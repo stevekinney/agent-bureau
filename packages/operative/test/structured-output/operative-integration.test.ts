@@ -46,7 +46,7 @@ describe('toolChoice in operative loop', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.toolChoice).toBe('required');
+    expect(calls[0].toolChoice).toBe('required');
   });
 
   it('passes undefined toolChoice when not configured', async () => {
@@ -62,7 +62,7 @@ describe('toolChoice in operative loop', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.toolChoice).toBeUndefined();
+    expect(calls[0].toolChoice).toBeUndefined();
   });
 
   it('allows selectToolChoice hook to override the default', async () => {
@@ -83,7 +83,7 @@ describe('toolChoice in operative loop', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.toolChoice).toBe('none');
+    expect(calls[0].toolChoice).toBe('none');
   });
 
   it('passes specific tool choice objects', async () => {
@@ -100,7 +100,7 @@ describe('toolChoice in operative loop', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.toolChoice).toEqual({ tool: 'search' });
+    expect(calls[0].toolChoice).toEqual({ tool: 'search' });
   });
 });
 
@@ -126,17 +126,14 @@ describe('output schema to responseFormat bridge', () => {
     });
 
     expect(calls).toHaveLength(1);
-    const format = calls[0]!.responseFormat;
+    const format = calls[0].responseFormat;
     expect(format).toBeDefined();
     expect(format!.type).toBe('json_schema');
     if (format!.type === 'json_schema') {
       expect(format!.schema).toMatchObject({
         type: 'object',
       });
-      const props = (format!.schema as Record<string, unknown>)['properties'] as Record<
-        string,
-        Record<string, unknown>
-      >;
+      const props = format!.schema['properties'] as Record<string, Record<string, unknown>>;
       expect(props['name']).toMatchObject({ type: 'string' });
       expect(props['age']).toMatchObject({ type: 'number' });
       expect(format!.name).toBe('response');
@@ -156,6 +153,6 @@ describe('output schema to responseFormat bridge', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.responseFormat).toBeUndefined();
+    expect(calls[0].responseFormat).toBeUndefined();
   });
 });

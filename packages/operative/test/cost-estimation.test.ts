@@ -222,10 +222,8 @@ describe('defaultPricingTable', () => {
     for (const model of openAIModels) {
       const pricing = defaultPricingTable[model];
       expect(pricing).toBeDefined();
-      expect(pricing!.cacheReadCostPerMillionTokens).toBe(
-        pricing!.promptCostPerMillionTokens * 0.5,
-      );
-      expect(pricing!.cacheWriteCostPerMillionTokens).toBeUndefined();
+      expect(pricing.cacheReadCostPerMillionTokens).toBe(pricing.promptCostPerMillionTokens * 0.5);
+      expect(pricing.cacheWriteCostPerMillionTokens).toBeUndefined();
     }
   });
 
@@ -233,8 +231,8 @@ describe('defaultPricingTable', () => {
     for (const model of ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']) {
       const pricing = defaultPricingTable[model];
       expect(pricing).toBeDefined();
-      expect(pricing!.cacheReadCostPerMillionTokens).toBeUndefined();
-      expect(pricing!.cacheWriteCostPerMillionTokens).toBeUndefined();
+      expect(pricing.cacheReadCostPerMillionTokens).toBeUndefined();
+      expect(pricing.cacheWriteCostPerMillionTokens).toBeUndefined();
     }
   });
 });

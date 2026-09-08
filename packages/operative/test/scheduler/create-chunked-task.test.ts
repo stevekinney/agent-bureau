@@ -173,7 +173,7 @@ describe('createChunkedTask', () => {
       async submit(task) {
         submitCount++;
         const run = await task.createRun();
-        await run.generate({ signal: new AbortController().signal } as never);
+        await run.generate({ signal: new AbortController().signal });
         return submitCount === 1 ? null : ({ finishReason: 'stop-condition' } as never);
       },
     } as unknown as Scheduler;
@@ -201,7 +201,7 @@ describe('createChunkedTask', () => {
     const scheduler = {
       async submit(task) {
         const run = await task.createRun();
-        await run.generate({ signal: new AbortController().signal } as never);
+        await run.generate({ signal: new AbortController().signal });
         return null;
       },
     } as unknown as Scheduler;
@@ -229,7 +229,7 @@ describe('createChunkedTask', () => {
     const scheduler = {
       async submit(task) {
         const run = await task.createRun();
-        await run.generate({ signal: new AbortController().signal } as never);
+        await run.generate({ signal: new AbortController().signal });
         return { finishReason: 'stop-condition' } as never;
       },
     } as unknown as Scheduler;
@@ -258,7 +258,7 @@ describe('createChunkedTask', () => {
         await expect(run.toolbox.execute([])).resolves.toEqual([]);
         const subscription = run.toolbox.toObservable().subscribe();
         subscription.unsubscribe();
-        await run.generate({ signal: new AbortController().signal } as never);
+        await run.generate({ signal: new AbortController().signal });
         return { finishReason: 'stop-condition' } as never;
       },
     } as unknown as Scheduler;

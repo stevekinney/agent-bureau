@@ -25,9 +25,9 @@ describe('mergeHybridResults', () => {
 
     const results = mergeHybridResults(vectorResults, textScores, candidates);
 
-    expect(results[0]!.combinedScore).toBeCloseTo(0.7 * 1.0 + 0.3 * 1.0, 10);
-    expect(results[0]!.vectorScore).toBe(1.0);
-    expect(results[0]!.textScore).toBe(1.0);
+    expect(results[0].combinedScore).toBeCloseTo(0.7 * 1.0 + 0.3 * 1.0, 10);
+    expect(results[0].vectorScore).toBe(1.0);
+    expect(results[0].textScore).toBe(1.0);
   });
 
   it('applies custom weights', () => {
@@ -40,7 +40,7 @@ describe('mergeHybridResults', () => {
       textWeight: 0.5,
     });
 
-    expect(results[0]!.combinedScore).toBeCloseTo(0.5 * 0.8 + 0.5 * 0.6, 10);
+    expect(results[0].combinedScore).toBeCloseTo(0.5 * 0.8 + 0.5 * 0.6, 10);
   });
 
   it('handles vector-only results (no text matches)', () => {
@@ -50,8 +50,8 @@ describe('mergeHybridResults', () => {
 
     const results = mergeHybridResults(vectorResults, textScores, candidates);
 
-    expect(results[0]!.combinedScore).toBeCloseTo(0.7 * 0.9, 10);
-    expect(results[0]!.textScore).toBe(0);
+    expect(results[0].combinedScore).toBeCloseTo(0.7 * 0.9, 10);
+    expect(results[0].textScore).toBe(0);
   });
 
   it('handles text-only results (no vector matches)', () => {
@@ -61,8 +61,8 @@ describe('mergeHybridResults', () => {
 
     const results = mergeHybridResults(vectorResults, textScores, candidates);
 
-    expect(results[0]!.combinedScore).toBeCloseTo(0.3 * 0.8, 10);
-    expect(results[0]!.vectorScore).toBe(0);
+    expect(results[0].combinedScore).toBeCloseTo(0.3 * 0.8, 10);
+    expect(results[0].vectorScore).toBe(0);
   });
 
   it('combines scores when both sources match the same document', () => {
@@ -107,7 +107,7 @@ describe('mergeHybridResults', () => {
     // Only 'a' should pass: 0.7 * 0.9 = 0.63 > 0.5
     // 'b' fails: 0.7 * 0.1 = 0.07 < 0.5
     expect(results).toHaveLength(1);
-    expect(results[0]!.id).toBe('a');
+    expect(results[0].id).toBe('a');
   });
 
   it('respects limit', () => {
@@ -147,8 +147,8 @@ describe('mergeHybridResults', () => {
 
     const results = mergeHybridResults(vectorResults, textScores, candidates);
 
-    expect(results[0]!.id).toBe('b');
-    expect(results[1]!.id).toBe('c');
-    expect(results[2]!.id).toBe('a');
+    expect(results[0].id).toBe('b');
+    expect(results[1].id).toBe('c');
+    expect(results[2].id).toBe('a');
   });
 });

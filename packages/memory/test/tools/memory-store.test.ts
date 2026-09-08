@@ -31,11 +31,7 @@ describe('createMemoryStoreTool', () => {
 
   it('stores content and returns confirmation', async () => {
     const tool = createMemoryStoreTool(memory);
-    const result = (await tool({ content: 'The deployment target is AWS' })) as {
-      id: string;
-      content: string;
-      stored: boolean;
-    };
+    const result = await tool({ content: 'The deployment target is AWS' });
 
     expect(result.stored).toBe(true);
     expect(result.content).toBe('The deployment target is AWS');
@@ -48,7 +44,7 @@ describe('createMemoryStoreTool', () => {
 
     const results = await memory.recall('CI pipeline');
     expect(results.length).toBeGreaterThan(0);
-    expect(results[0]!.content).toBe('The CI pipeline runs on GitHub Actions');
+    expect(results[0].content).toBe('The CI pipeline runs on GitHub Actions');
   });
 
   it('sets source metadata to tool', async () => {
@@ -56,7 +52,7 @@ describe('createMemoryStoreTool', () => {
     await tool({ content: 'Source should be tool' });
 
     const results = await memory.recall('Source should be tool');
-    expect(results[0]!.metadata.source).toBe('tool');
+    expect(results[0].metadata.source).toBe('tool');
   });
 
   it('stores content with tags', async () => {
@@ -64,7 +60,7 @@ describe('createMemoryStoreTool', () => {
     await tool({ content: 'Tagged memory', tags: ['infrastructure', 'aws'] });
 
     const results = await memory.recall('Tagged memory');
-    expect(results[0]!.metadata.tags).toEqual(['infrastructure', 'aws']);
+    expect(results[0].metadata.tags).toEqual(['infrastructure', 'aws']);
   });
 
   it('stores content with importance', async () => {
@@ -72,7 +68,7 @@ describe('createMemoryStoreTool', () => {
     await tool({ content: 'Important fact', importance: 0.95 });
 
     const results = await memory.recall('Important fact');
-    expect(results[0]!.metadata.importance).toBe(0.95);
+    expect(results[0].metadata.importance).toBe(0.95);
   });
 
   it('stores content with evergreen flag', async () => {
@@ -80,6 +76,6 @@ describe('createMemoryStoreTool', () => {
     await tool({ content: 'Evergreen knowledge', evergreen: true });
 
     const results = await memory.recall('Evergreen knowledge');
-    expect(results[0]!.metadata.evergreen).toBe(true);
+    expect(results[0].metadata.evergreen).toBe(true);
   });
 });

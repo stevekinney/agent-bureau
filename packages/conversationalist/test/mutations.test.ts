@@ -46,7 +46,7 @@ describe('immutable transcript mutations', () => {
       },
       environment,
     );
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalMessage = history.messages[messageId] as AssistantMessage;
     const originalSnapshot = structuredClone(history);
     const updates = {
@@ -96,7 +96,7 @@ describe('immutable transcript mutations', () => {
       },
       environment,
     );
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
 
     const updated = updateMessage(
       history,
@@ -126,7 +126,7 @@ describe('immutable transcript mutations', () => {
     const pluginEnvironment = { ...environment, plugins: [redactPii] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendUserMessage(history, 'Original', undefined, pluginEnvironment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
 
     const updated = updateMessage(
       history,
@@ -148,7 +148,7 @@ describe('immutable transcript mutations', () => {
     const pluginEnvironment = { ...environment, plugins: [prefixContent] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendUserMessage(history, 'Original', undefined, pluginEnvironment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalSnapshot = structuredClone(history);
 
     expect(() => setMessageHidden(history, messageId, true, pluginEnvironment)).toThrow(
@@ -177,7 +177,7 @@ describe('immutable transcript mutations', () => {
       undefined,
       pluginEnvironment,
     );
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalContent = history.messages[messageId]?.content;
     const originalSnapshot = structuredClone(history);
 
@@ -197,7 +197,7 @@ describe('immutable transcript mutations', () => {
     const pluginEnvironment = { ...environment, plugins: [toggleVisibility] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendUserMessage(history, 'Original', undefined, pluginEnvironment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalSnapshot = structuredClone(history);
 
     expect(() =>
@@ -220,7 +220,7 @@ describe('immutable transcript mutations', () => {
     const pluginEnvironment = { ...environment, plugins: [processEditedContentTwice] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendUserMessage(history, 'Original', undefined, pluginEnvironment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalSnapshot = structuredClone(history);
 
     expect(() =>
@@ -238,7 +238,7 @@ describe('immutable transcript mutations', () => {
     const pluginEnvironment = { ...environment, plugins: [hideBlockedContent] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendUserMessage(history, 'Allowed', undefined, pluginEnvironment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
 
     const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
 
@@ -260,7 +260,7 @@ describe('immutable transcript mutations', () => {
     const pluginEnvironment = { ...environment, plugins: [prefixAndHideBlockedContent] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendUserMessage(history, 'Allowed', undefined, pluginEnvironment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
 
     const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
 
@@ -280,7 +280,7 @@ describe('immutable transcript mutations', () => {
     const pluginEnvironment = { ...environment, plugins: [markProcessedAndHideBlockedContent] };
     let history = createConversationHistory({}, pluginEnvironment);
     history = appendUserMessage(history, 'Allowed', undefined, pluginEnvironment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
 
     const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
 
@@ -310,7 +310,7 @@ describe('immutable transcript mutations', () => {
       },
       pluginEnvironment,
     );
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
 
     const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
 
@@ -341,7 +341,7 @@ describe('immutable transcript mutations', () => {
       },
       environment,
     );
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalSnapshot = structuredClone(history);
 
     expect(() =>
@@ -374,7 +374,7 @@ describe('immutable transcript mutations', () => {
       { role: 'assistant', content: 'Allowed', goalCompleted: true },
       pluginEnvironment,
     );
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
 
     const updated = updateMessage(history, messageId, { content: 'Blocked' }, pluginEnvironment);
 
@@ -391,7 +391,7 @@ describe('immutable transcript mutations', () => {
     });
     let history = createConversationHistory({}, environment);
     history = appendUserMessage(history, 'Original', undefined, environment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalSnapshot = structuredClone(history);
 
     expect(() =>
@@ -413,7 +413,7 @@ describe('immutable transcript mutations', () => {
     });
     let history = createConversationHistory({}, environment);
     history = appendUserMessage(history, 'Original', undefined, environment);
-    const messageId = history.ids[0]!;
+    const messageId = history.ids[0];
     const originalSnapshot = structuredClone(history);
 
     expect(() =>
@@ -437,8 +437,8 @@ describe('immutable transcript mutations', () => {
     history = appendAssistantMessage(history, 'Remove me', undefined, environment);
     history = appendUserMessage(history, 'Third', undefined, environment);
     const [firstId, removedId, thirdId] = history.ids as [string, string, string];
-    const firstMessage = history.messages[firstId]!;
-    const thirdMessage = history.messages[thirdId]!;
+    const firstMessage = history.messages[firstId];
+    const thirdMessage = history.messages[thirdId];
     const originalSnapshot = structuredClone(history);
 
     const updated = removeMessage(history, removedId, environment);
@@ -476,7 +476,7 @@ describe('immutable transcript mutations', () => {
       environment,
     );
 
-    expect(() => removeMessage(history, history.ids[0]!, environment)).toThrow(
+    expect(() => removeMessage(history, history.ids[0], environment)).toThrow(
       ConversationalistError,
     );
     expectValid(history);
@@ -485,8 +485,8 @@ describe('immutable transcript mutations', () => {
   it('sets and clears message visibility without mutating the input message', () => {
     let history = createConversationHistory({}, environment);
     history = appendUserMessage(history, 'Toggle me', undefined, environment);
-    const messageId = history.ids[0]!;
-    const originalMessage = history.messages[messageId]!;
+    const messageId = history.ids[0];
+    const originalMessage = history.messages[messageId];
 
     const hidden = setMessageHidden(history, messageId, true, environment);
     const visible = setMessageHidden(hidden, messageId, false, environment);
@@ -521,8 +521,8 @@ describe('immutable transcript mutations', () => {
       },
       environment,
     );
-    const resultMessageId = history.ids[1]!;
-    const originalMessage = history.messages[resultMessageId]!;
+    const resultMessageId = history.ids[1];
+    const originalMessage = history.messages[resultMessageId];
     const replacement: ToolResult = {
       callId: 'call-1',
       outcome: 'success',
@@ -581,10 +581,10 @@ describe('immutable transcript mutations', () => {
       pluginEnvironment,
     );
 
-    expect(updated.messages[history.ids[1]!]?.toolResult?.content).toEqual({
+    expect(updated.messages[history.ids[1]]?.toolResult?.content).toEqual({
       email: '[EMAIL_REDACTED]',
     });
-    expect(history.messages[history.ids[1]!]?.toolResult?.content).toBeNull();
+    expect(history.messages[history.ids[1]]?.toolResult?.content).toBeNull();
     expectValid(updated);
   });
 
@@ -610,7 +610,7 @@ describe('immutable transcript mutations', () => {
       },
       pluginEnvironment,
     );
-    const resultMessageId = history.ids[1]!;
+    const resultMessageId = history.ids[1];
 
     const updated = replaceToolResult(
       history,
@@ -649,7 +649,7 @@ describe('immutable transcript mutations', () => {
       },
       pluginEnvironment,
     );
-    const resultMessageId = history.ids[1]!;
+    const resultMessageId = history.ids[1];
 
     const updated = updateMessage(
       history,
@@ -792,7 +792,7 @@ describe('immutable transcript mutations', () => {
       },
       environment,
     );
-    const resultMessageId = history.ids[2]!;
+    const resultMessageId = history.ids[2];
     const originalSnapshot = structuredClone(history);
 
     expect(() =>
@@ -838,7 +838,7 @@ describe('immutable transcript mutations', () => {
       },
       environment,
     );
-    const resultMessageId = history.ids[2]!;
+    const resultMessageId = history.ids[2];
     const originalSnapshot = structuredClone(history);
 
     expect(() =>

@@ -200,7 +200,7 @@ describe('createDurableMultiAgentHarness', () => {
         expect(tracked).toBeDefined();
 
         // The tracked handle snapshots the completed run correctly.
-        const snapshot = await tracked!.handle.snapshot();
+        const snapshot = await tracked.handle.snapshot();
         expect(snapshot).not.toBeNull();
         expect(snapshot!.status).toBe('completed');
       } finally {
@@ -411,15 +411,15 @@ describe('createDurableMultiAgentHarness', () => {
         const tracked = harness.childRunHandles[0];
         expect(tracked).toBeDefined();
 
-        await harness.waitForSuspend(tracked!.runId);
+        await harness.waitForSuspend(tracked.runId);
 
-        const snapshot = await tracked!.handle.snapshot();
+        const snapshot = await tracked.handle.snapshot();
         // 'running' = parked at ctx.waitForSignal.
         expect(snapshot?.status).toBe('running');
 
         // Release.
-        await harness.signal(tracked!.runId, 'human-response', { approved: true });
-        await tracked!.handle.result();
+        await harness.signal(tracked.runId, 'human-response', { approved: true });
+        await tracked.handle.result();
       } finally {
         harness.dispose();
       }

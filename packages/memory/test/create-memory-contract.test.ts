@@ -58,7 +58,7 @@ describe('createMemory over MemoryRecordStorage', () => {
 
       const listed = await memory.list({ namespace: 'alpha' });
       expect(listed).toHaveLength(1);
-      expect(listed[0]!.metadata.namespace).toBe('alpha');
+      expect(listed[0].metadata.namespace).toBe('alpha');
     });
   });
 
@@ -137,7 +137,7 @@ describe('createMemory over MemoryRecordStorage', () => {
       await conflictMemory.remember('Gamma numeric entry three');
 
       expect(calls).toHaveLength(1);
-      expect(calls[0]!.similarity).toBeTypeOf('number');
+      expect(calls[0].similarity).toBeTypeOf('number');
     });
   });
 
@@ -270,7 +270,7 @@ describe('createMemory over MemoryRecordStorage', () => {
       expect(results).toHaveLength(1);
       // Pure cosine of identical vectors is 1; the sentinel proves createMemory
       // surfaced the storage score rather than scoring the corpus itself.
-      expect(results[0]!.score).toBeCloseTo(SENTINEL_SCORE, 10);
+      expect(results[0].score).toBeCloseTo(SENTINEL_SCORE, 10);
     });
 
     it('does not recompute cosine in the hybrid path either', async () => {
@@ -295,7 +295,7 @@ describe('createMemory over MemoryRecordStorage', () => {
       expect(list).toHaveBeenCalled();
       expect(results).toHaveLength(1);
       // combined = vectorWeight * sentinel + textWeight * bm25 = 1 * 0.42 + 0.
-      expect(results[0]!.score).toBeCloseTo(SENTINEL_SCORE, 10);
+      expect(results[0].score).toBeCloseTo(SENTINEL_SCORE, 10);
     });
   });
 });

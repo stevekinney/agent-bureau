@@ -53,7 +53,7 @@ describe('applyMaximalMarginalRelevance', () => {
 
     // First pick has no prior selections so diversity doesn't apply yet — picks highest score
     // Second pick should prefer the diverse one ([0,1]) over the similar one
-    expect(selected[1]!.score).toBe(0.5);
+    expect(selected[1].score).toBe(0.5);
   });
 
   it('with lambda=0.7, balances relevance and diversity', () => {
@@ -68,7 +68,7 @@ describe('applyMaximalMarginalRelevance', () => {
     // Should return all 3 items
     expect(selected).toHaveLength(3);
     // First item should still be highest relevance
-    expect(selected[0]!.score).toBe(0.9);
+    expect(selected[0].score).toBe(0.9);
   });
 
   it('falls back to score-only ordering when results lack vectors', () => {

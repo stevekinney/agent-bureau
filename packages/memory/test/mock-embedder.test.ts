@@ -32,7 +32,7 @@ describe('createMockEmbedder', () => {
   it('produces unit vectors (magnitude close to 1)', () => {
     const embedder = createMockEmbedder(64);
     const [vector] = embedder(['some test text']);
-    const magnitude = Math.sqrt(vector!.reduce((sum, v) => sum + v * v, 0));
+    const magnitude = Math.sqrt(vector.reduce((sum, v) => sum + v * v, 0));
     expect(magnitude).toBeCloseTo(1.0, 5);
   });
 

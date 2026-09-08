@@ -35,7 +35,7 @@ describe('createMemoryForgetTool', () => {
     expect(initialCount).toBe(1);
 
     const tool = createMemoryForgetTool(memory);
-    const result = (await tool({ id: entry.id })) as { deleted: boolean; id: string };
+    const result = await tool({ id: entry.id });
 
     expect(result.deleted).toBe(true);
     expect(result.id).toBe(entry.id);
@@ -56,6 +56,6 @@ describe('createMemoryForgetTool', () => {
 
     const results = await memory.recall('Second memory');
     expect(results.length).toBe(1);
-    expect(results[0]!.id).toBe(entry2.id);
+    expect(results[0].id).toBe(entry2.id);
   });
 });

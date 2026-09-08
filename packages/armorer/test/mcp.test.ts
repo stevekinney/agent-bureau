@@ -435,7 +435,7 @@ describe('createMCP', () => {
     expect(mcpTool?.annotations?.readOnlyHint).toBe(true);
     expect(mcpTool?.description).toBe('adds two numbers');
 
-    const result = await mcpTool!.handler({ a: 2, b: 3 });
+    const result = await mcpTool.handler({ a: 2, b: 3 });
     expect(result.structuredContent).toEqual({ total: 5 });
     expect(textContent(result.content)).toContain('"total": 5');
   });
@@ -463,7 +463,7 @@ describe('createMCP', () => {
     };
 
     const [mcpTool] = toMcpTools(tool as any);
-    const canonicalResult = await mcpTool!.handler({});
+    const canonicalResult = await mcpTool.handler({});
     expect(canonicalResult.structuredContent).toEqual({ ok: true });
     expect(textContent(canonicalResult.content)).toContain('"ok": true');
 
@@ -474,7 +474,7 @@ describe('createMCP', () => {
       errorMessage: 'legacy error',
     });
 
-    const legacyErrorResult = await mcpTool!.handler({});
+    const legacyErrorResult = await mcpTool.handler({});
     expect(legacyErrorResult.isError).toBe(true);
     expect(textContent(legacyErrorResult.content)).toBe('legacy error');
 
@@ -484,7 +484,7 @@ describe('createMCP', () => {
       content: { message: 'content fallback' },
     });
 
-    const contentFallbackResult = await mcpTool!.handler({});
+    const contentFallbackResult = await mcpTool.handler({});
     expect(contentFallbackResult.isError).toBe(true);
     expect(textContent(contentFallbackResult.content)).toContain('content fallback');
   });
@@ -505,7 +505,7 @@ describe('createMCP', () => {
       },
     ]);
 
-    const result = await tool!.execute({ a: 4, b: 6 });
+    const result = await tool.execute({ a: 4, b: 6 });
     expect(result).toEqual({ total: 10 });
   });
 
@@ -534,7 +534,7 @@ describe('createMCP', () => {
       },
     );
 
-    const result = await tool!.execute({ text: 'hello' });
+    const result = await tool.execute({ text: 'hello' });
     expect(calls).toEqual([{ name: 'remote-echo', arguments: { text: 'hello' } }]);
     expect(result).toEqual({ echoed: { text: 'hello' } });
   });
@@ -548,7 +548,7 @@ describe('createMCP', () => {
       },
     ]);
 
-    await expect(tool!.execute({})).rejects.toThrow('requires callTool()');
+    await expect(tool.execute({})).rejects.toThrow('requires callTool()');
   });
 
   it('registers toolbox tools and exposes them via listTools', async () => {
@@ -1370,14 +1370,14 @@ describe('createMCP', () => {
       },
     ]);
 
-    expect(tool!.metadata).toEqual({
+    expect(tool.metadata).toEqual({
       readOnly: true,
       mcp: {
         title: 'Annotated title',
         description: 'annotated description',
       },
     });
-    await expect(tool!.execute({})).resolves.toEqual({ ok: true });
+    await expect(tool.execute({})).resolves.toEqual({ ok: true });
   });
 
   it('parses MCP content blocks and error payloads across edge cases', async () => {
@@ -1395,7 +1395,7 @@ describe('createMCP', () => {
         }),
       },
     ]);
-    await expect(errorTool!.execute({})).rejects.toThrow('first line\nsecond line');
+    await expect(errorTool.execute({})).rejects.toThrow('first line\nsecond line');
 
     const mixedContent = [
       { type: 'text', text: '{"ok":true}' },
@@ -1409,7 +1409,7 @@ describe('createMCP', () => {
         handler: async () => ({ content: [...mixedContent] }),
       },
     ]);
-    await expect(mixedTool!.execute({})).resolves.toEqual([...mixedContent]);
+    await expect(mixedTool.execute({})).resolves.toEqual([...mixedContent]);
 
     const [singleTextTool] = fromMcpTools([
       {
@@ -1419,7 +1419,7 @@ describe('createMCP', () => {
         handler: async () => ({ content: [{ type: 'text', text: 'not-json' }] }),
       },
     ]);
-    await expect(singleTextTool!.execute({})).resolves.toBe('not-json');
+    await expect(singleTextTool.execute({})).resolves.toBe('not-json');
 
     const [multiTextTool] = fromMcpTools([
       {
@@ -1434,7 +1434,7 @@ describe('createMCP', () => {
         }),
       },
     ]);
-    await expect(multiTextTool!.execute({})).resolves.toEqual([{ ok: true }, 'plain']);
+    await expect(multiTextTool.execute({})).resolves.toEqual([{ ok: true }, 'plain']);
   });
 
   it('re-registers duplicate tool names and keeps the latest definition', async () => {
@@ -1533,7 +1533,7 @@ describe('createMCP', () => {
     });
 
     const [mcpTool] = toMcpTools([tool]);
-    const result = await mcpTool!.handler({});
+    const result = await mcpTool.handler({});
     expect(textContent(result.content)).toBe('42');
     expect(result.structuredContent).toBeUndefined();
   });
@@ -1563,7 +1563,7 @@ describe('createMCP', () => {
     expect(mcpTool?.execution).toEqual({ taskSupport: 'optional' });
     const controller = new AbortController();
     await expect(
-      mcpTool!.handler({}, {
+      mcpTool.handler({}, {
         requestId: 'single-tool-like-request',
         signal: controller.signal,
         sendRequest: async () => ({ action: 'accept', content: {} }),
@@ -1589,7 +1589,7 @@ describe('createMCP', () => {
       },
     ]);
 
-    await expect(tool!.execute({})).resolves.toBeUndefined();
+    await expect(tool.execute({})).resolves.toBeUndefined();
   });
 
   it('derives readOnly annotations from metadata.mcp when missing', () => {
@@ -1747,7 +1747,7 @@ describe('MCP elicitation', () => {
         callTool: (request) => client.callTool(request) as Promise<CallToolResult>,
       });
 
-      const result = await tool!.execute({ amount: 10 });
+      const result = await tool.execute({ amount: 10 });
 
       expect(requests).toHaveLength(1);
       expect(requests[0]?.message).toBe('Approve purchase of $10?');

@@ -163,8 +163,8 @@ describe('createConditionalInstructionComposer', () => {
     );
     const all = composer.sections();
     expect(all).toHaveLength(2);
-    expect(all[0]!.name).toBe('a');
-    expect(all[1]!.name).toBe('b');
+    expect(all[0].name).toBe('a');
+    expect(all[1].name).toBe('b');
   });
 });
 

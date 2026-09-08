@@ -46,7 +46,7 @@ function createMockMemory(
       return { id: 'mock-id' };
     },
     async recall(query, options) {
-      recallCalls.push([query, options as Record<string, unknown>]);
+      recallCalls.push([query, options]);
       return storedResults;
     },
   };
@@ -266,7 +266,7 @@ describe('combineMemory — merged-read / private-write', () => {
 
       // Results must be sorted descending
       for (let index = 1; index < scores.length; index++) {
-        expect(scores[index - 1]!).toBeGreaterThanOrEqual(scores[index]!);
+        expect(scores[index - 1]).toBeGreaterThanOrEqual(scores[index]);
       }
     });
 
@@ -334,7 +334,7 @@ describe('combineMemory — merged-read / private-write', () => {
       expect(agentMemory.rememberCalls).toHaveLength(1);
       expect(bureauMemory.rememberCalls).toHaveLength(0);
 
-      const [content, metadata] = agentMemory.rememberCalls[0]!;
+      const [content, metadata] = agentMemory.rememberCalls[0];
       expect(content).toBe('new insight');
       expect(metadata).toEqual({ tag: 'important' });
     });
@@ -369,7 +369,7 @@ describe('combineIdentity — layered, bureau-first', () => {
     const messages = conversation.getMessages();
     const systemMessages = messages.filter((m) => m.role === 'system');
     expect(systemMessages).toHaveLength(1);
-    expect(systemMessages[0]!.content).toBe('You are a bureau agent');
+    expect(systemMessages[0].content).toBe('You are a bureau agent');
   });
 
   it('injects only agent persona when only agent identity is provided', async () => {
@@ -381,7 +381,7 @@ describe('combineIdentity — layered, bureau-first', () => {
     const messages = conversation.getMessages();
     const systemMessages = messages.filter((m) => m.role === 'system');
     expect(systemMessages).toHaveLength(1);
-    expect(systemMessages[0]!.content).toBe('You are the researcher');
+    expect(systemMessages[0].content).toBe('You are the researcher');
   });
 
   it('injects bureau persona BEFORE agent persona', async () => {
@@ -397,9 +397,9 @@ describe('combineIdentity — layered, bureau-first', () => {
     const systemMessages = messages.filter((m) => m.role === 'system');
     expect(systemMessages).toHaveLength(2);
     // Bureau persona comes first
-    expect(systemMessages[0]!.content).toBe('Bureau: you are a Lost Gradient agent');
+    expect(systemMessages[0].content).toBe('Bureau: you are a Lost Gradient agent');
     // Agent persona comes second
-    expect(systemMessages[1]!.content).toBe('Agent: you are the researcher');
+    expect(systemMessages[1].content).toBe('Agent: you are the researcher');
   });
 
   it('does NOT inject on steps other than step 0', async () => {
@@ -491,6 +491,6 @@ describe('combineIdentity — layered, bureau-first', () => {
     // Only the non-empty agent persona is injected
     const systemMessages = conversation.getMessages().filter((m) => m.role === 'system');
     expect(systemMessages).toHaveLength(1);
-    expect(systemMessages[0]!.content).toBe('Agent persona');
+    expect(systemMessages[0].content).toBe('Agent persona');
   });
 });

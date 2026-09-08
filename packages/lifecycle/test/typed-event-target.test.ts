@@ -58,7 +58,7 @@ describe('TypedEventTarget', () => {
     target.dispatch(new TestEvent(42));
 
     expect(received).toHaveLength(1);
-    expect(received[0]!.value).toBe(42);
+    expect(received[0].value).toBe(42);
   });
 
   it('delivers the exact Event subclass instance', () => {
@@ -89,7 +89,7 @@ describe('TypedEventTarget', () => {
     target.dispatch(new TestEvent(2));
 
     expect(received).toHaveLength(1);
-    expect(received[0]!.value).toBe(1);
+    expect(received[0].value).toBe(1);
   });
 
   it('supports { once: true } option', () => {
@@ -108,7 +108,7 @@ describe('TypedEventTarget', () => {
     target.dispatch(new TestEvent(2));
 
     expect(received).toHaveLength(1);
-    expect(received[0]!.value).toBe(1);
+    expect(received[0].value).toBe(1);
   });
 
   it('supports { signal } option for cleanup', () => {
@@ -129,7 +129,7 @@ describe('TypedEventTarget', () => {
     target.dispatch(new TestEvent(2));
 
     expect(received).toHaveLength(1);
-    expect(received[0]!.value).toBe(1);
+    expect(received[0].value).toBe(1);
   });
 
   it('supports multiple listeners for the same type', () => {

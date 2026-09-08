@@ -44,10 +44,10 @@ describe('createStorageIdentityProvider', () => {
     const loaded = await provider.loadSoul();
 
     expect(loaded).toHaveLength(2);
-    expect(loaded[0]!.id).toBe('1');
-    expect(loaded[1]!.source).toBe('graduated');
-    expect(loaded[1]!.sourceEntryIds).toEqual(['m1', 'm2']);
-    expect(loaded[1]!.pinned).toBe(true);
+    expect(loaded[0].id).toBe('1');
+    expect(loaded[1].source).toBe('graduated');
+    expect(loaded[1].sourceEntryIds).toEqual(['m1', 'm2']);
+    expect(loaded[1].pinned).toBe(true);
   });
 
   it('uses correct key namespace convention', async () => {
@@ -144,14 +144,14 @@ describe('createStorageIdentityProvider', () => {
     await provider.saveSoul([makeSoulItem('2', 'Version 2')]);
     const history1 = await provider.loadSoulHistory();
     expect(history1).toHaveLength(1);
-    expect(history1[0]!.version).toBe(1);
-    expect(history1[0]!.items[0]!.content).toBe('Version 1');
+    expect(history1[0].version).toBe(1);
+    expect(history1[0].items[0].content).toBe('Version 1');
 
     await provider.saveSoul([makeSoulItem('3', 'Version 3')]);
     const history2 = await provider.loadSoulHistory();
     expect(history2).toHaveLength(2);
-    expect(history2[1]!.version).toBe(2);
-    expect(history2[1]!.items[0]!.content).toBe('Version 2');
+    expect(history2[1].version).toBe(2);
+    expect(history2[1].items[0].content).toBe('Version 2');
   });
 
   it('derives the archived history timestamp from an injected manual runtime rather than the real clock', async () => {
@@ -163,7 +163,7 @@ describe('createStorageIdentityProvider', () => {
     await provider.saveSoul([makeSoulItem('2', 'Version 2')]);
 
     const history = await provider.loadSoulHistory();
-    expect(history[0]!.timestamp).toBe('2026-05-05T00:00:00.000Z');
+    expect(history[0].timestamp).toBe('2026-05-05T00:00:00.000Z');
   });
 
   it('pending update lifecycle', async () => {
@@ -177,7 +177,7 @@ describe('createStorageIdentityProvider', () => {
 
     const loaded = await provider.loadPendingSoulUpdate();
     expect(loaded).toHaveLength(1);
-    expect(loaded![0]!.content).toBe('Proposed update');
+    expect(loaded![0].content).toBe('Proposed update');
 
     await provider.clearPendingSoulUpdate();
     expect(await provider.loadPendingSoulUpdate()).toBeUndefined();
@@ -201,9 +201,9 @@ describe('createStorageIdentityProvider', () => {
     await provider.saveSoul([makeSoulItem('r1', 'Research')], 'research');
 
     const orchestratorSoul = await provider.loadSoul();
-    expect(orchestratorSoul[0]!.content).toBe('Orchestrator');
+    expect(orchestratorSoul[0].content).toBe('Orchestrator');
     const researchSoul = await provider.loadSoul('research');
-    expect(researchSoul[0]!.content).toBe('Research');
+    expect(researchSoul[0].content).toBe('Research');
   });
 
   it('persona data round-trips through JSON', async () => {

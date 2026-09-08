@@ -183,7 +183,7 @@ describe('per-step abort granularity', () => {
         return originalGenerate(...args);
       },
       { calls: generate.calls, callCount: generate.callCount },
-    ) as typeof generate;
+    );
 
     await run({
       generate: wrappedGenerate,

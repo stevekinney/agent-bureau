@@ -90,7 +90,9 @@ function createRecordingProxy(responseBody: unknown): RecordingProxy {
   return {
     baseURL: `http://127.0.0.1:${server.port}`,
     requests,
-    stop: () => server.stop(),
+    stop: () => {
+      server.stop();
+    },
   };
 }
 
@@ -121,7 +123,9 @@ function createRecordingSseProxy(sseBody: string): RecordingProxy {
   return {
     baseURL: `http://127.0.0.1:${server.port}`,
     requests,
-    stop: () => server.stop(),
+    stop: () => {
+      server.stop();
+    },
   };
 }
 

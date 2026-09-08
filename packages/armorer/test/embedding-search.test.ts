@@ -36,8 +36,8 @@ describe('registerToolEmbeddings', () => {
     const entries = getToolEmbeddings(tool);
     expect(entries).toBeDefined();
     expect(entries).toHaveLength(1);
-    expect(entries![0]!.field).toBe('name');
-    expect(entries![0]!.vector).toEqual([1, 0, 0]);
+    expect(entries![0].field).toBe('name');
+    expect(entries![0].vector).toEqual([1, 0, 0]);
   });
 
   it('getToolEmbeddings returns entries after registration', () => {
@@ -57,7 +57,7 @@ describe('registerToolEmbeddings', () => {
     });
     const entries = getToolEmbeddings(tool);
     expect(entries).toBeDefined();
-    expect(entries![0]!.magnitude).toBeCloseTo(5, 10);
+    expect(entries![0].magnitude).toBeCloseTo(5, 10);
   });
 
   it('registers embeddings for multiple fields', () => {
@@ -89,7 +89,7 @@ describe('registerToolEmbeddings', () => {
     const entries = getToolEmbeddings(tool);
     expect(entries).toBeDefined();
     expect(entries).toHaveLength(1);
-    expect(entries![0]!.field).toBe('description');
+    expect(entries![0].field).toBe('description');
   });
 
   it('skips vectors containing NaN', () => {
@@ -101,7 +101,7 @@ describe('registerToolEmbeddings', () => {
     const entries = getToolEmbeddings(tool);
     expect(entries).toBeDefined();
     expect(entries).toHaveLength(1);
-    expect(entries![0]!.field).toBe('description');
+    expect(entries![0].field).toBe('description');
   });
 
   it('sets text to empty string for pre-computed embeddings', () => {
@@ -110,7 +110,7 @@ describe('registerToolEmbeddings', () => {
       name: [1, 0],
     });
     const entries = getToolEmbeddings(tool);
-    expect(entries![0]!.text).toBe('');
+    expect(entries![0].text).toBe('');
   });
 });
 
@@ -123,7 +123,7 @@ describe('awaitToolEmbeddings', () => {
     const entries = await awaitToolEmbeddings(tool);
     expect(entries).toBeDefined();
     expect(entries).toHaveLength(1);
-    expect(entries![0]!.field).toBe('name');
+    expect(entries![0].field).toBe('name');
   });
 
   it('returns undefined for tool with no embeddings', async () => {
@@ -186,7 +186,7 @@ describe('integration with createToolbox', () => {
     // The toolbox creates internal tool objects; access them through the toolbox API
     const internalTools = toolbox.tools();
     expect(internalTools.length).toBe(1);
-    const internalTool = internalTools[0]!;
+    const internalTool = internalTools[0];
 
     // The internal tool definition should have embeddings via warmToolEmbeddings
     const entries = getToolEmbeddings(internalTool);
@@ -208,7 +208,7 @@ describe('integration with createToolbox', () => {
     const entries = getToolEmbeddings(tool);
     expect(entries).toBeDefined();
     expect(entries).toHaveLength(2);
-    expect(entries![0]!.vector).toEqual([0.5, 0.5, 0]);
+    expect(entries![0].vector).toEqual([0.5, 0.5, 0]);
   });
 });
 

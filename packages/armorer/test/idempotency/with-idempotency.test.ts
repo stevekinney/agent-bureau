@@ -148,7 +148,7 @@ function createManualDeadlineTiming(initialNow = 0): {
           timerHandlers.delete(handle);
         }
       },
-    } as DirectIdempotencyExecuteOptions,
+    },
   };
 }
 
@@ -260,8 +260,8 @@ describe('withIdempotency', () => {
     await wrapped.execute({ a: 1, b: 2 }, { requestContext });
 
     expect(onCacheHit).toHaveBeenCalledTimes(1);
-    expect(onCacheHit.mock.calls[0]![1]!.result).toBe(3);
-    expect(onCacheHit.mock.calls[0]![1]!.toolName).toBe('add');
+    expect(onCacheHit.mock.calls[0][1].result).toBe(3);
+    expect(onCacheHit.mock.calls[0][1].toolName).toBe('add');
   });
 
   it('re-runs current policy before returning a completed cache hit', async () => {
@@ -949,7 +949,7 @@ describe('withIdempotency', () => {
     const key = `["tenant-a","typed-input:1","typed-input",${JSON.stringify(fullInputKey({ x: '5' }))}]`;
 
     await expect(wrapped.execute({ x: '5' }, { requestContext })).rejects.toThrow();
-    expect(await cache.getState!(key)).toBeUndefined();
+    expect(await cache.getState(key)).toBeUndefined();
     expect(callCount).toBe(0);
   });
 

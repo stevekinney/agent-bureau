@@ -15,7 +15,7 @@ function createFakeFetch(response: { status: number; body?: unknown; contentType
 } {
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({ url: String(input), init });
+    calls.push({ url: input instanceof Request ? input.url : String(input), init });
     const bodyText =
       typeof response.body === 'string' && response.contentType !== 'application/json'
         ? response.body

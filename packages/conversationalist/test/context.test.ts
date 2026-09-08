@@ -1315,8 +1315,8 @@ describe('rewindBeforePosition', () => {
       ...conv,
       messages: {
         ...conv.messages,
-        [bId!]: { ...conv.messages[bId!]!, position: 9 },
-        [cId!]: { ...conv.messages[cId!]!, position: 3 },
+        [bId]: { ...conv.messages[bId], position: 9 },
+        [cId]: { ...conv.messages[cId], position: 3 },
       },
     };
 
@@ -1368,12 +1368,12 @@ describe('rewindBeforeMessage', () => {
       ...conv,
       messages: {
         ...conv.messages,
-        [bId!]: { ...conv.messages[bId!]!, position: 9 },
-        [cId!]: { ...conv.messages[cId!]!, position: 3 },
+        [bId]: { ...conv.messages[bId], position: 9 },
+        [cId]: { ...conv.messages[cId], position: 3 },
       },
     };
 
-    const rewound = rewindBeforeMessage(drifted, bId!, undefined, testEnvironment);
+    const rewound = rewindBeforeMessage(drifted, bId, undefined, testEnvironment);
 
     expect(getOrderedMessages(rewound).map((message) => message.content)).toEqual(['Message A']);
   });
@@ -1403,12 +1403,12 @@ describe('rewindBeforeMessage', () => {
       ...conv,
       messages: {
         ...conv.messages,
-        [callId!]: { ...conv.messages[callId!]!, position: 9 },
-        [resultId!]: { ...conv.messages[resultId!]!, position: 3 },
+        [callId]: { ...conv.messages[callId], position: 9 },
+        [resultId]: { ...conv.messages[resultId], position: 3 },
       },
     };
 
-    const rewound = rewindBeforeMessage(drifted, resultId!, undefined, testEnvironment);
+    const rewound = rewindBeforeMessage(drifted, resultId, undefined, testEnvironment);
 
     expect(getOrderedMessages(rewound).map((message) => message.role)).toEqual(['user']);
   });

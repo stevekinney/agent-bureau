@@ -82,7 +82,6 @@ describe('pipe()', () => {
     it('validates input using first tool schema', async () => {
       const pipeline = pipe(parseNumber, double);
       // Pass wrong type - str should be string, not number
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(pipeline({ str: 123 })).rejects.toThrow();
     });
 
@@ -97,7 +96,6 @@ describe('pipe()', () => {
 
       const pipeline = pipe(badTool, double);
       // double expects a number, but badTool returns a string
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(pipeline({ str: 'test' })).rejects.toThrow();
     });
 
@@ -246,16 +244,12 @@ describe('pipe()', () => {
           },
         );
 
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(runWithReason(new Error('direct-error'))).rejects.toThrow('direct-error');
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(runWithReason('direct-string')).rejects.toThrow('direct-string');
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(runWithReason({ code: 'DIRECT_OBJECT' })).rejects.toThrow('DIRECT_OBJECT');
 
       const circular: any = { code: 'DIRECT_CYCLE' };
       circular.self = circular;
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(runWithReason(circular)).rejects.toThrow('[object Object]');
     });
   });
@@ -326,7 +320,6 @@ describe('pipe()', () => {
         errors.push(e);
       });
 
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(pipeline({ str: '5' })).rejects.toThrow();
 
       expect(errors).toHaveLength(1);
@@ -349,7 +342,6 @@ describe('pipe()', () => {
 
       const pipeline = pipe(parseNumber, failing);
 
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(pipeline({ str: '5' })).rejects.toThrow('Pipeline failed at step 1 (failing)');
     });
 
@@ -376,7 +368,6 @@ describe('pipe()', () => {
         description: 'throws object errors',
         input: z.object({ value: z.number() }),
         execute: async () => {
-          // eslint-disable-next-line @typescript-eslint/only-throw-error
           throw { code: 'OBJECT_FAIL' };
         },
       });
@@ -387,7 +378,6 @@ describe('pipe()', () => {
         stepErrors.push(event.error as Error);
       });
 
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(pipeline({ str: '5' })).rejects.toThrow(
         'Pipeline failed at step 1 (object-failing)',
       );
@@ -414,7 +404,6 @@ describe('pipe()', () => {
         stepErrors.push(event.error as Error);
       });
 
-      // eslint-disable-next-line @typescript-eslint/await-thenable
       await expect(pipeline({ str: '5' })).rejects.toThrow(
         'Pipeline failed at step 1 (circular-failing)',
       );
@@ -767,7 +756,6 @@ describe('parallel()', () => {
       });
     });
 
-    // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(combined({ value: 1 })).rejects.toThrow('boom');
     expect(errors).toEqual([{ stepIndex: 1, stepName: 'fail' }]);
   });
@@ -871,7 +859,6 @@ describe('retry()', () => {
 
     const wrapped = retry(failing, { attempts: 2 });
 
-    // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(wrapped({ value: 1 })).rejects.toThrow('boom');
     expect(attempts).toBe(2);
   });
@@ -905,7 +892,6 @@ describe('retry()', () => {
       shouldRetry: async () => false,
     });
 
-    // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(wrapped({ value: 1 })).rejects.toThrow('stop');
     expect(attempts).toBe(1);
   });
@@ -949,7 +935,6 @@ describe('retry()', () => {
       tags: ['unstable'],
       metadata: { tier: 'dev' },
       execute: async () => {
-        // eslint-disable-next-line @typescript-eslint/only-throw-error
         throw 'nope';
       },
     });
@@ -957,7 +942,6 @@ describe('retry()', () => {
     const wrapped = retry(unstable, { attempts: 2 });
     expect(wrapped.tags).toEqual(['unstable']);
     expect((wrapped as any).metadata).toMatchObject({ tier: 'dev' });
-    // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(wrapped({ value: 1 })).rejects.toThrow('nope');
   });
 
@@ -967,13 +951,11 @@ describe('retry()', () => {
       description: 'throws object',
       input: z.object({ value: z.number() }),
       execute: async () => {
-        // eslint-disable-next-line @typescript-eslint/only-throw-error
         throw { code: 'OBJECT_FAIL' };
       },
     });
 
     const wrapped = retry(unstable, { attempts: 1 });
-    // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(wrapped({ value: 1 })).rejects.toThrow(JSON.stringify({ code: 'OBJECT_FAIL' }));
   });
 
@@ -990,7 +972,6 @@ describe('retry()', () => {
     });
 
     const wrapped = retry(unstable, { attempts: 1 });
-    // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(wrapped({ value: 1 })).rejects.toThrow('[object Object]');
   });
 

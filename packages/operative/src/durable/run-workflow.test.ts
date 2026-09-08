@@ -508,7 +508,6 @@ describe('durable agentRun workflow', () => {
         { runId: 'run-string-error', prompt: 'Go' },
         makeServices(async () => {
           // This regression intentionally verifies non-Error terminal rejection serialization.
-          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
           return Promise.reject('string failure');
         }),
       );
@@ -529,7 +528,6 @@ describe('durable agentRun workflow', () => {
         { runId: 'run-circular-error', prompt: 'Go' },
         makeServices(async () => {
           // This regression intentionally verifies non-Error terminal rejection serialization.
-          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
           return Promise.reject(circular);
         }),
       );

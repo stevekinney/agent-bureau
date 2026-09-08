@@ -79,7 +79,7 @@ describe('reflectionSweep — memory sink', () => {
     await onStep(createStepResult());
 
     expect(reflect).toHaveBeenCalledTimes(1);
-    const calledWith = reflect.mock.calls[0]![0];
+    const calledWith = reflect.mock.calls[0][0];
     expect(calledWith).toContain('## Run Summary');
     expect(calledWith).toContain('Initial query:');
   });
@@ -100,7 +100,7 @@ describe('reflectionSweep — memory sink', () => {
       }),
     );
 
-    expect(reflect.mock.calls[0]![0]).toContain('Initial query: (unknown)');
+    expect(reflect.mock.calls[0][0]).toContain('Initial query: (unknown)');
   });
 
   it('writes the insight to memory with experiential metadata', async () => {
@@ -113,7 +113,7 @@ describe('reflectionSweep — memory sink', () => {
     await onStep(createStepResult());
 
     expect(memory.remember).toHaveBeenCalledTimes(1);
-    const { content, metadata } = memory.entries[0]!;
+    const { content, metadata } = memory.entries[0];
     expect(content).toBe('Always run integration tests before refactoring auth.');
     expect(metadata['source']).toBe('experiential');
     expect(metadata['namespace']).toBe('experiential');
@@ -129,7 +129,7 @@ describe('reflectionSweep — memory sink', () => {
 
     await onStep(createStepResult());
 
-    expect(memory.entries[0]!.metadata['namespace']).toBe('experiential');
+    expect(memory.entries[0].metadata['namespace']).toBe('experiential');
   });
 
   it('forwards agentId and finishReason from step metadata', async () => {
@@ -143,7 +143,7 @@ describe('reflectionSweep — memory sink', () => {
       createStepResult({ metadata: { agentId: 'refactor-agent', finishReason: 'stop' } }),
     );
 
-    const { metadata } = memory.entries[0]!;
+    const { metadata } = memory.entries[0];
     expect(metadata['agentId']).toBe('refactor-agent');
     expect(metadata['finishReason']).toBe('stop');
   });
@@ -211,7 +211,7 @@ describe('reflectionSweep — skill sink', () => {
 
     const proposals = await listProposals(storage);
     expect(proposals).toHaveLength(1);
-    const proposal = proposals[0]!;
+    const proposal = proposals[0];
     expect(proposal.type).toBe('skill');
     expect(proposal.status).toBe('pending');
     expect(proposal.content).toContain('test-skill');
@@ -230,7 +230,7 @@ describe('reflectionSweep — skill sink', () => {
     await onStep(createStepResult());
 
     const proposals = await listProposals(storage);
-    expect(proposals[0]!.agentId).toBe('agent-42');
+    expect(proposals[0].agentId).toBe('agent-42');
   });
 
   it('is a no-op on non-final steps', async () => {
@@ -264,7 +264,7 @@ describe('reflectionSweep — skill sink', () => {
     await onStep(createStepResult());
 
     const proposals = await listProposals(storage);
-    expect(proposals[0]!.summary).toBe('Custom summary');
+    expect(proposals[0].summary).toBe('Custom summary');
     expect(proposalSummary).toHaveBeenCalledTimes(1);
   });
 });
@@ -287,7 +287,7 @@ describe('reflectionSweep — soul sink', () => {
 
     const proposals = await listProposals(storage);
     expect(proposals).toHaveLength(1);
-    const proposal = proposals[0]!;
+    const proposal = proposals[0];
     expect(proposal.type).toBe('soul');
     expect(proposal.status).toBe('pending');
     expect(proposal.content).toBe(soulContent);
@@ -306,7 +306,7 @@ describe('reflectionSweep — soul sink', () => {
     await onStep(createStepResult());
 
     const proposals = await listProposals(storage);
-    expect(proposals[0]!.agentId).toBe('soul-agent');
+    expect(proposals[0].agentId).toBe('soul-agent');
   });
 
   it('is a no-op on non-final steps', async () => {
@@ -343,7 +343,7 @@ describe('reflectionSweep — persona sink', () => {
 
     const proposals = await listProposals(storage);
     expect(proposals).toHaveLength(1);
-    const proposal = proposals[0]!;
+    const proposal = proposals[0];
     expect(proposal.type).toBe('persona');
     expect(proposal.status).toBe('pending');
     expect(proposal.content).toBe('You are a meticulous refactoring assistant.');
@@ -430,7 +430,7 @@ describe('reflectionSweep — rejected pattern suppression', () => {
     expect(firstBatch).toHaveLength(1);
 
     // Human rejects the proposal.
-    await rejectProposal(storage, firstBatch[0]!.id, 'Not relevant');
+    await rejectProposal(storage, firstBatch[0].id, 'Not relevant');
 
     // Second sweep with identical content: should be suppressed.
     await onStep(createStepResult());
@@ -454,7 +454,7 @@ describe('reflectionSweep — rejected pattern suppression', () => {
     const firstBatch = await listProposals(storage);
     expect(firstBatch).toHaveLength(1);
 
-    await rejectProposal(storage, firstBatch[0]!.id);
+    await rejectProposal(storage, firstBatch[0].id);
 
     await onStep(createStepResult());
     const secondBatch = await listProposals(storage);
@@ -476,7 +476,7 @@ describe('reflectionSweep — rejected pattern suppression', () => {
     const firstBatch = await listProposals(storage);
     expect(firstBatch).toHaveLength(1);
 
-    await rejectProposal(storage, firstBatch[0]!.id);
+    await rejectProposal(storage, firstBatch[0].id);
 
     await onStep(createStepResult());
     const secondBatch = await listProposals(storage);
@@ -501,13 +501,13 @@ describe('reflectionSweep — rejected pattern suppression', () => {
     await onStep(createStepResult());
     const firstBatch = await listProposals(storage);
     expect(firstBatch).toHaveLength(1);
-    await rejectProposal(storage, firstBatch[0]!.id);
+    await rejectProposal(storage, firstBatch[0].id);
 
     // Second sweep: different content ('content-2') must still be proposed.
     await onStep(createStepResult());
     const secondBatch = await listProposals(storage);
     expect(secondBatch).toHaveLength(1);
-    expect(secondBatch[0]!.content).toBe('content-2');
+    expect(secondBatch[0].content).toBe('content-2');
   });
 });
 
@@ -527,7 +527,7 @@ describe('reflectionSweep — proposal field integrity', () => {
     await onStep(createStepResult());
 
     const proposals = await listProposals(storage);
-    const proposal = proposals[0]!;
+    const proposal = proposals[0];
     expect(proposal.id).toBeTruthy();
     expect(proposal.createdAt).toBeTruthy();
     expect(new Date(proposal.createdAt).getTime()).not.toBeNaN();
@@ -549,7 +549,7 @@ describe('reflectionSweep — proposal field integrity', () => {
 
     const proposals = await listProposals(storage);
     expect(proposals).toHaveLength(2);
-    expect(proposals[0]!.id).not.toBe(proposals[1]!.id);
+    expect(proposals[0].id).not.toBe(proposals[1].id);
   });
 
   it('can retrieve the created proposal by id', async () => {
@@ -565,7 +565,7 @@ describe('reflectionSweep — proposal field integrity', () => {
     await onStep(createStepResult());
 
     const proposals = await listProposals(storage);
-    const id = proposals[0]!.id;
+    const id = proposals[0].id;
     const retrieved = await getProposal(storage, id);
 
     expect(retrieved).toBeDefined();
@@ -590,7 +590,7 @@ describe('reflectionSweep — proposal field integrity', () => {
     await onStep(createStepResult());
 
     const proposals = await listProposals(storage);
-    const proposal = proposals[0]!;
+    const proposal = proposals[0];
     expect(proposal.id).toBe(`${runtime.identifierPrefix}-skill-1`);
     expect(proposal.createdAt).toBe('2026-03-01T00:00:00.000Z');
   });

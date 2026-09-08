@@ -231,7 +231,7 @@ describe('createDualNamespaceMemory — merged-read / private-write', () => {
       const results = await dualMemory.recall('TypeScript type system');
 
       for (let i = 1; i < results.length; i++) {
-        expect(results[i]!.score).toBeLessThanOrEqual(results[i - 1]!.score);
+        expect(results[i].score).toBeLessThanOrEqual(results[i - 1].score);
       }
     });
 
@@ -295,7 +295,7 @@ describe('createDualNamespaceMemory — merged-read / private-write', () => {
 
       // Newest-first ordering.
       for (let i = 1; i < results.length; i++) {
-        expect(results[i]!.createdAt).toBeLessThanOrEqual(results[i - 1]!.createdAt);
+        expect(results[i].createdAt).toBeLessThanOrEqual(results[i - 1].createdAt);
       }
     });
 
@@ -427,7 +427,7 @@ describe('createDualNamespaceMemory — standalone (no sharedMemory)', () => {
     const results = await standaloneMemory.list();
 
     expect(results.length).toBe(1);
-    expect(results[0]!.metadata.namespace).toBe('agent-standalone');
+    expect(results[0].metadata.namespace).toBe('agent-standalone');
   });
 
   it('count() returns only the private count', async () => {

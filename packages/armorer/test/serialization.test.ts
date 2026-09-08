@@ -5,7 +5,6 @@ import {
   assertJsonValue,
   createRegistry,
   defineTool,
-  type JsonValue,
   serializeRegistry,
   serializeToolDefinition,
   stableStringifyJson,
@@ -71,8 +70,8 @@ describe('serialization', () => {
       metadata: { a: 2, z: 1 },
     });
 
-    const jsonA = stableStringifyJson(serializeToolDefinition(toolA) as unknown as JsonValue);
-    const jsonB = stableStringifyJson(serializeToolDefinition(toolB) as unknown as JsonValue);
+    const jsonA = stableStringifyJson(serializeToolDefinition(toolA));
+    const jsonB = stableStringifyJson(serializeToolDefinition(toolB));
 
     expect(jsonA).toBe(jsonB);
   });

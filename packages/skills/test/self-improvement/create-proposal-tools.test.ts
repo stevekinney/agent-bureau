@@ -93,10 +93,7 @@ describe('createProposalToolbox', () => {
     it('handles missing proposals gracefully', async () => {
       const { toolbox } = setup();
 
-      const result = (await toolbox.acceptProposal({ id: 'nope' })) as {
-        accepted: boolean;
-        error?: string;
-      };
+      const result = await toolbox.acceptProposal({ id: 'nope' });
 
       expect(result.accepted).toBe(false);
       expect(result.error).toBeDefined();
@@ -120,10 +117,7 @@ describe('createProposalToolbox', () => {
     it('handles missing proposals gracefully', async () => {
       const { toolbox } = setup();
 
-      const result = (await toolbox.rejectProposal({ id: 'nope' })) as {
-        rejected: boolean;
-        error?: string;
-      };
+      const result = await toolbox.rejectProposal({ id: 'nope' });
 
       expect(result.rejected).toBe(false);
       expect(result.error).toBeDefined();

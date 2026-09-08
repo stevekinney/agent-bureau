@@ -39,7 +39,7 @@ describe('createContextCompactor', () => {
 
     // compact() may chunk messages and call summarize multiple times
     expect(summarize).toHaveBeenCalled();
-    const calledMessages = summarize.mock.calls[0]![0] as ReadonlyArray<Message>;
+    const calledMessages = summarize.mock.calls[0][0];
     expect(calledMessages.length).toBeGreaterThan(0);
   });
 

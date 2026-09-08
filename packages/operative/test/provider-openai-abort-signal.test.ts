@@ -109,7 +109,7 @@ function createStalledStreamingClient(): OpenAIStreamingClient & {
           return (async function* () {
             yield {
               choices: [{ delta: { content: 'partial' }, finish_reason: null }],
-            } as OpenAIChatCompletionChunk;
+            };
             await new Promise<never>((_resolve, reject) => {
               if (signal?.aborted) {
                 reject(new DOMException('Request was aborted.', 'AbortError'));

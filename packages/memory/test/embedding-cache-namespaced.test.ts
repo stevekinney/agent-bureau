@@ -20,8 +20,8 @@ describe('embedding cache with namespaces', () => {
     expect(cacheB.cache.size).toBe(1);
 
     // The keys should be different
-    const keyA = [...cacheA.cache.keys()][0]!;
-    const keyB = [...cacheB.cache.keys()][0]!;
+    const keyA = [...cacheA.cache.keys()][0];
+    const keyB = [...cacheB.cache.keys()][0];
     expect(keyA).not.toBe(keyB);
   });
 

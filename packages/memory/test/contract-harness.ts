@@ -154,13 +154,13 @@ export function runMemoryRecordStorageContract(
 
         const records = await storage.list(SCOPE);
         expect(records).toHaveLength(1);
-        expect([first.id, second.id]).toContain(records[0]!.id);
+        expect([first.id, second.id]).toContain(records[0].id);
 
         const duplicateResult = firstResult.inserted ? secondResult : firstResult;
-        expect(duplicateResult.record.id).toBe(records[0]!.id);
+        expect(duplicateResult.record.id).toBe(records[0].id);
         expect(duplicateResult.inserted).toBe(false);
         await expect(storage.getByDedupeKey!(SCOPE, 'run-1:0')).resolves.toMatchObject({
-          id: records[0]!.id,
+          id: records[0].id,
         });
       });
 
@@ -336,9 +336,9 @@ export function runMemoryRecordStorageContract(
         await storage.put(makeRecord('ortho', { vector: new Float32Array([0, 1]) }));
 
         const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
-        expect(hits[0]!.id).toBe('exact');
-        expect(hits[0]!.score).toBeCloseTo(1, 5);
-        expect(hits[1]!.id).toBe('ortho');
+        expect(hits[0].id).toBe('exact');
+        expect(hits[0].score).toBeCloseTo(1, 5);
+        expect(hits[1].id).toBe('ortho');
       });
 
       it('applies the threshold filter', async () => {
@@ -347,7 +347,7 @@ export function runMemoryRecordStorageContract(
 
         const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10, threshold: 0.5 });
         expect(hits).toHaveLength(1);
-        expect(hits[0]!.id).toBe('exact');
+        expect(hits[0].id).toBe('exact');
       });
 
       it('retains negative-similarity records when no threshold is given', async () => {
@@ -383,8 +383,8 @@ export function runMemoryRecordStorageContract(
         it('orders the parallel hit first and the opposite hit last', async () => {
           const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
           expect(hits).toHaveLength(4);
-          expect(hits[0]!.id).toBe('parallel');
-          expect(hits[3]!.id).toBe('opposite');
+          expect(hits[0].id).toBe('parallel');
+          expect(hits[3].id).toBe('opposite');
           // Scores are sorted descending regardless of how the two zero-score
           // ties are ordered between them.
           const scores = hits.map((hit) => hit.score);

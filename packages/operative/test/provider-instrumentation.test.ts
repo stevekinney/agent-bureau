@@ -16,7 +16,6 @@ import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
 import { instrument } from '../src/providers/instrumentation/index.ts';
-import type { ProviderName } from '../src/providers/types.ts';
 import type { GenerateContext, GenerateFunction, TokenUsage } from '../src/types.ts';
 
 function createMockSpan(
@@ -102,7 +101,7 @@ describe('providers/instrumentation instrument', () => {
     await wrapped(makeContext());
 
     expect(tracer.spans).toHaveLength(1);
-    const span = tracer.spans[0]!;
+    const span = tracer.spans[0];
     expect(span.name).toBe('chat claude-sonnet-5');
     expect(span.kind).toBe(SpanKind.CLIENT);
     expect(span.attributes['gen_ai.operation.name']).toBe('chat');
@@ -128,7 +127,7 @@ describe('providers/instrumentation instrument', () => {
 
     await wrapped(makeContext());
 
-    const span = tracer.spans[0]!;
+    const span = tracer.spans[0];
     expect(span.name).toBe('generate_content gemini-2.5-pro');
     expect(span.attributes['gen_ai.operation.name']).toBe('generate_content');
   });
@@ -142,7 +141,7 @@ describe('providers/instrumentation instrument', () => {
     const generate: GenerateFunction = async () => ({ content: 'hi', toolCalls: [] });
     const wrapped = instrument(generate, {
       tracer,
-      provider: provider as ProviderName,
+      provider: provider,
       model: 'test-model',
     });
 
@@ -166,7 +165,7 @@ describe('providers/instrumentation instrument', () => {
 
     const withoutMax = instrument(generate, { tracer, provider: 'anthropic', model: 'm' });
     await withoutMax(makeContext());
-    expect('gen_ai.request.max_tokens' in tracer.spans[1]!.attributes).toBe(false);
+    expect('gen_ai.request.max_tokens' in tracer.spans[1].attributes).toBe(false);
   });
 
   it('reports gen_ai.usage.input_tokens and output_tokens from the response usage', async () => {
@@ -177,7 +176,7 @@ describe('providers/instrumentation instrument', () => {
 
     await wrapped(makeContext());
 
-    const span = tracer.spans[0]!;
+    const span = tracer.spans[0];
     expect(span.attributes['gen_ai.usage.input_tokens']).toBe(12);
     expect(span.attributes['gen_ai.usage.output_tokens']).toBe(34);
     // total_tokens is not a defined gen_ai.usage.* attribute — backends sum
@@ -199,7 +198,7 @@ describe('providers/instrumentation instrument', () => {
 
     await wrapped(makeContext());
 
-    const span = tracer.spans[0]!;
+    const span = tracer.spans[0];
     expect(span.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(5);
     expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(7);
   });
@@ -212,7 +211,7 @@ describe('providers/instrumentation instrument', () => {
 
     await wrapped(makeContext());
 
-    const span = tracer.spans[0]!;
+    const span = tracer.spans[0];
     expect('gen_ai.usage.cache_creation.input_tokens' in span.attributes).toBe(false);
     expect('gen_ai.usage.cache_read.input_tokens' in span.attributes).toBe(false);
   });
@@ -232,7 +231,7 @@ describe('providers/instrumentation instrument', () => {
     }
     expect(caught).toBeInstanceOf(TypeError);
 
-    const span = tracer.spans[0]!;
+    const span = tracer.spans[0];
     expect(span.status.code).toBe(SpanStatusCode.ERROR);
     expect(span.status.message).toBe('boom');
     expect(span.attributes['error.type']).toBe('TypeError');

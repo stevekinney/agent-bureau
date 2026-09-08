@@ -42,8 +42,8 @@ describe('session verb events (C3 completeness rule)', () => {
     const e = new SessionRecoverEvent('session-1', null, [{ runId: 'session-1:0', error }]);
     expect(e.runId).toBeNull();
     expect(e.failures).toHaveLength(1);
-    expect(e.failures[0]!.runId).toBe('session-1:0');
-    expect(e.failures[0]!.error).toBe(error);
+    expect(e.failures[0].runId).toBe('session-1:0');
+    expect(e.failures[0].error).toBe(error);
   });
 
   it('SessionCancelEvent carries sessionId and runId', () => {

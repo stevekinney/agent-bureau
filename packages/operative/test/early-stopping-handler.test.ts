@@ -2,6 +2,7 @@ import { createTool } from 'armorer';
 import { createTestToolbox } from 'armorer/test';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
+import { messageText } from 'conversationalist/utilities';
 import { z } from 'zod';
 
 import { createEarlyStoppingHandler } from '../src/create-early-stopping-handler';
@@ -60,7 +61,7 @@ describe('createEarlyStoppingHandler', () => {
     const summaryGenerate = async (context: GenerateContext) => {
       const allMessages = context.conversation.getMessages();
       const lastUser = allMessages.filter((m) => m.role === 'user').pop();
-      if (lastUser) messages.push(String(lastUser.content));
+      if (lastUser) messages.push(messageText(lastUser));
       return textResponse('Summary');
     };
 
@@ -84,7 +85,7 @@ describe('createEarlyStoppingHandler', () => {
     const summaryGenerate = async (context: GenerateContext) => {
       const allMessages = context.conversation.getMessages();
       const lastUser = allMessages.filter((m) => m.role === 'user').pop();
-      if (lastUser) messages.push(String(lastUser.content));
+      if (lastUser) messages.push(messageText(lastUser));
       return textResponse('Custom summary');
     };
 

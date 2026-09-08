@@ -353,7 +353,7 @@ describe('usage.accumulated event', () => {
       cacheCreationTokens: 100,
       cacheReadTokens: 200,
     });
-    expect(result.usage).toEqual(totals[2]!);
+    expect(result.usage).toEqual(totals[2]);
   });
 
   it('exposes a cache hit rate on usage.accumulated, computed from cacheReadTokens/cacheCreationTokens/prompt', async () => {

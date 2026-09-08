@@ -56,7 +56,7 @@ describe('appendStreamingMessage', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
     const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
 
-    expect(isStreamingMessage(getOrderedMessages(conversation)[0]!)).toBe(true);
+    expect(isStreamingMessage(getOrderedMessages(conversation)[0])).toBe(true);
   });
 
   it('preserves custom metadata', () => {
@@ -226,7 +226,7 @@ describe('updateStreamingMessage', () => {
       },
       testEnvironment,
     );
-    const messageId = getOrderedMessages(conversation)[0]!.id;
+    const messageId = getOrderedMessages(conversation)[0].id;
 
     const updated = updateStreamingMessage(conversation, messageId, 'Updated', testEnvironment);
 
@@ -293,7 +293,7 @@ describe('updateStreamingMessage', () => {
       { role: 'assistant', content: 'Settled' },
       testEnvironment,
     );
-    const messageId = getOrderedMessages(conversation)[0]!.id;
+    const messageId = getOrderedMessages(conversation)[0].id;
 
     const updated = updateStreamingMessage(conversation, messageId, 'Rewritten', testEnvironment);
 
@@ -369,7 +369,7 @@ describe('finalizeStreamingMessage', () => {
     );
 
     const finalized = finalizeStreamingMessage(conversation, messageId, undefined, testEnvironment);
-    expect(isStreamingMessage(getOrderedMessages(finalized)[0]!)).toBe(false);
+    expect(isStreamingMessage(getOrderedMessages(finalized)[0])).toBe(false);
   });
 
   it('adds token usage when provided', () => {
@@ -512,7 +512,7 @@ describe('isStreamingMessage', () => {
     const conv = createConversation({ id: 'test' }, testEnvironment);
     const { conversation } = appendStreamingMessage(conv, 'assistant', undefined, testEnvironment);
 
-    expect(isStreamingMessage(getOrderedMessages(conversation)[0]!)).toBe(true);
+    expect(isStreamingMessage(getOrderedMessages(conversation)[0])).toBe(true);
   });
 
   it('returns false for non-streaming messages', async () => {
@@ -520,7 +520,7 @@ describe('isStreamingMessage', () => {
     let conv = createConversation({ id: 'test' }, testEnvironment);
     conv = appendMessages(conv, { role: 'user', content: 'Hello' }, testEnvironment);
 
-    expect(isStreamingMessage(getOrderedMessages(conv)[0]!)).toBe(false);
+    expect(isStreamingMessage(getOrderedMessages(conv)[0])).toBe(false);
   });
 
   it('returns false for finalized streaming messages', () => {
@@ -533,7 +533,7 @@ describe('isStreamingMessage', () => {
     );
     const finalized = finalizeStreamingMessage(conversation, messageId, undefined, testEnvironment);
 
-    expect(isStreamingMessage(getOrderedMessages(finalized)[0]!)).toBe(false);
+    expect(isStreamingMessage(getOrderedMessages(finalized)[0])).toBe(false);
   });
 });
 

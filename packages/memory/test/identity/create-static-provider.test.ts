@@ -27,7 +27,7 @@ describe('createStaticIdentityProvider', () => {
     const provider = createStaticIdentityProvider({ soul: items });
     const soul = await provider.loadSoul();
     expect(soul).toHaveLength(1);
-    expect(soul[0]!.content).toBe('Be helpful.');
+    expect(soul[0].content).toBe('Be helpful.');
   });
 
   it('saveSoul overwrites the current soul', async () => {
@@ -36,7 +36,7 @@ describe('createStaticIdentityProvider', () => {
 
     const soul = await provider.loadSoul();
     expect(soul).toHaveLength(1);
-    expect(soul[0]!.content).toBe('New');
+    expect(soul[0].content).toBe('New');
   });
 
   it('saveSoul archives the previous version in history', async () => {
@@ -45,8 +45,8 @@ describe('createStaticIdentityProvider', () => {
 
     const history = await provider.loadSoulHistory();
     expect(history).toHaveLength(1);
-    expect(history[0]!.version).toBe(1);
-    expect(history[0]!.items[0]!.content).toBe('V1');
+    expect(history[0].version).toBe(1);
+    expect(history[0].items[0].content).toBe('V1');
   });
 
   it('derives the archived history timestamp from an injected manual runtime rather than the real clock', async () => {
@@ -55,7 +55,7 @@ describe('createStaticIdentityProvider', () => {
     await provider.saveSoul([makeSoulItem('2', 'V2')]);
 
     const history = await provider.loadSoulHistory();
-    expect(history[0]!.timestamp).toBe('2026-03-15T00:00:00.000Z');
+    expect(history[0].timestamp).toBe('2026-03-15T00:00:00.000Z');
   });
 
   it('listPersonas returns empty when none registered', async () => {
@@ -151,7 +151,7 @@ describe('createStaticIdentityProvider', () => {
     await provider.savePendingSoulUpdate(pending);
     const loaded = await provider.loadPendingSoulUpdate();
     expect(loaded).toHaveLength(1);
-    expect(loaded![0]!.content).toBe('Proposed change.');
+    expect(loaded![0].content).toBe('Proposed change.');
 
     await provider.clearPendingSoulUpdate();
     expect(await provider.loadPendingSoulUpdate()).toBeUndefined();
@@ -163,9 +163,9 @@ describe('createStaticIdentityProvider', () => {
     await provider.saveSoul([makeSoulItem('r1', 'Research soul')], 'research');
 
     const orchestratorSoul = await provider.loadSoul();
-    expect(orchestratorSoul[0]!.content).toBe('Orchestrator soul');
+    expect(orchestratorSoul[0].content).toBe('Orchestrator soul');
     const researchSoul = await provider.loadSoul('research');
-    expect(researchSoul[0]!.content).toBe('Research soul');
+    expect(researchSoul[0].content).toBe('Research soul');
   });
 
   it('default values for missing fields', async () => {

@@ -182,7 +182,7 @@ describe('createHyDEGenerator', () => {
     expect(result).toBe('TypeScript is a typed superset of JavaScript.');
     expect(generateText).toHaveBeenCalledTimes(1);
     // The prompt should contain the user query
-    const calledWith = generateText.mock.calls[0]![0];
+    const calledWith = generateText.mock.calls[0][0];
     expect(calledWith).toContain('What is TypeScript?');
   });
 

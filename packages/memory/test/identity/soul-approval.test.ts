@@ -49,8 +49,8 @@ describe('getSoulDiff', () => {
     const diff = await getSoulDiff(provider);
     expect(diff.empty).toBe(false);
     expect(diff.additions).toHaveLength(1);
-    expect(diff.additions[0]!.proposed!.id).toBe('2');
-    expect(diff.additions[0]!.proposed!.content).toBe('New item');
+    expect(diff.additions[0].proposed!.id).toBe('2');
+    expect(diff.additions[0].proposed!.content).toBe('New item');
   });
 
   it('correctly identifies removals', async () => {
@@ -63,7 +63,7 @@ describe('getSoulDiff', () => {
     const diff = await getSoulDiff(provider);
     expect(diff.empty).toBe(false);
     expect(diff.removals).toHaveLength(1);
-    expect(diff.removals[0]!.current!.id).toBe('2');
+    expect(diff.removals[0].current!.id).toBe('2');
   });
 
   it('correctly identifies modifications', async () => {
@@ -76,8 +76,8 @@ describe('getSoulDiff', () => {
     const diff = await getSoulDiff(provider);
     expect(diff.empty).toBe(false);
     expect(diff.modifications).toHaveLength(1);
-    expect(diff.modifications[0]!.current!.content).toBe('Old content');
-    expect(diff.modifications[0]!.proposed!.content).toBe('Updated content');
+    expect(diff.modifications[0].current!.content).toBe('Old content');
+    expect(diff.modifications[0].proposed!.content).toBe('Updated content');
   });
 
   it('returns empty diff when pending matches current', async () => {
@@ -107,7 +107,7 @@ describe('acceptSoulUpdate', () => {
     // Current soul should be the pending update
     const soul = await provider.loadSoul();
     expect(soul).toHaveLength(2);
-    expect(soul[1]!.content).toBe('New in V2');
+    expect(soul[1].content).toBe('New in V2');
 
     // Pending should be cleared
     expect(await provider.loadPendingSoulUpdate()).toBeUndefined();
@@ -115,7 +115,7 @@ describe('acceptSoulUpdate', () => {
     // History should contain the previous version
     const history = await provider.loadSoulHistory();
     expect(history.length).toBeGreaterThan(0);
-    expect(history[0]!.items[0]!.content).toBe('Version 1');
+    expect(history[0].items[0].content).toBe('Version 1');
   });
 
   it('increments the version number', async () => {
@@ -155,7 +155,7 @@ describe('rejectSoulUpdate', () => {
 
     // Current soul should be unchanged
     const soul = await provider.loadSoul();
-    expect(soul[0]!.content).toBe('Current');
+    expect(soul[0].content).toBe('Current');
   });
 
   it('is a no-op when no pending update exists', async () => {
@@ -175,7 +175,7 @@ describe('pinSoulItem / unpinSoulItem', () => {
     expect(result).toBe(true);
 
     const soul = await provider.loadSoul();
-    expect(soul[0]!.pinned).toBe(true);
+    expect(soul[0].pinned).toBe(true);
   });
 
   it('unpinSoulItem sets pinned to false', async () => {
@@ -187,7 +187,7 @@ describe('pinSoulItem / unpinSoulItem', () => {
     expect(result).toBe(true);
 
     const soul = await provider.loadSoul();
-    expect(soul[0]!.pinned).toBe(false);
+    expect(soul[0].pinned).toBe(false);
   });
 
   it('returns false for non-existent item ID', async () => {
@@ -208,8 +208,8 @@ describe('pinSoulItem / unpinSoulItem', () => {
     await pinSoulItem(provider, '1', undefined, runtime);
 
     const soul = await provider.loadSoul();
-    expect(soul[0]!.updatedAt).not.toBe('2020-01-01T00:00:00Z');
-    expect(soul[0]!.updatedAt).toBe('2026-06-15T12:00:00.000Z');
+    expect(soul[0].updatedAt).not.toBe('2020-01-01T00:00:00Z');
+    expect(soul[0].updatedAt).toBe('2026-06-15T12:00:00.000Z');
   });
 
   it('derives updatedAt from an injected manual runtime rather than the real clock', async () => {
@@ -220,10 +220,10 @@ describe('pinSoulItem / unpinSoulItem', () => {
 
     await pinSoulItem(provider, '1', undefined, runtime);
     let soul = await provider.loadSoul();
-    expect(soul[0]!.updatedAt).toBe('2026-09-09T00:00:00.000Z');
+    expect(soul[0].updatedAt).toBe('2026-09-09T00:00:00.000Z');
 
     await unpinSoulItem(provider, '1', undefined, runtime);
     soul = await provider.loadSoul();
-    expect(soul[0]!.updatedAt).toBe('2026-09-09T00:00:00.000Z');
+    expect(soul[0].updatedAt).toBe('2026-09-09T00:00:00.000Z');
   });
 });

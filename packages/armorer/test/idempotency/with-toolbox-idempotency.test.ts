@@ -203,7 +203,7 @@ describe('withToolboxIdempotency', () => {
     expect(result2.idempotency?.outcome).toBe('deduped');
     expect(addCallCount).toBe(1); // Cached on second call
     expect(
-      await cache.getState!(
+      await cache.getState(
         expectedCacheKey('tenant-a', 'default:add', `add:${fullInputKey({ a: 1, b: 2 })}`),
       ),
     ).toEqual(
@@ -1039,7 +1039,7 @@ describe('withToolboxIdempotency', () => {
     });
     expect(addCallCount).toBe(1);
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:retry-after-review')),
     ).toEqual(
       expect.objectContaining({
         status: 'completed',
@@ -1107,7 +1107,7 @@ describe('withToolboxIdempotency', () => {
     expect(result.outcome).toBe('error');
     expect(result.idempotency).toBeUndefined();
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
@@ -1124,7 +1124,7 @@ describe('withToolboxIdempotency', () => {
     ).rejects.toMatchObject({ category: 'validation' });
 
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
     ).toBeUndefined();
 
     const retry = await idempotentToolbox.execute(
@@ -1135,7 +1135,7 @@ describe('withToolboxIdempotency', () => {
     expect(retry.outcome).toBe('error');
     expect(retry.idempotency).toBeUndefined();
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:invalid-input')),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
@@ -1170,7 +1170,7 @@ describe('withToolboxIdempotency', () => {
     expect(first.error?.category).toBe('unavailable');
     expect(first.idempotency).toBeUndefined();
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:unavailable-now')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:unavailable-now')),
     ).toEqual(
       expect.objectContaining({
         status: 'completed',
@@ -1215,7 +1215,7 @@ describe('withToolboxIdempotency', () => {
     expect(first.idempotency).toBeUndefined();
     expect(second.idempotency).toBeUndefined();
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:approval-pause')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:approval-pause')),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
@@ -1241,7 +1241,7 @@ describe('withToolboxIdempotency', () => {
     expect(second.outcome).toBe('error');
     expect(second.idempotency).toBeUndefined();
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
@@ -1260,7 +1260,7 @@ describe('withToolboxIdempotency', () => {
     ).rejects.toMatchObject({ category: 'conflict', code: 'BUDGET_EXCEEDED' });
 
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
     ).toBeUndefined();
 
     const retry = await idempotentToolbox.execute(
@@ -1271,7 +1271,7 @@ describe('withToolboxIdempotency', () => {
     expect(retry.outcome).toBe('error');
     expect(retry.idempotency).toBeUndefined();
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:budget-block')),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
@@ -1557,7 +1557,7 @@ describe('withToolboxIdempotency', () => {
     expect(first.idempotency).toBeUndefined();
     expect(second.idempotency).toBeUndefined();
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:policy-denied')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:policy-denied')),
     ).toBeUndefined();
     expect(addCallCount).toBe(0);
   });
@@ -1597,7 +1597,7 @@ describe('withToolboxIdempotency', () => {
     });
     expect(sideEffects).toEqual([100]);
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:charge', 'charge:charge-once')),
     ).toEqual(expect.objectContaining({ status: 'started', toolName: 'charge' }));
   });
 
@@ -1633,7 +1633,7 @@ describe('withToolboxIdempotency', () => {
       inputDigest: expect.any(String),
     });
     expect(
-      await cache.getState!(expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error')),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:primitive-error')),
     ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
 
@@ -1675,9 +1675,7 @@ describe('withToolboxIdempotency', () => {
       inputDigest: expect.any(String),
     });
     expect(
-      await cache.getState!(
-        expectedCacheKey('tenant-a', 'default:add', 'add:error-without-object'),
-      ),
+      await cache.getState(expectedCacheKey('tenant-a', 'default:add', 'add:error-without-object')),
     ).toEqual(expect.objectContaining({ status: 'started', toolName: 'add' }));
   });
 
@@ -1749,7 +1747,7 @@ describe('withToolboxIdempotency', () => {
     const toolbox = createToolbox([createToolWithKey()]);
     const idempotentToolbox = withToolboxIdempotency(toolbox, { cache, tenantId: 'tenant-a' });
 
-    const result = await idempotentToolbox.execute({ name: '', arguments: { a: 1, b: 2 } } as any);
+    const result = await idempotentToolbox.execute({ name: '', arguments: { a: 1, b: 2 } });
 
     expect(result.outcome).toBe('error');
     expect(result.errorMessage).toContain('Tool not found');
@@ -2469,11 +2467,11 @@ describe('withToolboxIdempotency', () => {
       async replaceUnknownStarted(cacheKey, expectedAttemptId, replacement, currentTime) {
         replacementStartedAt = replacement.startedAt;
         replacementLeaseExpiresAt = replacement.leaseExpiresAt;
-        return cache.replaceUnknownStarted!(cacheKey, expectedAttemptId, replacement, currentTime);
+        return cache.replaceUnknownStarted(cacheKey, expectedAttemptId, replacement, currentTime);
       },
       async completeStarted(cacheKey, attemptId, result, ttl, currentTime) {
         completedAt = result.executedAt;
-        return cache.completeStarted!(cacheKey, attemptId, result, ttl, currentTime);
+        return cache.completeStarted(cacheKey, attemptId, result, ttl, currentTime);
       },
     };
     const toolbox = withToolboxIdempotency(createToolbox([createToolWithKey()]), {

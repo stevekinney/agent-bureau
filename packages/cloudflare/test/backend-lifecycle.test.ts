@@ -324,7 +324,7 @@ describe('Cloudflare memory dedupe keys', () => {
     expect(duplicate.inserted).toBe(false);
     expect(duplicate.record.id).toBe('first');
     expect(vectorize.upsertCalls).toHaveLength(1);
-    expect(vectorize.upsertCalls[0]![0]!.id).toContain(':first');
+    expect(vectorize.upsertCalls[0][0].id).toContain(':first');
   });
 
   it('repairs an unindexed dedupe winner on keyed lookup before duplicate putOnce', async () => {
@@ -349,7 +349,7 @@ describe('Cloudflare memory dedupe keys', () => {
 
     expect(existing?.id).toBe('first');
     expect(vectorize.upsertCalls).toHaveLength(1);
-    expect(vectorize.upsertCalls[0]![0]!.id).toContain(':first');
+    expect(vectorize.upsertCalls[0][0].id).toContain(':first');
     const rows = sql
       .exec<{
         indexed_at: number;

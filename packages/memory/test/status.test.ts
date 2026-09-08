@@ -52,8 +52,8 @@ describe('getMemoryStatus', () => {
 
     const status = await getMemoryStatus(storage, { namespaces: ['small', 'large'] });
 
-    expect(status.namespaces[0]!.name).toBe('large');
-    expect(status.namespaces[1]!.name).toBe('small');
+    expect(status.namespaces[0].name).toBe('large');
+    expect(status.namespaces[1].name).toBe('small');
   });
 
   it('reports storage type from constructor name', async () => {

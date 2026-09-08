@@ -473,8 +473,8 @@ describe('inspect', () => {
       const inspection = toolbox.inspect();
 
       // Mutate the inspection
-      inspection.tools[0]!.name = 'mutated';
-      inspection.tools[0]!.tags.push('extra');
+      inspection.tools[0].name = 'mutated';
+      inspection.tools[0].tags.push('extra');
 
       // Re-inspect should show original data
       const freshInspection = toolbox.inspect();

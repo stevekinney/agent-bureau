@@ -342,7 +342,7 @@ describe('loop helper coverage', () => {
       },
       toolbox: createTestToolbox([recordKeyTool]),
       conversation: new Conversation(),
-      parentContext: { traceId: 'trace-1' } as never,
+      parentContext: { traceId: 'trace-1' },
       withTraceContext: async (context, run) => {
         tracedContexts.push(context);
         return run();

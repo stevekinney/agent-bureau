@@ -235,7 +235,7 @@ describe('createMemoryBridge', () => {
       await onStep(createStepResult(conversation, { final: true }));
 
       expect(memory.rememberCalls.length).toBe(1);
-      expect(memory.rememberCalls[0]![0]).toBe('Keep this');
+      expect(memory.rememberCalls[0][0]).toBe('Keep this');
     });
 
     it('does not re-persist the recalled memories key', async () => {
@@ -251,7 +251,7 @@ describe('createMemoryBridge', () => {
 
       // Only 'notes' should be persisted, not 'memories'
       expect(memory.rememberCalls.length).toBe(1);
-      expect(memory.rememberCalls[0]![0]).toBe('New note');
+      expect(memory.rememberCalls[0][0]).toBe('New note');
     });
 
     it('does not crash when memory.remember throws', async () => {

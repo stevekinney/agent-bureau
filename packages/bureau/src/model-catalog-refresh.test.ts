@@ -530,7 +530,6 @@ describe('createModelCatalogService', () => {
     // Deliberately a non-Error rejection: this test exists to cover
     // describeFailure()'s String(cause) branch for a scripted
     // descriptorSource that misbehaves by rejecting with a plain value.
-    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
     const { service } = createService(() => Promise.reject('a plain string rejection'));
     const handle = service.refresh(request());
     const result = await handle.result();

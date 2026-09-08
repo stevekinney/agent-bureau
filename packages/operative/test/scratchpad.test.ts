@@ -188,7 +188,7 @@ describe('scratchpad tools', () => {
 
     expect(readTool.name).toBe('read-scratchpad');
     const result = await readTool({ key: 'greeting' });
-    expect(JSON.parse(result as string)).toEqual({
+    expect(JSON.parse(result)).toEqual({
       found: true,
       key: 'greeting',
       value: 'hello',
@@ -200,7 +200,7 @@ describe('scratchpad tools', () => {
     const readTool = createScratchpadReadTool(pad);
 
     const result = await readTool({ key: 'missing' });
-    expect(JSON.parse(result as string)).toEqual({ found: false, key: 'missing' });
+    expect(JSON.parse(result)).toEqual({ found: false, key: 'missing' });
   });
 
   it('read tool reads all entries when no key is provided', async () => {
@@ -208,7 +208,7 @@ describe('scratchpad tools', () => {
     const readTool = createScratchpadReadTool(pad);
 
     const result = await readTool({});
-    expect(JSON.parse(result as string)).toEqual({ a: 1, b: 2 });
+    expect(JSON.parse(result)).toEqual({ a: 1, b: 2 });
   });
 
   it('write tool writes a value', async () => {
@@ -227,7 +227,7 @@ describe('scratchpad tools', () => {
 
     await writeTool({ key: 'count', value: 42 });
     const result = await readTool({ key: 'count' });
-    expect(JSON.parse(result as string)).toEqual({ found: true, key: 'count', value: 42 });
+    expect(JSON.parse(result)).toEqual({ found: true, key: 'count', value: 42 });
   });
 });
 

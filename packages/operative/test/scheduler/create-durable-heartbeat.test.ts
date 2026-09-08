@@ -149,7 +149,7 @@ describe('createDurableHeartbeat', () => {
       workflowId: 'invalid-heartbeat-input',
       workflowType: DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
       input: {},
-    } as never);
+    });
 
     expect(resolution).toEqual({
       status: 'unavailable',
@@ -568,12 +568,12 @@ describe('createDurableHeartbeat', () => {
       await fireSchedule(engine, 'heartbeat-active-priority');
       expect(firstScheduler.submittedTasks).toHaveLength(0);
       expect(secondScheduler.submittedTasks).toHaveLength(1);
-      expect(secondScheduler.submittedTasks[0]!.priority).toBe('immediate');
+      expect(secondScheduler.submittedTasks[0].priority).toBe('immediate');
 
       second[Symbol.dispose]();
       await fireSchedule(engine, 'heartbeat-active-priority');
       expect(firstScheduler.submittedTasks).toHaveLength(1);
-      expect(firstScheduler.submittedTasks[0]!.priority).toBe('ambient');
+      expect(firstScheduler.submittedTasks[0].priority).toBe('ambient');
 
       await first.cancel();
     } finally {
@@ -788,7 +788,7 @@ describe('createDurableHeartbeat', () => {
       },
     };
     engine.addEventListener(weft.WorkflowFailedEvent.type, (event) => {
-      failedWorkflowMessages.push((event as weft.WorkflowFailedEvent).error.message);
+      failedWorkflowMessages.push(event.error.message);
     });
 
     try {
@@ -915,7 +915,7 @@ describe('createDurableHeartbeat', () => {
     let createRunCount = 0;
     const completedTicks: DurableHeartbeatTickResult[] = [];
     engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
-      const result = (event as weft.WorkflowCompletedEvent).result;
+      const result = event.result;
       if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
     });
 
@@ -939,8 +939,8 @@ describe('createDurableHeartbeat', () => {
       });
       expect(createRunCount).toBe(1);
       expect(submittedTasks).toHaveLength(1);
-      expect(submittedTasks[0]!.priority).toBe('scheduled');
-      expect(submittedTasks[0]!.id).toBe(`durable-heartbeat-${completedTicks[0]!.workflowId}`);
+      expect(submittedTasks[0].priority).toBe('scheduled');
+      expect(submittedTasks[0].id).toBe(`durable-heartbeat-${completedTicks[0].workflowId}`);
       expect(resolverDelegationCount).toBe(0);
     } finally {
       await heartbeat.cancel();
@@ -959,7 +959,7 @@ describe('createDurableHeartbeat', () => {
     const completedTicks: DurableHeartbeatTickResult[] = [];
     const tickResults: Array<RunResult | null> = [];
     engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
-      const result = (event as weft.WorkflowCompletedEvent).result;
+      const result = event.result;
       if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
     });
 
@@ -1005,7 +1005,7 @@ describe('createDurableHeartbeat', () => {
     const completedTicks: DurableHeartbeatTickResult[] = [];
     const failureErrors: unknown[] = [];
     engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
-      const result = (event as weft.WorkflowCompletedEvent).result;
+      const result = event.result;
       if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
     });
 
@@ -1057,7 +1057,7 @@ describe('createDurableHeartbeat', () => {
     const completedTicks: DurableHeartbeatTickResult[] = [];
     const failureErrors: unknown[] = [];
     engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
-      const result = (event as weft.WorkflowCompletedEvent).result;
+      const result = event.result;
       if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
     });
 
@@ -1099,7 +1099,7 @@ describe('createDurableHeartbeat', () => {
     const { scheduler, submittedTasks } = createRecordingScheduler();
     const completedTicks: DurableHeartbeatTickResult[] = [];
     engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
-      const result = (event as weft.WorkflowCompletedEvent).result;
+      const result = event.result;
       if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
     });
     const heartbeat = await createDurableHeartbeat(engine, {
@@ -1124,9 +1124,9 @@ describe('createDurableHeartbeat', () => {
       expect(await checkpointStore.loadCursor('direct-tick')).toBeNull();
       expect(await checkpointStore.loadSteps('direct-tick')).toEqual([]);
       expect(await checkpointStore.loadConversation('direct-tick')).toBeNull();
-      expect(await checkpointStore.loadCursor(completedTicks[0]!.workflowId)).toBeNull();
-      expect(await checkpointStore.loadSteps(completedTicks[0]!.workflowId)).toEqual([]);
-      expect(await checkpointStore.loadConversation(completedTicks[0]!.workflowId)).toBeNull();
+      expect(await checkpointStore.loadCursor(completedTicks[0].workflowId)).toBeNull();
+      expect(await checkpointStore.loadSteps(completedTicks[0].workflowId)).toEqual([]);
+      expect(await checkpointStore.loadConversation(completedTicks[0].workflowId)).toBeNull();
       expect(await listStorageKeys(storage, 'durable-run:')).toEqual([]);
     } finally {
       await heartbeat.cancel();
@@ -1149,7 +1149,7 @@ describe('createDurableHeartbeat', () => {
     const { scheduler, submittedTasks } = createRecordingScheduler();
     const firedScheduleIds: string[] = [];
     engine.addEventListener(weft.ScheduleFiredEvent.type, (event) => {
-      firedScheduleIds.push((event as weft.ScheduleFiredEvent).scheduleId);
+      firedScheduleIds.push(event.scheduleId);
     });
 
     const heartbeat = await createDurableHeartbeat(engine, {
@@ -1181,7 +1181,7 @@ describe('createDurableHeartbeat', () => {
     const { scheduler, submittedTasks } = createRecordingScheduler();
     const completedTicks: DurableHeartbeatTickResult[] = [];
     engine.addEventListener(weft.WorkflowCompletedEvent.type, (event) => {
-      const result = (event as weft.WorkflowCompletedEvent).result;
+      const result = event.result;
       if (isDurableHeartbeatTickResult(result)) completedTicks.push(result);
     });
     const heartbeat = await createDurableHeartbeat(engine, {
@@ -1225,7 +1225,7 @@ describe('createDurableHeartbeat', () => {
       startScheduler: false,
     });
     engine.addEventListener(weft.WorkflowFailedEvent.type, (event) => {
-      const failedEvent = event as weft.WorkflowFailedEvent;
+      const failedEvent = event;
       failedWorkflowIds.push(failedEvent.workflowId);
       failureMessages.push(failedEvent.error.message);
     });

@@ -180,7 +180,7 @@ describe('createStore', () => {
     store.recordAction(id, 'workflow.reattached', { sessionId: 'session-1' });
 
     expect(received).toHaveLength(1);
-    expect(received[0]!.type).toBe('workflow.reattached');
+    expect(received[0].type).toBe('workflow.reattached');
 
     store.dispose();
   });

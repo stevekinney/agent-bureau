@@ -16,7 +16,7 @@ describe('chunkHtml', () => {
     const chunks = await chunkHtml(html);
 
     expect(chunks).toHaveLength(1);
-    expect(chunks[0]!.text).toBe('Hello world.');
+    expect(chunks[0].text).toBe('Hello world.');
   });
 
   it('drops script and style content entirely', async () => {
@@ -42,7 +42,7 @@ describe('chunkHtml', () => {
     const html = '<div><p>First paragraph.</p><p>Second paragraph.</p></div>';
     const chunks = await chunkHtml(html);
 
-    expect(chunks[0]!.text.split('\n')).toEqual(['First paragraph.', 'Second paragraph.']);
+    expect(chunks[0].text.split('\n')).toEqual(['First paragraph.', 'Second paragraph.']);
   });
 
   it('tags chunks with the nearest preceding heading text', async () => {
@@ -79,7 +79,7 @@ describe('chunkHtml', () => {
 
     const chunks = await chunkHtml(html);
 
-    expect(chunks[0]!.heading).toBe('Install CLI');
+    expect(chunks[0].heading).toBe('Install CLI');
   });
 
   it('does not label the next chunk with a heading that has no text', async () => {
@@ -87,35 +87,35 @@ describe('chunkHtml', () => {
 
     const chunks = await chunkHtml(html);
 
-    expect(chunks[0]!.heading).toBeUndefined();
+    expect(chunks[0].heading).toBeUndefined();
   });
 
   it('preserves whitespace separators between adjacent inline elements', async () => {
     const html = '<p><strong>Hello</strong> <em>world</em></p>';
     const chunks = await chunkHtml(html);
 
-    expect(chunks[0]!.text).toBe('Hello world');
+    expect(chunks[0].text).toBe('Hello world');
   });
 
   it('decodes common HTML entities before storing text', async () => {
     const html = '<p>AT&amp;T&nbsp;plans</p>';
     const chunks = await chunkHtml(html);
 
-    expect(chunks[0]!.text).toBe('AT&T plans');
+    expect(chunks[0].text).toBe('AT&T plans');
   });
 
   it('decodes numeric character references', async () => {
     const html = '<p>caf&#233; &#x2013; menu</p>';
     const chunks = await chunkHtml(html);
 
-    expect(chunks[0]!.text).toBe('café – menu');
+    expect(chunks[0].text).toBe('café – menu');
   });
 
   it('captures text nodes that are not wrapped in any element', async () => {
     const html = 'Hello <b>world</b>';
     const chunks = await chunkHtml(html);
 
-    expect(chunks[0]!.text).toBe('Hello world');
+    expect(chunks[0].text).toBe('Hello world');
   });
 
   it('ignores elements nested inside skipped tags entirely', async () => {

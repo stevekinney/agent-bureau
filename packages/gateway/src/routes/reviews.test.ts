@@ -475,7 +475,6 @@ describe('reviews routes error mapping (stub bureau)', () => {
 
   it('maps a thrown non-Error value to 500 with its stringified form', async () => {
     const app = buildApp(async () => {
-      // eslint-disable-next-line @typescript-eslint/only-throw-error -- exercising the toHttpException fallback for a non-Error throw
       throw 'plain string failure';
     });
     const response = await app.request('/api/v1/reviews/any/deny', { method: 'POST' });

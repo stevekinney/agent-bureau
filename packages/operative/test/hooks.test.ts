@@ -293,7 +293,7 @@ describe('step hooks', () => {
         return originalGenerate(...args);
       },
       { calls: generate.calls, callCount: generate.callCount },
-    ) as typeof generate;
+    );
 
     await run({
       generate: wrappedGenerate,

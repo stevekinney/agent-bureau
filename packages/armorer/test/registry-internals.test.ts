@@ -86,7 +86,7 @@ const makeTextIndex = (tool: {
   nameTokens: [tool.identity.name.toLowerCase()],
   descriptionTokens: tool.description.toLowerCase().split(/\s+/g).filter(Boolean),
   tags: (tool.tags ?? []).map((tag) => ({ raw: tag, normalized: tag.toLowerCase() })),
-  schemaKeys: Object.keys((tool.input as z.ZodObject<any>).shape).map((key) => ({
+  schemaKeys: Object.keys(tool.input.shape).map((key) => ({
     raw: key,
     normalized: key.toLowerCase(),
   })),
@@ -312,7 +312,7 @@ describe('registry internal coverage', () => {
     ).toBeNull();
 
     removeToolFromEmbeddingIndex(indexed, tool);
-    removeToolFromEmbeddingIndex(indexed, toolWithoutEmbeddings as any);
+    removeToolFromEmbeddingIndex(indexed, toolWithoutEmbeddings);
     const bucketIndex = createEmbeddingBucketIndex(2);
     expect(bucketIndex.dimension).toBe(2);
   });

@@ -53,7 +53,7 @@ describe('registry module coverage', () => {
         name: ' canonical-tool ',
         version: ' 1.0.0 ',
       },
-    } as any);
+    });
 
     expect(registry.get('default:canonical-tool@1.0.0')?.id).toBe('default:canonical-tool@1.0.0');
   });

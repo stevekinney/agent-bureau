@@ -129,7 +129,7 @@ describe('createRunCaptureHook', () => {
     const results = await memory.recall('TypeScript', { namespace: 'experiential' });
     expect(results.length).toBe(1);
 
-    const entry = results[0]!;
+    const entry = results[0];
     expect(entry.metadata.source).toBe('experiential');
     expect(entry.metadata.namespace).toBe('experiential');
     expect(entry.metadata.tags).toEqual(['case']);
@@ -162,6 +162,6 @@ describe('createRunCaptureHook', () => {
 
     const results = await memory.recall('Custom summary', { namespace: 'experiential' });
     expect(results.length).toBe(1);
-    expect(results[0]!.content).toBe('Custom summary output');
+    expect(results[0].content).toBe('Custom summary output');
   });
 });

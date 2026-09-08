@@ -417,7 +417,7 @@ describe('Conversation', () => {
       const baseline = build();
       const flooded = build();
       const finalizedState = flooded.current;
-      const messageId = finalizedState.ids[0]!;
+      const messageId = finalizedState.ids[0];
       for (let index = 0; index < 5; index += 1) {
         flooded.updateStreamingMessage(messageId, `late token ${index}`);
       }

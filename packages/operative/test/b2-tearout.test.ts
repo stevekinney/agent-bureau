@@ -95,21 +95,26 @@ describe('B2 tearout — remaining surface is coherent', () => {
       agent: {
         name: 'stub-agent',
         hasOutput: false,
-        run: (input) =>
-          ({
+        run: (input) => {
+          // `AgentInput` is `string | { conversation: ConversationHistory }` — this stub is
+          // never actually invoked (the test only checks `tool.name`), but stringify it
+          // correctly rather than risk `[object Object]` via a bare `String(input)`.
+          const inputSummary = typeof input === 'string' ? input : JSON.stringify(input);
+          return {
             result: () =>
               Promise.resolve({
                 conversation: {} as never,
                 steps: [],
-                content: `Result: ${String(input)}`,
+                content: `Result: ${inputSummary}`,
                 usage: { prompt: 0, completion: 0, total: 0 },
                 finishReason: 'stop-condition' as const,
               }),
-            unwrap: () => Promise.resolve(`Result: ${String(input)}`),
+            unwrap: () => Promise.resolve(`Result: ${inputSummary}`),
             abort: () => {},
             [Symbol.dispose]: () => {},
             [Symbol.asyncIterator]: () => (async function* () {})(),
-          }) as unknown as AgentRun<string, boolean>,
+          } as unknown as AgentRun<string, boolean>;
+        },
       },
       input: z.object({ query: z.string() }),
     });

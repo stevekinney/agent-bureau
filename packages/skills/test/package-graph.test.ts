@@ -93,8 +93,8 @@ describe('E3: SkillProvider satisfies the bureau SkillProviderLike seam (behavio
     // The return shape must include name + description (SkillProviderLike contract).
     const skill = skills[0];
     expect(skill).toBeDefined();
-    expect(skill!.name).toBe('test-skill');
-    expect(skill!.description).toBe('A skill for testing.');
+    expect(skill.name).toBe('test-skill');
+    expect(skill.description).toBe('A skill for testing.');
   });
 
   it('listSkills() returns catalog entries for multiple skills', async () => {

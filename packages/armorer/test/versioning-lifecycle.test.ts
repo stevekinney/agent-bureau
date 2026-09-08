@@ -328,7 +328,7 @@ describe('onDeprecatedToolCalled', () => {
     await toolbox.execute({ name: 'old-tool', arguments: {} });
 
     expect(callback).toHaveBeenCalledTimes(1);
-    const [config, callInfo] = callback.mock.calls[0]!;
+    const [config, callInfo] = callback.mock.calls[0];
     expect(config.name).toBe('old-tool');
     expect(callInfo.name).toBe('old-tool');
   });
@@ -351,7 +351,7 @@ describe('onDeprecatedToolCalled', () => {
     await toolbox.execute({ name: 'old-tool', arguments: {} });
 
     expect(callback).toHaveBeenCalledTimes(1);
-    const [config] = callback.mock.calls[0]!;
+    const [config] = callback.mock.calls[0];
     expect(config.lifecycle?.deprecated).toBe('Use new-tool instead');
   });
 
@@ -392,7 +392,7 @@ describe('onDeprecatedToolCalled', () => {
     await toolbox.execute({ id: 'call-123', name: 'old-tool', arguments: {} });
 
     expect(callback).toHaveBeenCalledTimes(1);
-    const [, callInfo] = callback.mock.calls[0]!;
+    const [, callInfo] = callback.mock.calls[0];
     expect(callInfo.id).toBe('call-123');
   });
 });

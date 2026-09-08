@@ -78,7 +78,7 @@ describe('HookRegistry integration', () => {
     const hooks = new HookRegistry<OperativeHookMap>();
 
     hooks.on('prepareStep', async () => {
-      return { content: 'Intercepted by registry', toolCalls: [] } as GenerateResponse;
+      return { content: 'Intercepted by registry', toolCalls: [] };
     });
 
     const generate = createMockGenerate([textResponse('Should not be called')]);
