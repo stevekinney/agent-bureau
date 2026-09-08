@@ -27,8 +27,10 @@ describe('NIGHTLY_TEST_NAME_PATTERN', () => {
     const workflow = await Bun.file(
       join(import.meta.dir, '..', '.github', 'workflows', 'ci.yml'),
     ).text();
-    expect(workflow).toContain(
-      `bun run test:gateway-conformance -- --test-name-pattern "${NIGHTLY_TEST_NAME_PATTERN}"`,
-    );
+    const runLines = workflow
+      .split('\n')
+      .filter((line) => line.includes('run:') && line.includes('test:gateway-conformance'));
+    expect(runLines).toHaveLength(1);
+    expect(runLines[0]).toContain(`--test-name-pattern "${NIGHTLY_TEST_NAME_PATTERN}"`);
   });
 });
