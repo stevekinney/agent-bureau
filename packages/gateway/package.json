@@ -18,7 +18,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "start": "bun run dist/start.js",
-    "test": "bun test --test-name-pattern \"^(?!.*\\[nightly\\])\"",
+    "test": "bun run ../../scripts/run-tests-excluding-nightly.ts",
     "test:coverage": "bun test --coverage",
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
