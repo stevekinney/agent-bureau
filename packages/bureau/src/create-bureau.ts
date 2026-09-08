@@ -31,6 +31,7 @@ import {
   ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  SessionDeletedEvent,
   type SessionListOptions,
   type SessionStore,
   type SessionSummary,
@@ -4825,7 +4826,85 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return requireSessionStore().load(id);
   }
 
+  // AB-228 (Codex P2 review finding, PR #566): two concurrent
+  // `deleteSession(id)` calls can both observe a truthy `session` from
+  // their own `sessionStore.load(id)` before either has actually deleted
+  // it — `SessionStore.delete` is an idempotent no-op for an
+  // already-removed id, not a signal of who "won" — so both would
+  // otherwise reach the unconditional `SessionDeletedEvent` dispatch
+  // below, producing two durable `session.deleted` records (and notifying
+  // subscribers twice) for one real deletion. Coalescing concurrent calls
+  // for the same id onto a single in-flight promise makes exactly one of
+  // them actually run `performDeleteSession` (and its single dispatch);
+  // every other concurrent caller awaits that same result instead of
+  // starting a second, redundant run. A call that arrives strictly AFTER
+  // the first has already settled (id reused, or genuinely deleting again)
+  // is unaffected — the map entry is cleared in `finally`, so it starts a
+  // fresh `performDeleteSession` and gets the normal "already gone, no
+  // session to dispatch for" behavior.
+  //
+  // KNOWN LIMITATION (Codex follow-up review finding, PR #566): this map
+  // is process-local, so it does NOT coordinate two separate BUREAU
+  // PROCESSES sharing one persistent backend under the supported
+  // `durableOwnership: { ownership: 'workflow-lease' }` configuration
+  // (`types.ts`'s own doc comment) — two processes can each observe a
+  // truthy session before either commits its deletion. The winner signal
+  // actually exists inside `SessionStore.delete`'s own `runMutation` loop
+  // (it reads whether the body was present when its write committed) —
+  // it is just not surfaced to the caller today. The honest fix is
+  // returning that signal from `SessionStore.delete()` itself, which is
+  // `@lostgradient/operative`'s own published contract, not bureau's —
+  // out of this `packages/bureau`-only child's boundary, and a real
+  // reason, not a jurisdictional one: a bureau-side workaround (e.g. a
+  // second conditional tombstone key layered over the store's own
+  // mutation) would be exactly the kind of shim this repo's conventions
+  // reject, on top of needing its own cleanup for session-id reuse. Two
+  // processes independently deleting the SAME session id at the SAME
+  // moment is an unusual operational pattern (unlike the single-process
+  // race above, which ordinary concurrent API callers can trigger
+  // routinely); until that operative-side contract exists, that specific
+  // case can still produce a duplicate durable `session.deleted` record
+  // and a duplicate notification — the session record itself is still
+  // correctly deleted either way; the duplication is confined to the
+  // dispatch and the audit rows, matching this same code path's
+  // pre-existing (not introduced by this fix) double-write of
+  // `revokePendingApprovalsForRun`'s own `review.revoked` records under
+  // the identical cross-process race.
+  // AB-228 (Codex follow-up review finding, PR #566): the coalescing slot
+  // above is released as soon as `sessionStore.delete(id)` itself commits
+  // (`onStoreDeletionCommitted` below), NOT when the whole function
+  // finally resolves. `performDeleteSession`'s tail after that point
+  // (releasing a paused run's steering gate, awaiting its terminal event)
+  // is cleanup for the OLD, now-actually-deleted incarnation — holding the
+  // coalescing slot open through it would make a `deleteSession(id)` call
+  // for a session RECREATED with the same id, arriving during that tail,
+  // silently resolve against the OLD promise instead of ever deleting the
+  // NEW session. `releaseCoalescing` is reset to a no-op the first time it
+  // runs (either via the commit callback or the `finally` safety net for
+  // the never-existed-session path / a thrown error before commit) so it
+  // never double-clears an entry a later, unrelated call may already own.
+  const inFlightSessionDeletions = new Map<string, Promise<void>>();
   async function deleteSession(id: string): Promise<void> {
+    const existing = inFlightSessionDeletions.get(id);
+    if (existing) return existing;
+    let releaseCoalescing: (() => void) | undefined = () => {
+      inFlightSessionDeletions.delete(id);
+    };
+    const deletion = performDeleteSession(id, () => {
+      releaseCoalescing?.();
+      releaseCoalescing = undefined;
+    }).finally(() => {
+      releaseCoalescing?.();
+      releaseCoalescing = undefined;
+    });
+    inFlightSessionDeletions.set(id, deletion);
+    return deletion;
+  }
+
+  async function performDeleteSession(
+    id: string,
+    onStoreDeletionCommitted: () => void,
+  ): Promise<void> {
     const sessionStore = requireSessionStore();
     const session = await sessionStore.load(id);
     if (session) {
@@ -4890,6 +4969,65 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
 
       await sessionStore.delete(id);
+      onStoreDeletionCommitted();
+
+      // AB-228 (Codex P1 + follow-up review findings, PR #566): the durable
+      // audit trail allowlists `session.deleted`, but nothing dispatched
+      // it — this is the emission point. Dispatched on the bureau-level
+      // emitter (not via `store.recordAction`, which silently no-ops for
+      // any runId not currently `store.runs`, and a deleted session may
+      // own zero live runs) exactly once, only for a session that
+      // genuinely existed — the no-such-session path below (`session` was
+      // already `undefined`) dispatches nothing, since nothing was
+      // actually deleted. `audit-trail.ts`'s dedicated
+      // `sessionDeletedListener` mirrors the schedule-definition listeners'
+      // `writeOutOfBandRecord` path to turn this into a durable record.
+      //
+      // Dispatched HERE — immediately after `sessionStore.delete` commits,
+      // NOT after the later `Promise.allSettled(runTerminals)` wait — this
+      // is a deliberate reversal of an earlier round's "dispatch after
+      // runTerminals settle" fix (Codex P2 review finding, PR #566,
+      // "Preserve emission order for session deletion records"). That
+      // earlier ordering bought same-millisecond sort correctness for a
+      // released-paused-run's own terminal action by gating a durable fact
+      // behind an UNBOUNDED wait: if a run this deletion releases or
+      // aborts has a tool or provider that ignores abort, `runTerminals`
+      // can stay pending indefinitely even though the session record is
+      // already gone, and a crash or restart during that window
+      // permanently loses the `session.deleted` audit fact — there is no
+      // recovery-time producer to reconstruct it (Codex P1 review finding,
+      // PR #566, "Persist deletion before waiting for run terminals").
+      //
+      // Verified empirically (regression test in `create-bureau.test.ts`),
+      // dispatching this early does not reopen a same-millisecond
+      // ordering bug: it instead makes `session.deleted` sort BEFORE a
+      // released run's own later terminal action, because that run
+      // resuming its step loop after `settleForDeletion` (below) and
+      // reaching its own terminal takes real, measurable time even
+      // in-process with no real I/O — comfortably enough, on this
+      // machine, to land at a strictly LATER millisecond than this
+      // dispatch. `encodeKey`'s primary sort key is timestamp, so the
+      // genuinely earlier deletion sorts first; `writeOutOfBandRecord`'s
+      // huge manual sequence (`Number.MAX_SAFE_INTEGER`-adjacent, always
+      // larger than any real per-run `action.sequence`) only matters as a
+      // SAME-millisecond tie-break and doesn't apply when the two don't
+      // tie. This is arguably a MORE truthful chronology than the earlier
+      // round's, not a less truthful one: the session record really was
+      // deleted before this run went on to finish. The residual,
+      // deliberately accepted risk is a same-millisecond collision (a
+      // faster machine, or a run releasing to an already-satisfied step
+      // with nothing left to do) — in that narrow case the huge manual
+      // sequence still forces this out-of-band record to sort AFTER the
+      // action-stream one, exactly as before this change. A single
+      // ordering source shared across the store's own per-run sequence
+      // space and this trail's process-local `manualSequence` would
+      // remove that narrow case's dependency on wall-clock timing
+      // entirely, but requires a new field on `AuditRecord` itself — the
+      // same "schema-version field" this issue's own out-of-scope section
+      // already assigns to whoever ships the next audit-record schema
+      // change, not this fix.
+      emitter.dispatch(new SessionDeletedEvent(id));
+
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,
       // bureau-wide idempotency ledger — must not survive to be inherited

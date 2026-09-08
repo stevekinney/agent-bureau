@@ -4,39 +4,47 @@
  * Uses a hand-crafted `TextValueStore` stub so tests are fully deterministic
  * without starting a live bureau or durable engine.
  */
+import {
+  AgentScheduledEvent,
+  ScheduleCancelledEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+  SessionDeletedEvent,
+} from '@lostgradient/operative';
 import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { CompletableEventTarget } from 'lifecycle';
 
 import { type AuditRecord, createAuditTrail } from './audit-trail';
-import { ActionEvent } from './events';
+import { ActionEvent, type BureauEventMap } from './events';
 import type { Bureau } from './types';
 
 // ── Minimal Bureau stub ──────────────────────────────────────────────
 
-type ActionListener = (event: ActionEvent) => void;
-
 /**
- * A minimal bureau stub that only supports the action-event subscription the
- * audit trail requires. No runs, no sessions, no persistence machinery.
+ * A minimal bureau stub that only supports the event subscriptions the
+ * audit trail requires (`'action'` plus, as of AB-228, the bureau-level
+ * `schedule.*` and `session.deleted` lifecycle events, which never traverse `'action'` — see
+ * `audit-trail.ts`'s own doc comment). Backed by a real, typed
+ * `CompletableEventTarget<BureauEventMap>` (the same base class
+ * `create-bureau.ts`'s own `emitter` uses) so `emit` routes by the
+ * dispatched event's own `type`, exactly like a real bureau — a single
+ * shared listener bag that ignored `type` would hand a `SchedulePausedEvent`
+ * to the `'action'` listener too, which destructures `event.action` and
+ * throws. No runs, no sessions, no persistence machinery.
  */
-function createStubBureau(): { bureau: Bureau; emit: (event: ActionEvent) => void } {
-  const listeners = new Set<ActionListener>();
+function createStubBureau(): { bureau: Bureau; emit: (event: Event) => void } {
+  const target = new CompletableEventTarget<BureauEventMap>();
 
   const bureau = {
-    addEventListener(_type: string, listener: ActionListener) {
-      listeners.add(listener);
-    },
-    removeEventListener(_type: string, listener: ActionListener) {
-      listeners.delete(listener);
-    },
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
   } as unknown as Bureau;
 
-  const emit = (event: ActionEvent) => {
-    for (const listener of listeners) {
-      listener(event);
-    }
+  const emit = (event: Event) => {
+    target.dispatchEvent(event);
   };
 
   return { bureau, emit };
@@ -71,6 +79,34 @@ async function seedRecord(
   const seq = record.sequence.toString().padStart(12, '0');
   // Keep in sync with `encodeKey` in audit-trail.ts: audit:v1:<ts>:<seq>:<runId>
   await kv.set(`audit:v1:${ts}:${seq}:${record.runId}`, JSON.stringify(record));
+}
+
+/**
+ * A `TextValueStore`-shaped stub whose `set` resolves only once the
+ * returned `release` function is called — a controllable, deterministic
+ * stand-in for a slow write, never a real timer. Shared by the AB-207
+ * (awaited dispose) and AB-228 (read-your-writes) test groups below.
+ */
+function createControllableKv(): {
+  kv: ReturnType<typeof textValueStore>;
+  release: () => void;
+  setCallCount: () => number;
+} {
+  const base = textValueStore(new MemoryStorage());
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let setCallCount = 0;
+  const kv: ReturnType<typeof textValueStore> = {
+    ...base,
+    async set(key: string, value: string) {
+      setCallCount += 1;
+      await gate;
+      await base.set(key, value);
+    },
+  };
+  return { kv, release, setCallCount: () => setCallCount };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -651,33 +687,6 @@ describe('createAuditTrail', () => {
   // new write once aborted (a write already in flight still runs to
   // completion and `dispose()` still awaits it — see `AuditTrailOptions`).
   describe('AB-207 — awaited dispose and the owner-issued signal', () => {
-    /**
-     * A `TextValueStore`-shaped stub whose `set` resolves only once the
-     * returned `release` function is called — a controllable, deterministic
-     * stand-in for a slow write, never a real timer.
-     */
-    function createControllableKv(): {
-      kv: ReturnType<typeof textValueStore>;
-      release: () => void;
-      setCallCount: () => number;
-    } {
-      const base = textValueStore(new MemoryStorage());
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let setCallCount = 0;
-      const kv: ReturnType<typeof textValueStore> = {
-        ...base,
-        async set(key: string, value: string) {
-          setCallCount += 1;
-          await gate;
-          await base.set(key, value);
-        },
-      };
-      return { kv, release, setCallCount: () => setCallCount };
-    }
-
     it('dispose() resolves only after a write already in flight settles', async () => {
       const { kv, release } = createControllableKv();
       const { bureau, emit } = createStubBureau();
@@ -804,6 +813,276 @@ describe('createAuditTrail', () => {
 
       const records = await trail.query({ runId: 'run-before-abort' });
       expect(records).toHaveLength(1);
+    });
+  });
+
+  /**
+   * AB-228 — closes `AUDIT_EVENT_TYPES` parity gaps AB-87's matrix named.
+   * Each of these confirms the type reaches `AuditTrail`'s durable write
+   * from its OWN emission point, not merely that the string sits in the
+   * allowlist array.
+   */
+  describe('AB-228 parity gaps', () => {
+    it('sinks session.deleted bureau-level events under a synthetic session:<id> owner, which never traverse the action stream (Codex P1 review finding, PR #566)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(new SessionDeletedEvent('session-1'));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ runId: 'session:session-1' });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.type).toBe('session.deleted');
+      expect(records[0]?.detail).toEqual({ sessionId: 'session-1' });
+      trail.dispose();
+    });
+
+    it('sinks budget.exceeded action events (no production emitter — AB-231, merged, chose a different terminal path — but the type stays harmlessly listed for allowlist completeness)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const action: Action = {
+        type: 'budget.exceeded',
+        timestamp: 9100,
+        sequence: 1,
+        runId: 'run-budget-exceeded',
+        detail: { currentCost: 6, budget: 5 },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'budget.exceeded' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('sinks toolbox.loop-warning action events under the toolbox-forwarded wire string, not the bare armorer name', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // The armorer event's own `.type` is the bare `loop-warning`
+      // (`ToolboxLoopWarningEvent.type`), but `forwardEvents` re-dispatches
+      // every toolbox event onto the run's emitter as `toolbox.<type>`
+      // before the operative store turns it into an `Action` — so this is
+      // the string that actually reaches this trail's `'action'` listener.
+      const action: Action = {
+        type: 'toolbox.loop-warning',
+        timestamp: 9200,
+        sequence: 1,
+        runId: 'run-loop-warning',
+        detail: { detector: 'sliding-window', count: 3, message: 'repeated calls detected' },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'toolbox.loop-warning' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('sinks toolbox.loop-blocked action events under the toolbox-forwarded wire string', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const action: Action = {
+        type: 'toolbox.loop-blocked',
+        timestamp: 9300,
+        sequence: 1,
+        runId: 'run-loop-blocked',
+        detail: { detector: 'sliding-window', count: 5, message: 'blocked repeated calls' },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'toolbox.loop-blocked' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('does not sink the bare, un-prefixed loop-warning/loop-blocked type strings', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(
+        new ActionEvent({
+          type: 'loop-warning',
+          timestamp: 9400,
+          sequence: 1,
+          runId: 'run-bare-loop-warning',
+          detail: null,
+        }),
+      );
+      await yieldToPortableEventLoop();
+
+      expect(await trail.query({ type: 'loop-warning' })).toHaveLength(0);
+      trail.dispose();
+    });
+
+    it('sinks toolbox.budget-exceeded action events under the toolbox-forwarded wire string, distinct from the orphaned bare budget.exceeded (Codex P2 review finding, PR #566)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // The armorer event's own `.type` is the bare `budget-exceeded`
+      // (`ToolboxBudgetExceededEvent.type`), but `forwardEvents`
+      // re-dispatches every toolbox event onto the run's emitter as
+      // `toolbox.<type>` before the operative store turns it into an
+      // `Action` — the SAME mechanism `toolbox.loop-warning`/`loop-blocked`
+      // above go through, and distinct from the orphaned operative-level
+      // `BudgetExceededEvent` class the bare `budget.exceeded` entry covers.
+      const action: Action = {
+        type: 'toolbox.budget-exceeded',
+        timestamp: 9350,
+        sequence: 1,
+        runId: 'run-budget-exceeded-toolbox',
+        detail: { reason: 'max-calls' },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'toolbox.budget-exceeded' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('sinks schedule.created bureau-level events under a synthetic schedule:<id> owner, which never traverse the action stream', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(
+        new AgentScheduledEvent({
+          scheduleId: 'schedule-created-1',
+          agentName: 'researcher',
+          spec: { every: '1h' },
+          sessionId: 'session-1',
+        }),
+      );
+      await yieldToPortableEventLoop();
+
+      const createdRecords = await trail.query({ runId: 'schedule:schedule-created-1' });
+      expect(createdRecords).toHaveLength(1);
+      expect(createdRecords[0]?.type).toBe('schedule.created');
+      expect(createdRecords[0]?.detail).toEqual({
+        scheduleId: 'schedule-created-1',
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        sessionId: 'session-1',
+      });
+
+      trail.dispose();
+    });
+
+    it('sinks schedule.paused/resumed/cancelled bureau-level events, which never traverse the action stream', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(new SchedulePausedEvent('schedule-1'));
+      emit(new ScheduleResumedEvent('schedule-1'));
+      emit(new ScheduleCancelledEvent('schedule-2'));
+      await yieldToPortableEventLoop();
+
+      const pausedRecords = await trail.query({ type: 'schedule.paused' });
+      expect(pausedRecords).toHaveLength(1);
+      expect(pausedRecords[0]?.detail).toEqual({ scheduleId: 'schedule-1' });
+
+      const resumedRecords = await trail.query({ type: 'schedule.resumed' });
+      expect(resumedRecords).toHaveLength(1);
+      expect(resumedRecords[0]?.detail).toEqual({ scheduleId: 'schedule-1' });
+
+      const cancelledRecords = await trail.query({ type: 'schedule.cancelled' });
+      expect(cancelledRecords).toHaveLength(1);
+      expect(cancelledRecords[0]?.detail).toEqual({ scheduleId: 'schedule-2' });
+
+      trail.dispose();
+    });
+
+    it('query({ runId }) waits for that owner\'s still-in-flight write, giving read-your-writes even against a KV whose set() resolves asynchronously (Codex P2 review finding, PR #566, "Wait for schedule audit writes before returning success")', async () => {
+      const { kv, release, setCallCount } = createControllableKv();
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(new SchedulePausedEvent('schedule-inflight'));
+      // The listener dispatches synchronously, so `kv.set` has already been
+      // called (and is gated) before `query()` below ever runs.
+      expect(setCallCount()).toBe(1);
+
+      // Filtered by the schedule's own synthetic owner id — the shape every
+      // real caller chasing read-your-writes for its OWN just-issued write
+      // actually uses (see `scheduleOwnerId`/`sessionOwnerId` in
+      // `audit-trail.ts`).
+      const queryPromise = trail.query({ runId: 'schedule:schedule-inflight' });
+
+      let queryResolved = false;
+      void queryPromise.then(() => {
+        queryResolved = true;
+      });
+      // The write is deliberately still gated — query() must not resolve
+      // (and thus must not report an empty result) while it's in flight.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(queryResolved).toBe(false);
+
+      release();
+      const records = await queryPromise;
+      expect(records).toHaveLength(1);
+      expect(records[0]?.detail).toEqual({ scheduleId: 'schedule-inflight' });
+
+      trail.dispose();
+    });
+
+    it('query({ runId }) does NOT wait on an unrelated owner\'s stalled write, so one hung write cannot hang every other query (Codex P2 review finding, PR #566, "Avoid blocking every audit query on unrelated writes")', async () => {
+      const { kv, setCallCount } = createControllableKv();
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // This write is gated forever within this test — deliberately never
+      // released, standing in for a genuinely stalled storage backend.
+      emit(new SchedulePausedEvent('schedule-stuck'));
+      expect(setCallCount()).toBe(1);
+
+      // A query scoped to a DIFFERENT owner must resolve promptly — it has
+      // nothing in `activeWritesByRunId` for its own runId to wait on, so
+      // the unrelated stuck write for `schedule:schedule-stuck` never
+      // enters its wait at all.
+      const records = await trail.query({ runId: 'schedule:some-other-owner' });
+      expect(records).toEqual([]);
+
+      // A fully unscoped query (no runId filter) likewise does not hang —
+      // it has no single owner to scope a wait to, by design.
+      const allRecords = await trail.query();
+      expect(allRecords).toEqual([]);
+
+      trail.dispose();
+    });
+
+    it('does not write a schedule.* record when no kv store is configured', async () => {
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, undefined);
+
+      emit(new SchedulePausedEvent('schedule-ephemeral'));
+      await yieldToPortableEventLoop();
+
+      expect(await trail.query()).toEqual([]);
+      trail.dispose();
+    });
+
+    it('stops writing schedule.* records after dispose() removes its listeners', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+      await trail.dispose();
+
+      emit(new SchedulePausedEvent('schedule-after-dispose'));
+      await yieldToPortableEventLoop();
+
+      expect(await trail.query({ type: 'schedule.paused' })).toEqual([]);
     });
   });
 });

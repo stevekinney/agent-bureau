@@ -10376,6 +10376,7 @@ describe('createBureau review lifecycle event family (AB-224)', () => {
       ]),
       toolbox: createNeedsApprovalToolbox('event-revoked-secret', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
     });
     try {
       const revoked: unknown[] = [];
@@ -10401,6 +10402,20 @@ describe('createBureau review lifecycle event family (AB-224)', () => {
         kind: 'tool-approval',
       });
       expect(canceled).toEqual([]);
+
+      // AB-228 — the LIVE `review.revoked` dispatch asserted above has a
+      // durable counterpart (`recordReviewStatusTransition`'s `record()`
+      // call, same as every other `ReviewStatus` transition) that this
+      // suite had never independently queried for. Every other status
+      // (approved/denied/rejected/expired/canceled/superseded) already has
+      // this same durable-query assertion elsewhere in this file; this
+      // closes the one gap AB-228 found.
+      const revokedRecords = await bureau.auditTrail!.query({ runId: run.id });
+      const revokedRecord = revokedRecords.find(
+        (record) => record.type === 'review.tool-approval.revoked',
+      );
+      expect(revokedRecord).toBeDefined();
+      expect(revokedRecord!.principal).toBe('system:run-deletion');
     } finally {
       bureau.dispose();
     }
@@ -12859,15 +12874,17 @@ describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () 
   });
 
   it('returns deleted-aggregate for a session.deleted owner, carrying the already-committed events, distinguishable from an unrelated empty page', async () => {
-    // `session.deleted` has no production dispatch site today (AB-87's own
-    // declared gap: "session.deleted durable only via the generic action
-    // stream, a gap" — no `emitter.dispatch(new SessionDeletedEvent(...))`
-    // call exists anywhere in `deleteSession`). This synthesizes it the
-    // same supported way the sibling "records a session-scoped action"
+    // AB-228 wired `deleteSession` (`create-bureau.ts`) to dispatch a real
+    // `SessionDeletedEvent` on the BUREAU-level emitter, closing the durable
+    // audit trail's own gap (`audit-trail.ts`'s dedicated
+    // `sessionDeletedListener`) — but that dispatch never traverses the
+    // `'action'` stream this module's `createDurableEventProducer` listens
+    // through, so it still does not reach THIS store. This synthesizes it
+    // the same supported way the sibling "records a session-scoped action"
     // test above does (`Store.recordAction`), proving this issue's own
-    // detection logic against the event shape a future dispatch site would
-    // produce, without inventing a new production dispatch beyond this
-    // issue's own delivery boundary.
+    // detection logic against the event shape a real `'action'`-stream
+    // dispatch site would produce; wiring one up here remains a follow-up,
+    // out of AB-228's `AUDIT_EVENT_TYPES`-only boundary.
     const databasePath = join(
       tmpdir(),
       `bureau-event-history-deleted-session-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
@@ -13572,6 +13589,538 @@ describe('Bureau.issueGrant / revokeGrant / listGrants (AB-46, AB-346)', () => {
           delegationBehavior: 'does-not-propagate',
         }),
       ).rejects.toThrow('approvalSecret is required');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-detection, schedule-definition lifecycle, and session deletion)', () => {
+  it('durably records a real toolbox loop-warning/loop-blocked through the SAME production wiring a run uses, under the toolbox-prefixed type', async () => {
+    // Mirrors `packages/operative/test/event-forwarding.test.ts`'s own
+    // loop-detection scenario (identical thresholds, identical repeated
+    // no-argument tool call) — but exercised through a REAL `createBureau`
+    // with persistence configured, so this proves the full production path
+    // (armorer's toolbox -> `forwardEvents`'s `toolbox.` prefix -> the
+    // operative store's Action log -> the bureau's `'action'` stream ->
+    // `createAuditTrail`'s listener) actually reaches
+    // `bureau.auditTrail.query()`, not just a unit-level stub dispatch.
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => 'ok',
+    });
+    const toolbox = createToolbox([nextTool], {
+      loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
+    });
+
+    const LOOPING_STEPS = 6;
+    const bureau = await createBureau({
+      agents: {},
+      // Step-counting, not a canned response list (matches the pattern this
+      // file already uses for tool-driving generate functions) — calls the
+      // same no-argument `next` tool repeatedly, tripping the loop detector's
+      // warning threshold (2) and then its block threshold (4), before
+      // finishing with a plain text response.
+      generate: async ({ step }: { step: number }) =>
+        step < LOOPING_STEPS
+          ? { content: '', toolCalls: [{ name: 'next', arguments: {} }] }
+          : { content: 'Done.', toolCalls: [] },
+      toolbox,
+      stopWhen: stopWhen.noToolCalls(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Loop the tool' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const warningRecords = await bureau.auditTrail!.query({
+        runId: run.id,
+        type: 'toolbox.loop-warning',
+      });
+      expect(warningRecords.length).toBeGreaterThan(0);
+      // Pins the store's `originalEvent` flattening (`store.ts`'s
+      // `register()`): a nested Event's own OBJECT properties (`tool`,
+      // `call` — the full `Tool`/`ToolCall`, potentially carrying tool
+      // arguments) are dropped, only its primitive properties survive. This
+      // is the exact mechanism AB-228's own rollback trigger names ("a
+      // newly durable event type is found to write unredacted privileged
+      // content") — if a future change to that flattening ever let `tool`/
+      // `call` through, this assertion is what catches it.
+      const warningDetail = warningRecords[0]?.detail as {
+        originalEvent?: Record<string, unknown>;
+      };
+      expect(warningDetail.originalEvent).toMatchObject({
+        type: 'loop-warning',
+        detector: 'simple-repeat',
+        count: expect.any(Number),
+        message: expect.any(String),
+      });
+      expect(warningDetail.originalEvent).not.toHaveProperty('tool');
+      expect(warningDetail.originalEvent).not.toHaveProperty('call');
+
+      const blockedRecords = await bureau.auditTrail!.query({
+        runId: run.id,
+        type: 'toolbox.loop-blocked',
+      });
+      expect(blockedRecords.length).toBeGreaterThan(0);
+      const blockedDetail = blockedRecords[0]?.detail as {
+        originalEvent?: Record<string, unknown>;
+      };
+      expect(blockedDetail.originalEvent).toMatchObject({
+        type: 'loop-blocked',
+        detector: 'simple-repeat',
+        count: expect.any(Number),
+        message: expect.any(String),
+      });
+      expect(blockedDetail.originalEvent).not.toHaveProperty('tool');
+      expect(blockedDetail.originalEvent).not.toHaveProperty('call');
+
+      // Confirm the bare, un-prefixed armorer name never appears — proves
+      // the trail is keyed on the ACTUAL wire string, not the name AB-87's
+      // prose used.
+      expect(await bureau.auditTrail!.query({ runId: run.id, type: 'loop-warning' })).toEqual([]);
+      expect(await bureau.auditTrail!.query({ runId: run.id, type: 'loop-blocked' })).toEqual([]);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('durably records a real toolbox.budget-exceeded through the SAME production wiring a run uses, under the toolbox-prefixed type (Codex P2 review finding, PR #566)', async () => {
+    // The bare `budget.exceeded` entry only covers the orphaned
+    // `BudgetExceededEvent` class (see `audit-trail.ts`'s own doc comment):
+    // it never matches this REAL production path, where the toolbox's own
+    // `checkBudget` rejection emits `'budget-exceeded'`, forwarded with the
+    // `toolbox.` prefix the same way `loop-warning`/`loop-blocked` are.
+    // Mirrors `packages/operative/test/event-forwarding.test.ts`'s own
+    // `budget: { maxCalls: 1 }` scenario, but through a real `createBureau`.
+    const weatherTool = createTool({
+      name: 'weather',
+      description: 'look up the weather',
+      input: z.object({ city: z.string() }),
+      execute: async () => 'sunny',
+    });
+    const toolbox = createToolbox([weatherTool], { budget: { maxCalls: 1 } });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-budget-1', name: 'weather', arguments: { city: 'Denver' } }],
+        },
+        {
+          content: '',
+          toolCalls: [{ id: 'call-budget-2', name: 'weather', arguments: { city: 'Boulder' } }],
+        },
+        { content: 'Done.', toolCalls: [] },
+      ]),
+      toolbox,
+      stopWhen: stopWhen.noToolCalls(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Check the weather twice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const exceededRecords = await bureau.auditTrail!.query({
+        runId: run.id,
+        type: 'toolbox.budget-exceeded',
+      });
+      expect(exceededRecords.length).toBeGreaterThan(0);
+
+      // Confirm the bare, un-prefixed `budget.exceeded` never matches this
+      // real emission — proves the trail is keyed on the ACTUAL wire
+      // string, not the class name that never dispatches in production.
+      expect(await bureau.auditTrail!.query({ runId: run.id, type: 'budget.exceeded' })).toEqual(
+        [],
+      );
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('durably records schedule.created/paused/resumed/cancelled through a real bureau, under a schedule-scoped owner id', async () => {
+    // Mirrors `schedule-fire.test.ts`'s own
+    // "dispatches SchedulePausedEvent/ScheduleResumedEvent/ScheduleCancelledEvent"
+    // setup (same `storage`/`durableExecution` config, same
+    // `createSchedule`/`pauseSchedule`/`resumeSchedule`/`cancelSchedule`
+    // calls) — proving the durable audit write and the live event this
+    // suite already covers come from the identical production call sites.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const summary = await bureau.createSchedule({
+        agentName: 'researcher',
+        input: 'paused forever',
+        spec: '1h',
+      });
+      expect(summary).toBeDefined();
+
+      await bureau.pauseSchedule(summary!.id);
+      await bureau.resumeSchedule(summary!.id);
+      await bureau.cancelSchedule(summary!.id);
+
+      const owner = `schedule:${summary!.id}`;
+      const createdRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.created',
+      });
+      expect(createdRecords).toHaveLength(1);
+      const pausedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.paused',
+      });
+      expect(pausedRecords).toHaveLength(1);
+      const resumedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.resumed',
+      });
+      expect(resumedRecords).toHaveLength(1);
+      const cancelledRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.cancelled',
+      });
+      expect(cancelledRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('durably records session.deleted through a real bureau.deleteSession call, under a session-scoped owner id (Codex P1 review finding, PR #566)', async () => {
+    // Before this fix, `deleteSession` deleted the session without ever
+    // dispatching a `session.deleted` fact of any kind — a repo-wide
+    // production search found no emission point at all, so this new
+    // allowlist entry only handled synthetic/manual actions like
+    // `audit-trail.test.ts`'s unit-level stub dispatch. This proves the
+    // real production call site (`Bureau.deleteSession`) reaches
+    // `bureau.auditTrail.query()`, not just that string sitting in
+    // `AUDIT_EVENT_TYPES`.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'A session about to be deleted' });
+      await waitForRunCompletion(bureau, run.id);
+      const session = await bureau.getSession(run.sessionId);
+      expect(session).toBeDefined();
+
+      await bureau.deleteSession(run.sessionId);
+
+      const owner = `session:${run.sessionId}`;
+      const deletedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'session.deleted',
+      });
+      expect(deletedRecords).toHaveLength(1);
+      expect(deletedRecords[0]?.detail).toEqual({ sessionId: run.sessionId });
+
+      // Deleting an id that was never a live session dispatches nothing —
+      // there is no genuine deletion fact to record.
+      await bureau.deleteSession('never-existed-session');
+      const nonExistentRecords = await bureau.auditTrail!.query({
+        runId: 'session:never-existed-session',
+        type: 'session.deleted',
+      });
+      expect(nonExistentRecords).toEqual([]);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('dispatches session.deleted exactly once for two concurrent deleteSession(id) calls on the same session (Codex P2 review finding, PR #566)', async () => {
+    // Both callers' own `sessionStore.load(id)` can resolve truthy before
+    // either has actually deleted the record — `SessionStore.delete` is an
+    // idempotent no-op for an already-removed id, not a "did I win"
+    // signal — so an unguarded dispatch would fire twice for one real
+    // deletion. `deleteSession` coalesces concurrent calls for the same id
+    // onto a single in-flight `performDeleteSession` run.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'A session deleted concurrently' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const deleted: string[] = [];
+      bureau.addEventListener('session.deleted', (event) => deleted.push(event.sessionId));
+
+      await Promise.all([
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+      ]);
+
+      expect(deleted).toEqual([run.sessionId]);
+
+      const owner = `session:${run.sessionId}`;
+      const deletedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'session.deleted',
+      });
+      expect(deletedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('does not coalesce a deleteSession call for a session RECREATED with the same id while the original deletion is still finishing its post-commit cleanup (Codex follow-up review finding, PR #566)', async () => {
+    // The coalescing map above is released as soon as `sessionStore.delete`
+    // itself commits, not when the whole function (including awaiting a
+    // released paused run's own terminal event) finally resolves. Before
+    // that fix, a `deleteSession(id)` call arriving during that tail would
+    // silently resolve against the OLD, already-settled deletion's promise
+    // without ever touching the NEW session — this proves it actually
+    // deletes the new one.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const originalRun = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = originalRun.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+
+      // Deletes the ORIGINAL session — `sessionStore.delete` commits
+      // quickly (nothing here waits on the gated tool), but the returned
+      // promise stays pending, awaiting the just-released paused run's own
+      // terminal event, which the still-held tool gate blocks.
+      const originalDeletion = bureau.deleteSession(sessionId);
+      await pollUntil(async () => (await bureau.getSession(sessionId)) === undefined);
+
+      // A NEW session, reusing the SAME id, created and completed WHILE
+      // `originalDeletion` is still pending.
+      const recreatedRun = await bureau.createRun({
+        message: 'a fresh session reusing the same id',
+        sessionId,
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      expect(await bureau.getSession(sessionId)).toBeDefined();
+
+      // This must genuinely delete the RECREATED session, not silently
+      // resolve against `originalDeletion`'s stale promise.
+      const recreatedDeletion = bureau.deleteSession(sessionId);
+
+      releaseTool!();
+      await Promise.all([originalDeletion, recreatedDeletion]);
+      await waitForRunCompletion(bureau, originalRun.id);
+
+      expect(await bureau.getSession(sessionId)).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('dispatches session.deleted immediately, so it durably sorts BEFORE a released run own later terminal action rather than after it (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
+    // A prior round dispatched `session.deleted` only after every run this
+    // deletion released or aborted had actually settled, specifically so a
+    // released-paused-run's own terminal action — landing in the same
+    // millisecond under a fixed/injected clock — would sort after (not
+    // before) the deletion that caused it. That ordering bought
+    // same-millisecond correctness for exactly that one case at the cost
+    // of gating a durable fact behind an UNBOUNDED wait: a run whose tool
+    // ignores its abort signal can leave that wait pending forever, and a
+    // crash during that window permanently loses the `session.deleted`
+    // audit fact, with no recovery-time producer able to reconstruct it.
+    // Durability now wins: the dispatch moved to immediately after
+    // `sessionStore.delete` commits, well before `settleForDeletion`
+    // releases this paused run, let alone before it resumes its step loop
+    // and eventually reaches its own `run.completed`.
+    //
+    // Verified empirically (not assumed): releasing a paused run and
+    // letting it resume through a further tool call and generate step
+    // takes real, measurable time even with everything in-process and no
+    // real I/O — comfortably enough to cross a millisecond boundary on
+    // this machine. `AuditRecord`'s primary sort key is timestamp
+    // (`encodeKey`), so the deletion's genuinely earlier timestamp sorts
+    // it before the run's later terminal action; `writeOutOfBandRecord`'s
+    // huge manual sequence only matters as a SAME-millisecond tie-break,
+    // and doesn't apply here since these two do not tie. This actually
+    // recovers a MORE truthful chronology than the prior round's, not a
+    // less truthful one: the session record really was deleted before
+    // this run went on to finish.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = run.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      await bureau.deleteSession(sessionId);
+      await waitForRunCompletion(bureau, run.id);
+
+      const allRecords = await bureau.auditTrail!.query({ limit: 1000 });
+      const runTerminalIndex = allRecords.findIndex(
+        (record) => record.runId === run.id && record.type === 'run.completed',
+      );
+      const sessionDeletedIndex = allRecords.findIndex(
+        (record) => record.runId === `session:${sessionId}` && record.type === 'session.deleted',
+      );
+      expect(runTerminalIndex).toBeGreaterThanOrEqual(0);
+      expect(sessionDeletedIndex).toBeGreaterThanOrEqual(0);
+      expect(sessionDeletedIndex).toBeLessThan(runTerminalIndex);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('durably records session.deleted before waiting on any run cleanup, so a genuinely stuck run cannot block the durable audit fact (Codex P1 review finding, PR #566)', async () => {
+    // Before this fix, `session.deleted` was dispatched only after
+    // `Promise.allSettled(runTerminals)` resolved — an UNBOUNDED wait for
+    // every run this deletion released or aborted to actually terminate.
+    // A PAUSED run's cleanup path is exactly this shape: `deleteSession`
+    // never aborts it, only releases its steering gate
+    // (`settleForDeletion`) so it can resume running to a real terminal —
+    // if the tool it resumes into never settles (ignores its abort signal,
+    // or simply hangs), that wait can hold open indefinitely even though
+    // the session record itself is already gone, permanently losing the
+    // `session.deleted` audit fact if the process crashes in that window.
+    // (Aborting a NON-paused run instead settles its `ActiveRun` on
+    // `run.aborted` promptly regardless of the tool's own state, so that
+    // shape would not actually exercise the unbounded wait this test
+    // targets — the paused path is the one that genuinely can hang.) This
+    // proves the durable record now lands, and is observable via
+    // `query()`, WHILE `deleteSession`'s own returned promise is still
+    // pending behind exactly such a stuck, released run.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const stuckTool = createTool({
+      name: 'stuck',
+      description: 'never resolves until released',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'stuck', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([stuckTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = run.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+
+      let deletionSettled = false;
+      const deletionPromise = bureau.deleteSession(sessionId).then(() => {
+        deletionSettled = true;
+      });
+
+      const observedDeletion = await new Promise<{ sessionId: string }>((resolve) => {
+        bureau.addEventListener('session.deleted', (event) => resolve(event), { once: true });
+      });
+      expect(observedDeletion.sessionId).toBe(sessionId);
+      // The released-but-stuck tool keeps the run's terminal event — and
+      // thus `deleteSession`'s own returned promise — pending at this
+      // point.
+      expect(deletionSettled).toBe(false);
+
+      const records = await bureau.auditTrail!.query({
+        runId: `session:${sessionId}`,
+        type: 'session.deleted',
+      });
+      expect(records).toHaveLength(1);
+      // Still pending: the durable write above resolved without needing
+      // the stuck run's cleanup to finish first.
+      expect(deletionSettled).toBe(false);
+
+      releaseTool!();
+      await deletionPromise;
+      await waitForRunCompletion(bureau, run.id);
     } finally {
       await bureau.dispose();
     }
