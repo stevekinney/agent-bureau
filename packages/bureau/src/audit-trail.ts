@@ -545,6 +545,29 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     async query(options: AuditQueryOptions = {}): Promise<AuditRecord[]> {
       if (!kv) return [];
 
+      // AB-228 (Codex P2 review finding, PR #566, "Wait for schedule audit
+      // writes before returning success"): every out-of-band write
+      // (`writeOutOfBandRecord`, backing the schedule-definition and
+      // session-deletion listeners) is fire-and-forget from its
+      // dispatching caller's perspective — `pauseSchedule`/
+      // `resumeSchedule`/`cancelSchedule`/`deleteSession` all return as
+      // soon as the synchronous event dispatch completes, not once the
+      // underlying `kv.set` actually commits. A `TextValueStore` whose
+      // `set()` resolves asynchronously (the controllable-KV test helper
+      // demonstrates this is a real, supported shape, not a hypothetical
+      // one) can then have a query immediately following a successful
+      // schedule transition or session deletion observe no record at all,
+      // even though the write is genuinely in flight. Draining a SNAPSHOT
+      // of `activeWrites` here — not looping until the set is empty, which
+      // could livelock under continuous writes — gives read-your-writes
+      // for every write already tracked at call time: `trackWrite` adds to
+      // the set synchronously inside the listener, so anything a caller's
+      // own synchronous dispatch triggered is already present by the time
+      // that caller's `await` reaches here.
+      if (activeWrites.size > 0) {
+        await Promise.allSettled([...activeWrites]);
+      }
+
       const { since, runId, type, limit = 500 } = options;
 
       // List all audit keys under the prefix, then filter. For large logs a

@@ -4833,6 +4833,57 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
       await sessionStore.delete(id);
       onStoreDeletionCommitted();
+
+      // AB-228 (Codex P1 + follow-up review findings, PR #566): the durable
+      // audit trail allowlists `session.deleted`, but nothing dispatched
+      // it — this is the emission point. Dispatched on the bureau-level
+      // emitter (not via `store.recordAction`, which silently no-ops for
+      // any runId not currently `store.runs`, and a deleted session may
+      // own zero live runs) exactly once, only for a session that
+      // genuinely existed — the no-such-session path below (`session` was
+      // already `undefined`) dispatches nothing, since nothing was
+      // actually deleted. `audit-trail.ts`'s dedicated
+      // `sessionDeletedListener` mirrors the schedule-definition listeners'
+      // `writeOutOfBandRecord` path to turn this into a durable record.
+      //
+      // Dispatched HERE — immediately after `sessionStore.delete` commits,
+      // NOT after the later `Promise.allSettled(runTerminals)` wait — this
+      // is a deliberate reversal of an earlier round's "dispatch after
+      // runTerminals settle" fix (Codex P2 review finding, PR #566,
+      // "Preserve emission order for session deletion records"). That
+      // earlier ordering bought same-millisecond sort correctness by
+      // gating a durable fact behind an UNBOUNDED wait: if a run this
+      // deletion releases or aborts has a tool or provider that ignores
+      // abort, `runTerminals` can stay pending indefinitely even though
+      // the session record is already gone, and a crash or restart during
+      // that window permanently loses the `session.deleted` audit fact —
+      // there is no recovery-time producer to reconstruct it (Codex P1
+      // review finding, PR #566, "Persist deletion before waiting for run
+      // terminals").
+      //
+      // This does NOT reopen the same-millisecond ordering bug the earlier
+      // round closed: `writeOutOfBandRecord`'s manual sequence counter
+      // starts near `Number.MAX_SAFE_INTEGER`, always larger than any real
+      // per-run `action.sequence`, so an out-of-band record still sorts
+      // LAST within a shared millisecond regardless of which write was
+      // actually issued first — dispatching earlier changes nothing about
+      // that tie-break (see the regression test asserting exactly this
+      // with a frozen clock). The residual, deliberately accepted risk is
+      // narrower: if enough real wall-clock time elapses between this
+      // dispatch and a same-deletion run's later terminal action to cross
+      // a millisecond boundary, `encodeKey`'s primary (timestamp) sort key
+      // now makes the deletion — timestamped earlier — sort BEFORE that
+      // later terminal, which is arguably the more truthful order anyway
+      // (the deletion really did happen when the store committed, not
+      // when the last released run's cleanup happened to finish). A
+      // single ordering source shared across the store's own per-run
+      // sequence space and this trail's process-local `manualSequence`
+      // would remove even that residual case, but requires a new field on
+      // `AuditRecord` itself — the same "schema-version field" this
+      // issue's own out-of-scope section already assigns to whoever ships
+      // the next audit-record schema change, not this fix.
+      emitter.dispatch(new SessionDeletedEvent(id));
+
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,
       // bureau-wide idempotency ledger — must not survive to be inherited
@@ -4860,36 +4911,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       steeringGates.delete(id);
 
       await Promise.allSettled(runTerminals);
-
-      // AB-228 (Codex P1 + follow-up review findings, PR #566): the durable
-      // audit trail allowlists `session.deleted`, but nothing dispatched
-      // it — this is the emission point. Dispatched on the bureau-level
-      // emitter (not via `store.recordAction`, which silently no-ops for
-      // any runId not currently `store.runs`, and a deleted session may
-      // own zero live runs) exactly once, only for a session that
-      // genuinely existed — the no-such-session path below (`session` was
-      // already `undefined`) dispatches nothing, since nothing was
-      // actually deleted. `audit-trail.ts`'s dedicated
-      // `sessionDeletedListener` mirrors the schedule-definition listeners'
-      // `writeOutOfBandRecord` path to turn this into a durable record.
-      //
-      // Deliberately dispatched HERE — after `runTerminals` settles, not
-      // right after `sessionStore.delete` above — because
-      // `writeOutOfBandRecord`'s manual sequence counter starts near
-      // `Number.MAX_SAFE_INTEGER` specifically so an out-of-band record
-      // always sorts LAST within its own millisecond against a real
-      // action-stream record's small per-run sequence. A paused run this
-      // deletion releases (`settleForDeletion` above) settles its own
-      // terminal action-stream record — chronologically AFTER this
-      // deletion decided to release it — during this very
-      // `Promise.allSettled` wait; dispatching the deletion before that
-      // wait would let a same-millisecond terminal action's small sequence
-      // sort earlier than this deletion's huge one, inverting true causal
-      // order for postmortems. Waiting until every released run has
-      // actually settled first means the deletion genuinely IS the last
-      // fact to become true, so the huge manual sequence's "sorts last"
-      // property matches reality instead of fighting it.
-      emitter.dispatch(new SessionDeletedEvent(id));
 
       for (const runId of sessionRunIds) {
         runRequestContexts.delete(runId);

@@ -13721,15 +13721,30 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
-  it('dispatches session.deleted only after a released paused run has actually settled, so the durable record sorts after that run own terminal action (Codex follow-up review finding, PR #566)', async () => {
-    // `writeOutOfBandRecord`'s manual sequence starts near
-    // `Number.MAX_SAFE_INTEGER` so an out-of-band record always sorts LAST
-    // within its own millisecond against a real action-stream record's
-    // small per-run sequence. Dispatching `session.deleted` before the
-    // released run settles would let that run's own same-millisecond
-    // terminal action sort BEFORE the deletion that actually caused it —
-    // inverting true causal order. Dispatching only after the run settles
-    // makes the "sorts last" property match reality.
+  it('still sorts session.deleted after a released run own terminal action within the same millisecond, even though the dispatch itself now happens earlier (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
+    // A prior round dispatched `session.deleted` only after every run this
+    // deletion released or aborted had actually settled, specifically so a
+    // released-paused-run's own same-millisecond terminal action would
+    // sort after (not before) the deletion that caused it. That ordering
+    // bought same-millisecond correctness for exactly that one case at the
+    // cost of gating a durable fact behind an UNBOUNDED wait: a run whose
+    // tool ignores its abort signal can leave that wait pending forever,
+    // and a crash during that window permanently loses the
+    // `session.deleted` audit fact, with no recovery-time producer able to
+    // reconstruct it. Durability now wins: the dispatch moved to
+    // immediately after `sessionStore.delete` commits, well before this
+    // released run's own terminal action exists.
+    //
+    // That earlier dispatch does NOT reopen the ordering bug, because
+    // `writeOutOfBandRecord`'s manual sequence counter starts near
+    // `Number.MAX_SAFE_INTEGER` — always larger than any real per-run
+    // store sequence — so within a single millisecond an out-of-band
+    // record sorts LAST regardless of which write was issued first. A
+    // frozen clock (`createManualRuntimeServices`, never advanced in this
+    // test) pins both the deletion and the run's later terminal action to
+    // the exact same millisecond deterministically, so this is a real
+    // invariant, not an artifact of how fast the test happens to run on a
+    // given machine.
     let releaseTool: (() => void) | undefined;
     const toolGate = new Promise<void>((resolve) => {
       releaseTool = resolve;
@@ -13754,6 +13769,7 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       toolbox: createToolbox([nextTool]),
       persistence: textValueStore(new MemoryStorage()),
       stopWhen: stopWhen.noToolCalls(),
+      runtime: createManualRuntimeServices(),
     });
 
     try {
@@ -13781,6 +13797,92 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       expect(runTerminalIndex).toBeGreaterThanOrEqual(0);
       expect(sessionDeletedIndex).toBeGreaterThanOrEqual(0);
       expect(runTerminalIndex).toBeLessThan(sessionDeletedIndex);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('durably records session.deleted before waiting on any run cleanup, so a genuinely stuck run cannot block the durable audit fact (Codex P1 review finding, PR #566)', async () => {
+    // Before this fix, `session.deleted` was dispatched only after
+    // `Promise.allSettled(runTerminals)` resolved — an UNBOUNDED wait for
+    // every run this deletion released or aborted to actually terminate.
+    // A PAUSED run's cleanup path is exactly this shape: `deleteSession`
+    // never aborts it, only releases its steering gate
+    // (`settleForDeletion`) so it can resume running to a real terminal —
+    // if the tool it resumes into never settles (ignores its abort signal,
+    // or simply hangs), that wait can hold open indefinitely even though
+    // the session record itself is already gone, permanently losing the
+    // `session.deleted` audit fact if the process crashes in that window.
+    // (Aborting a NON-paused run instead settles its `ActiveRun` on
+    // `run.aborted` promptly regardless of the tool's own state, so that
+    // shape would not actually exercise the unbounded wait this test
+    // targets — the paused path is the one that genuinely can hang.) This
+    // proves the durable record now lands, and is observable via
+    // `query()`, WHILE `deleteSession`'s own returned promise is still
+    // pending behind exactly such a stuck, released run.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const stuckTool = createTool({
+      name: 'stuck',
+      description: 'never resolves until released',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'stuck', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([stuckTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = run.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+
+      let deletionSettled = false;
+      const deletionPromise = bureau.deleteSession(sessionId).then(() => {
+        deletionSettled = true;
+      });
+
+      const observedDeletion = await new Promise<{ sessionId: string }>((resolve) => {
+        bureau.addEventListener('session.deleted', (event) => resolve(event), { once: true });
+      });
+      expect(observedDeletion.sessionId).toBe(sessionId);
+      // The released-but-stuck tool keeps the run's terminal event — and
+      // thus `deleteSession`'s own returned promise — pending at this
+      // point.
+      expect(deletionSettled).toBe(false);
+
+      const records = await bureau.auditTrail!.query({
+        runId: `session:${sessionId}`,
+        type: 'session.deleted',
+      });
+      expect(records).toHaveLength(1);
+      // Still pending: the durable write above resolved without needing
+      // the stuck run's cleanup to finish first.
+      expect(deletionSettled).toBe(false);
+
+      releaseTool!();
+      await deletionPromise;
+      await waitForRunCompletion(bureau, run.id);
     } finally {
       await bureau.dispose();
     }

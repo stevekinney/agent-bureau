@@ -81,6 +81,34 @@ async function seedRecord(
   await kv.set(`audit:v1:${ts}:${seq}:${record.runId}`, JSON.stringify(record));
 }
 
+/**
+ * A `TextValueStore`-shaped stub whose `set` resolves only once the
+ * returned `release` function is called — a controllable, deterministic
+ * stand-in for a slow write, never a real timer. Shared by the AB-207
+ * (awaited dispose) and AB-228 (read-your-writes) test groups below.
+ */
+function createControllableKv(): {
+  kv: ReturnType<typeof textValueStore>;
+  release: () => void;
+  setCallCount: () => number;
+} {
+  const base = textValueStore(new MemoryStorage());
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let setCallCount = 0;
+  const kv: ReturnType<typeof textValueStore> = {
+    ...base,
+    async set(key: string, value: string) {
+      setCallCount += 1;
+      await gate;
+      await base.set(key, value);
+    },
+  };
+  return { kv, release, setCallCount: () => setCallCount };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe('createAuditTrail', () => {
@@ -659,33 +687,6 @@ describe('createAuditTrail', () => {
   // new write once aborted (a write already in flight still runs to
   // completion and `dispose()` still awaits it — see `AuditTrailOptions`).
   describe('AB-207 — awaited dispose and the owner-issued signal', () => {
-    /**
-     * A `TextValueStore`-shaped stub whose `set` resolves only once the
-     * returned `release` function is called — a controllable, deterministic
-     * stand-in for a slow write, never a real timer.
-     */
-    function createControllableKv(): {
-      kv: ReturnType<typeof textValueStore>;
-      release: () => void;
-      setCallCount: () => number;
-    } {
-      const base = textValueStore(new MemoryStorage());
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      let setCallCount = 0;
-      const kv: ReturnType<typeof textValueStore> = {
-        ...base,
-        async set(key: string, value: string) {
-          setCallCount += 1;
-          await gate;
-          await base.set(key, value);
-        },
-      };
-      return { kv, release, setCallCount: () => setCallCount };
-    }
-
     it('dispose() resolves only after a write already in flight settles', async () => {
       const { kv, release } = createControllableKv();
       const { bureau, emit } = createStubBureau();
@@ -998,6 +999,36 @@ describe('createAuditTrail', () => {
       const cancelledRecords = await trail.query({ type: 'schedule.cancelled' });
       expect(cancelledRecords).toHaveLength(1);
       expect(cancelledRecords[0]?.detail).toEqual({ scheduleId: 'schedule-2' });
+
+      trail.dispose();
+    });
+
+    it('query() waits for a schedule listener\'s still-in-flight write, giving read-your-writes even against a KV whose set() resolves asynchronously (Codex P2 review finding, PR #566, "Wait for schedule audit writes before returning success")', async () => {
+      const { kv, release, setCallCount } = createControllableKv();
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(new SchedulePausedEvent('schedule-inflight'));
+      // The listener dispatches synchronously, so `kv.set` has already been
+      // called (and is gated) before `query()` below ever runs.
+      expect(setCallCount()).toBe(1);
+
+      const queryPromise = trail.query({ type: 'schedule.paused' });
+
+      let queryResolved = false;
+      void queryPromise.then(() => {
+        queryResolved = true;
+      });
+      // The write is deliberately still gated — query() must not resolve
+      // (and thus must not report an empty result) while it's in flight.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(queryResolved).toBe(false);
+
+      release();
+      const records = await queryPromise;
+      expect(records).toHaveLength(1);
+      expect(records[0]?.detail).toEqual({ scheduleId: 'schedule-inflight' });
 
       trail.dispose();
     });
