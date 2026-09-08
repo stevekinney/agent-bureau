@@ -1,5 +1,5 @@
 ---
-'armorer': patch
+'armorer': minor
 ---
 
 Enforce `ReusableApprovalGrant.scope` in grant matching (AB-364, AB-46, AB-346).
@@ -9,3 +9,5 @@ Enforce `ReusableApprovalGrant.scope` in grant matching (AB-364, AB-46, AB-346).
 Also fixes a latent defect this change surfaced: `signGrant`/`verifyGrantSignature` previously signed `usesRemaining`, so `decrementUse` (which has no access to the signing secret) silently invalidated a grant's signature on its very first use, making any `maxUses > 1` grant unusable a second time. `usesRemaining` is now excluded from the signed payload alongside `signature`; `maxUses` (the issuance-time ceiling) stays signed.
 
 New public fields: `ReusableApprovalGrant.runId`, `ReusableApprovalGrant.sessionId`, `GrantError.code`'s `'invalid-scope'` member.
+
+Recorded as a minor rather than a patch: the change adds public `runId`/`sessionId` fields and the `invalid-scope` error code, and bumps `GRANT_VERSION` to 2 so grants issued before this release no longer verify and must be reissued.
