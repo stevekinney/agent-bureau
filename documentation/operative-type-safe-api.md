@@ -653,9 +653,14 @@ bureau-level default `generate`/`provider` an agent falls back to; every
 `RunnableAgent` in `agents` supplies its own. AB-366 turned the `@deprecated`
 tag into live pressure rather than editor-only strikethrough:
 `@typescript-eslint/no-deprecated` runs at `warn` in `eslint.config.base.ts`,
-so every construction of these fields shows up as a warning in
-`bun run lint`'s output. That lint warning, not this paragraph, is the
-tracking mechanism for when the removal issue can close.
+so a direct property key in an object literal that is contextually typed as
+`BureauOptions` — or a `Bureau.createRun` call site — shows up as a warning in
+`bun run lint`'s output. It does not see a field introduced through
+conditional object-spread merging (`packages/gateway/src/start.ts`'s
+`resolveStartOptions` is the known case), so that construction has to stay
+tracked by hand rather than by the lint warning alone. That lint warning,
+not this paragraph, is the primary tracking mechanism for when the removal
+issue can close.
 
 ### `BureauRunOptions`
 
