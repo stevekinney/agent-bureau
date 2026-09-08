@@ -992,6 +992,103 @@ interface LoopStatistics {
  * });
  * ```
  */
+/**
+ * The approval- and toolbox-identity-related subset of `ToolboxOptions`
+ * that `combineToolboxes` (`combine-toolboxes.ts`) forwards from the first
+ * toolbox into a combined toolbox (AB-362) — the same options `extend()`
+ * already forwards into an extended toolbox. This is a narrow, explicit
+ * allowlist, not "every option minus a growing exclude list": two fields
+ * that seemed safe to forward broadly at first turned out not to be
+ * (`middleware` double-applies to already-transformed configurations;
+ * `signal` ties the combined toolbox's abort listener to a signal it
+ * never gets a chance to detach from on normal completion, accumulating
+ * listeners across repeated short-lived combinations under one long-lived
+ * signal) — both AB-362 review findings. An allowlist means the next
+ * option added to `ToolboxOptions` is excluded from forwarding by
+ * default, not forwarded by default. `policyRevision`, `approvalRevision`,
+ * and `toolboxRevision` are included even though they are not
+ * approval-specific by name: `restoreApproval`'s staleness check compares
+ * each against the *toolbox's own* resolved value (defaulting to
+ * `'policy:1'` / `'approval:1'` / `'toolbox:1'` when unset), so silently
+ * reverting to those defaults on combination would make every approval
+ * binding issued by a toolbox with customized revisions look stale (or
+ * pass when it should not) the moment it is combined. `policyContext` is
+ * included alongside `policy` for the same reason they must travel
+ * together: a registry-level `policy.beforeExecute` hook that branches on
+ * `policyContext` (a tenant flag, an approval-context provider) would
+ * otherwise be forwarded without the context it reads, silently defaulting
+ * to whatever the hook does when that context is absent—which can mean
+ * a call that should return `needs_approval` executes immediately instead
+ * (AB-362 review finding).
+ */
+export type InternalToolboxOptions = Pick<
+  ToolboxOptions,
+  | 'policy'
+  | 'policyContext'
+  | 'approvalPolicy'
+  | 'approvalSecret'
+  | 'approvalStateStore'
+  | 'grantStateStore'
+  | 'approvalBindingTtlMs'
+  | 'approvalNow'
+  | 'approvalNonce'
+  | 'policyRevision'
+  | 'approvalRevision'
+  | 'toolboxRevision'
+  | 'readOnly'
+  | 'allowMutation'
+  | 'allowDangerous'
+>;
+
+/**
+ * Maps a toolbox's own `toJSON` function reference to a snapshot of its
+ * {@link InternalToolboxOptions}, so `combineToolboxes` (`combine-toolboxes.ts`)
+ * can forward them from the first toolbox into a combined toolbox (AB-362).
+ *
+ * This is intentionally not a method on the public `Toolbox` interface:
+ * `approvalSecret` lives in these options, and a public accessor would let
+ * any caller holding a toolbox reference read it straight off the object
+ * (AB-362 review finding). A symbol-keyed property directly on the
+ * toolbox object was tried next and also rejected: `Object.keys()`,
+ * `for...in`, and `JSON.stringify()` skip symbol-keyed properties, but
+ * `Object.getOwnPropertySymbols(toolbox)` does not — it hands back the
+ * actual symbol, which is then usable as an index to read the value right
+ * back off the object, so non-enumerability was never real secrecy (a
+ * second AB-362 review finding). A `WeakMap` has no such gap: nothing
+ * enumerates its keys or contents without holding a reference to the map
+ * itself, which lives only in this module and `combine-toolboxes.ts`.
+ *
+ * Keying by the toolbox instance itself (the very first attempt) doesn't
+ * work, though: Bureau's `runtime-composition.ts`'s
+ * `withDefaultToolboxRequestContext` wraps every run's toolbox in
+ * `new Proxy(toolbox, { get(target, property, receiver) { ... } })`
+ * before `wireDurableOptInTools` ever sees it, and a `Proxy` is never
+ * `===` its target — a `WeakMap.get(proxy)` looked up against the real
+ * object's registration entry always misses, silently reproducing this
+ * issue's own bug. Keying by `toolbox.toJSON` instead survives that
+ * Proxy: `toJSON` is declared inside this function's own closure (see its
+ * definition below), so it is a distinct function object per toolbox
+ * instance, and a well-behaved proxy's `get` trap that doesn't
+ * special-case `'toJSON'` falls through to `Reflect.get(target,
+ * 'toJSON', receiver)`, which returns that SAME function object — proxy
+ * or no proxy, `proxy.toJSON === target.toJSON`. If some future wrapper
+ * ever rebinds or replaces `toJSON` itself (rather than transparently
+ * forwarding property reads), the lookup misses and this falls back to
+ * `{}`, the same ungated failure mode a missing registration always had —
+ * see `combine-toolboxes.test.ts`'s Proxy-wrapped regression test, which
+ * exercises exactly the shape of proxy Bureau constructs.
+ *
+ * This map is exported (unlike a closure-private variable would allow)
+ * only so `combine-toolboxes.ts` can read it; it is deliberately NOT
+ * re-exported from `index.ts`, so it never reaches a consumer of the
+ * published `armorer` package. Same non-public-surface pattern as
+ * `internalToolboxTestUtilities` below.
+ */
+export const internalToolboxOptionsRegistry = new WeakMap<
+  () => SerializedToolbox,
+  InternalToolboxOptions
+>();
+
 function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   entries: TEntries = [] as unknown as TEntries,
   options: ToolboxOptions = {},
@@ -2702,6 +2799,38 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   if (entries.length) {
     registerSerialized(entries);
   }
+
+  // AB-362: register this toolbox's own approval- and toolbox-identity
+  // options — built from the same RESOLVED locals (with defaults already
+  // applied) this closure uses everywhere else, not a re-read of the raw
+  // `options` parameter — under its `toJSON` function reference, so
+  // `combineToolboxes` (`combine-toolboxes.ts`) can forward them into a
+  // combined toolbox the way `extend()` already forwards its own options
+  // into an extended toolbox. See `internalToolboxOptionsRegistry`'s own
+  // doc comment for why this is a `WeakMap` keyed by `toJSON`, not a
+  // method on `api`, a symbol-keyed property on `api`, or a `WeakMap`
+  // keyed by `api` itself. Using the resolved locals (rather than raw
+  // `options`) means this reflects what THIS toolbox actually does —
+  // including every default it applied — and can never drift from a
+  // caller mutating the object it originally passed in after
+  // construction.
+  internalToolboxOptionsRegistry.set(toJSON, {
+    ...(registryPolicy ? { policy: registryPolicy } : {}),
+    ...(registryPolicyContext ? { policyContext: registryPolicyContext } : {}),
+    ...(approvalPolicy ? { approvalPolicy } : {}),
+    ...(approvalSecret ? { approvalSecret } : {}),
+    ...(approvalStateStore ? { approvalStateStore } : {}),
+    ...(grantStateStore ? { grantStateStore } : {}),
+    approvalBindingTtlMs,
+    approvalNow,
+    approvalNonce,
+    policyRevision,
+    approvalRevision,
+    toolboxRevision,
+    readOnly,
+    allowMutation,
+    allowDangerous,
+  });
 
   return api;
 
