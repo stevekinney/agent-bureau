@@ -629,11 +629,25 @@ surface withheld was deleted rather than relocated.
 ### Removed from `BureauOptions`
 
 `generate`, `provider`, `providers`, `routing`, `toolbox`, `guardrails`,
-`skills`, `stopWhen`, `maximumSteps`, and `systemPrompt` are gone from
-`BureauOptions`. Every one of them is agent-owned configuration now — declared
-per agent on `CreateAgentOptions` (`instructions` replaces `systemPrompt`).
-There is no bureau-level default `generate`/`provider` an agent falls back to;
-every `RunnableAgent` in `agents` supplies its own.
+`skills`, `stopWhen`, `maximumSteps`, and `systemPrompt` are the target end
+state's departure from `BureauOptions`. AB-242's decision record
+(2026-09-04) deprecated these fields in place rather than removing them: the
+in-repo caller census found production consumers (`packages/gateway/src/start.ts`
+and `scripts/verify-bureau-tarball-boundary.ts`) that construct
+`BureauOptions` with these fields directly, and `packages/gateway/src/routes/webhooks.ts`'s
+per-request `systemPrompt`/`maximumSteps` override has no `bureau.run`
+equivalent yet. Each field carries a `@deprecated` TSDoc tag in
+`packages/bureau/src/types.ts` naming its per-agent replacement and pointing
+at AB-242 — `generate` on `CreateAgentOptions` for the provider-resolution
+trio (`provider`/`providers`/`routing`), `instructions` for `systemPrompt`,
+`stopWhen`/`maximumSteps`/`toolbox` unchanged by name, and for `guardrails`/
+`skills`, the per-agent home AB-15 describes that has not yet landed on
+`CreateAgentOptions`; the fields remain present and functional until the removal issue
+(AB-352), blocked on the gateway dynamic-agent dispatch migration decision
+(AB-351), closes. This document's example code stays the target end state it
+describes — every one of these fields is agent-owned configuration, with no
+bureau-level default `generate`/`provider` an agent falls back to; every
+`RunnableAgent` in `agents` supplies its own.
 
 ### `BureauRunOptions`
 
@@ -706,8 +720,14 @@ generic helper forwarding a caller-supplied literal union), the return type
 distributes per member — `AgentRun<never, false> | AgentRun<{...}, true>` —
 rather than collapsing to one branch.
 
-There is no `createRun` on `Bureau<D>`. `run` replaces it outright; nothing
-else in this API creates a run.
+`createRun` on `Bureau<D>` is deprecated, not yet removed, per AB-242's
+decision record (2026-09-04): `run` is the target end-state replacement, but
+production call sites in `packages/gateway` (per-request `principal`,
+plus `webhooks.ts`'s per-request `systemPrompt`/`maximumSteps` override that
+`run` cannot express) still depend on it. `packages/bureau/src/types.ts`
+carries the `@deprecated` tag naming `run` as the replacement and pointing
+at AB-242; removal is tracked by AB-352, blocked on the gateway migration
+decision AB-351 names.
 
 ### Administrative operations
 
