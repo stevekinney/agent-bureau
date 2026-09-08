@@ -4944,6 +4944,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             if (freshRetainedRunIds.has(runId)) continue;
             if (liveOrPendingRunIds.has(runId)) continue;
             if (durableEventProducerInstance?.hasActiveWrite({ kind: 'run', id: runId })) continue;
+            // A run still present in the in-memory run `store` can still be
+            // handed to `deleteRun()` at any future point — which records a
+            // brand-new, retained `run.removed` durable event under this
+            // SAME owner (Codex review, PR #568, "Preserve ownership for a
+            // later run removal event"). Before AB-363 this map was never
+            // pruned at all, so that future write always had an owner
+            // waiting for it; excluding a still-present run here restores
+            // that guarantee. `deleteRun()` throws NOT_FOUND once a run is
+            // gone from `store` — the exact same check, so this is really
+            // "can a future deleteRun() still fire for this run", not a
+            // proxy for it. It is also process-bound: `store` is never
+            // repopulated with a TERMINAL run at boot (only recovered
+            // in-flight ones are), so a run this process never held can
+            // never be deleted again by any process, and gets no
+            // protection here — correctly, since no future `run.removed`
+            // is possible for it either. Once `deleteRun()` actually runs,
+            // `store.getRun` returns `undefined` immediately, and
+            // `hasActiveWrite` above already protects the write it starts
+            // synchronously in the same call.
+            if (store.getRun(runId) !== undefined) continue;
             delete nextOwners[runId];
             changed = true;
           }
