@@ -125,6 +125,7 @@ describe('execution lifecycle', () => {
       audience: 'operator',
       agentId: 'agent-a',
       runId: 'run-a',
+      sessionId: 'session-a',
       requestId: 'request-a',
       locale: 'en-US',
       deadline: 5000,
@@ -216,6 +217,10 @@ describe('execution lifecycle', () => {
       audience: 'operator',
       agentId: 'agent-a',
       runId: 'run-a',
+      // AB-364 review finding (chatgpt-codex-connector): sessionId must
+      // survive settlement the same way runId/agentId do — it must be
+      // visible here, not silently dropped after the call goes terminal.
+      sessionId: 'session-a',
       requestId: 'request-a',
       locale: 'en-US',
       deadline: 5000,

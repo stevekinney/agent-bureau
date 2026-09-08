@@ -4508,7 +4508,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             maximumSteps: request.maximumSteps,
             systemPrompt: request.systemPrompt,
             sessionId: taskId,
-            requestContext: createSchedulerServiceRequestContext(taskId, agentName),
+            requestContext: createSchedulerServiceRequestContext(taskId, agentName, taskId),
           },
           { liveStreaming: false },
         );

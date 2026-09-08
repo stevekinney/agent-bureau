@@ -49,6 +49,7 @@ import {
   createMemoryRecallHook,
   createRoutingStrategy,
   createRuntimeComposition,
+  createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
   isActiveSkillEntryArray,
   recordedAgentStep,
@@ -487,6 +488,16 @@ describe('createRuntimeComposition', () => {
         authorizationRevision: 'authorization:2',
       },
     });
+  });
+
+  it('createSchedulerServiceRequestContext stamps sessionId for consistency, without changing the fixed scheduler-service principal that already blocks grant matching (AB-364 review finding)', () => {
+    const withSession = createSchedulerServiceRequestContext('run-a', 'agent-a', 'session-a');
+    expect(withSession.sessionId).toBe('session-a');
+    expect(withSession.runId).toBe('run-a');
+    expect(withSession.authority.principalId).toBe('service:scheduler');
+
+    const withoutSession = createSchedulerServiceRequestContext('run-a', 'agent-a');
+    expect(withoutSession.sessionId).toBeUndefined();
   });
 
   it('provides an unavailable toolbox that accepts empty calls and rejects tool calls', async () => {

@@ -316,7 +316,16 @@ export function createProcessLocalApprovalStateStore(
 // wiring belong to AB-346, this module only owns the type, storage, and
 // signing primitives.
 
-export const GRANT_VERSION = 1 as const;
+// Bumped 1 -> 2 (AB-364 review finding, chatgpt-codex-connector): version 1's
+// signature covered `usesRemaining`; this version's `grantSignaturePayload`
+// excludes it. A grant signed under version 1 would silently fail
+// `verifyGrantSignature` under version 2's payload shape — bumping the
+// version instead makes `findMatchingGrant`'s existing `grant.version !==
+// GRANT_VERSION` check (already exercised by "treats a grant with an
+// unrecognized version as absent") the compatibility boundary: an
+// already-issued version-1 grant is treated as absent, never crashes, and
+// never silently misverifies under the new payload shape.
+export const GRANT_VERSION = 2 as const;
 
 export interface ReusableApprovalGrant {
   readonly version: typeof GRANT_VERSION;
@@ -391,7 +400,7 @@ function normalizeGrantSignaturePayload(
   return JSON.parse(serialized) as JsonValue;
 }
 
-/** Signs a grant's canonical fields (every field but `signature`) with the same HMAC primitive `signPendingApproval` uses. */
+/** Signs a grant's canonical fields (every field but `signature` and `usesRemaining`, see {@link grantSignaturePayload}) with the same HMAC primitive `signPendingApproval` uses. */
 export function signGrant(grant: ReusableApprovalGrant, secret: string): string {
   return hmacSha256HexSync(
     secret,
@@ -399,7 +408,7 @@ export function signGrant(grant: ReusableApprovalGrant, secret: string): string 
   );
 }
 
-/** Verifies a grant's signature against its current field values; throws `GrantError` with code `invalid-signature` on mismatch. */
+/** Verifies a grant's signature against its current field values (excluding the live `usesRemaining` counter, see {@link grantSignaturePayload}); throws `GrantError` with code `invalid-signature` on mismatch. */
 export function verifyGrantSignature(grant: ReusableApprovalGrant, secret: string): void {
   if (!timingSafeEqualHex(grant.signature, signGrant(grant, secret))) {
     throw new GrantError('Reusable approval grant signature is invalid.', 'invalid-signature');

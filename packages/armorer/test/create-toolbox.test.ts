@@ -8117,7 +8117,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
     // The HMAC alone can't protect against a version bump changing matching
     // semantics — a grant must also declare the exact version this toolbox
     // understands (Copilot review PRRT_kwDORvupsc6fN8yV).
-    const grant = buildGrant({ version: 2 as unknown as typeof GRANT_VERSION });
+    const grant = buildGrant({ version: 3 as unknown as typeof GRANT_VERSION });
     const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
 
     const result = await toolbox.execute(
@@ -8428,6 +8428,26 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
       );
 
       expect(result.outcome).toBe('success');
+    });
+
+    it('treats an already-issued version-1 grant (pre-AB-364 signature shape) as absent, never a crash or an implicit deny', async () => {
+      // Review finding (chatgpt-codex-connector): GRANT_VERSION bumped 1 -> 2
+      // because version 1's signature covered `usesRemaining`, which this
+      // issue's payload no longer signs. A durable store carrying a
+      // version-1 grant from before this change must not crash
+      // `verifyGrantSignature` (it's never reached — the version check
+      // short-circuits first) and must never silently match despite the
+      // signature shape mismatch.
+      const grant = buildGrant({ version: 1 as unknown as typeof GRANT_VERSION });
+      const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+      const result = await toolbox.execute(
+        { id: 'call-legacy-version', name: 'read-file', arguments: {} },
+        { requestContext: grantRequestContext },
+      );
+
+      expect(result.outcome).toBe('action_required');
+      expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
     });
   });
 

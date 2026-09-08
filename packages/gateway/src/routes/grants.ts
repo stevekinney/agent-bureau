@@ -60,9 +60,15 @@ const issueGrantBodySchema = z
     // union: a `run` grant carrying an incidental `sessionId` (or vice
     // versa) is not itself invalid — only the identifier the CHOSEN scope
     // needs is required — and the ruling never says the other one must be
-    // absent.
-    runId: z.string().min(1).optional(),
-    sessionId: z.string().min(1).optional(),
+    // absent. `.trim()` before `.min(1)` matches `createRunFromRequest`'s
+    // own `request.sessionId?.trim()` canonicalization
+    // (`packages/bureau/src/create-bureau.ts`): without it, a session id
+    // supplied here with incidental whitespace would sign a grant that can
+    // never match the trimmed session id a real run actually carries, and a
+    // whitespace-only value would pass `min(1)` untrimmed while Bureau
+    // rejects the same value for a run (review finding, chatgpt-codex-connector).
+    runId: z.string().trim().min(1).optional(),
+    sessionId: z.string().trim().min(1).optional(),
     expiresAt: z.number(),
     // A fractional or non-positive maxUses would break usage-counting
     // semantics downstream: `Toolbox.issueGrant` initializes

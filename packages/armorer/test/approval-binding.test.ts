@@ -222,8 +222,21 @@ function buildGrant(overrides: Partial<ReusableApprovalGrant> = {}): ReusableApp
 }
 
 describe('reusable approval grant state', () => {
-  it('exports GRANT_VERSION as 1', () => {
-    expect(GRANT_VERSION).toBe(1);
+  it('exports GRANT_VERSION as 2', () => {
+    expect(GRANT_VERSION).toBe(2);
+  });
+
+  it('treats a version-1 grant (pre-AB-364 signature shape) as an unrecognized version, never a crash or a silent misverify', () => {
+    // AB-364 review finding (chatgpt-codex-connector): version 1's signature
+    // covered `usesRemaining`; an already-issued version-1 grant must be
+    // treated as absent under the new payload shape, never crash
+    // `verifyGrantSignature` or silently misverify. `findMatchingGrant`'s
+    // own `grant.version !== GRANT_VERSION` check (create-toolbox.test.ts)
+    // is the actual compatibility boundary; this test just pins that a
+    // version-1 grant is constructible and inert here, at the type/store
+    // level.
+    const grant = buildGrant({ version: 1 as unknown as typeof GRANT_VERSION });
+    expect(grant.version).not.toBe(GRANT_VERSION);
   });
 
   it('issues a grant, initializing usesRemaining to maxUses', async () => {

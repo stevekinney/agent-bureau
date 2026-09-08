@@ -394,7 +394,11 @@ function normalizedServiceAgentName(agentName: string | undefined): string {
   return trimmed && trimmed.length > 0 ? trimmed : defaultBureauAgentName;
 }
 
-export function createSchedulerServiceRequestContext(runId: string, agentName: string | undefined) {
+export function createSchedulerServiceRequestContext(
+  runId: string,
+  agentName: string | undefined,
+  sessionId?: string,
+) {
   const ownerId = normalizedServiceAgentName(agentName);
   return {
     authority: {
@@ -407,6 +411,13 @@ export function createSchedulerServiceRequestContext(runId: string, agentName: s
     audience: 'operator',
     agentId: ownerId,
     runId,
+    // AB-364 review finding (chatgpt-codex-connector): stamped for
+    // consistency with every other request context this module builds —
+    // NOT a fix for scheduled-fire grant matching, which the fixed
+    // `principalId` above (always `schedulerServicePrincipalId`, never the
+    // triggering user's own principal) already blocks unconditionally,
+    // independent of scope or sessionId.
+    ...(sessionId !== undefined ? { sessionId } : {}),
   } satisfies ToolRequestContext;
 }
 
@@ -2875,7 +2886,7 @@ export async function createRuntimeComposition(
       runId,
       isRecoveredFireReplay,
     );
-    const requestContext = createSchedulerServiceRequestContext(runId, agentName);
+    const requestContext = createSchedulerServiceRequestContext(runId, agentName, sessionId);
 
     const runRuntime = await createRunRuntime(
       { message: scheduledInput.input, sessionId, runId, agentName, requestContext },

@@ -384,6 +384,38 @@ describe('grants routes — scope identifiers (AB-364)', () => {
     expect(grant.sessionId).toBe('session-1');
   });
 
+  it("POST /api/v1/grants trims incidental whitespace from sessionId, matching Bureau's own request.sessionId?.trim() canonicalization", async () => {
+    // Review finding (chatgpt-codex-connector): without trimming here, a
+    // session id supplied with incidental whitespace would sign a grant
+    // that can never match the trimmed session id a real run actually
+    // carries (`createRunFromRequest` trims `request.sessionId`).
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-session-trim', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'session', sessionId: '  session-1  ' })),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as { sessionId: string };
+    expect(grant.sessionId).toBe('session-1');
+  });
+
+  it("POST /api/v1/grants returns 400 for a whitespace-only sessionId, matching Bureau's rejection of the same value for a run", async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-session-blank', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'session', sessionId: '   ' })),
+    });
+    expect(response.status).toBe(400);
+  });
+
   it('POST /api/v1/grants issues a "principal"-scoped grant with neither runId nor sessionId', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),
