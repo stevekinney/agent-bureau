@@ -634,9 +634,11 @@ state's departure from `BureauOptions`. AB-242's decision record
 (2026-09-04) deprecated these fields in place rather than removing them: the
 in-repo caller census found production consumers (`packages/gateway/src/start.ts`
 and `scripts/verify-bureau-tarball-boundary.ts`) that construct
-`BureauOptions` with these fields directly, and `packages/gateway/src/routes/webhooks.ts`'s
-per-request `systemPrompt`/`maximumSteps` override has no `bureau.run`
-equivalent yet. Each field carries a `@deprecated` TSDoc tag in
+`BureauOptions` with these fields directly, and `packages/gateway/src/routes/hooks.ts`'s
+per-request `systemPrompt`/`maximumSteps` override (the route this census
+originally attributed to `webhooks.ts`, since deleted as dead code by
+AB-316) has no `bureau.run` equivalent yet. Each field carries a
+`@deprecated` TSDoc tag in
 `packages/bureau/src/types.ts` naming its per-agent replacement and pointing
 at AB-242 — `generate` on `CreateAgentOptions` for the provider-resolution
 trio (`provider`/`providers`/`routing`), `instructions` for `systemPrompt`,
@@ -650,9 +652,9 @@ bureau-level default `generate`/`provider` an agent falls back to; every
 `RunnableAgent` in `agents` supplies its own. AB-366 turned the `@deprecated`
 tag into live pressure rather than editor-only strikethrough:
 `@typescript-eslint/no-deprecated` runs at `warn` in `eslint.config.base.ts`,
-so every construction of these fields shows up as a warning in `bun run
-lint`'s output. That lint warning, not this paragraph, is the tracking
-mechanism for when the removal issue can close.
+so every construction of these fields shows up as a warning in
+`bun run lint`'s output. That lint warning, not this paragraph, is the
+tracking mechanism for when the removal issue can close.
 
 ### `BureauRunOptions`
 
