@@ -335,9 +335,41 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   // can await terminal state deterministically (AB-207) rather than leaving
   // an in-flight `kv.set` unobserved.
   const activeWrites = new Set<Promise<void>>();
-  function trackWrite(promise: Promise<void>): void {
+  // AB-228 (Codex P2 review finding, PR #566, "Avoid blocking every audit
+  // query on unrelated writes"): `query()` needs read-your-writes against
+  // the SPECIFIC owner (`runId`, or the synthetic `schedule:<id>`/
+  // `session:<id>` owner) a caller is asking about, not against every
+  // write in flight anywhere in the process. Draining the global
+  // `activeWrites` set (the first cut of this fix) made one unrelated
+  // stalled write — a slow storage backend, any run's own write — hang
+  // every other `query()` call, including the gateway's public
+  // `GET /api/v1/audit` endpoint, indefinitely. Tracking writes ALSO by
+  // their owning `runId` lets `query({ runId })` await only the writes
+  // that could actually affect ITS OWN result, so a hung write for a
+  // different owner no longer blocks it. A query with no `runId` filter
+  // (a full/paginated scan) does not wait on anything here — narrowing
+  // that case to "only wait for writes matching every constituent owner in
+  // the store" would need iterating live owners, which is out of scope for
+  // this fix; a caller that needs read-your-writes for a specific owner
+  // already gets it by filtering on that owner's `runId`.
+  const activeWritesByRunId = new Map<string, Set<Promise<void>>>();
+  function trackWrite(promise: Promise<void>, ownerRunId?: string): void {
     activeWrites.add(promise);
     void promise.finally(() => activeWrites.delete(promise));
+    if (ownerRunId !== undefined) {
+      let owned = activeWritesByRunId.get(ownerRunId);
+      if (!owned) {
+        owned = new Set();
+        activeWritesByRunId.set(ownerRunId, owned);
+      }
+      owned.add(promise);
+      void promise.finally(() => {
+        const stillOwned = activeWritesByRunId.get(ownerRunId);
+        if (!stillOwned) return;
+        stillOwned.delete(promise);
+        if (stillOwned.size === 0) activeWritesByRunId.delete(ownerRunId);
+      });
+    }
     // AB-260: layered on top of `activeWrites` (never replacing it) — every
     // audit write also registers with the bureau's composed
     // `RuntimeServices.deferred`, so `deferred.drain()` reports it under the
@@ -399,6 +431,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
           cause: error,
         });
       }),
+      action.runId,
     );
   };
 
@@ -445,8 +478,11 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       });
     });
     // Tracked (AB-207) in addition to being returned: a caller that does not
-    // await the result must not strand this write past `dispose()`.
-    trackWrite(writePromise);
+    // await the result must not strand this write past `dispose()`. Also
+    // tracked by `entry.runId` (AB-228) so a `query({ runId: entry.runId })`
+    // immediately following this write observes it without waiting on any
+    // OTHER owner's in-flight write.
+    trackWrite(writePromise, entry.runId);
     return writePromise;
   }
 
@@ -545,8 +581,11 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     async query(options: AuditQueryOptions = {}): Promise<AuditRecord[]> {
       if (!kv) return [];
 
-      // AB-228 (Codex P2 review finding, PR #566, "Wait for schedule audit
-      // writes before returning success"): every out-of-band write
+      const { since, runId, type, limit = 500 } = options;
+
+      // AB-228 (Codex P2 review findings, PR #566: "Wait for schedule audit
+      // writes before returning success", then "Avoid blocking every audit
+      // query on unrelated writes"): every out-of-band write
       // (`writeOutOfBandRecord`, backing the schedule-definition and
       // session-deletion listeners) is fire-and-forget from its
       // dispatching caller's perspective — `pauseSchedule`/
@@ -557,18 +596,32 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // demonstrates this is a real, supported shape, not a hypothetical
       // one) can then have a query immediately following a successful
       // schedule transition or session deletion observe no record at all,
-      // even though the write is genuinely in flight. Draining a SNAPSHOT
-      // of `activeWrites` here — not looping until the set is empty, which
-      // could livelock under continuous writes — gives read-your-writes
-      // for every write already tracked at call time: `trackWrite` adds to
-      // the set synchronously inside the listener, so anything a caller's
-      // own synchronous dispatch triggered is already present by the time
-      // that caller's `await` reaches here.
-      if (activeWrites.size > 0) {
-        await Promise.allSettled([...activeWrites]);
+      // even though the write is genuinely in flight.
+      //
+      // The first cut of this fix drained the ENTIRE `activeWrites` set —
+      // correct for read-your-writes, but it made any one unrelated stalled
+      // write (a different run, a slow backend) hang every OTHER
+      // `query()` call too, including the gateway's public
+      // `GET /api/v1/audit` endpoint. Scoped instead: when the caller
+      // filters by `runId` (which every schedule/session caller chasing
+      // read-your-writes for ITS OWN just-issued write does — schedules and
+      // deletions are recorded under the synthetic `schedule:<id>`/
+      // `session:<id>` owner), only that owner's own in-flight writes are
+      // awaited — a snapshot, not a loop until empty, so this can't
+      // livelock under continuous writes to the same owner. `trackWrite`
+      // registers synchronously inside the listener, so anything a
+      // caller's own synchronous dispatch triggered is already present by
+      // the time that caller's `await` reaches here. A query with no
+      // `runId` filter (a broad scan) does not wait on anything — it has
+      // no single owner to scope the wait to, and waiting on every writer
+      // in the process would reopen the exact unrelated-write hang this
+      // fix closes.
+      if (runId !== undefined) {
+        const owned = activeWritesByRunId.get(runId);
+        if (owned && owned.size > 0) {
+          await Promise.allSettled([...owned]);
+        }
       }
-
-      const { since, runId, type, limit = 500 } = options;
 
       // List all audit keys under the prefix, then filter. For large logs a
       // range-prefix trick could narrow further (the timestamp is the first

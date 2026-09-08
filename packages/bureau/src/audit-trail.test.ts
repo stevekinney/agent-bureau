@@ -1003,7 +1003,7 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
-    it('query() waits for a schedule listener\'s still-in-flight write, giving read-your-writes even against a KV whose set() resolves asynchronously (Codex P2 review finding, PR #566, "Wait for schedule audit writes before returning success")', async () => {
+    it('query({ runId }) waits for that owner\'s still-in-flight write, giving read-your-writes even against a KV whose set() resolves asynchronously (Codex P2 review finding, PR #566, "Wait for schedule audit writes before returning success")', async () => {
       const { kv, release, setCallCount } = createControllableKv();
       const { bureau, emit } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);
@@ -1013,7 +1013,11 @@ describe('createAuditTrail', () => {
       // called (and is gated) before `query()` below ever runs.
       expect(setCallCount()).toBe(1);
 
-      const queryPromise = trail.query({ type: 'schedule.paused' });
+      // Filtered by the schedule's own synthetic owner id — the shape every
+      // real caller chasing read-your-writes for its OWN just-issued write
+      // actually uses (see `scheduleOwnerId`/`sessionOwnerId` in
+      // `audit-trail.ts`).
+      const queryPromise = trail.query({ runId: 'schedule:schedule-inflight' });
 
       let queryResolved = false;
       void queryPromise.then(() => {
@@ -1029,6 +1033,31 @@ describe('createAuditTrail', () => {
       const records = await queryPromise;
       expect(records).toHaveLength(1);
       expect(records[0]?.detail).toEqual({ scheduleId: 'schedule-inflight' });
+
+      trail.dispose();
+    });
+
+    it('query({ runId }) does NOT wait on an unrelated owner\'s stalled write, so one hung write cannot hang every other query (Codex P2 review finding, PR #566, "Avoid blocking every audit query on unrelated writes")', async () => {
+      const { kv, setCallCount } = createControllableKv();
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // This write is gated forever within this test — deliberately never
+      // released, standing in for a genuinely stalled storage backend.
+      emit(new SchedulePausedEvent('schedule-stuck'));
+      expect(setCallCount()).toBe(1);
+
+      // A query scoped to a DIFFERENT owner must resolve promptly — it has
+      // nothing in `activeWritesByRunId` for its own runId to wait on, so
+      // the unrelated stuck write for `schedule:schedule-stuck` never
+      // enters its wait at all.
+      const records = await trail.query({ runId: 'schedule:some-other-owner' });
+      expect(records).toEqual([]);
+
+      // A fully unscoped query (no runId filter) likewise does not hang —
+      // it has no single owner to scope a wait to, by design.
+      const allRecords = await trail.query();
+      expect(allRecords).toEqual([]);
 
       trail.dispose();
     });
