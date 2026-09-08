@@ -2981,6 +2981,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // run by the time a caller can first call `abortRun()` — existing
     // abort-timing tests depend on that not moving. try/catch alone adds no
     // such hop, so it is the release mechanism here.
+    //
+    // AB-361 review (codex P2 PRRT_kwDORvupsc6ga0TX): distinguishes the
+    // catch block's two reachable cases below — set true the moment
+    // `store.register` succeeds, so a durable-write failure that happens
+    // AFTER registration (this run is already a terminal FAILED run other
+    // callers can see via `listRuns()`/`getRun()`) does not fall through
+    // the SAME `runAttribution.delete(runId)` cleanup a genuinely
+    // never-registered run needs.
+    let registeredForRecovery = false;
     try {
       const { session, conversation } = await loadConversation(sessionId);
       const baseConversationHistory = conversation.current;
@@ -3424,6 +3433,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
 
       store.register(activeRun, runId);
+      registeredForRecovery = true;
       runSessionIdentifiers.set(activeRun, sessionId);
 
       // AB-361/AB-34: the started-work control contract says an
@@ -3469,7 +3479,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // run.
       flowController?.settle(runId);
       runRequestContexts.delete(runId);
-      runAttribution.delete(runId);
+      // AB-361 review (codex P2 PRRT_kwDORvupsc6ga0TX): only the
+      // never-registered case may delete `runAttribution` — a run that
+      // reached `store.register` is ALREADY a terminal FAILED run other
+      // callers can observe via `listRuns()`/`getRun()` (its
+      // `run.completed` listener fired synchronously, per the comment
+      // above), and `resolveEventHistory()`'s authorization check fails
+      // closed when this map entry is absent, locking the run's real owner
+      // out of its own event history. A normal terminal run keeps its
+      // attribution until an explicit `deleteRun`; this post-registration
+      // durable-write-failure path must match that, not the
+      // never-registered path's full cleanup.
+      if (!registeredForRecovery) {
+        runAttribution.delete(runId);
+      }
       throw error;
     }
   }

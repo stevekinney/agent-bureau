@@ -1723,6 +1723,111 @@ describe('createBureau', () => {
     }
   });
 
+  it('keeps runAttribution for a run whose durable workflow write failed AFTER registration — its real owner is not locked out of its own event history (AB-361 review PRRT_kwDORvupsc6ga0TX)', async () => {
+    // Same gated-storage failure shape as the sibling test above, but this
+    // one supplies a `principal` on the request and asserts on the
+    // AUTHORIZATION consequence, not just cleanup: before the review fix,
+    // `createRunFromRequest`'s catch block applied the SAME
+    // `runAttribution.delete(runId)` cleanup to this case as it does to a
+    // run that never reached `store.register` at all — but this run DID
+    // reach `store.register`, so it is already a terminal FAILED run
+    // visible via `listRuns()`/`getRun()`. Wiping its attribution made
+    // `resolveEventHistory()`'s fail-closed check indistinguishable from a
+    // deleted or genuinely-unattributed run, so the run's REAL owner
+    // (the exact principal that created it) got `not-found` for its own
+    // failed run's event history — the fail-closed check meant to protect
+    // against imposters, misapplied to lock out the legitimate owner.
+    //
+    // SQLite, not memory: `bureau.eventHistory()` only exists when
+    // `persistentDurableStorage` is set, which gates on the storage
+    // backend's own declared `capabilities().persistence !== 'ephemeral'`
+    // — the in-memory backend the sibling test above uses is ephemeral, so
+    // this test needs a genuinely persistent backend to exercise it.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-361-review-attribution-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const realStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const startFailure = new Error('AB-361 review: durable write persistence failure');
+    const gatedStorage = new Proxy(realStorage, {
+      get(target, property, receiver) {
+        if (property === 'batch') {
+          return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+            const isWorkflowStartWrite = operations.some(
+              (operation) => operation.type === 'put' && operation.key.startsWith('wf:'),
+            );
+            if (isWorkflowStartWrite) {
+              throw startFailure;
+            }
+            return target.batch(operations);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: gatedStorage,
+      durableExecution: true,
+    });
+
+    try {
+      const sessionId = 'ab-361-review-attribution-preserved';
+      let runId: string | undefined;
+      const error = await bureau
+        .createRun({
+          message: 'AB-361 review: engine.start rejects, principal must survive',
+          sessionId,
+          principal: 'the-real-owner',
+        })
+        .catch((caught: unknown) => {
+          // `createRun` rejects before returning a `RunSummary`, so the
+          // run's id is recovered from the errored session metadata below
+          // instead of the (never-returned) resolved value.
+          return caught;
+        });
+      expect(error).toBeInstanceOf(Error);
+
+      await waitForCondition(async () => {
+        const session = await bureau.getSession(sessionId);
+        runId = session?.metadata['lastRunId'] as string | undefined;
+        return session?.metadata['lastRunStatus'] === 'error' && runId !== undefined;
+      }, 'errored session metadata was not persisted after the durable write failure');
+      if (runId === undefined) throw new Error('expected lastRunId on the errored session');
+
+      // The run's REAL owner, supplying the SAME principal the request
+      // used, must NOT be locked out — this is the assertion that failed
+      // before the review fix (it returned `{ outcome: 'not-found' }`).
+      const ownedOutcome = await bureau.eventHistory(
+        { kind: 'run', id: runId },
+        { principal: 'the-real-owner' },
+      );
+      expect(ownedOutcome).not.toEqual({ outcome: 'not-found' });
+
+      // An unrelated caller supplying a DIFFERENT principal is still
+      // correctly denied — this fix restores attribution, it does not
+      // disable the authorization check.
+      const strangerOutcome = await bureau.eventHistory(
+        { kind: 'run', id: runId },
+        { principal: 'someone-else' },
+      );
+      expect(strangerOutcome).toEqual({ outcome: 'not-found' });
+
+      const report = await bureau.shutdown();
+      expect(report.unresolved).toBe(0);
+      expect(report.failed).toBe(0);
+    } finally {
+      await bureau.dispose().catch(() => {});
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it("reattaches a catalog-dispatched bureau.run() across a process restart, rebuilding deps from the catalog agent's OWN OPERATIVE_RESOLVE_RUN_OPTIONS (AB-240)", async () => {
     // Same cross-process proof as the interactive-run recovery test above,
     // but through `bureau.run(name, input)` — a catalog dispatch, which has
