@@ -20,6 +20,7 @@ import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { BureauError, createBureau } from './create-bureau';
+import type { BureauRunOptions } from './types';
 
 function mockGenerate(content = 'ok') {
   return async () => ({ content, toolCalls: [] });
@@ -441,6 +442,57 @@ describe('bureau.run', () => {
           // @ts-expect-error — deliberately malformed options.principal
           bureau.run('echo', 'hi', { principal: 42 }),
         ).toThrow(BureauError);
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it('rejects a principal getter whose FIRST read is malformed, never giving it a second chance to look valid (AB-241 review finding)', async () => {
+      const bureau = await createBureau({
+        agents: { echo: createAgent({ generate: mockGenerate() }) },
+      });
+      try {
+        let reads = 0;
+        const options = {} as BureauRunOptions;
+        Object.defineProperty(options, 'principal', {
+          // First read (the only one a correct implementation performs) is
+          // malformed; a second, independent read would return a valid
+          // string. A caller reading `options.principal` twice — once to
+          // validate, once to use — could see this getter validate the
+          // FIRST read then use the second, silently accepting an option
+          // this call is supposed to reject synchronously.
+          get: () => (reads++ === 0 ? 42 : 'alice'),
+        });
+        expect(() => bureau.run('echo', 'hi', options)).toThrow(BureauError);
+        expect(reads).toBe(1);
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it('validates and attributes the SAME captured principal value even when options.principal is a getter whose result changes on a later read (AB-241 review finding)', async () => {
+      const bureau = await createBureau({
+        agents: { echo: createAgent({ generate: mockGenerate('durable hello') }) },
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      try {
+        let reads = 0;
+        const options = {} as BureauRunOptions;
+        Object.defineProperty(options, 'principal', {
+          // First read (the only one this call should perform) is a valid
+          // string; a later, independent read would return a different,
+          // malformed value. A caller re-reading `options.principal` after
+          // validation — at `persistCatalogRunRecoveryRecord` or the
+          // `createActiveRun` owner argument, both after an `await` — could
+          // otherwise attribute this run to a DIFFERENT, unvalidated value
+          // than the one that was checked.
+          get: () => (reads++ === 0 ? 'alice' : 42),
+        });
+        const run = bureau.run('echo', 'hi', options);
+        await run.result();
+        expect(run.snapshot().owner).toBe('alice');
+        expect(reads).toBe(1);
       } finally {
         await bureau.dispose();
       }
