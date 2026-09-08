@@ -74,14 +74,12 @@
  * `resolveEventHistory` in `create-bureau.ts`) already knows how to read —
  * previously exercised only by that detection's own synthetic tests
  * (`Store.recordAction`/`bureau.store.recordAction`), never by a real
- * deletion. Best-effort de-duplication on a duplicate dispatch of the same
- * event: the listener first checks whether the owner's own durable page
- * already carries a `'session.deleted'` record (the SAME evidence-based
- * check `resolveEventHistory` performs) and skips the write when one is
- * already present, rather than appending a second record for one logical
- * deletion. This read-then-write check is NOT atomic across processes —
- * see the listener's own doc comment for exactly which duplicate-dispatch
- * case it does and does not cover.
+ * deletion. De-duplicated on a duplicate dispatch of the same event via a
+ * per-owner IN-FLIGHT map, never a read of the owner's own durable history
+ * — see the listener's own doc comment for why a durable-history scan
+ * cannot tell a duplicate dispatch apart from a session id's legitimate
+ * later reuse, and exactly which duplicate-dispatch case the in-flight map
+ * does and does not cover.
  */
 import type {
   AgentScheduledEvent,
@@ -762,14 +760,11 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   const activeWriteCountsByOwner = new Map<string, number>();
 
   // AB-372 — extracted out of `sink()` below so `sessionDeletedListener`'s
-  // read-then-write idempotency check (which does not call `sink()`
-  // directly, since it needs to skip the write entirely on a hit) still
-  // participates in the SAME `activeWrites`/`activeWriteCountsByOwner`
-  // bookkeeping every other listener's write does — the increment happens
-  // synchronously when the listener fires, before the async page-read even
-  // starts, so `hasActiveWrite(owner)` correctly reports `true` for the
-  // whole duration of the check-then-maybe-write, not just the write half
-  // of it (Copilot review finding, PR #580).
+  // conditional write (which does not call `sink()` directly, since it
+  // needs to skip the write entirely on a duplicate in-flight dispatch)
+  // still participates in the SAME `activeWrites`/`activeWriteCountsByOwner`
+  // bookkeeping every other listener's write does (Copilot review finding,
+  // PR #580).
   function trackWrite(ownerKey: string, work: () => Promise<void>): void {
     activeWriteCountsByOwner.set(ownerKey, (activeWriteCountsByOwner.get(ownerKey) ?? 0) + 1);
     const write = work();
@@ -912,62 +907,79 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // `Bureau.eventHistory`'s deleted-aggregate detection (`create-bureau.ts`'s
   // `resolveEventHistory`) already reads.
   //
-  // Best-effort de-duplication on a duplicate dispatch (Copilot review
-  // finding, PR #580 — this paragraph previously overclaimed "exactly
-  // one"): unlike every other listener in this producer, this one checks
-  // the owner's own durable page BEFORE writing — if a `'session.deleted'`
-  // record is already present, the write is skipped rather than appending
-  // a second record for one logical deletion. This matters because
-  // `deleteSession`'s own single-process coalescing (`create-bureau.ts`)
-  // does not cover every duplicate-dispatch path (its own doc comment names
-  // a documented cross-process race). The read-then-write check is NOT
-  // atomic — two producer instances (in two separate Bureau processes
-  // sharing one persistent backend) can both read "no record yet" before
-  // either has appended, and both then append, producing two
-  // `'session.deleted'` records for one logical deletion; this guard
-  // reliably prevents a duplicate from ONE process's own repeated/duplicate
-  // dispatch of the SAME event (the case this issue's own acceptance
-  // criterion tests), not every possible source of a duplicate. This is
-  // safe to be best-effort rather than exact: a second record would still
-  // evidence deletion just as correctly as the first — `resolveEventHistory`
-  // (`create-bureau.ts`) only checks for the PRESENCE of a `'session.deleted'`
-  // kind in the page (`.some(...)`), never that there is exactly one, so any
-  // reader of this durable history must already tolerate more than one
-  // `'session.deleted'` record for the same owner. A page-fetch failure
-  // propagates to the outer `.catch` below like any other write failure —
-  // it does not report a false "already recorded" (it throws, never
-  // returning a truthy page-with-matching-event).
+  // De-duplication on a duplicate dispatch is done via an IN-FLIGHT map,
+  // never a read of the owner's own durable history (Codex review findings,
+  // PR #580, on an earlier round of this change that scanned `history.page()`
+  // before writing):
   //
-  // Routed through `trackWrite` (not `sink()`, which always writes) so
-  // `hasActiveWrite(owner)` reports `true` for this owner from the moment
-  // the listener fires — covering the async page-read this listener does
-  // before it decides whether to write at all — through to the write's own
-  // completion, exactly as it does for every other listener's write
-  // (Copilot review finding, PR #580).
+  // - A read-then-write check against durable history cannot tell "the
+  //   SAME underlying deletion, re-dispatched" apart from "a DIFFERENT,
+  //   LATER deletion of a session id that was legitimately recreated after
+  //   its first incarnation was deleted" (proved by
+  //   `create-bureau.test.ts`'s own "does not coalesce a deleteSession call
+  //   for a session RECREATED with the same id" test) — a stale historical
+  //   marker would silently swallow the second incarnation's real deletion
+  //   fact forever.
+  // - It is also unbounded work: `page()`'s default limit means a session
+  //   with 100+ prior durable events would miss its own marker on a later
+  //   page, and every deletion would replay the fleet-global feed looking
+  //   for it regardless.
+  // - It cannot be made atomic across processes anyway (two page() reads
+  //   can both complete before either append()s), so it was buying, at
+  //   best, protection against a same-process duplicate — which the
+  //   in-flight map below provides for free, correctly, and synchronously.
+  //
+  // The map below is keyed by owner and holds the CURRENTLY in-flight
+  // write's promise; a second dispatch for the SAME owner arriving while
+  // that write is still pending is dropped (checked and set synchronously,
+  // before any `await`, so two dispatches on the same microtask cannot both
+  // pass the check — a read-then-write check against a store necessarily
+  // can). Once the in-flight write settles, its entry is removed: a LATER,
+  // separate dispatch for the same owner (a genuine second deletion of a
+  // recreated session, or simply time having passed) starts and completes
+  // its own write, exactly as it should. This closes the same-process
+  // duplicate-dispatch case this issue's own acceptance criterion tests;
+  // the cross-process race `deleteSession`'s own single-process coalescing
+  // (`create-bureau.ts`) does not cover is NOT closed by this map (each
+  // process holds its own, independent map) — matching every other
+  // out-of-band durable write in this package (the audit trail's own
+  // `session.deleted`/`schedule.*` listeners, AB-228, never de-dupe at
+  // all), and consistent with `resolveEventHistory`'s deleted-aggregate
+  // detection already tolerating more than one `'session.deleted'` record
+  // for the same owner (it checks only for PRESENCE via `.some(...)`,
+  // never exactly one).
+  //
+  // Routed through `trackWrite` (not `sink()`, which always writes,
+  // unconditionally) so `hasActiveWrite(owner)` reports `true` for this
+  // owner for the write's full duration, exactly as it does for every
+  // other listener's write (Copilot review finding, PR #580).
+  const pendingSessionDeletionWrites = new Map<string, Promise<void>>();
   const sessionDeletedListener = (event: SessionDeletedEvent): void => {
     if (signal?.aborted) return;
     const owner: DurableEventOwner = { kind: 'session', id: event.sessionId };
-    trackWrite(encodeOwner(owner), () =>
-      recordSessionDeletedIfAbsent(owner, event.sessionId).catch((error: unknown) => {
-        diagnose({
-          level: 'error',
-          scope: 'durable-event-history',
-          message: `[durable-event-history] Failed to record durable event "session.deleted" for ${owner.kind}:${owner.id}:`,
-          cause: error,
-        });
-      }),
-    );
+    const ownerKey = encodeOwner(owner);
+    if (pendingSessionDeletionWrites.has(ownerKey)) return;
+    trackWrite(ownerKey, () => {
+      const write = history.record(owner, 'session.deleted', { sessionId: event.sessionId }).then(
+        () => undefined,
+        (error: unknown) => {
+          diagnose({
+            level: 'error',
+            scope: 'durable-event-history',
+            message: `[durable-event-history] Failed to record durable event "session.deleted" for ${owner.kind}:${owner.id}:`,
+            cause: error,
+          });
+        },
+      );
+      pendingSessionDeletionWrites.set(ownerKey, write);
+      void write.finally(() => {
+        if (pendingSessionDeletionWrites.get(ownerKey) === write) {
+          pendingSessionDeletionWrites.delete(ownerKey);
+        }
+      });
+      return write;
+    });
   };
-  async function recordSessionDeletedIfAbsent(
-    owner: DurableEventOwner,
-    sessionId: string,
-  ): Promise<void> {
-    const existing = await history.page(owner);
-    const alreadyRecorded =
-      !('outcome' in existing) && existing.events.some((event) => event.kind === 'session.deleted');
-    if (alreadyRecorded) return;
-    await history.record(owner, 'session.deleted', { sessionId });
-  }
   bureau.addEventListener('session.deleted', sessionDeletedListener);
 
   // AB-224's `review.*` lifecycle family (AB-87/AB-46) — like `schedule.*`

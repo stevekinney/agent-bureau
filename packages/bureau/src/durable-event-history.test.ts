@@ -1732,7 +1732,52 @@ describe('createDurableEventProducer()', () => {
     await history.dispose();
   });
 
-  it('dispatching the same SessionDeletedEvent twice produces exactly one durable record (AB-372)', async () => {
+  it('dispatching the same SessionDeletedEvent twice while the first write is still in flight produces exactly one durable record (AB-372)', async () => {
+    // The realistic case this issue's own acceptance criterion targets: a
+    // genuinely CONCURRENT duplicate dispatch of the SAME underlying
+    // deletion (e.g. the documented cross-process race), not a later,
+    // separate deletion — see the sibling "session id legitimately reused"
+    // test below for why those two cases must be told apart.
+    const runtime = createManualRuntimeServices();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory(async () => {
+      await writeGate;
+    });
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    // A second dispatch arrives while the first write is still pending —
+    // checked and dropped SYNCHRONOUSLY, before the first write's `record()`
+    // has even resolved.
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+
+    releaseWrite();
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([
+      {
+        owner: { kind: 'session', id: 'sess-1' },
+        kind: 'session.deleted',
+        payload: { sessionId: 'sess-1' },
+      },
+    ]);
+
+    await producer.dispose();
+  });
+
+  it('a session id legitimately reused after deletion gets its own session.deleted record when it is deleted again (Codex P1 review finding, PR #580)', async () => {
+    // Before this fix, idempotency was a read-then-write check against the
+    // owner's OWN durable history: a session recreated with the same id
+    // after its first incarnation was deleted (a real, supported scenario
+    // — see `create-bureau.test.ts`'s "does not coalesce a deleteSession
+    // call for a session RECREATED with the same id") would find its
+    // predecessor's `'session.deleted'` marker already in the page and
+    // silently skip recording its OWN, separate deletion — permanently
+    // losing that durable fact for the second incarnation.
     const runtime = createManualRuntimeServices();
     const storage = await createMemoryStorage();
     const history = createDurableEventHistory(storage, runtime);
@@ -1741,41 +1786,30 @@ describe('createDurableEventProducer()', () => {
 
     dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
     await runtime.deferred.drain();
+    // The first write has fully settled — this is a genuinely LATER,
+    // separate dispatch, not a concurrent duplicate of the same one.
     dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
     await runtime.deferred.drain();
 
     const page = await history.page({ kind: 'session', id: 'sess-1' });
     if ('outcome' in page) throw new Error('expected a page, got a gap');
-    expect(page.events.map((event) => event.kind)).toEqual(['session.deleted']);
+    expect(page.events.map((event) => event.kind)).toEqual(['session.deleted', 'session.deleted']);
 
     await producer.dispose();
     await history.dispose();
   });
 
-  it('hasActiveWrite() reports true for a session owner while the idempotency page-read AND the write are in flight, not just the write (AB-372, Copilot review finding, PR #580)', async () => {
+  it("hasActiveWrite() reports true for a session owner for the write's full duration (AB-372, Copilot review finding, PR #580)", async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
-    let releasePage!: () => void;
-    const pageGate = new Promise<void>((resolve) => {
-      releasePage = resolve;
-    });
     const owner = { kind: 'session' as const, id: 'sess-1' };
-    const history: DurableEventHistory = {
-      record: async () => {
-        throw new Error('unused: this test never lets the read resolve');
-      },
-      page: async () => {
-        await pageGate;
-        return { events: [], hasMore: false };
-      },
-      subscribeEventHistory: () => {
-        throw new Error('unused by createDurableEventProducer');
-      },
-      retainedRunOwnerIds: () => {
-        throw new Error('unused by createDurableEventProducer');
-      },
-      dispose: async () => {},
-    };
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const { history } = createRecordingHistory(async () => {
+      await writeGate;
+    });
     const producer = createDurableEventProducer(bureau, history, runtime);
 
     expect(producer.hasActiveWrite(owner)).toBe(false);
@@ -1783,11 +1817,10 @@ describe('createDurableEventProducer()', () => {
     dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
 
     // The listener increments the owner's active-write count SYNCHRONOUSLY
-    // when it fires — before the async idempotency page-read has even
-    // started, let alone resolved.
+    // when it fires, before `record()`'s gated promise ever resolves.
     expect(producer.hasActiveWrite(owner)).toBe(true);
 
-    releasePage();
+    releaseWrite();
     await runtime.deferred.drain();
 
     expect(producer.hasActiveWrite(owner)).toBe(false);
@@ -1795,22 +1828,12 @@ describe('createDurableEventProducer()', () => {
     await producer.dispose();
   });
 
-  it('diagnoses (never throws) when the session.deleted idempotency check fails to read the owner page', async () => {
+  it('diagnoses (never throws) when a session.deleted record() write rejects', async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
-    const history: DurableEventHistory = {
-      record: () => {
-        throw new Error('record() should not be called when page() rejects');
-      },
-      page: () => Promise.reject(new Error('storage unavailable')),
-      subscribeEventHistory: () => {
-        throw new Error('unused by createDurableEventProducer');
-      },
-      retainedRunOwnerIds: () => {
-        throw new Error('unused by createDurableEventProducer');
-      },
-      dispose: async () => {},
-    };
+    const { history } = createRecordingHistory(async () => {
+      throw new Error('storage boom');
+    });
     const diagnostics: BureauDiagnostic[] = [];
     const producer = createDurableEventProducer(bureau, history, runtime, (diagnostic) =>
       diagnostics.push(diagnostic),
