@@ -4920,6 +4920,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           if (freshRetainedRunIds === undefined) return undefined;
 
           const currentAuthorities = session.metadata['lastRequestAuthorities'];
+          // A PRESENT-but-malformed `lastRequestAuthorities` value (not
+          // absent — a string or array where a map belongs) is itself
+          // evidence something was recorded and corrupted, the same
+          // fail-closed shape `lookupSessionAuthority` above treats as
+          // "recorded" rather than "nothing recorded" (Codex/Copilot review,
+          // PR #568, "Preserve owners when the authority map is
+          // malformed"). Reading it as absent here would let every
+          // candidate run in this session lose its `liveOrPendingRunIds`
+          // protection instead of none of them — skip the whole session for
+          // this cycle rather than risk pruning a run this corrupted map may
+          // still be recording.
+          if (currentAuthorities !== undefined && !isPlainAuthorityRecord(currentAuthorities)) {
+            return undefined;
+          }
           const liveOrPendingRunIds = isPlainAuthorityRecord(currentAuthorities)
             ? new Set(Object.keys(currentAuthorities))
             : new Set<string>();

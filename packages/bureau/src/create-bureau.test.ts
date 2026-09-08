@@ -13560,6 +13560,74 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('preserves every ownership entry on a session whose lastRequestAuthorities is present but malformed, rather than treating it as absent (Codex/Copilot review, PR #568, "Preserve owners when the authority map is malformed")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-malformed-authorities-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+
+        const page = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in page) throw new Error('expected a page for the run');
+        const lastEvent = page.events.at(-1);
+        if (!lastEvent) throw new Error('expected at least one durable event');
+
+        // Corrupt `lastRequestAuthorities` to a non-record shape (a bare
+        // string) — present, not absent, the same "recorded but corrupted"
+        // shape `lookupSessionAuthority` fails closed on elsewhere in this
+        // file. The run's own `lastRequestAuthorities` entry was already
+        // cleared by its terminal transition, so nothing here recreates it
+        // — this replaces the WHOLE map with a malformed value.
+        const sessionStore = bureau.sessionStore;
+        if (!sessionStore) throw new Error('expected a configured session store');
+        await sessionStore.update(run.sessionId, (session) => {
+          if (!session) return undefined;
+          return {
+            ...session,
+            metadata: {
+              ...session.metadata,
+              lastRequestAuthorities: 'corrupt',
+            },
+          };
+        });
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        await bureau.runDurableMaintenance();
+
+        const session = await bureau.getSession(run.sessionId);
+        // The run's history is below the floor and it has no active write —
+        // by every OTHER signal it is a pruning candidate. A malformed
+        // `lastRequestAuthorities` must still block the write for this
+        // whole session, not just fail to protect this one run: the
+        // ownership entry survives.
+        expect(session?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+        expect(session?.metadata['lastRequestAuthorities']).toBe('corrupt');
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('deleteSession aborts every run it owns (AB-207)', () => {
