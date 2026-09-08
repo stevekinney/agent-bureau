@@ -192,7 +192,11 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   let started = false;
   let stopping = false;
   let loopPromise: Promise<void> | undefined;
-  let lastTaskCompletedAt = 0;
+  // `undefined` is the never-completed sentinel — NOT `0` — because a
+  // manual `RuntimeServices` clock starts its monotonic time at exactly 0,
+  // so a task completing before the clock ever advances would otherwise be
+  // indistinguishable from "no task has completed yet" (AB-357).
+  let lastTaskCompletedAt: number | undefined;
 
   // Resolvers for tasks awaiting completion via submit()
   const taskResolvers = new Map<
@@ -459,7 +463,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       }
 
       // Apply idle delay for non-immediate tasks
-      if (nextTask.priority !== 'immediate' && lastTaskCompletedAt > 0) {
+      if (nextTask.priority !== 'immediate' && lastTaskCompletedAt !== undefined) {
         const elapsed = runtime.monotonic.now() - lastTaskCompletedAt;
         if (elapsed < idleDelay) {
           await waitForWake(idleDelay - elapsed);
