@@ -2617,6 +2617,22 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * flight the same way it already aborts bureau-owned `ActiveRun`s.
    * Untracked on terminal settlement so a long-lived bureau does not retain
    * one entry per historical run forever.
+   *
+   * This does NOT also untrack `runAttribution` (review finding
+   * PRRT_kwDORvupsc6gUhzr): a settled catalog run's attribution must
+   * survive its own settlement, matching `Bureau.createRun`'s session
+   * record, which likewise lives until an explicit `deleteRun` — the
+   * `eventHistory` authorization test above (`bureau-run.test.ts`) reads
+   * `runAttribution` back AFTER `await run.result()` and requires it still
+   * be there. `runAttribution.delete` for a catalog run's minted `runId`
+   * only ever runs for a run that never actually dispatched (the
+   * `AgentContractError` fallback and non-`AgentContractError` resolver
+   * failure paths below), never for one that reached the durable engine and
+   * settled. Catalog runs have no `deleteRun` equivalent to bound this the
+   * way a bureau session's attribution is bounded — a real gap, tracked as
+   * a follow-up rather than fixed here, since closing it means giving
+   * catalog runs their own deletion surface, which is its own design
+   * problem outside AB-241's attribution-forwarding scope.
    */
   function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
     catalogRuns.add(handle);
@@ -2671,7 +2687,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // AB-241 — recorded BEFORE any async work, mirroring
       // `createRunFromRequest`'s own `runAttribution.set` (it writes before
       // `store.register` so it's in place before any observer can see this
-      // run). Cleaned up in `trackCatalogRun`'s settlement `finally` below.
+      // run). Review finding: cleaned up ONLY when this minted `runId` is
+      // abandoned before it ever actually dispatches — the `AgentContractError`
+      // fallback and the non-`AgentContractError` resolver-failure catch
+      // below, both because an attribution entry keyed to a run that never
+      // existed would otherwise be a permanent phantom. A run that DOES
+      // dispatch and settle keeps its attribution indefinitely (see
+      // `trackCatalogRun`'s own doc comment) — it is not cleaned up here.
       if (runOptions?.principal !== undefined) {
         runAttribution.set(runId, { agentName: name, principal: runOptions.principal });
       }
@@ -2796,6 +2818,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // assignable from `AnyRunnableAgent`'s `RunnableAgent<any, true>` half.
           definitionRevision: readGenerationProfile(agent as RunnableAgent).revision,
           input,
+          // AB-241 review finding: without this, a durable catalog run that
+          // crosses a process restart lost its attribution entirely — the
+          // resumed resolver's rebuilt `AgentRunContext` carried no
+          // `principal`, and `runAttribution` (in-memory only) started
+          // empty on the new process.
+          ...(runOptions?.principal !== undefined ? { principal: runOptions.principal } : {}),
         });
         const activeRun = createActiveRun(
           resolvedOptions,
@@ -3944,6 +3972,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // session-ownership classification below, which would otherwise treat
     // it as an orphaned run and cancel it.
     if (await runtime.isCatalogRecoveredRun(info.workflowId)) {
+      // AB-241 review finding: reseed `runAttribution` from the persisted
+      // recovery record — the in-memory map a live dispatch populates is
+      // empty on a freshly booted process, so without this a recovered
+      // catalog run's principal (and `eventHistory`'s principal gate,
+      // which consults this map) would silently revert to unattributed.
+      // Not cleaned up on settlement, matching a live dispatch's own
+      // attribution lifetime (see `trackCatalogRun`'s doc comment) — a
+      // settled run's attribution must survive so `eventHistory` can still
+      // read it back afterward.
+      const attribution = await runtime.getCatalogRunAttribution(info.workflowId);
+      if (attribution) {
+        runAttribution.set(info.workflowId, attribution);
+      }
       void monitorRecoveredCatalogRun(info.handle, info.input.agentName, diagnose);
       return;
     }

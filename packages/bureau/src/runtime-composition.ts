@@ -706,6 +706,16 @@ export interface CatalogRunRecoveryRecord {
   readonly agentName: string;
   readonly definitionRevision: number;
   readonly input: AgentInput;
+  /**
+   * AB-241 review finding: the attributing principal `bureau.run(name, input,
+   * { principal })` recorded in the live, pre-crash `runAttribution` map —
+   * persisted here too so a durable catalog run that crosses a process
+   * restart keeps its attribution. Without this, a resumed run's rebuilt
+   * `AgentRunContext` carried no `principal` at all, so `eventHistory`'s
+   * principal gate would fail closed for a run recovery re-resolves.
+   * Absent when the original dispatch supplied no principal.
+   */
+  readonly principal?: string;
 }
 
 // Exported for tests only — lets `runtime-composition.test.ts` construct the
@@ -731,6 +741,8 @@ function isCatalogRunRecoveryRecord(value: unknown): value is CatalogRunRecovery
   const agentName = value['agentName'];
   if (typeof agentName !== 'string' || agentName.length === 0) return false;
   if (typeof value['definitionRevision'] !== 'number') return false;
+  const principal = value['principal'];
+  if (principal !== undefined && typeof principal !== 'string') return false;
   return isCatalogAgentInput(value['input']);
 }
 
@@ -1543,6 +1555,17 @@ export interface RuntimeComposition {
    * a headless monitor instead of the session-ownership classification.
    */
   isCatalogRecoveredRun(runId: string): Promise<boolean>;
+  /**
+   * AB-241 review finding: the recovered catalog run's own attribution
+   * (agent name and principal, when one was supplied at the original
+   * dispatch) — used by `createBureau`'s `onRecoveredWorkflow` to reseed its
+   * in-memory `runAttribution` map for a catalog run recovered after a
+   * restart, the same way a fresh dispatch populates it. `undefined` when
+   * `runId` has no persisted or readable catalog-run recovery record.
+   */
+  getCatalogRunAttribution(
+    runId: string,
+  ): Promise<{ agentName: string; principal?: string } | undefined>;
   ready: boolean;
   provider: RedactedProviderConfiguration | undefined;
   providers: RedactedProviderRouteConfiguration[];
@@ -2439,6 +2462,27 @@ export async function createRuntimeComposition(
   }
 
   /**
+   * AB-241 review finding: `create-bureau.ts`'s `onRecoveredWorkflow` calls
+   * this to reseed `runAttribution` for a recovered catalog run — see this
+   * function's own doc comment on the `RuntimeComposition` interface.
+   * Unlike `isCatalogRecoveredRun` (which treats `'read-error'` as still
+   * catalog territory for classification purposes), a corrupt record has no
+   * decoded `agentName` or `principal` to offer here, so `'read-error'`
+   * resolves to `undefined` the same as `'missing'`.
+   */
+  async function getCatalogRunAttribution(
+    runId: string,
+  ): Promise<{ agentName: string; principal?: string } | undefined> {
+    const load = await loadCatalogRunRecoveryRecord(runId);
+    if (load.status === 'missing') return undefined;
+    if (load.status === 'read-error') return undefined;
+    return {
+      agentName: load.record.agentName,
+      ...(load.record.principal !== undefined ? { principal: load.record.principal } : {}),
+    };
+  }
+
+  /**
    * AB-240: `resolveRunServices`'s catalog branch — resolves a recovered
    * catalog-dispatched run's deps through the CATALOG AGENT's own
    * `OPERATIVE_RESOLVE_RUN_OPTIONS` (via `catalogAgentRunOptionsResolver`,
@@ -2459,6 +2503,11 @@ export async function createRuntimeComposition(
     }
     const resolution = await catalogAgentRunOptionsResolver(record.agentName, record.input, {
       agentName: record.agentName,
+      // AB-241 review finding: without this, a recovered catalog agent's
+      // re-invoked `OPERATIVE_RESOLVE_RUN_OPTIONS` rebuilt `RunOptions` with
+      // no `principal` at all, so a resumed run silently lost attribution
+      // across a restart.
+      ...(record.principal !== undefined ? { principal: record.principal } : {}),
     });
     if (resolution.status === 'missing-agent') {
       return {
@@ -3033,6 +3082,7 @@ export async function createRuntimeComposition(
     },
     persistCatalogRunRecoveryRecord,
     isCatalogRecoveredRun,
+    getCatalogRunAttribution,
     ready:
       options.generate !== undefined ||
       options.provider !== undefined ||

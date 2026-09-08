@@ -426,6 +426,13 @@ export function createDeferredAgentRun<O, H extends boolean>(
       revision: syntheticTerminal ? 1 : 0,
       status: syntheticTerminal ? 'terminal' : 'created',
       lastTransitionAt: now,
+      // AB-241 review finding: `context.principal` is already resolved by
+      // the time this wrapper is constructed (both `createLazyAgent`'s
+      // module-load case and bureau's own async per-run setup pass it
+      // through unchanged), so a caller's immediate `snapshot()` or first
+      // `subscribeSnapshot()` delivery — before `underlying` resolves —
+      // reports the same owner the eventually-settled run will.
+      ...(context?.principal !== undefined ? { owner: context.principal } : {}),
       projection: 'redacted',
       ownership: 'independent',
       detached: false,

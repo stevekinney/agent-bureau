@@ -649,7 +649,18 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       input: string | { conversation: ConversationHistory },
       context?: AgentRunContext,
     ): AgentRun<unknown, boolean> {
-      const activeRun = createActiveRun(buildRunOptions(input, context));
+      // AB-241 review finding: `createActiveRun` derives `LivenessSnapshot.owner`
+      // exclusively from its third `dependencies.owner` argument, not from
+      // `RunOptions.principal` — passing `principal` only into `RunOptions` (via
+      // `buildRunOptions` above) left every direct-dispatch run's settled
+      // snapshot reporting `owner: undefined` regardless of the supplied
+      // principal, contradicting the promised branch-independent attribution.
+      const runOptions = buildRunOptions(input, context);
+      const activeRun = createActiveRun(
+        runOptions,
+        undefined,
+        runOptions.principal !== undefined ? { owner: runOptions.principal } : undefined,
+      );
       return createAgentRun<unknown, boolean>(activeRun, {
         hasOutput: output !== undefined,
         // AB-50 — opt-in: only present when the caller supplied one.
