@@ -14,6 +14,16 @@
  * neither see nor revoke a grant issued to a different principal, mirroring
  * the review routes' `resolvePrincipal`-based attribution.
  *
+ * `policyRevision` is likewise never accepted from the request body (the
+ * schema below has no such field): `Toolbox.issueGrant` defaults it to the
+ * toolbox's own current revision when omitted, and AB-46's decision record
+ * describes `policyRevision` purely as an internal "reuses armorer's
+ * existing policyRevision" field, not a caller-supplied override. Accepting
+ * a client value here would let an untrusted caller pre-sign a grant for a
+ * predictable FUTURE policy revision — dormant until that revision deploys,
+ * then valid — defeating a policy bump's intended invalidation of
+ * previously issued authority (review finding, this pull request).
+ *
  * Status codes follow the existing `POST /schedules` / `DELETE
  * /schedules/:id` convention this gateway already establishes
  * (`schedules.ts`): `201` for issuance, `200` for listing, `204` for
@@ -36,9 +46,15 @@ const issueGrantBodySchema = z.object({
   argumentConstraints: z.record(z.string(), z.unknown()).optional(),
   scope: z.enum(['run', 'session', 'principal']),
   expiresAt: z.number(),
-  maxUses: z.number(),
+  // A fractional or non-positive maxUses would break usage-counting
+  // semantics downstream: `Toolbox.issueGrant` initializes
+  // `usesRemaining` to `maxUses` verbatim and matching only requires
+  // `usesRemaining > 0` after decrementing by exactly 1 per use, so e.g.
+  // `maxUses: 1.5` grants two uses instead of one, and `maxUses: 0` (or
+  // negative) silently mints a permanently unusable grant rather than
+  // rejecting the request (review finding, this pull request).
+  maxUses: z.number().int().positive(),
   delegationBehavior: z.enum(['inherits-to-children', 'does-not-propagate']),
-  policyRevision: z.string().min(1).optional(),
 });
 
 export function createGrantsRoutes(bureau: Bureau) {

@@ -108,6 +108,50 @@ describe('grants routes', () => {
     expect(grant.principalId).toBe('static-token');
   });
 
+  it("POST /api/v1/grants ignores a client-supplied policyRevision, always signing against the toolbox's current revision", async () => {
+    // Regression test (review finding, this pull request): `issueGrantBodySchema`
+    // has no `policyRevision` field at all, so a client cannot pre-sign a
+    // grant for a predictable future policy revision that is dormant today
+    // but becomes valid once that revision deploys — the same class of
+    // trust-boundary bug as accepting a client-supplied `principalId` above.
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-policy-revision', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      // `policyRevision` is not part of `issueGrantBodySchema`; a request
+      // body carrying one exercises the schema's `.strict()`-free but
+      // additive-only shape — the field is simply dropped, never forwarded.
+      body: JSON.stringify(validGrantBody({ policyRevision: 'policy:99-from-the-future' })),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as { policyRevision: string };
+    expect(grant.policyRevision).toBe('policy:1');
+    expect(grant.policyRevision).not.toBe('policy:99-from-the-future');
+  });
+
+  it('POST /api/v1/grants returns 400 for a non-positive-integer maxUses', async () => {
+    // Regression test (review finding, this pull request): a fractional or
+    // non-positive `maxUses` breaks usage-counting semantics downstream
+    // (`Toolbox.issueGrant` initializes `usesRemaining` to `maxUses`
+    // verbatim; matching only requires `usesRemaining > 0` after
+    // decrementing by exactly 1 per use).
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-max-uses', []),
+    });
+
+    for (const maxUses of [1.5, 0, -1]) {
+      const response = await requestJSON(gateway, '/api/v1/grants', {
+        method: 'POST',
+        body: JSON.stringify(validGrantBody({ maxUses })),
+      });
+      expect(response.status).toBe(400);
+    }
+  });
+
   it('POST /api/v1/grants returns 400 for a body missing required fields', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),
@@ -284,10 +328,14 @@ describe('grants routes', () => {
 // `scheduleWakeup` tools onto a run's toolbox) rebuilds a fresh toolbox via
 // `createToolbox(configurations, { context })`, forwarding only `context` —
 // see `combine-toolboxes.ts`. This test drives a real durable run
-// (`humanInput: true`) that also carries a `needs_approval` tool and a
-// matching grant, and records what actually happens against the gateway
-// route surface this issue owns, per the coordinator's instruction to
-// report rather than widen scope.
+// (`humanInput: true`) that also carries a `needs_approval` tool, and
+// records what actually happens against the gateway route surface this
+// issue owns, per the coordinator's instruction to report rather than
+// widen scope. It deliberately issues NO grant at all (a review finding on
+// this pull request: an earlier version of this test issued a matching
+// grant, which would silently stop detecting the `policy`-dropping
+// regression — and start passing for the WRONG reason — the moment AB-362
+// restores grant-matching without also restoring the policy hook itself).
 //
 // FINDING (reported on AB-347, not fixed here — this is `combineToolboxes`'/
 // `wireDurableOptInTools`'s own gap in `packages/armorer`/`packages/bureau`,
@@ -331,13 +379,9 @@ describe('grants routes — durable opt-in tools (AB-346 follow-up, gap tracked 
     const gateway = await createTestGateway(bureau, { authToken: 'durable-grant-token' });
     const authorization = { authorization: 'Bearer durable-grant-token' };
 
-    const issueResponse = await requestJSON(gateway, '/api/v1/grants', {
-      method: 'POST',
-      headers: authorization,
-      body: JSON.stringify(validGrantBody()),
-    });
-    expect(issueResponse.status).toBe(201);
-
+    // No grant is issued here — see the module comment above the
+    // `describe` block for why proving the tool still executes with NO
+    // grant at all is the stronger, regression-resistant assertion.
     const createResponse = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
       headers: authorization,
@@ -352,10 +396,9 @@ describe('grants routes — durable opt-in tools (AB-346 follow-up, gap tracked 
     );
 
     // See the FINDING above the `describe` block: the tool executes
-    // immediately (no review is ever created), but NOT because the issued
-    // grant matched — `combineToolboxes` drops the toolbox's `policy`
-    // (the `needs_approval` hook) entirely for this run, independent of
-    // grants.
+    // immediately (no review is ever created) with NO grant issued —
+    // `combineToolboxes` drops the toolbox's `policy` (the
+    // `needs_approval` hook) entirely for this run, independent of grants.
     expect(charges).toEqual([4200]);
     expect(gateway.bureau.listPendingReviews()).toHaveLength(0);
   });
