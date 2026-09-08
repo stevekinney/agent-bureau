@@ -19,22 +19,10 @@ import type { RunEventRecord } from 'bureau';
 import { RUN_DURABLE_EVENT_TYPES } from 'bureau';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
+import { DEFAULT_HEARTBEAT_INTERVAL_MS } from './heartbeat';
 import type { ServerFrame } from './types';
 
 export const ALL_RUNS_SUBSCRIPTION = '*';
-
-/**
- * Default heartbeat interval in milliseconds.
- *
- * Must be shorter than the reverse-proxy and server idle timeout so the
- * connection is never silently killed during long silences (e.g. a parked
- * human-in-the-loop workflow or a slow tool call).
- *
- * Bun.serve defaults `idleTimeout` to 10 s; common reverse proxies (nginx,
- * AWS ALB) default to 60 s. We pick 8 s — safely under both — and expose
- * `heartbeatIntervalMs` so callers can tune it.
- */
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 8_000;
 
 /**
  * Per-run replay buffer cap (AB-15). Bounded so a long-running or
@@ -173,11 +161,16 @@ function hasNonKeepaliveEvidence(evidence: readonly LivenessEvidenceEntry[]): bo
 }
 
 /**
- * AB-219's AC2: the existing SSE `: heartbeat` comment write and WebSocket
- * pong are recorded as `evidenceSource: 'transport-keepalive'`, but that
- * source alone never resolves `reachability`/`progress` off `'unknown'` —
- * only `'host-reachability'` or another application-level signal may (none
- * exists yet for gateway connections; a future obs-* slice adds one).
+ * AB-219's AC2: the existing SSE `: heartbeat` comment write is recorded as
+ * `evidenceSource: 'transport-keepalive'`, but that source alone never
+ * resolves `reachability`/`progress` off `'unknown'` — only
+ * `'host-reachability'` or another application-level signal may. AB-299
+ * adds exactly that for a WebSocket connection with an attached UI client:
+ * the client's application-level `ping` (`websocket/handler.ts`) is
+ * recorded as `'host-reachability'`, not `'transport-keepalive'`, so a
+ * healthy connection resolves to `'reachable'` rather than staying clamped
+ * to `'unknown'` forever. An SSE connection (no application-level ping
+ * today) still clamps to `'unknown'`.
  * `createStallWatchdog`'s generic cadence-gated `assess()` computes
  * `reachability`/`progress` from `missedPulseCount` alone, regardless of
  * which evidence source produced the pulses, so this clamp is applied here
@@ -271,6 +264,15 @@ type Subscriber = {
    * revision advance from a fresh pulse has to happen here.
    */
   recordKeepalive(): void;
+  /**
+   * Records `evidenceSource: 'host-reachability'` pulse evidence AND
+   * advances this connection's `LivenessSnapshot.revision` (AB-299) —
+   * same rationale as {@link recordKeepalive}. Unlike a transport
+   * keepalive, this evidence source is never clamped
+   * (`clampGatewayConnectionAssessment`): it is real peer evidence, not a
+   * host-generated pulse.
+   */
+  recordHostReachability(): void;
   snapshot(): GatewayConnectionSnapshot;
   /**
    * Run ids for which this connection's replay is currently being served by
@@ -635,6 +637,10 @@ export class LiveFrameBroker {
         watchdog.recordPulse('transport-keepalive', 0);
         bumpRevision();
       },
+      recordHostReachability: () => {
+        watchdog.recordPulse('host-reachability', 0);
+        bumpRevision();
+      },
       snapshot: () => buildConnectionSnapshot(connectionId, startedAt, watchdog, clock, revision),
       durableFallbackRunIds: new Set(),
       durableSubscriptions: new Map(),
@@ -650,13 +656,30 @@ export class LiveFrameBroker {
   /**
    * Records `evidenceSource: 'transport-keepalive'` pulse evidence for
    * `key`'s connection watchdog (AB-219, AB-88's AC2/AC5). Used by the
-   * existing SSE `: heartbeat` comment write and WebSocket pong response —
-   * neither of which changes behavior on the wire; this only feeds the
-   * application-level watchdog the fact that the transport-level keepalive
-   * fired. A no-op if `key` is not (or is no longer) a tracked subscriber.
+   * existing SSE `: heartbeat` comment write — which doesn't change
+   * behavior on the wire; this only feeds the application-level watchdog
+   * the fact that the transport-level keepalive fired. (The WebSocket
+   * `ping`/pong path records `'host-reachability'` instead — see
+   * {@link recordHostReachability} — since AB-299 made that an
+   * application-level signal from the UI client, not a bare transport
+   * keepalive.) A no-op if `key` is not (or is no longer) a tracked
+   * subscriber.
    */
   recordTransportKeepalive(key: object): void {
     this.subscribers.get(key)?.recordKeepalive();
+  }
+
+  /**
+   * Records `evidenceSource: 'host-reachability'` pulse evidence for
+   * `key`'s connection watchdog (AB-299, AB-88's AC2/AC5). Used by the
+   * WebSocket handler when the UI client's application-level `ping`
+   * arrives — real peer evidence, unlike {@link recordTransportKeepalive}'s
+   * host-generated transport keepalive, so it is never clamped by
+   * {@link clampGatewayConnectionAssessment}. A no-op if `key` is not (or
+   * is no longer) a tracked subscriber.
+   */
+  recordHostReachability(key: object): void {
+    this.subscribers.get(key)?.recordHostReachability();
   }
 
   /**
