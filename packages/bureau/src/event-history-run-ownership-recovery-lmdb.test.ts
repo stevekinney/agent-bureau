@@ -94,7 +94,14 @@ describe('bureau.eventHistory run ownership survives a process restart over LMDB
       });
 
       try {
-        await pollUntilWithRealDelay(() => bureauB.getRun(run.id)?.status !== 'running');
+        // `undefined` (not yet registered by `reattachRecoveredRun`) is NOT
+        // a terminal status — keep polling for it exactly like `'running'`,
+        // rather than a bare `!== 'running'` check that would read
+        // "not yet recovered" as "already done" (copilot review, PR #564).
+        await pollUntilWithRealDelay(() => {
+          const status = bureauB.getRun(run.id)?.status;
+          return status !== undefined && status !== 'running';
+        });
 
         const asOwner = await bureauB.eventHistory(
           { kind: 'run', id: run.id },
