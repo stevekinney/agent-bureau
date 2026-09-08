@@ -1556,16 +1556,27 @@ export interface RuntimeComposition {
    */
   isCatalogRecoveredRun(runId: string): Promise<boolean>;
   /**
-   * AB-241 review finding: the recovered catalog run's own attribution
-   * (agent name and principal, when one was supplied at the original
-   * dispatch) — used by `createBureau`'s `onRecoveredWorkflow` to reseed its
-   * in-memory `runAttribution` map for a catalog run recovered after a
-   * restart, the same way a fresh dispatch populates it. `undefined` when
-   * `runId` has no persisted or readable catalog-run recovery record.
+   * AB-241 review finding: the combined catalog-run classification AND
+   * attribution read `createBureau`'s `onRecoveredWorkflow` uses, backed by
+   * exactly ONE `loadCatalogRunRecoveryRecord` call — deliberately NOT two
+   * separate calls (one to `isCatalogRecoveredRun`, one to a
+   * would-be `getCatalogRunAttribution`), because a transient storage read
+   * failure on a SECOND, independent read could then classify a workflow as
+   * catalog territory (the first read succeeded) while losing its
+   * attribution (the second read hit the transient failure) — silently
+   * demoting an attributed run to unattributed for the rest of this
+   * process's lifetime, since `eventHistory`'s principal gate fails closed
+   * on an absent `runAttribution` entry. `isCatalogRun` is `true` for
+   * `'read-error'` as well as `'found'` (matching `isCatalogRecoveredRun`'s
+   * own read-error handling), so a corrupt (not absent) record still routes
+   * to the headless catalog monitor rather than falling through to the
+   * session-ownership classification; `attribution` is populated only for
+   * `'found'`, since a corrupt record has nothing decoded to offer.
    */
-  getCatalogRunAttribution(
-    runId: string,
-  ): Promise<{ agentName: string; principal?: string } | undefined>;
+  classifyCatalogRecoveredRun(runId: string): Promise<{
+    isCatalogRun: boolean;
+    attribution?: { agentName: string; principal?: string };
+  }>;
   ready: boolean;
   provider: RedactedProviderConfiguration | undefined;
   providers: RedactedProviderRouteConfiguration[];
@@ -2463,22 +2474,24 @@ export async function createRuntimeComposition(
 
   /**
    * AB-241 review finding: `create-bureau.ts`'s `onRecoveredWorkflow` calls
-   * this to reseed `runAttribution` for a recovered catalog run — see this
-   * function's own doc comment on the `RuntimeComposition` interface.
-   * Unlike `isCatalogRecoveredRun` (which treats `'read-error'` as still
-   * catalog territory for classification purposes), a corrupt record has no
-   * decoded `agentName` or `principal` to offer here, so `'read-error'`
-   * resolves to `undefined` the same as `'missing'`.
+   * this ONCE to both classify a recovered workflow as catalog territory
+   * and, in the same read, reseed `runAttribution` — see this function's
+   * own doc comment on the `RuntimeComposition` interface for why a single
+   * combined read replaces what would otherwise be two independent ones.
    */
-  async function getCatalogRunAttribution(
-    runId: string,
-  ): Promise<{ agentName: string; principal?: string } | undefined> {
+  async function classifyCatalogRecoveredRun(runId: string): Promise<{
+    isCatalogRun: boolean;
+    attribution?: { agentName: string; principal?: string };
+  }> {
     const load = await loadCatalogRunRecoveryRecord(runId);
-    if (load.status === 'missing') return undefined;
-    if (load.status === 'read-error') return undefined;
+    if (load.status === 'missing') return { isCatalogRun: false };
+    if (load.status === 'read-error') return { isCatalogRun: true };
     return {
-      agentName: load.record.agentName,
-      ...(load.record.principal !== undefined ? { principal: load.record.principal } : {}),
+      isCatalogRun: true,
+      attribution: {
+        agentName: load.record.agentName,
+        ...(load.record.principal !== undefined ? { principal: load.record.principal } : {}),
+      },
     };
   }
 
@@ -3082,7 +3095,7 @@ export async function createRuntimeComposition(
     },
     persistCatalogRunRecoveryRecord,
     isCatalogRecoveredRun,
-    getCatalogRunAttribution,
+    classifyCatalogRecoveredRun,
     ready:
       options.generate !== undefined ||
       options.provider !== undefined ||

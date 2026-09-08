@@ -3983,19 +3983,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // the same headless monitor a native scheduled fire gets instead of the
     // session-ownership classification below, which would otherwise treat
     // it as an orphaned run and cancel it.
-    if (await runtime.isCatalogRecoveredRun(info.workflowId)) {
-      // AB-241 review finding: reseed `runAttribution` from the persisted
-      // recovery record — the in-memory map a live dispatch populates is
-      // empty on a freshly booted process, so without this a recovered
-      // catalog run's principal (and `eventHistory`'s principal gate,
-      // which consults this map) would silently revert to unattributed.
-      // Not cleaned up on settlement, matching a live dispatch's own
-      // attribution lifetime (see `trackCatalogRun`'s doc comment) — a
-      // settled run's attribution must survive so `eventHistory` can still
-      // read it back afterward.
-      const attribution = await runtime.getCatalogRunAttribution(info.workflowId);
-      if (attribution) {
-        runAttribution.set(info.workflowId, attribution);
+    // AB-241 review finding: ONE combined classify-and-attribute read
+    // (`classifyCatalogRecoveredRun`), not a separate `isCatalogRecoveredRun`
+    // check followed by an independent attribution lookup — two reads could
+    // let a transient storage failure on the SECOND one silently demote an
+    // attributed run to unattributed even though the FIRST read (deciding
+    // this is catalog territory at all) succeeded. See that function's own
+    // doc comment on the `RuntimeComposition` interface.
+    const catalogRecovery = await runtime.classifyCatalogRecoveredRun(info.workflowId);
+    if (catalogRecovery.isCatalogRun) {
+      // Reseed `runAttribution` from the persisted recovery record — the
+      // in-memory map a live dispatch populates is empty on a freshly
+      // booted process, so without this a recovered catalog run's principal
+      // (and `eventHistory`'s principal gate, which consults this map)
+      // would silently revert to unattributed. Not cleaned up on
+      // settlement, matching a live dispatch's own attribution lifetime
+      // (see `trackCatalogRun`'s doc comment) — a settled run's attribution
+      // must survive so `eventHistory` can still read it back afterward.
+      if (catalogRecovery.attribution) {
+        runAttribution.set(info.workflowId, catalogRecovery.attribution);
       }
       void monitorRecoveredCatalogRun(info.handle, info.input.agentName, diagnose);
       return;

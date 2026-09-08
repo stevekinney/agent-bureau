@@ -506,8 +506,23 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     // below, at agent construction, and that SAME instance handed to every
     // run this agent starts.
     runtime: providedRuntime,
+    // Review findings (AB-241): `principal` is inherently per-call
+    // attribution (AB-21's `AgentRunContext.principal`), never a
+    // construction-time concept — `CreateAgentOptionsBase` declares no such
+    // field. But TypeScript's excess-property check only fires against an
+    // object LITERAL, so a caller passing a widened or plain-JS options
+    // object that happens to carry a `principal` key would otherwise have
+    // it survive into `rest` undetected. Destructured out and discarded
+    // here (the cast is narrow and exists ONLY to name and strip this one
+    // unsupported key; `principal` itself is never read from `options`)
+    // rather than merely reordering the later spread, since reordering
+    // alone still leaked a construction-time value through on a run whose
+    // own `context.principal` was omitted (the later conditional spread is
+    // a no-op when `context?.principal` is `undefined`, so nothing
+    // overwrites whatever `rest.principal` would otherwise have carried).
+    principal: _discardedConstructionTimePrincipal,
     ...rest
-  } = options;
+  } = options as CreateAgentOptions & { principal?: unknown };
 
   const resolvedName = configuredName ?? '(agent)';
 
