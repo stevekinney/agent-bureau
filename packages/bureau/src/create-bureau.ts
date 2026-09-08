@@ -6403,6 +6403,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         const runId = session.metadata['lastRunId'];
         const status = session.metadata['lastRunStatus'];
         const metadata = session.metadata;
+        // AB-359 (chatgpt-codex-connector review, PR #564, P1) — rehydrate
+        // `runAttribution` for EVERY run this session ever dispatched with a
+        // principal, not only the one `reattachRecoveredRun` happens to
+        // reattach. `recoverAll()` only surfaces still-in-flight workflows,
+        // so a run that already reached a terminal state before the crash
+        // never reaches `reattachRecoveredRun` at all — without this, its
+        // real owner would read `not-found` from `eventHistory` after a
+        // restart despite `lastRunOwningPrincipals` having the entry,
+        // because `resolveEventHistory`'s AB-313 check consults only the
+        // in-memory map. This loop already walks every persisted session
+        // once at boot (the pending-approval/terminal-review restore
+        // above), so this rides the same pass rather than adding a second
+        // full session scan.
+        const owners = metadata['lastRunOwningPrincipals'];
+        if (isPlainAuthorityRecord(owners)) {
+          for (const [ownedRunId, ownerPrincipal] of Object.entries(owners)) {
+            if (typeof ownerPrincipal === 'string') {
+              runAttribution.set(ownedRunId, {
+                ...runAttribution.get(ownedRunId),
+                principal: ownerPrincipal,
+              });
+            }
+          }
+        }
         const restoredRunIds = persistedApprovalRunIds(metadata);
         if (typeof runId === 'string' && status === 'running') restoredRunIds.delete(runId);
         for (const restoredRunId of restoredRunIds) {

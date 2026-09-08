@@ -12375,6 +12375,69 @@ describe('bureau.eventHistory run ownership survives a process restart (AB-359)'
     }
   });
 
+  it('a run already TERMINAL before the crash — never reattached, since recoverAll() only surfaces in-flight workflows — is still readable by its owner after restart (chatgpt-codex-connector review, PR #564, P1)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-owner-recovery-terminal-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureauA = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      const run = await bureauA.createRun({
+        message: 'Complete me, THEN restart',
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureauA, run.id);
+      // A clean shutdown, not a crash — the run is genuinely, fully
+      // terminal in the durable engine before bureau B ever boots, so
+      // `recoverAll()` has nothing in-flight to surface for this run and
+      // `reattachRecoveredRun` never runs for it.
+      await bureauA.dispose();
+
+      const bureauB = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      try {
+        // Never reattached: getRun confirms bureau B has no live handle for
+        // it at all, proving this read does not ride reattachRecoveredRun.
+        expect(bureauB.getRun(run.id)).toBeUndefined();
+
+        const asOwner = await bureauB.eventHistory(
+          { kind: 'run', id: run.id },
+          { principal: 'alice' },
+        );
+        if ('outcome' in asOwner) {
+          throw new Error(
+            `expected a page for the owning principal, got ${JSON.stringify(asOwner)}`,
+          );
+        }
+        expect(asOwner.events.map((event) => event.kind)).toContain('run.completed');
+
+        const asStranger = await bureauB.eventHistory(
+          { kind: 'run', id: run.id },
+          { principal: 'mallory' },
+        );
+        expect(asStranger).toEqual({ outcome: 'not-found' });
+      } finally {
+        await bureauB.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('a run dispatched WITHOUT a principal stays denied to any principal after recovery, and readable to a trusted caller that omits one', async () => {
     const databasePath = join(
       tmpdir(),
