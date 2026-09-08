@@ -100,7 +100,7 @@ describe('proposals', () => {
       const result = await listProposals(storage, { type: 'soul' });
 
       expect(result).toHaveLength(1);
-      expect(result[0]!.id).toBe('soul-1');
+      expect(result[0].id).toBe('soul-1');
     });
 
     it('filters by agentId', async () => {
@@ -113,7 +113,7 @@ describe('proposals', () => {
       const result = await listProposals(storage, { agentId: 'agent-a' });
 
       expect(result).toHaveLength(1);
-      expect(result[0]!.id).toBe('p1');
+      expect(result[0].id).toBe('p1');
     });
 
     it('filters by status', async () => {
@@ -126,7 +126,7 @@ describe('proposals', () => {
       const result = await listProposals(storage, { status: 'rejected' });
 
       expect(result).toHaveLength(1);
-      expect(result[0]!.id).toBe('p3');
+      expect(result[0].id).toBe('p3');
     });
 
     it('skips malformed proposals while listing', async () => {
@@ -158,7 +158,7 @@ describe('proposals', () => {
 
       const saveCalls = skillProvider.calls.filter((c) => c.method === 'saveSkill');
       expect(saveCalls).toHaveLength(1);
-      expect(saveCalls[0]!.args[0]).toBe('test-skill');
+      expect(saveCalls[0].args[0]).toBe('test-skill');
     });
 
     it('sets the proposal status to accepted', async () => {
@@ -195,8 +195,8 @@ describe('proposals', () => {
 
       const soulCalls = identityProvider.calls.filter((c) => c.method === 'savePendingSoulUpdate');
       expect(soulCalls).toHaveLength(1);
-      expect(soulCalls[0]!.args[0]).toEqual(soulItems);
-      expect(soulCalls[0]!.args[1]).toBe('agent-x');
+      expect(soulCalls[0].args[0]).toEqual(soulItems);
+      expect(soulCalls[0].args[1]).toBe('agent-x');
     });
 
     it('accepts a persona proposal and calls savePersona', async () => {
@@ -220,8 +220,8 @@ describe('proposals', () => {
 
       const personaCalls = identityProvider.calls.filter((c) => c.method === 'savePersona');
       expect(personaCalls).toHaveLength(1);
-      expect(personaCalls[0]!.args[0]).toBe('agent-y');
-      expect(personaCalls[0]!.args[1]).toEqual({ text: 'You are a friendly assistant.' });
+      expect(personaCalls[0].args[0]).toBe('agent-y');
+      expect(personaCalls[0].args[1]).toEqual({ text: 'You are a friendly assistant.' });
     });
 
     it('returns an error for a non-existent proposal', async () => {

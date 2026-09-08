@@ -422,7 +422,7 @@ describe('createPublicConversationProjection', () => {
     expect(projection.ids).toHaveLength(1);
     expect(projection.metadata).toEqual({});
     expect(projection.title).toBe('Account for [EMAIL_REDACTED]');
-    expect(projection.messages[projection.ids[0]!]!.content).toEqual([
+    expect(projection.messages[projection.ids[0]].content).toEqual([
       { type: 'text', text: 'Email [EMAIL_REDACTED] or call [PHONE_REDACTED].' },
     ]);
     for (const forbidden of [
@@ -442,7 +442,7 @@ describe('createPublicConversationProjection', () => {
       expect(serialized).not.toContain(forbidden);
     }
     expect(Object.isFrozen(projection)).toBe(true);
-    expect(Object.isFrozen(projection.messages[projection.ids[0]!]!)).toBe(true);
+    expect(Object.isFrozen(projection.messages[projection.ids[0]])).toBe(true);
   });
 
   it('applies domain redaction in addition to mandatory default redaction', () => {
@@ -459,7 +459,7 @@ describe('createPublicConversationProjection', () => {
       redactText: (text) => text.replace('123-456', '[ACCOUNT_REDACTED]'),
     });
 
-    expect(projection.messages[projection.ids[0]!]!.content).toBe(
+    expect(projection.messages[projection.ids[0]].content).toBe(
       'Email [EMAIL_REDACTED] about account [ACCOUNT_REDACTED].',
     );
   });

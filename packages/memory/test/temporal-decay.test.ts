@@ -87,8 +87,8 @@ describe('applyTemporalDecay', () => {
       referenceTime: now,
     });
 
-    expect(decayed[0]!.score).toBeCloseTo(1.0, 10); // evergreen: untouched
-    expect(decayed[1]!.score).toBeCloseTo(0.5, 10); // not evergreen: decayed
+    expect(decayed[0].score).toBeCloseTo(1.0, 10); // evergreen: untouched
+    expect(decayed[1].score).toBeCloseTo(0.5, 10); // not evergreen: decayed
   });
 
   it('does NOT exempt evergreen entries when evergreenExempt is false', () => {
@@ -101,7 +101,7 @@ describe('applyTemporalDecay', () => {
       evergreenExempt: false,
     });
 
-    expect(decayed[0]!.score).toBeCloseTo(0.5, 10);
+    expect(decayed[0].score).toBeCloseTo(0.5, 10);
   });
 
   it('returns an empty array for empty input', () => {

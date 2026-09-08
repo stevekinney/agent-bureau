@@ -117,7 +117,7 @@ function createStalledStreamingClient(): AnthropicStreamingClient & {
             type: 'content_block_delta',
             index: 0,
             delta: { type: 'text_delta', text: 'partial' },
-          } as AnthropicStreamEvent;
+          };
           await new Promise<never>((_resolve, reject) => {
             if (signal?.aborted) {
               reject(new DOMException('Request was aborted.', 'AbortError'));

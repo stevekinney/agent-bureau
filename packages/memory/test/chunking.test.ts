@@ -15,10 +15,10 @@ describe('chunkMarkdown', () => {
     const chunks = chunkMarkdown('Hello world');
 
     expect(chunks).toHaveLength(1);
-    expect(chunks[0]!.text).toBe('Hello world');
-    expect(chunks[0]!.startLine).toBe(0);
-    expect(chunks[0]!.endLine).toBe(0);
-    expect(chunks[0]!.index).toBe(0);
+    expect(chunks[0].text).toBe('Hello world');
+    expect(chunks[0].startLine).toBe(0);
+    expect(chunks[0].endLine).toBe(0);
+    expect(chunks[0].index).toBe(0);
   });
 
   it('splits content into multiple chunks when exceeding token limit', () => {
@@ -32,7 +32,7 @@ describe('chunkMarkdown', () => {
 
     expect(chunks.length).toBeGreaterThan(1);
     for (let i = 0; i < chunks.length; i++) {
-      expect(chunks[i]!.index).toBe(i);
+      expect(chunks[i].index).toBe(i);
     }
   });
 
@@ -44,7 +44,7 @@ describe('chunkMarkdown', () => {
     const chunks = chunkMarkdown(content);
 
     // First chunk always starts at line 0.
-    expect(chunks[0]!.startLine).toBe(0);
+    expect(chunks[0].startLine).toBe(0);
 
     // Each chunk's startLine should be <= its endLine.
     for (const chunk of chunks) {
@@ -61,8 +61,8 @@ describe('chunkMarkdown', () => {
 
     if (chunks.length >= 2) {
       // The end of chunk N should overlap with the start of chunk N+1.
-      const firstChunkLines = chunks[0]!.text.split('\n');
-      const secondChunkLines = chunks[1]!.text.split('\n');
+      const firstChunkLines = chunks[0].text.split('\n');
+      const secondChunkLines = chunks[1].text.split('\n');
 
       // At least one line from the end of chunk 0 should appear at the start of chunk 1.
       const lastLinesOfFirst = firstChunkLines.slice(-3);
@@ -103,7 +103,7 @@ describe('chunkMarkdown', () => {
     const chunks = chunkMarkdown(content);
 
     for (let i = 0; i < chunks.length; i++) {
-      expect(chunks[i]!.index).toBe(i);
+      expect(chunks[i].index).toBe(i);
     }
   });
 
@@ -116,8 +116,8 @@ describe('chunkMarkdown', () => {
     expect(chunks.length).toBeGreaterThan(1);
 
     for (let i = 1; i < chunks.length; i++) {
-      const previousLines = chunks[i - 1]!.text.split('\n');
-      const currentLines = chunks[i]!.text.split('\n');
+      const previousLines = chunks[i - 1].text.split('\n');
+      const currentLines = chunks[i].text.split('\n');
       const overlap = previousLines.filter((line) => currentLines.includes(line));
       expect(overlap).toHaveLength(0);
     }
@@ -145,9 +145,9 @@ describe('chunkMarkdown', () => {
     const chunks = chunkMarkdown(content);
 
     expect(chunks).toHaveLength(1);
-    expect(chunks[0]!.text).toBe(content);
-    expect(chunks[0]!.startLine).toBe(0);
-    expect(chunks[0]!.endLine).toBe(2);
+    expect(chunks[0].text).toBe(content);
+    expect(chunks[0].startLine).toBe(0);
+    expect(chunks[0].endLine).toBe(2);
   });
 
   it('drops whitespace-only chunks created during intermediate flushes', () => {
@@ -184,8 +184,8 @@ describe('chunkText', () => {
     // Even though both sections would fit in a single chunk by token count,
     // the boundary at line 1 forces a split.
     expect(chunks).toHaveLength(2);
-    expect(chunks[0]!.text).toBe(sectionA);
-    expect(chunks[1]!.text).toBe(sectionB);
+    expect(chunks[0].text).toBe(sectionA);
+    expect(chunks[1].text).toBe(sectionB);
   });
 
   it('tags each chunk with the nearest preceding heading label', () => {
@@ -197,8 +197,8 @@ describe('chunkText', () => {
     });
 
     expect(chunks).toHaveLength(2);
-    expect(chunks[0]!.heading).toBeUndefined();
-    expect(chunks[1]!.heading).toBe('Heading One');
+    expect(chunks[0].heading).toBeUndefined();
+    expect(chunks[1].heading).toBe('Heading One');
   });
 
   it('reindexes chunks continuously across sections', () => {
@@ -216,7 +216,7 @@ describe('chunkText', () => {
     );
 
     for (let i = 0; i < chunks.length; i++) {
-      expect(chunks[i]!.index).toBe(i);
+      expect(chunks[i].index).toBe(i);
     }
   });
 

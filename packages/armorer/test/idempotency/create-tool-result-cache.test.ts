@@ -88,7 +88,7 @@ describe('createToolResultCache', () => {
         ...result,
         status: 'completed',
       });
-      expect(await cache.getState!('undefined-result')).toMatchObject({
+      expect(await cache.getState('undefined-result')).toMatchObject({
         ...result,
         status: 'completed',
       });
@@ -205,7 +205,7 @@ describe('createToolResultCache', () => {
       });
 
       expect(await cache.get('started-key')).toBeUndefined();
-      expect(await cache.getState!('started-key')).toEqual({
+      expect(await cache.getState('started-key')).toEqual({
         status: 'started',
         toolName: 'charge-card',
         startedAt: expect.any(Number),
@@ -223,7 +223,7 @@ describe('createToolResultCache', () => {
       await cache.set('completed-key', completed);
 
       expect(
-        await cache.claimStarted!('completed-key', {
+        await cache.claimStarted('completed-key', {
           status: 'started',
           toolName: 'charge-card',
           startedAt: runtime.clock.now(),
@@ -233,13 +233,13 @@ describe('createToolResultCache', () => {
     });
 
     it('serializes concurrent claims for the same key within a cache instance', async () => {
-      const firstClaim = cache.claimStarted!('racing-key', {
+      const firstClaim = cache.claimStarted('racing-key', {
         status: 'started',
         toolName: 'charge-card',
         startedAt: runtime.clock.now(),
         ttl: 60_000,
       });
-      const secondClaim = cache.claimStarted!('racing-key', {
+      const secondClaim = cache.claimStarted('racing-key', {
         status: 'started',
         toolName: 'charge-card',
         startedAt: runtime.clock.now(),
@@ -250,7 +250,7 @@ describe('createToolResultCache', () => {
 
       expect(results.filter((result) => result.outcome === 'claimed')).toHaveLength(1);
       expect(results.filter((result) => result.outcome === 'existing')).toHaveLength(1);
-      expect(await cache.getState!('racing-key')).toEqual(
+      expect(await cache.getState('racing-key')).toEqual(
         expect.objectContaining({
           status: 'started',
           toolName: 'charge-card',
@@ -281,13 +281,15 @@ describe('createToolResultCache', () => {
         now: runtime.clock.now,
       });
 
-      const firstClaim = failingCache.claimStarted!('recover-key', {
-        status: 'started',
-        toolName: 'charge-card',
-        startedAt: runtime.clock.now(),
-        ttl: 60_000,
-      }).catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
-      const secondClaim = failingCache.claimStarted!('recover-key', {
+      const firstClaim = failingCache
+        .claimStarted('recover-key', {
+          status: 'started',
+          toolName: 'charge-card',
+          startedAt: runtime.clock.now(),
+          ttl: 60_000,
+        })
+        .catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+      const secondClaim = failingCache.claimStarted('recover-key', {
         status: 'started',
         toolName: 'charge-card',
         startedAt: runtime.clock.now(),
@@ -296,7 +298,7 @@ describe('createToolResultCache', () => {
 
       await expect(firstClaim).resolves.toBe('write failed');
       await expect(secondClaim).resolves.toEqual({ outcome: 'claimed' });
-      expect(await failingCache.getState!('recover-key')).toEqual(
+      expect(await failingCache.getState('recover-key')).toEqual(
         expect.objectContaining({
           status: 'started',
           toolName: 'charge-card',
@@ -480,21 +482,21 @@ describe('createToolResultCache', () => {
     it('deletes malformed entries on read', async () => {
       await store.set('malformed-key', JSON.stringify({ status: 'completed' }));
 
-      expect(await cache.getState!('malformed-key')).toBeUndefined();
+      expect(await cache.getState('malformed-key')).toBeUndefined();
       expect(await store.get('malformed-key')).toBeNull();
     });
 
     it('deletes non-object entries on read', async () => {
       await store.set('array-key', JSON.stringify([]));
 
-      expect(await cache.getState!('array-key')).toBeUndefined();
+      expect(await cache.getState('array-key')).toBeUndefined();
       expect(await store.get('array-key')).toBeNull();
     });
 
     it('deletes invalid JSON entries on read', async () => {
       await store.set('invalid-json-key', '{');
 
-      expect(await cache.getState!('invalid-json-key')).toBeUndefined();
+      expect(await cache.getState('invalid-json-key')).toBeUndefined();
       expect(await store.get('invalid-json-key')).toBeNull();
     });
   });
@@ -542,8 +544,8 @@ describe('createToolResultCache', () => {
       attemptId: 'attempt-1',
     };
     const [left, right] = await Promise.all([
-      first.claimStarted!('shared', execution),
-      second.claimStarted!('shared', { ...execution, attemptId: 'attempt-2' }),
+      first.claimStarted('shared', execution),
+      second.claimStarted('shared', { ...execution, attemptId: 'attempt-2' }),
     ]);
     expect([left.outcome, right.outcome].filter((outcome) => outcome === 'claimed')).toHaveLength(
       1,
@@ -561,8 +563,8 @@ describe('createToolResultCache', () => {
     };
 
     const [left, right] = await Promise.all([
-      namespaced.claimStarted!('x', { ...execution, attemptId: 'namespaced' }),
-      unnamespaced.claimStarted!('a:x', { ...execution, attemptId: 'unnamespaced' }),
+      namespaced.claimStarted('x', { ...execution, attemptId: 'namespaced' }),
+      unnamespaced.claimStarted('a:x', { ...execution, attemptId: 'unnamespaced' }),
     ]);
 
     expect([left.outcome, right.outcome].filter((outcome) => outcome === 'claimed')).toHaveLength(
@@ -572,7 +574,7 @@ describe('createToolResultCache', () => {
   });
 
   it('renews and completes only for the current fencing token', async () => {
-    await cache.claimStarted!('fenced', {
+    await cache.claimStarted('fenced', {
       status: 'started',
       toolName: 'charge',
       startedAt: runtime.clock.now(),
@@ -581,7 +583,7 @@ describe('createToolResultCache', () => {
       absoluteDeadline: runtime.clock.now() + 60_000,
     });
     expect(
-      await cache.renewStarted!(
+      await cache.renewStarted(
         'fenced',
         'stale',
         runtime.clock.now() + 30_000,
@@ -589,7 +591,7 @@ describe('createToolResultCache', () => {
       ),
     ).toBe(false);
     expect(
-      await cache.renewStarted!(
+      await cache.renewStarted(
         'fenced',
         'current',
         runtime.clock.now() + 30_000,
@@ -597,7 +599,7 @@ describe('createToolResultCache', () => {
       ),
     ).toBe(true);
     expect(
-      await cache.completeStarted!('fenced', 'stale', {
+      await cache.completeStarted('fenced', 'stale', {
         result: 'late',
         toolName: 'charge',
         executedAt: runtime.clock.now(),
@@ -605,7 +607,7 @@ describe('createToolResultCache', () => {
       }),
     ).toBe(false);
     expect(
-      await cache.completeStarted!('fenced', 'current', {
+      await cache.completeStarted('fenced', 'current', {
         result: 'ok',
         toolName: 'charge',
         executedAt: runtime.clock.now(),

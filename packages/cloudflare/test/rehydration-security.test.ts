@@ -61,7 +61,7 @@ describe('searchByVector rehydration security', () => {
     await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
 
     expect(vectorize.queryCalls).toHaveLength(1);
-    const call = vectorize.queryCalls[0]!;
+    const call = vectorize.queryCalls[0];
     expect(call.options.filter).toEqual({ tenant_id: TENANT, namespace: NAMESPACE });
     expect(call.options.returnMetadata).toBe(true);
     // The backend OVERFETCHES (topK > limit) so rehydration can drop poison/stale
@@ -138,7 +138,7 @@ describe('searchByVector rehydration security', () => {
     // The genuine match for 'legit' (version 1) still surfaces; the stale poison
     // copy does not produce a second, lower-scored 'legit'.
     expect(hits.map((h) => h.id)).toEqual(['legit']);
-    expect(hits[0]!.record.version).toBe(1);
+    expect(hits[0].record.version).toBe(1);
   });
 
   it('drops a hit whose advertised version is missing entirely', async () => {
@@ -175,8 +175,8 @@ describe('searchByVector rehydration security', () => {
     const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 10 });
     expect(hits.map((h) => h.id)).toEqual(['legit']);
     // Surfaced record is the CANONICAL current version, never the stale copy.
-    expect(hits[0]!.record.version).toBe(3);
-    expect(hits[0]!.record.content).toBe('v3');
+    expect(hits[0].record.version).toBe(3);
+    expect(hits[0].record.content).toBe('v3');
   });
 
   it('drops a deleted (tombstoned) hit', async () => {
@@ -238,7 +238,7 @@ describe('searchByVector rehydration security', () => {
     expect(hits.map((h) => h.id)).toEqual(['legit']);
     // The surfaced 'legit' is the genuine hit (score 1.0 against [1,0]), not the
     // 0.999 spoof — the spoof never claimed the slot.
-    expect(hits[0]!.score).toBeCloseTo(1, 5);
+    expect(hits[0].score).toBeCloseTo(1, 5);
   });
 
   it('prefers the current-version hit over a higher-scored stale one for the same record', async () => {
@@ -268,8 +268,8 @@ describe('searchByVector rehydration security', () => {
     const itemHits = hits.filter((h) => h.id === 'item');
     expect(itemHits).toHaveLength(1);
     // The current-version hit won the slot despite its lower score.
-    expect(itemHits[0]!.score).toBeCloseTo(0.4, 5);
-    expect(itemHits[0]!.record.version).toBe(2);
+    expect(itemHits[0].score).toBeCloseTo(0.4, 5);
+    expect(itemHits[0].record.version).toBe(2);
   });
 
   it('drops a hit absent from SQLite entirely', async () => {
@@ -344,8 +344,8 @@ describe('searchByVector rehydration security', () => {
 
     const hits = await storage.searchByVector([1, 0], SCOPE, { limit: 20 });
     expect(hits.map((h) => h.id)).toEqual(['legit']);
-    expect(hits[0]!.record.version).toBe(1);
-    expect(hits[0]!.record.content).toBe('content-legit');
+    expect(hits[0].record.version).toBe(1);
+    expect(hits[0].record.content).toBe('content-legit');
   });
 
   describe('scoped Vectorize id: the same memory id in two scopes does not collide', () => {
@@ -371,7 +371,7 @@ describe('searchByVector rehydration security', () => {
 
       const bHits = await storage.searchByVector([1, 0], scopeB, { limit: 10 });
       expect(bHits.map((h) => h.id)).toEqual(['doc']);
-      expect(bHits[0]!.record.content).toBe('B-doc');
+      expect(bHits[0].record.content).toBe('B-doc');
 
       // Deleting tenant-a's 'doc' must leave tenant-b's 'doc' fully searchable and
       // gettable — the scoped Vectorize id keeps the two index entries distinct.
@@ -380,7 +380,7 @@ describe('searchByVector rehydration security', () => {
       expect(await storage.get('doc', scopeB)).toBeDefined();
       const bAfter = await storage.searchByVector([1, 0], scopeB, { limit: 10 });
       expect(bAfter.map((h) => h.id)).toEqual(['doc']);
-      expect(bAfter[0]!.record.content).toBe('B-doc');
+      expect(bAfter[0].record.content).toBe('B-doc');
     });
   });
 
@@ -401,8 +401,8 @@ describe('searchByVector rehydration security', () => {
       );
 
       expect(vectorize.upsertCalls).toHaveLength(1);
-      const [vector] = vectorize.upsertCalls[0]!;
-      expect(vector!.metadata).toEqual({
+      const [vector] = vectorize.upsertCalls[0];
+      expect(vector.metadata).toEqual({
         tenant_id: TENANT,
         namespace: NAMESPACE,
         memory_id: 'secret',
@@ -410,16 +410,16 @@ describe('searchByVector rehydration security', () => {
         version: 1,
       });
       // No content, no caller metadata keys leak into the secondary index.
-      expect(Object.keys(vector!.metadata)).not.toContain('content');
-      expect(Object.keys(vector!.metadata)).not.toContain('ssn');
-      expect(Object.keys(vector!.metadata)).not.toContain('injected');
+      expect(Object.keys(vector.metadata)).not.toContain('content');
+      expect(Object.keys(vector.metadata)).not.toContain('ssn');
+      expect(Object.keys(vector.metadata)).not.toContain('injected');
     });
 
     it('re-upserts with the bumped version after update so the index version tracks canonical', async () => {
       await storage.update('legit', SCOPE, { content: 'patched' });
 
       const lastUpsert = vectorize.upsertCalls.at(-1)!;
-      expect(lastUpsert[0]!.metadata['version']).toBe(2);
+      expect(lastUpsert[0].metadata['version']).toBe(2);
     });
   });
 });

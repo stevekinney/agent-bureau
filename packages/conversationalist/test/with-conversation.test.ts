@@ -32,7 +32,7 @@ describe('withConversation', () => {
     expect(result.createdAt).toBeDefined();
     const messages = getOrderedMessages(result);
     expect(messages.length).toBe(4);
-    expect(messages[1]!.content).toBe('[REDACTED]');
+    expect(messages[1].content).toBe('[REDACTED]');
 
     expect(result).not.toBe(base);
   });
@@ -47,7 +47,7 @@ describe('withConversation', () => {
     const result = await resultPromise;
     const messages = getOrderedMessages(result);
     expect(messages.length).toBe(1);
-    expect(messages[0]!.role).toBe('user');
+    expect(messages[0].role).toBe('user');
   });
 
   test('exposes system message helpers on the draft', async () => {
@@ -61,7 +61,7 @@ describe('withConversation', () => {
 
     const systemMessages = getOrderedMessages(result).filter((m) => m.role === 'system');
     expect(systemMessages.length).toBe(1);
-    expect(systemMessages[0]!.content).toBe('Intro v2\nFirst\nSecond');
+    expect(systemMessages[0].content).toBe('Intro v2\nFirst\nSecond');
   });
 });
 
@@ -76,8 +76,8 @@ describe('pipeConversation', () => {
 
     const pipedMessages = getOrderedMessages(piped);
     expect(pipedMessages.length).toBe(2);
-    expect(pipedMessages[0]!.role).toBe('user');
-    expect(pipedMessages[1]!.role).toBe('assistant');
+    expect(pipedMessages[0].role).toBe('user');
+    expect(pipedMessages[1].role).toBe('assistant');
     expect(base.ids.length).toBe(0);
   });
 });
@@ -96,8 +96,8 @@ describe('withConversation streaming support', () => {
     expect(capturedId).toBeDefined();
     const messages = getOrderedMessages(result);
     expect(messages.length).toBe(1);
-    expect(messages[0]!.content).toBe('Hello...');
-    expect(isStreamingMessage(messages[0]!)).toBe(true);
+    expect(messages[0].content).toBe('Hello...');
+    expect(isStreamingMessage(messages[0])).toBe(true);
   });
 
   test('finalizeStreamingMessage removes streaming flag', async () => {
@@ -114,9 +114,9 @@ describe('withConversation streaming support', () => {
 
     const messages = getOrderedMessages(result);
     expect(messages.length).toBe(1);
-    expect(messages[0]!.content).toBe('Complete response');
-    expect(isStreamingMessage(messages[0]!)).toBe(false);
-    expect(messages[0]!.tokenUsage?.total).toBe(15);
+    expect(messages[0].content).toBe('Complete response');
+    expect(isStreamingMessage(messages[0])).toBe(false);
+    expect(messages[0].tokenUsage?.total).toBe(15);
   });
 
   test('cancelStreamingMessage removes the message', async () => {
@@ -130,7 +130,7 @@ describe('withConversation streaming support', () => {
 
     const messages = getOrderedMessages(result);
     expect(messages.length).toBe(1);
-    expect(messages[0]!.role).toBe('user');
+    expect(messages[0].role).toBe('user');
   });
 });
 
@@ -148,8 +148,8 @@ describe('withConversation context window management', () => {
 
     const messages = getOrderedMessages(result);
     expect(messages.length).toBe(2);
-    expect(messages[0]!.content).toBe('Message 2');
-    expect(messages[1]!.content).toBe('Message 3');
+    expect(messages[0].content).toBe('Message 2');
+    expect(messages[1].content).toBe('Message 3');
   });
 
   test('truncateFromPosition preserves system messages by default', async () => {
@@ -165,8 +165,8 @@ describe('withConversation context window management', () => {
 
     const messages = getOrderedMessages(result);
     expect(messages.length).toBe(2);
-    expect(messages[0]!.role).toBe('system');
-    expect(messages[1]!.content).toBe('Message 3');
+    expect(messages[0].role).toBe('system');
+    expect(messages[1].content).toBe('Message 3');
   });
 
   test('truncateToTokenLimit removes oldest messages to fit limit', async () => {
@@ -198,8 +198,8 @@ describe('withConversation context window management', () => {
     });
 
     const lastTwo = getOrderedMessages(result).slice(-2);
-    expect(lastTwo[0]!.content).toBe('New message');
-    expect(lastTwo[1]!.content).toBe('New response');
+    expect(lastTwo[0].content).toBe('New message');
+    expect(lastTwo[1].content).toBe('New response');
   });
 });
 
@@ -229,7 +229,7 @@ describe('withConversation branch rewinds', () => {
     const target = getOrderedMessages(seeded)[1];
 
     const result = await withConversation(seeded, (c) => {
-      c.rewindBeforeMessage(target!.id);
+      c.rewindBeforeMessage(target.id);
     });
 
     expect(getOrderedMessages(result).map((message) => message.content)).toEqual(['Message 0']);

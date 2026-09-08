@@ -967,7 +967,6 @@ describe('resolveStaticTokenRevisionSecret', () => {
       conditionalBatch: async () => false,
     } as unknown as FakeKvStore;
 
-    // eslint-disable-next-line @typescript-eslint/await-thenable -- bun-types declares `Matchers.rejects` as synchronous (`Matchers<unknown>`), not a Promise, though it resolves correctly at runtime — same known gap `compose.test.ts` disables this rule for.
     await expect(resolveStaticTokenRevisionSecret(store, fakeIdentifiers())).rejects.toThrow(
       'Static-token revision secret initialization lost without a persisted winner.',
     );

@@ -25,7 +25,7 @@ describe('ingest', () => {
 
     expect(result.chunkCount).toBe(1);
     expect(result.entries).toHaveLength(1);
-    expect(result.entries[0]!.content).toBe('Short note about testing.');
+    expect(result.entries[0].content).toBe('Short note about testing.');
     expect(result.sourceIdentifier).toBeDefined();
   });
 
@@ -46,8 +46,8 @@ describe('ingest', () => {
     const result = await ingest(memory, content, { sourceIdentifier: 'test-doc' });
 
     for (let i = 0; i < result.entries.length; i++) {
-      expect(result.entries[i]!.metadata[SOURCE_DOCUMENT_KEY]).toBe('test-doc');
-      expect(result.entries[i]!.metadata[CHUNK_INDEX_KEY]).toBe(i);
+      expect(result.entries[i].metadata[SOURCE_DOCUMENT_KEY]).toBe('test-doc');
+      expect(result.entries[i].metadata[CHUNK_INDEX_KEY]).toBe(i);
     }
   });
 
@@ -55,7 +55,7 @@ describe('ingest', () => {
     const result = await ingest(memory, 'Some content', { sourceIdentifier: 'my-doc-id' });
 
     expect(result.sourceIdentifier).toBe('my-doc-id');
-    expect(result.entries[0]!.metadata[SOURCE_DOCUMENT_KEY]).toBe('my-doc-id');
+    expect(result.entries[0].metadata[SOURCE_DOCUMENT_KEY]).toBe('my-doc-id');
   });
 
   it('generates a source identifier when none is provided', async () => {
@@ -79,8 +79,8 @@ describe('ingest', () => {
       metadata: { tags: ['test'], importance: 0.8 },
     });
 
-    expect(result.entries[0]!.metadata.tags).toEqual(['test']);
-    expect(result.entries[0]!.metadata.importance).toBe(0.8);
+    expect(result.entries[0].metadata.tags).toEqual(['test']);
+    expect(result.entries[0].metadata.importance).toBe(0.8);
   });
 
   it('fires onProgress after each chunk', async () => {
@@ -93,9 +93,9 @@ describe('ingest', () => {
     });
 
     expect(progressEvents).toHaveLength(result.chunkCount);
-    expect(progressEvents[0]!.completed).toBe(1);
-    expect(progressEvents[progressEvents.length - 1]!.completed).toBe(result.chunkCount);
-    expect(progressEvents[progressEvents.length - 1]!.total).toBe(result.chunkCount);
+    expect(progressEvents[0].completed).toBe(1);
+    expect(progressEvents[progressEvents.length - 1].completed).toBe(result.chunkCount);
+    expect(progressEvents[progressEvents.length - 1].total).toBe(result.chunkCount);
   });
 
   it('deduplicates recall results by source document', async () => {
@@ -196,7 +196,7 @@ describe('ingest', () => {
       sourceIdentifier: 'doc-changing',
     });
 
-    expect(second.entries[0]!.id).not.toBe(first.entries[0]!.id);
+    expect(second.entries[0].id).not.toBe(first.entries[0].id);
   });
 
   it('uses chunkHtml to ingest HTML content when passed as the loader', async () => {

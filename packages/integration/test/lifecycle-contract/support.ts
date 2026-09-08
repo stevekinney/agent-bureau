@@ -89,7 +89,7 @@ export function filterRunEvents(
         },
         async return(value?: unknown): Promise<IteratorResult<RunEvent>> {
           const returned = await iterator.return?.(value);
-          return returned ?? { done: true, value: undefined as unknown as RunEvent };
+          return returned ?? { done: true, value: undefined };
         },
         async throw(error?: unknown): Promise<IteratorResult<RunEvent>> {
           if (!iterator.throw) throw error;

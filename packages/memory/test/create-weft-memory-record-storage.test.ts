@@ -114,7 +114,7 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
 
       const keys = [...underlying.snapshot().keys()];
       expect(keys).toHaveLength(1);
-      expect(keys[0]!.startsWith(customPrefix)).toBe(true);
+      expect(keys[0].startsWith(customPrefix)).toBe(true);
     });
 
     it('rejects a custom keyPrefix that collides with a reserved Weft prefix', () => {
@@ -277,7 +277,7 @@ describe('createWeftMemoryRecordStorage (Weft-specific)', () => {
         found.push(key);
       }
       expect(found).toHaveLength(1);
-      return found[0]!;
+      return found[0];
     }
 
     it('throws when a stored record is not valid JSON', async () => {

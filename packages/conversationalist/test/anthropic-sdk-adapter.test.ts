@@ -349,7 +349,7 @@ describe('Anthropic SDK adapter', () => {
 
     const conversation = fromAnthropicMessages(payload);
 
-    expect(conversation.messages[conversation.ids[0]!]?.content).toEqual([
+    expect(conversation.messages[conversation.ids[0]]?.content).toEqual([
       {
         type: 'document',
         name: 'upload.pdf',

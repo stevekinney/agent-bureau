@@ -255,11 +255,11 @@ describe('createMemory', () => {
       const results = await memory.recall('programming languages');
 
       expect(results.length).toBeGreaterThan(0);
-      expect(results[0]!.id).toBeTypeOf('string');
-      expect(results[0]!.content).toBeTypeOf('string');
-      expect(results[0]!.score).toBeTypeOf('number');
-      expect(results[0]!.metadata).toBeDefined();
-      expect(results[0]!.createdAt).toBeTypeOf('number');
+      expect(results[0].id).toBeTypeOf('string');
+      expect(results[0].content).toBeTypeOf('string');
+      expect(results[0].score).toBeTypeOf('number');
+      expect(results[0].metadata).toBeDefined();
+      expect(results[0].createdAt).toBeTypeOf('number');
     });
 
     it('returns results sorted by score descending', async () => {
@@ -270,7 +270,7 @@ describe('createMemory', () => {
       const results = await memory.recall('Alpha');
 
       for (let i = 1; i < results.length; i++) {
-        expect(results[i - 1]!.score).toBeGreaterThanOrEqual(results[i]!.score);
+        expect(results[i - 1].score).toBeGreaterThanOrEqual(results[i].score);
       }
     });
 
@@ -285,7 +285,7 @@ describe('createMemory', () => {
 
     it('applies temporal decay when configured', async () => {
       // Store an entry with a very old timestamp by manually writing to storage.
-      const vector = embedder(['old memory'])[0]!;
+      const vector = embedder(['old memory'])[0];
       const float32Vector = new Float32Array(vector);
       const oldTimestamp = FIXED_NOW - 30 * 24 * 60 * 60 * 1000; // 30 days ago
 
@@ -557,7 +557,7 @@ describe('createMemory', () => {
       // Float32 has limited precision compared to Float64 (number),
       // so we compare with tolerance
       for (let i = 0; i < entry.vector.length; i++) {
-        expect(roundTripped[i]).toBeCloseTo(entry.vector[i]!, 5);
+        expect(roundTripped[i]).toBeCloseTo(entry.vector[i], 5);
       }
     });
   });

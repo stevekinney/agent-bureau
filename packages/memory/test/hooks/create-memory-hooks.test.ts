@@ -71,7 +71,7 @@ describe('createMemoryHooks', () => {
       const messages = conversation.getMessages();
       const systemMessages = messages.filter((message) => message.role === 'system');
       expect(systemMessages.length).toBe(1);
-      expect(systemMessages[0]!.content).toContain('Relevant memories:');
+      expect(systemMessages[0].content).toContain('Relevant memories:');
     });
 
     it('does not inject when no memories match', async () => {
@@ -128,7 +128,7 @@ describe('createMemoryHooks', () => {
       expect(systemMessages.length).toBe(1);
 
       // Count the bullet points in the system message
-      const bulletCount = (systemMessages[0]!.content.match(/^- /gm) || []).length;
+      const bulletCount = (systemMessages[0].content.match(/^- /gm) || []).length;
       expect(bulletCount).toBeLessThanOrEqual(3);
     });
 
@@ -146,7 +146,7 @@ describe('createMemoryHooks', () => {
       const messages = conversation.getMessages();
       const systemMessages = messages.filter((message) => message.role === 'system');
       expect(systemMessages.length).toBe(1);
-      expect(systemMessages[0]!.content).toContain('Project namespace memory');
+      expect(systemMessages[0].content).toContain('Project namespace memory');
     });
 
     describe('guardrail scanning', () => {
@@ -209,7 +209,7 @@ describe('createMemoryHooks', () => {
         const messages = conversation.getMessages();
         const systemMessages = messages.filter((message) => message.role === 'system');
         expect(systemMessages.length).toBe(1);
-        expect(systemMessages[0]!.content).toContain('Suspicious but not blocked content.');
+        expect(systemMessages[0].content).toContain('Suspicious but not blocked content.');
       });
 
       it('injects unscanned memories when no guardrail is configured', async () => {
@@ -297,7 +297,7 @@ describe('createMemoryHooks', () => {
 
       const results = await memory.recall('TypeScript is great');
       expect(results.length).toBeGreaterThan(0);
-      expect(results[0]!.metadata.source).toBe('auto-capture');
+      expect(results[0].metadata.source).toBe('auto-capture');
     });
 
     it('uses the provided namespace for auto-capture', async () => {

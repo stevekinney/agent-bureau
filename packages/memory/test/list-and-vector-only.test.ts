@@ -62,7 +62,7 @@ describe('memory.list()', () => {
 
     const results = await memory.list();
 
-    expect(results[0]!.createdAt).toBeGreaterThanOrEqual(results[1]!.createdAt);
+    expect(results[0].createdAt).toBeGreaterThanOrEqual(results[1].createdAt);
 
     await memory.close();
   });

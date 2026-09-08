@@ -1,5 +1,6 @@
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { fixupPluginRules } from '@eslint/compat';
@@ -535,6 +536,25 @@ export function parseDeterminismManifest(value: unknown): DeterminismManifest {
 export const determinismManifest = parseDeterminismManifest(rawDeterminismManifest);
 
 /**
+ * Resolves the tsconfig a package's `test/**` type-checked lint block should parse against
+ * (AB-368). Each package's own `tsconfig.test.json` relaxes a handful of strict-mode checks for
+ * tests (`noUnusedLocals`, `noImplicitAny`, etc. — see any package's `tsconfig.test.json`) while
+ * still extending its `tsconfig.json`, so it is the right project for test files whenever it
+ * exists. Two packages (`interoperability`, `integration`) have no `tsconfig.test.json` at all —
+ * their single `tsconfig.json` already lists `test` in its own `include`, so falling back to it
+ * is correct rather than a compromise.
+ *
+ * `packageRoot` is the directory an individual package's `eslint.config.js` runs from
+ * (`process.cwd()` at call time — `eslint .` is invoked per package, see `eslint.config.base.ts`
+ * usage in any `packages/*\/eslint.config.js`), not `REPO_ROOT`.
+ */
+export function resolveTestTsconfigProject(packageRoot: string): string {
+  return existsSync(join(packageRoot, 'tsconfig.test.json'))
+    ? './tsconfig.test.json'
+    : './tsconfig.json';
+}
+
+/**
  * Shared ESLint flat config array. Each package imports this and spreads it,
  * appending package-specific overrides before the final Prettier block.
  *
@@ -545,6 +565,26 @@ export const determinismManifest = parseDeterminismManifest(rawDeterminismManife
  * export default [...baseConfig, ...testOverrides, prettierConfig];
  * ```
  */
+
+/**
+ * Rule overrides layered on top of both type-checked blocks below (`src/**` and, as of AB-368,
+ * `test/**`) — kept as one object so the two blocks can't drift.
+ */
+const typeCheckedOverrideRules: Linter.RulesRecord = {
+  '@typescript-eslint/no-floating-promises': 'error',
+  '@typescript-eslint/await-thenable': 'error',
+  '@typescript-eslint/no-unused-vars': 'off',
+  'unused-imports/no-unused-vars': [
+    'warn',
+    { argsIgnorePattern: '^_', varsIgnorePattern: '^_', ignoreRestSiblings: true },
+  ],
+  // Surfaces `@deprecated`-tagged uses at lint time (type-aware; requires the built types this
+  // config block already depends on). `warn`, not `error`: AB-242 deprecated `BureauOptions`'s
+  // agent-owned fields and `Bureau.createRun` in place rather than removing them, so the build
+  // stays green while every `bun run lint` lists every current call site as pressure to close
+  // the gateway migration (AB-352/AB-351). See AB-366, and AB-368 for the `test/**` extension.
+  '@typescript-eslint/no-deprecated': 'warn',
+};
 
 export const baseConfig = [
   {
@@ -611,20 +651,29 @@ export const baseConfig = [
     },
     rules: {
       ...(configuration.rules ?? {}),
-      '@typescript-eslint/no-floating-promises': 'error',
-      '@typescript-eslint/await-thenable': 'error',
-      '@typescript-eslint/no-unused-vars': 'off',
-      'unused-imports/no-unused-vars': [
-        'warn',
-        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', ignoreRestSiblings: true },
-      ],
-      // Surfaces `@deprecated`-tagged uses at lint time (type-aware; requires the built types
-      // this config block already depends on). `warn`, not `error`: AB-242 deprecated
-      // `BureauOptions`'s agent-owned fields and `Bureau.createRun` in place rather than
-      // removing them, so the build stays green while every `bun run lint` lists every
-      // current call site as pressure to close the gateway migration (AB-352/AB-351). See
-      // AB-366.
-      '@typescript-eslint/no-deprecated': 'warn',
+      ...typeCheckedOverrideRules,
+    },
+  })),
+
+  // AB-368: the block above only covers `src/**` (via `projectService`, which resolves each
+  // file's project by walking up from it for the nearest `tsconfig.json` — and no package's
+  // `tsconfig.json` itself `include`s `test/`, so a package-root `test/**` directory such as
+  // `packages/integration/test/**` is invisible to it and gets none of the type-aware rules
+  // below, `no-deprecated` included). This block covers that gap with the classic
+  // `parserOptions.project` form instead of `projectService`, pointed explicitly at each
+  // package's own test tsconfig via `resolveTestTsconfigProject` (`process.cwd()` at load time
+  // is the linting package's root — see that function's doc comment). `testOverrides` below
+  // still applies its relaxations on top of this block for the same `test/**` files.
+  ...tseslint.configs.recommendedTypeChecked.map((configuration) => ({
+    ...configuration,
+    files: ['test/**/*.{ts,tsx}'],
+    languageOptions: {
+      ...(configuration.languageOptions ?? {}),
+      parserOptions: { project: [resolveTestTsconfigProject(process.cwd())] },
+    },
+    rules: {
+      ...(configuration.rules ?? {}),
+      ...typeCheckedOverrideRules,
     },
   })),
 
@@ -672,6 +721,34 @@ export const testOverrides = [
       '@typescript-eslint/no-unused-expressions': 'off',
       '@typescript-eslint/no-unused-vars': 'off',
       'unused-imports/no-unused-vars': 'off',
+      // AB-368: extending the type-checked block to test/** (see baseConfig above) surfaced
+      // `await-thenable` on hundreds of `await expect(promise).resolves/.rejects.toXxx()`
+      // calls across the suite — this is a bun-types defect, not a real bug: every
+      // `MatchersBuiltin<T>` method (`toBe`, `toMatchObject`, `toThrow`, ...) is declared
+      // returning plain `void` even when reached through `.resolves`/`.rejects`, so the
+      // type-checker sees the whole chained call as non-Promise `void`. Bun's own
+      // documentation and every existing call site in this repo `await` these calls (dropping
+      // the `await` leaves a floating promise racing the assertion against test completion);
+      // Jest's own type stubs give `.resolves`/`.rejects` a distinct `Promise<void>`-returning
+      // matcher shape for exactly this reason, bun-types doesn't. Off for the same reason
+      // `no-floating-promises` already is above: the rule has no true-positive mode against
+      // this bun:test idiom.
+      '@typescript-eslint/await-thenable': 'off',
+      // AB-368: the same widened glob's one `prefer-promise-reject-errors` hit
+      // (`packages/interoperability/test/materialization.test.ts`) is a test whose entire
+      // point is asserting normalization of a non-Error rejection reason
+      // (`Promise.reject('stream failed')` inside "normalizes non-Error abort reasons and
+      // iterator rejections"); rewriting it to reject an `Error` deletes what the test
+      // verifies. `packages/armorer/eslint.config.js` already turns this rule off for `src`
+      // files with the identical rationale ("requires permissive type handling"); tests that
+      // deliberately exercise non-Error rejections are the same case.
+      '@typescript-eslint/prefer-promise-reject-errors': 'off',
+      // AB-368: same widened glob, every `only-throw-error` hit a `throw failure`/
+      // `throw 'some string'` inside a test mock's injected
+      // failure path (`failure`/`error` typed `unknown`, deliberately not `Error`) exercising
+      // this codebase's non-Error-throw normalization — the throw analogue of the
+      // `prefer-promise-reject-errors` case immediately above, same disposition.
+      '@typescript-eslint/only-throw-error': 'off',
     },
   },
 ];

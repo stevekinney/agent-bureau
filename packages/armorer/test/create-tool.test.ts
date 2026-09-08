@@ -12,7 +12,6 @@ import type {
 } from '../src';
 import { createTool, createToolCall, isTool, lazy, withContext } from '../src';
 import { serializeToolDefinition } from '../src/core/serialization';
-import type { AnyToolDefinition } from '../src/core/tool-definition';
 import { ToolProgressEvent } from '../src/events';
 import {
   approvalConsumeSymbol,
@@ -74,7 +73,7 @@ function createManualExecutionTiming(initialNow = 0): {
           timers.delete(handle);
         }
       },
-    } as ToolExecuteOptions,
+    },
   };
 }
 
@@ -214,14 +213,14 @@ describe('createTool', () => {
     // String representations
     expect(tool.toString()).toContain('example');
     expect(tool[Symbol.toPrimitive]('string')).toBe('example');
-    expect(`${tool}`).toBe('example');
+    expect(String(tool)).toBe('example');
     // AB-308: `toJSON` is now part of the public `Tool` type, accessed
     // directly instead of through a cast.
     expect(tool.toJSON()).toEqual(
       serializeToolDefinition({
         ...tool.configuration,
         input: tool.configuration.input ?? tool.input,
-      } as AnyToolDefinition),
+      }),
     );
 
     // execute() validates then calls underlying fn
@@ -418,13 +417,23 @@ describe('createTool', () => {
   });
 
   it('returns an error when lazy execute rejects', async () => {
+    // A variable type annotation, not an `as unknown as` assertion: `@typescript-eslint/
+    // no-unnecessary-type-assertion` treats a `(): never`-returning function as assignable to
+    // any parameter shape and reports the cast as redundant, but `tsc -p tsconfig.test.json`'s
+    // overload resolution has a genuine contravariance mismatch that `never` doesn't fix — the
+    // annotation sidesteps the rule's false positive. It's genuinely necessary: a
+    // lazily-loaded executor that always rejects has no real parameter type to offer
+    // (`(): never` has none at all), so it is not structurally assignable to the
+    // expected lazy-execute shape without one.
+    const lazyExecute: Promise<(params: { value: string }) => Promise<unknown>> =
+      Promise.resolve().then((): never => {
+        throw new Error('lazy load failed');
+      });
     const tool = createTool({
       name: 'lazy-reject',
       description: 'fails on load',
       input: z.object({ value: z.string() }),
-      execute: Promise.resolve().then((): never => {
-        throw new Error('lazy load failed');
-      }) as unknown as Promise<(params: { value: string }) => Promise<unknown>>,
+      execute: lazyExecute,
     });
 
     const result = await tool.execute(createToolCall('lazy-reject', { value: 'x' }));
@@ -433,13 +442,16 @@ describe('createTool', () => {
 
   it('does not consume approval admission when a lazy executor rejects', async () => {
     let consumeCount = 0;
+    // See the "lazy execute rejects" test above for why this type annotation is necessary.
+    const lazyExecute: Promise<(params: { value: string }) => Promise<unknown>> =
+      Promise.resolve().then((): never => {
+        throw new Error('lazy load failed before approval');
+      });
     const tool = createTool({
       name: 'lazy-reject-before-approval',
       description: 'fails before approval admission',
       input: z.object({ value: z.string() }),
-      execute: Promise.resolve().then((): never => {
-        throw new Error('lazy load failed before approval');
-      }) as unknown as Promise<(params: { value: string }) => Promise<unknown>>,
+      execute: lazyExecute,
     });
 
     const result = await tool.execute(
@@ -520,7 +532,7 @@ describe('createTool', () => {
       },
     });
 
-    const result = await tool.executeWith({ params: { value: 123 } as any });
+    const result = await tool.executeWith({ params: { value: 123 } });
     expect(result.error).toBeDefined();
   });
 
@@ -552,7 +564,7 @@ describe('createTool', () => {
         async execute({ value }, context) {
           expect(context.workspaceId).toBe('ws-1');
           expect(context.role).toBe('admin');
-          return `${value}-${context.role}`;
+          return `${String(value)}-${String(context.role)}`;
         },
       },
     ) as Tool;
@@ -591,7 +603,7 @@ describe('createTool', () => {
     });
 
     // Missing required property returns a ToolResult failure shape
-    const res = await tool.executeWith({ params: {} as any });
+    const res = await tool.executeWith({ params: {} });
     expect(res.toolName).toBe('invalid-test');
     expect(res.error?.category).toBe('validation');
     expect(res.error?.code).toBe('VALIDATION_ERROR');
@@ -679,7 +691,7 @@ describe('createTool', () => {
     });
     const removeListener = tool.addEventListener('execute-start', () => {
       const snapshot = tool.executions.inspect({ callId: 'deadline-start-call' })[0];
-      tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'deadline during admission');
+      tool.executions.locate(snapshot.executionId)?.abort('deadline', 'deadline during admission');
     });
 
     const result = await tool.execute({
@@ -707,7 +719,7 @@ describe('createTool', () => {
     const removeListener = tool.addEventListener('validate-success', () => {
       const snapshot = tool.executions.inspect({ callId: 'deadline-validation-call' })[0];
       tool.executions
-        .locate(snapshot!.executionId)
+        .locate(snapshot.executionId)
         ?.abort('deadline', new Error('deadline error reason'));
     });
 
@@ -983,7 +995,7 @@ describe('createTool', () => {
     // The execute call signature's inferred return type is the raw
     // `execute()` shape (an async iterable); the actual runtime result is
     // the collected array (see this test's own name/purpose).
-    const result = (await tool.execute({} as any)) as unknown as number[];
+    const result = (await tool.execute({})) as unknown as number[];
     expect(result).toEqual([1, 2]);
     const callResult = await tool.execute({ id: 'c1', name: 'collect-stream', arguments: {} });
     expect(callResult.result).toEqual([1, 2]);
@@ -1317,7 +1329,7 @@ describe('createTool', () => {
         description: 'uses object schema',
         input: schemaAsObject,
         async execute({ name, count }) {
-          return `${name}-${count}`;
+          return `${String(name)}-${String(count)}`;
         },
       });
 
@@ -2695,7 +2707,7 @@ describe('isTool', () => {
           const snapshot = tool.executions.inspect({
             callId: 'authorization-only-deadline-call',
           })[0];
-          tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'approval deadline');
+          tool.executions.locate(snapshot.executionId)?.abort('deadline', 'approval deadline');
           return async () => {
             rollbackCount += 1;
           };
@@ -2735,7 +2747,7 @@ describe('isTool', () => {
           const snapshot = tool.executions.inspect({
             callId: 'approval-deadline-before-execute-call',
           })[0];
-          tool.executions.locate(snapshot!.executionId)?.abort('deadline', 'approval deadline');
+          tool.executions.locate(snapshot.executionId)?.abort('deadline', 'approval deadline');
           return async () => {
             rollbackCount += 1;
           };
@@ -3618,7 +3630,7 @@ describe('execution identity on execute-start/progress/settled (AB-290)', () => 
           capabilities: [],
           authorizationRevision: 'rev-1',
         },
-      } as ToolRequestContext,
+      },
     });
 
     expect(settledOwnerId).toBe('run-from-request-context');

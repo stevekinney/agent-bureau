@@ -342,7 +342,7 @@ describe('createToolbox', () => {
     );
     await Promise.resolve();
     currentTime = 10;
-    scheduled[0]!();
+    scheduled[0]();
 
     await expect(pending).resolves.toMatchObject({
       outcome: 'error',
@@ -2665,10 +2665,7 @@ describe('createToolbox', () => {
 
     expect(execute).toBeDefined();
     await expect(
-      (execute as (params: unknown, context: unknown) => Promise<unknown>)?.(
-        { a: 1, b: 2 },
-        {} as never,
-      ),
+      (execute as (params: unknown, context: unknown) => Promise<unknown>)?.({ a: 1, b: 2 }, {}),
     ).resolves.toBe(3);
   });
 
@@ -2682,7 +2679,7 @@ describe('createToolbox', () => {
 
     expect(execute).toBeDefined();
     await expect(
-      (execute as (params: unknown, context: unknown) => Promise<unknown>)?.({}, {} as never),
+      (execute as (params: unknown, context: unknown) => Promise<unknown>)?.({}, {}),
     ).rejects.toThrow('Imported tool "missing-tool" does not have an execute implementation');
   });
 
@@ -3043,7 +3040,7 @@ describe('createToolbox', () => {
       captured = event;
     });
 
-    const result = await tool.executeWith({ params: { value: 123 } as any });
+    const result = await tool.executeWith({ params: { value: 123 } });
 
     expect(result.error).toBeDefined();
     expect(captured.report).toEqual(report);
@@ -3250,7 +3247,7 @@ describe('createToolbox', () => {
     );
     const tool = toolbox.getTool('bump');
     expect(tool).toBeDefined();
-    const value = await tool!({ a: 1, b: 1 } as any);
+    const value = await tool!({ a: 1, b: 1 });
     expect(value).toBe(3);
   });
 
@@ -3491,7 +3488,7 @@ describe('createToolbox', () => {
       async execute({ value }) {
         return value;
       },
-    } as any);
+    });
 
     const result = await toolbox.execute({
       name: 'input-configuration',
@@ -3781,10 +3778,10 @@ describe('createToolbox', () => {
   it('handles invalid configurations by throwing a helpful error', () => {
     const toolbox = createMutableToolbox();
     expect(() => {
-      toolbox.register({} as any);
+      toolbox.register({});
     }).toThrow(/ToolConfiguration/);
     expect(() => {
-      toolbox.register(null as any);
+      toolbox.register(null);
     }).toThrow(/ToolConfiguration/);
     expect(() => {
       toolbox.register({
@@ -3792,7 +3789,7 @@ describe('createToolbox', () => {
         description: 'ok',
         input: makeConfiguration().input,
         execute: async () => {},
-      } as any);
+      });
     }).toThrow(/ToolConfiguration/);
     expect(() => {
       toolbox.register({
@@ -3800,7 +3797,7 @@ describe('createToolbox', () => {
         description: 42 as any,
         input: makeConfiguration().input,
         execute: async () => {},
-      } as any);
+      });
     }).toThrow(/ToolConfiguration/);
     expect(() => {
       toolbox.register({
@@ -3808,7 +3805,7 @@ describe('createToolbox', () => {
         description: 'ok',
         input: undefined as any,
         execute: async () => {},
-      } as any);
+      });
     }).not.toThrow();
     expect(() => {
       toolbox.register({
@@ -3830,7 +3827,7 @@ describe('createToolbox', () => {
       error: 0,
       'not-found': 0,
     };
-    (Object.keys(events) as (keyof typeof events)[]).forEach((type) => {
+    Object.keys(events).forEach((type) => {
       toolbox.addEventListener(type, () => {
         events[type] += 1;
       });
@@ -3847,7 +3844,7 @@ describe('createToolbox', () => {
     );
     await toolbox.execute({ id: 'ok-1', name: 'ok', arguments: { a: 1, b: 1 } });
     await toolbox.execute({ id: 'boom-1', name: 'boom', arguments: { a: 0, b: 0 } });
-    await toolbox.execute({ id: 'missing', name: 'nope', arguments: {} as any });
+    await toolbox.execute({ id: 'missing', name: 'nope', arguments: {} });
 
     expect(events.registering).toBe(2);
     expect(events.registered).toBe(2);
@@ -3883,7 +3880,7 @@ describe('createToolbox', () => {
 
   it('clears listeners when provided signal aborts', async () => {
     const controller = new AbortController();
-    const toolbox = createMutableToolbox([], { signal: controller.signal as any });
+    const toolbox = createMutableToolbox([], { signal: controller.signal });
 
     let calls = 0;
     toolbox.addEventListener('call', () => {
@@ -6284,7 +6281,7 @@ describe('createToolbox', () => {
         blocked.push(e as unknown as (typeof blocked)[number]);
       });
       toolbox.addEventListener('error', (e) => {
-        errors.push(e as (typeof errors)[number]);
+        errors.push(e);
       });
 
       let blockedResult: ToolExecutionResult | undefined;
@@ -7470,7 +7467,7 @@ describe('toolbox execute-start/progress/settled carry execution identity (AB-29
     };
     toolbox.addEventListener('settled', (event: any) => {
       if (event.ownerId === 'run-a' || event.ownerId === 'run-b') {
-        seenByOwner[event.ownerId]!.push({
+        seenByOwner[event.ownerId].push({
           ownerId: event.ownerId,
           executionId: event.executionId,
         });
@@ -7497,7 +7494,7 @@ describe('toolbox execute-start/progress/settled carry execution identity (AB-29
     await pendingA;
     expect(seenByOwner['run-a']).toHaveLength(1);
     expect(seenByOwner['run-b']).toHaveLength(1);
-    expect(seenByOwner['run-a']![0]!.executionId).not.toBe(seenByOwner['run-b']![0]!.executionId);
+    expect(seenByOwner['run-a'][0].executionId).not.toBe(seenByOwner['run-b'][0].executionId);
   });
 });
 
@@ -7695,8 +7692,8 @@ describe('every per-call toolbox event class carries execution identity, attribu
           misattributed.push({ type, ownerId, executionId: event.executionId });
           return;
         }
-        perOwnerCounts[ownerId]![type] += 1;
-        executionIdsByOwner[ownerId]!.add(String(event.executionId));
+        perOwnerCounts[ownerId][type] += 1;
+        executionIdsByOwner[ownerId].add(String(event.executionId));
       });
     }
 
@@ -7727,11 +7724,9 @@ describe('every per-call toolbox event class carries execution identity, attribu
     expect(misattributed).toEqual([]);
     expect(perOwnerCounts['owner-a']).toEqual(soloCounts);
     expect(perOwnerCounts['owner-b']).toEqual(soloCounts);
-    expect(executionIdsByOwner['owner-a']!.size).toBe(1);
-    expect(executionIdsByOwner['owner-b']!.size).toBe(1);
-    expect([...executionIdsByOwner['owner-a']!][0]).not.toBe(
-      [...executionIdsByOwner['owner-b']!][0],
-    );
+    expect(executionIdsByOwner['owner-a'].size).toBe(1);
+    expect(executionIdsByOwner['owner-b'].size).toBe(1);
+    expect([...executionIdsByOwner['owner-a']][0]).not.toBe([...executionIdsByOwner['owner-b']][0]);
   });
 
   it('attributes every per-call EXECUTE-ERROR-path event to exactly one of two concurrent executions', async () => {
@@ -7776,7 +7771,7 @@ describe('every per-call toolbox event class carries execution identity, attribu
       toolbox.addEventListener(type as never, (event: any) => {
         const ownerId: unknown = event.ownerId;
         if (ownerId === 'owner-a' || ownerId === 'owner-b') {
-          perOwnerCounts[ownerId]![type] += 1;
+          perOwnerCounts[ownerId][type] += 1;
         }
       });
     }

@@ -434,9 +434,7 @@ describe('createHeartbeat', () => {
         maximumSteps: 1,
       }),
       onTick: (result) => {
-        ticks.push(
-          result ? ({ content: result.content, toolCalls: [] } as GenerateResponse) : null,
-        );
+        ticks.push(result ? { content: result.content, toolCalls: [] } : null);
       },
     });
 

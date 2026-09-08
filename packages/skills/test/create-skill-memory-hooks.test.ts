@@ -105,7 +105,8 @@ describe('createSkillMemoryHooks', () => {
         memory: mock,
         recallQuery: (conversation) => {
           const messages = conversation.getMessages();
-          return `skill context: ${messages[0]?.content}`;
+          const content = messages[0]?.content;
+          return `skill context: ${typeof content === 'string' ? content : JSON.stringify(content)}`;
         },
       });
 

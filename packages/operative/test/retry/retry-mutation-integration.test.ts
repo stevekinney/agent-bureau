@@ -98,7 +98,7 @@ describe('retry with mutation integration', () => {
 
     const retryEvents = recorder.events.filter((e) => e.type === 'generate.retry');
     expect(retryEvents).toHaveLength(1);
-    expect((retryEvents[0]!.detail as GenerateRetryEvent).mutated).toBe(true);
+    expect((retryEvents[0].detail as GenerateRetryEvent).mutated).toBe(true);
   });
 
   it('emits GenerateRetryEvent with mutated=false when mutator returns void', async () => {
@@ -125,7 +125,7 @@ describe('retry with mutation integration', () => {
 
     const retryEvents = recorder.events.filter((e) => e.type === 'generate.retry');
     expect(retryEvents).toHaveLength(1);
-    expect((retryEvents[0]!.detail as GenerateRetryEvent).mutated).toBe(false);
+    expect((retryEvents[0].detail as GenerateRetryEvent).mutated).toBe(false);
   });
 
   it('composes multiple mutators via composeMutators', async () => {

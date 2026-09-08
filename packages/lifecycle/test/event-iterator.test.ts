@@ -129,7 +129,7 @@ describe('eventIterator', () => {
     const first = await iterator.next();
     expect(first.value.value).toBe(1);
 
-    const returned = await iterator.return!(undefined as unknown as TestEvent);
+    const returned = await iterator.return!(undefined);
     expect(returned.done).toBe(true);
 
     // Subsequent calls should also return done
@@ -212,7 +212,7 @@ describe('eventIterator', () => {
     expect(result.value.value).toBe(7);
 
     // Clean up via return
-    await iterator.return!(undefined as unknown as TestEvent);
+    await iterator.return!(undefined);
   });
 
   it('uses default buffer size of 256', async () => {

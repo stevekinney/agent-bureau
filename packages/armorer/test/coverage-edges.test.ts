@@ -293,11 +293,11 @@ describe('coverage edges', () => {
     });
 
     const controller = new AbortController();
-    const result = (await (streamingTool as any).executeWith({
+    const result = await (streamingTool as any).executeWith({
       params: {},
       stream: true,
       signal: controller.signal,
-    })) as any;
+    });
     const stream = result.stream[Symbol.asyncIterator]();
 
     expect(await stream.next()).toEqual({ done: false, value: 'first' });
@@ -337,7 +337,7 @@ describe('coverage edges', () => {
       }),
     );
     anthropicSerialized.input.additionalProperties = true;
-    const anthropicTool = toAnthropicTools(anthropicSerialized as any);
+    const anthropicTool = toAnthropicTools(anthropicSerialized);
     expect(anthropicTool.input_schema.additionalProperties).toBe(true);
     expect(() =>
       formatAnthropicToolResults({
@@ -579,7 +579,7 @@ describe('coverage edges', () => {
       if (callCount === 1) {
         throw new Error('transient failure');
       }
-      return (await import('@openai/agents')) as any;
+      return await import('@openai/agents');
     });
 
     // First call should fail
@@ -633,7 +633,7 @@ describe('coverage edges', () => {
     await expect(wait(1, preAborted.signal as any)).rejects.toThrow('stop');
 
     const delayedAbort = new AbortController();
-    const pending = wait(100, delayedAbort.signal as any);
+    const pending = wait(100, delayedAbort.signal);
     delayedAbort.abort('later');
     await expect(pending).rejects.toThrow('later');
     await expect(wait(1, new AbortController().signal as any)).resolves.toBeUndefined();

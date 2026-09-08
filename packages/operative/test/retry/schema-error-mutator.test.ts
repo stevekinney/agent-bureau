@@ -45,8 +45,8 @@ describe('createSchemaErrorMutator', () => {
     const messages = result!.conversation.getMessages();
     const lastMessage = messages[messages.length - 1];
     expect(lastMessage).toBeDefined();
-    expect(lastMessage!.role).toBe('user');
-    expect(typeof lastMessage!.content === 'string' ? lastMessage!.content : '').toContain(
+    expect(lastMessage.role).toBe('user');
+    expect(typeof lastMessage.content === 'string' ? lastMessage.content : '').toContain(
       'Required',
     );
   });
@@ -75,7 +75,7 @@ describe('createSchemaErrorMutator', () => {
 
     const messages = result!.conversation.getMessages();
     const lastMessage = messages[messages.length - 1];
-    const content = typeof lastMessage!.content === 'string' ? lastMessage!.content : '';
+    const content = typeof lastMessage.content === 'string' ? lastMessage.content : '';
     expect(content).toContain('email');
     expect(content).toContain('Invalid email format');
   });

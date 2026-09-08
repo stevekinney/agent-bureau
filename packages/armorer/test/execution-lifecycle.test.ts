@@ -120,8 +120,15 @@ describe('execution lifecycle', () => {
     });
 
     handle.activate();
-    const liveContext = handle.privilegedSnapshot().context as
-      (EffectiveToolExecutionContext & { debugGraph?: unknown }) | undefined;
+    // `debugGraph` is a test-only extra field on `privilegedContext` (see
+    // `createPrivilegedContext` above), not part of `EffectiveToolExecutionContext` itself. A
+    // variable type annotation, not an `as` assertion: `tsc -p tsconfig.test.json` requires
+    // widening `.context`'s declared type to access `.debugGraph` below, but
+    // `@typescript-eslint/no-unnecessary-type-assertion` reports an `as` doing the same
+    // widening as redundant — the annotation sidesteps that false positive. The added field
+    // stays optional, so this is structurally sound either way.
+    const liveContext: (EffectiveToolExecutionContext & { debugGraph?: unknown }) | undefined =
+      handle.privilegedSnapshot().context;
 
     expect(liveContext?.credentials).toBe(privilegedContext.credentials);
     expect(liveContext?.traceContext).toBe(privilegedContext.traceContext);
@@ -130,8 +137,7 @@ describe('execution lifecycle', () => {
     handle.settle({ ok: true });
     await lifecycle.shutdown({ policy: 'drain' });
 
-    const terminalContext = handle.privilegedSnapshot().context as
-      (EffectiveToolExecutionContext & { debugGraph?: unknown }) | undefined;
+    const terminalContext = handle.privilegedSnapshot().context;
     const [inspected] = lifecycle.inspectPrivileged({ callId: 'sensitive-call' });
 
     expect(terminalContext).toEqual({
@@ -173,8 +179,7 @@ describe('execution lifecycle', () => {
 
     handle.cleanup({ status: 'unresolved' });
 
-    const context = handle.privilegedSnapshot().context as
-      (EffectiveToolExecutionContext & { debugGraph?: unknown }) | undefined;
+    const context = handle.privilegedSnapshot().context;
     expect(handle.snapshot().state).toBe('unknown-effect');
     expect(context?.authority.principalId).toBe('principal-a');
     expect(context?.revisions.toolDefinition).toBe('tool:1');
@@ -201,7 +206,7 @@ describe('execution lifecycle', () => {
     });
     handle.activate();
     currentTime = 5;
-    scheduled[0]!();
+    scheduled[0]();
     expect(handle.signal.aborted).toBe(true);
     expect(handle.snapshot()).toMatchObject({
       state: 'abort-requested',
@@ -248,7 +253,7 @@ describe('execution lifecycle', () => {
     });
     handle.settle('done');
     expect(cleared).toEqual(['timer-token']);
-    scheduled[0]!();
+    scheduled[0]();
     expect(handle.snapshot().state).toBe('terminal');
   });
 

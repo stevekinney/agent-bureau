@@ -107,7 +107,7 @@ describe('conflict detection', () => {
       await memory.remember('The project uses Rust');
 
       expect(onConflict).toHaveBeenCalledTimes(1);
-      const [incoming, existing] = onConflict.mock.calls[0]!;
+      const [incoming, existing] = onConflict.mock.calls[0];
       expect(incoming.content).toBe('The project uses Rust');
       expect(existing.id).toBe(entry1.id);
       expect(existing.content).toBe('The project uses TypeScript');
@@ -126,7 +126,7 @@ describe('conflict detection', () => {
       await memory.remember('Gamma numeric entry three');
 
       expect(onConflict).toHaveBeenCalledTimes(1);
-      const [, existing] = onConflict.mock.calls[0]!;
+      const [, existing] = onConflict.mock.calls[0];
       expect(existing.similarity).toBeTypeOf('number');
     });
   });

@@ -283,7 +283,14 @@ describe('abort propagation — aborting a run finalizes as aborted and stops ge
   it('createRun.abort() fires run.aborted and finalizes as aborted', async () => {
     const events: string[] = [];
     let finishReasonSeen: string | undefined;
-    let abortError: AbortAgentRunError | undefined;
+    // Typed `unknown`, not `AgentRunError`: under AB-368's widened test/** type-checked
+    // block, `@typescript-eslint/no-redundant-type-constituents` reports `AgentRunError`
+    // here as "an 'error' type that acts as 'any'" (`tsc -p tsconfig.test.json` reports no
+    // actual error, so this is a lint-time-only anomaly — see the PR body for what's
+    // confirmed and what's still open about the cause). `unknown` sidesteps it entirely;
+    // the assertions below narrow with `instanceof`/property checks, not a static
+    // annotation.
+    let abortError: unknown;
 
     // Use a generate that parks until we let it proceed — gives us time to abort
     let allowProceed: (() => void) | undefined;
@@ -434,7 +441,7 @@ describe('step-level recovery re-attach — a recovered run resumes from its che
       const handles = await b.engine.recoverAll();
 
       expect(handles).toHaveLength(1);
-      const result = await handles[0]!.result();
+      const result = await handles[0].result();
 
       // The recovered run must have continued from step 1 (NOT re-run step 0)
       expect(recoveredSteps).not.toContain(0);
@@ -607,7 +614,7 @@ describe('at-least-once tool re-execution on simulated crash — a crashed mid-s
     try {
       const handles = await b.engine.recoverAll();
       expect(handles).toHaveLength(1);
-      const result = await handles[0]!.result();
+      const result = await handles[0].result();
       expect((result as { finishReason: string }).finishReason).toBe('stop-condition');
 
       // Step 1's tool MUST have been executed on recovery (at-least-once contract)
@@ -682,7 +689,7 @@ describe('at-least-once tool re-execution on simulated crash — a crashed mid-s
     try {
       const handles = await b.engine.recoverAll();
       expect(handles).toHaveLength(1);
-      await handles[0]!.result();
+      await handles[0].result();
 
       // The recovery engine must NOT have called generate for step 0 (memoized)
       expect(recoveredGenerateCallsByStep).not.toContain(0);

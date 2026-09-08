@@ -12,7 +12,7 @@ describe('test helper exports', () => {
     conversation.appendUserMessage('hello');
 
     expect(conversation.current.ids).toHaveLength(1);
-    expect(conversation.current.messages[conversation.current.ids[0]!]!.content).toBe('hello');
+    expect(conversation.current.messages[conversation.current.ids[0]].content).toBe('hello');
   });
 
   it('records conversation mutations through createConversationRecorder', () => {

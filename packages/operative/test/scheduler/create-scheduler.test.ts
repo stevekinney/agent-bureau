@@ -262,7 +262,7 @@ describe('createScheduler', () => {
       conversation: new Conversation(),
       maximumSteps: 1,
     }));
-    blockingGenerates[0]!.resolve(textResponse('step'));
+    blockingGenerates[0].resolve(textResponse('step'));
     await imm1;
 
     // Wait for requeued task to be dispatched
@@ -275,7 +275,7 @@ describe('createScheduler', () => {
       conversation: new Conversation(),
       maximumSteps: 1,
     }));
-    blockingGenerates[1]!.resolve(textResponse('step'));
+    blockingGenerates[1].resolve(textResponse('step'));
     await imm2;
 
     const result = await bgResult;

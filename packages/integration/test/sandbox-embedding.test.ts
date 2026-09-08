@@ -101,7 +101,9 @@ function createMockAnthropicServer(): RecordingServer {
   return {
     baseURL: `http://127.0.0.1:${server.port}`,
     requests,
-    stop: () => server.stop(),
+    stop: () => {
+      server.stop();
+    },
   };
 }
 

@@ -108,7 +108,7 @@ describe('Soul Tools', () => {
 
       expect(result.success).toBe(true);
       const soul = await provider.loadSoul();
-      expect(soul[0]!.pinned).toBe(true);
+      expect(soul[0].pinned).toBe(true);
     });
 
     it('returns failure for non-existent item', async () => {
@@ -130,7 +130,7 @@ describe('Soul Tools', () => {
       });
 
       const tool = createSoulViewTool(provider);
-      const result = (await tool({})) as { items: SoulItem[]; rendered: string };
+      const result = await tool({});
 
       expect(result.items).toHaveLength(1);
       expect(result.rendered).toContain('Be helpful.');

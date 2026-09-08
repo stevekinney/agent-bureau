@@ -8,10 +8,10 @@ describe('createSoulSeed', () => {
     const items = createSoulSeed();
 
     expect(items).toHaveLength(1);
-    expect(items[0]!.content).toBe('You are a helpful assistant.');
-    expect(items[0]!.source).toBe('seed');
-    expect(items[0]!.pinned).toBe(true);
-    expect(items[0]!.reinforcementCount).toBe(0);
+    expect(items[0].content).toBe('You are a helpful assistant.');
+    expect(items[0].source).toBe('seed');
+    expect(items[0].pinned).toBe(true);
+    expect(items[0].reinforcementCount).toBe(0);
   });
 
   it('creates seed items from traits, values, and style', () => {
@@ -56,15 +56,15 @@ describe('createSoulSeed', () => {
     const items = createSoulSeed({ name: 'Atlas' });
 
     expect(items).toHaveLength(1);
-    expect(items[0]!.content).toBe('Your name is Atlas.');
-    expect(items[0]!.topic).toBe('identity');
+    expect(items[0].content).toBe('Your name is Atlas.');
+    expect(items[0].topic).toBe('identity');
   });
 
   it('includes additional content as an item', () => {
     const items = createSoulSeed({ additional: 'Some extra context.' });
 
     expect(items).toHaveLength(1);
-    expect(items[0]!.content).toBe('Some extra context.');
+    expect(items[0].content).toBe('Some extra context.');
   });
 
   it('empty arrays produce no items for that category', () => {
@@ -76,7 +76,7 @@ describe('createSoulSeed', () => {
 
     // All arrays empty, no name, no additional — falls back to default
     expect(items).toHaveLength(1);
-    expect(items[0]!.content).toBe('You are a helpful assistant.');
+    expect(items[0].content).toBe('You are a helpful assistant.');
   });
 
   it('produces unique IDs for each item', () => {
@@ -105,9 +105,9 @@ describe('createSoulSeed', () => {
     const items = createSoulSeed({ name: 'Aria', traits: ['Curious'], runtime });
 
     expect(items).toHaveLength(2);
-    expect(items[0]!.id).toBe(`seed-${runtime.identifierPrefix}-seed-1`);
-    expect(items[0]!.updatedAt).toBe('2026-07-04T00:00:00.000Z');
-    expect(items[1]!.id).toBe(`seed-${runtime.identifierPrefix}-seed-2`);
-    expect(items[1]!.updatedAt).toBe('2026-07-04T00:00:00.000Z');
+    expect(items[0].id).toBe(`seed-${runtime.identifierPrefix}-seed-1`);
+    expect(items[0].updatedAt).toBe('2026-07-04T00:00:00.000Z');
+    expect(items[1].id).toBe(`seed-${runtime.identifierPrefix}-seed-2`);
+    expect(items[1].updatedAt).toBe('2026-07-04T00:00:00.000Z');
   });
 });

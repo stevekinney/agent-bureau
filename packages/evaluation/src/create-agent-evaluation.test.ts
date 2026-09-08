@@ -547,7 +547,6 @@ describe('createAgentEvaluation', () => {
     // Simulate a generate function that throws undefined, which causes
     // the operative loop to return { finishReason: 'error', error: undefined }.
     const generate = async () => {
-      // eslint-disable-next-line @typescript-eslint/only-throw-error
       throw undefined;
     };
     const toolbox = createTestToolbox([]);

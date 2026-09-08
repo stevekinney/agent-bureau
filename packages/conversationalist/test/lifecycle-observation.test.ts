@@ -130,7 +130,7 @@ describe('Conversation lifecycle and observation', () => {
     conversation.updateStreamingMessage(messageId, 'ab');
 
     expect(events.map(({ revision }) => revision)).toEqual([2, 3]);
-    expect(events[1]!.sequence).toBeGreaterThan(events[0]!.sequence);
+    expect(events[1].sequence).toBeGreaterThan(events[0].sequence);
     expect(events.map(({ streamSequence }) => streamSequence)).toEqual([1, 2]);
   });
 
@@ -350,15 +350,15 @@ describe('Conversation lifecycle and observation', () => {
     conversation.undo();
 
     expect(events.map(({ type }) => type)).toEqual(['change', 'undo']);
-    expect(events[0]!.sequence).not.toBe(events[1]!.sequence);
-    expect(events[0]!.correlationId).toBe(events[1]!.correlationId);
+    expect(events[0].sequence).not.toBe(events[1].sequence);
+    expect(events[0].correlationId).toBe(events[1].correlationId);
 
     const forkEvents: Array<{ sequence: number; correlationId: string }> = [];
     conversation.addEventListener('session.forked', (event) => forkEvents.push(event));
     conversation.addEventListener('change', (event) => forkEvents.push(event));
     conversation.fork();
-    expect(forkEvents[0]!.sequence).not.toBe(forkEvents[1]!.sequence);
-    expect(forkEvents[0]!.correlationId).toBe(forkEvents[1]!.correlationId);
+    expect(forkEvents[0].sequence).not.toBe(forkEvents[1].sequence);
+    expect(forkEvents[0].correlationId).toBe(forkEvents[1].correlationId);
   });
 
   it('preserves stream sequence counters across history navigation', () => {
@@ -472,7 +472,7 @@ describe('Conversation lifecycle and observation', () => {
 
     conversation.appendUserMessage('outer write');
 
-    expect(conversation.current.ids.map((id) => conversation.current.messages[id]!.role)).toEqual([
+    expect(conversation.current.ids.map((id) => conversation.current.messages[id].role)).toEqual([
       'user',
       'assistant',
     ]);
@@ -510,7 +510,7 @@ describe('Conversation lifecycle and observation', () => {
     });
 
     expect(result).toEqual({ accepted: false, revision: 1, reason: 'revision-conflict' });
-    expect(conversation.current.ids.map((id) => conversation.current.messages[id]!.role)).toEqual([
+    expect(conversation.current.ids.map((id) => conversation.current.messages[id].role)).toEqual([
       'assistant',
     ]);
   });

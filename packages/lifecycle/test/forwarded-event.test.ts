@@ -90,9 +90,9 @@ describe('forwardEvents', () => {
     source.dispatch(new ToolCallEvent('search'));
 
     expect(received).toHaveLength(1);
-    expect(received[0]!.type).toBe('toolbox.call');
-    expect(received[0]!.originalEvent).toBeInstanceOf(ToolCallEvent);
-    expect((received[0]!.originalEvent as ToolCallEvent).toolName).toBe('search');
+    expect(received[0].type).toBe('toolbox.call');
+    expect(received[0].originalEvent).toBeInstanceOf(ToolCallEvent);
+    expect((received[0].originalEvent as ToolCallEvent).toolName).toBe('search');
 
     source.complete();
   });
@@ -129,7 +129,7 @@ describe('forwardEvents', () => {
     source.dispatch(new ToolCallEvent('second'));
 
     expect(received).toHaveLength(1);
-    expect((received[0]!.originalEvent as ToolCallEvent).toolName).toBe('first');
+    expect((received[0].originalEvent as ToolCallEvent).toolName).toBe('first');
 
     source.complete();
   });

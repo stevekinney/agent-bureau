@@ -79,7 +79,7 @@ describe('beforeGenerate hook', () => {
 
     hooks.on('beforeGenerate', async (context) => {
       // Return a modified context with a different step
-      return { ...context, step: 99 } as GenerateContext;
+      return { ...context, step: 99 };
     });
 
     const generate = createMockGenerate([textResponse('Hello')]);
@@ -90,7 +90,7 @@ describe('beforeGenerate hook', () => {
         return originalGenerate(...args);
       },
       { calls: generate.calls, callCount: generate.callCount },
-    ) as typeof generate;
+    );
 
     await run({
       generate: wrappedGenerate,
@@ -120,7 +120,7 @@ describe('beforeGenerate hook', () => {
         return originalGenerate(...args);
       },
       { calls: generate.calls, callCount: generate.callCount },
-    ) as typeof generate;
+    );
 
     await run({
       generate: wrappedGenerate,
@@ -141,7 +141,7 @@ describe('beforeGenerate hook', () => {
     hooks.on(
       'beforeGenerate',
       async (context) => {
-        return { ...context, step: 42 } as GenerateContext;
+        return { ...context, step: 42 };
       },
       { priority: 10 },
     );
@@ -150,7 +150,7 @@ describe('beforeGenerate hook', () => {
       'beforeGenerate',
       async (context) => {
         // This should receive step=42 from the first hook
-        return { ...context, step: context.step + 1 } as GenerateContext;
+        return { ...context, step: context.step + 1 };
       },
       { priority: 5 },
     );
@@ -163,7 +163,7 @@ describe('beforeGenerate hook', () => {
         return originalGenerate(...args);
       },
       { calls: generate.calls, callCount: generate.callCount },
-    ) as typeof generate;
+    );
 
     await run({
       generate: wrappedGenerate,
@@ -577,7 +577,7 @@ describe('onRunAbort hook', () => {
         return result;
       },
       { calls: generate.calls, callCount: generate.callCount },
-    ) as typeof generate;
+    );
 
     const result = await run({
       generate: wrappedGenerate,
@@ -1083,7 +1083,7 @@ describe('onLLMInput and onLLMOutput use consistent context after beforeGenerate
 
     hooks.on('beforeGenerate', async (context) => {
       // Modify the step to a different value
-      return { ...context, step: 99 } as GenerateContext;
+      return { ...context, step: 99 };
     });
 
     hooks.on('onLLMInput', async (context) => {
@@ -1204,13 +1204,13 @@ describe('onError hook exception does not bypass error result path', () => {
     // to individual tool errors which the toolbox catches internally).
     const throwingToolbox = createTestToolbox([tool]);
     const originalExecute = throwingToolbox.execute.bind(throwingToolbox);
-    throwingToolbox.execute = (async (...args: unknown[]) => {
+    throwingToolbox.execute = async (...args: unknown[]) => {
       // Call original for the first time, but then throw
       const _ = await (originalExecute as (...a: unknown[]) => Promise<unknown>)(...args);
       // The toolbox catches individual tool errors, so we throw here
       // to simulate a catastrophic toolbox failure.
       throw new Error('catastrophic toolbox failure');
-    }) as typeof throwingToolbox.execute;
+    };
 
     const generate = createMockGenerate([
       toolCallResponse([weatherToolCall('Denver')]),

@@ -967,8 +967,12 @@ describe('createAgent — default stopWhen', () => {
     // `createAgent` call — no explicit `stopWhen`.
     const generate: GenerateFunction = async ({ conversation }) => {
       const last = conversation.getMessages().at(-1);
+      // `Message.content` is `string | readonly MultiModalContent[]` — guard rather than
+      // interpolate it directly, which would print "[object Object],[object Object]" for
+      // multi-modal input.
+      const lastText = typeof last?.content === 'string' ? last.content : '(non-text content)';
       return {
-        content: `Echo: ${last?.content ?? '(empty)'}`,
+        content: `Echo: ${lastText}`,
         toolCalls: [],
       };
     };

@@ -264,7 +264,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c2',
       outcome: 'success',
-      content: undefined as any,
+      content: undefined,
     });
 
     expect(result.content).toBe(null);
@@ -274,7 +274,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c3',
       outcome: 'success',
-      content: { value: Infinity } as any,
+      content: { value: Infinity },
     });
 
     expect(result.content).toEqual({ value: null });
@@ -284,7 +284,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c4',
       outcome: 'success',
-      content: { tag: Symbol('test') } as any,
+      content: { tag: Symbol('test') },
     });
 
     expect(result.content).toEqual({});
@@ -294,7 +294,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c5',
       outcome: 'success',
-      content: Symbol('fallback') as any,
+      content: Symbol('fallback'),
     });
 
     expect(result.content).toBe('Symbol(fallback)');
@@ -354,7 +354,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c6-object',
       outcome: 'success',
-      content: circular as any,
+      content: circular,
     });
 
     expect(result.content).toBe('[object Object]');
@@ -442,7 +442,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c6-throwing-tostring',
       outcome: 'success',
-      content: unstringifiable as any,
+      content: unstringifiable,
     });
 
     // Normalization must still produce a string rather than propagate the hook's error.
@@ -468,7 +468,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c6-hostile-tag',
       outcome: 'success',
-      content: hostile as any,
+      content: hostile,
     });
 
     expect(result.content).toBe('[unstringifiable]');
@@ -566,7 +566,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c6-infinite-length',
       outcome: 'success',
-      content: hostile as any,
+      content: hostile,
     });
 
     expect(result.content).toBe('[unstringifiable]');
@@ -592,7 +592,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c6-oversized-length',
       outcome: 'success',
-      content: hostile as any,
+      content: hostile,
     });
 
     expect(result.content).toBe('[unstringifiable]');
@@ -632,7 +632,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c6-throwing-traversal',
       outcome: 'success',
-      content: hostile as any,
+      content: hostile,
     });
 
     expect(result.content).toBe('[unstringifiable]');
@@ -678,7 +678,7 @@ describe('interoperability materialization', () => {
     const result = materializeToolResult({
       callId: 'c7',
       outcome: 'success',
-      content: circular as any,
+      content: circular,
     });
 
     expect(result.content).toBe(String(circular));

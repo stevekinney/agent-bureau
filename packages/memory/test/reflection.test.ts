@@ -59,7 +59,7 @@ describe('createReflectionHook', () => {
     await onStep(createStepResult());
 
     expect(reflect).toHaveBeenCalledTimes(1);
-    const calledWith = reflect.mock.calls[0]![0];
+    const calledWith = reflect.mock.calls[0][0];
     expect(calledWith).toContain('## Run Summary');
     expect(calledWith).toContain('Initial query:');
   });
@@ -81,7 +81,7 @@ describe('createReflectionHook', () => {
     const results = await memory.recall('refactoring auth', { namespace: 'experiential' });
     expect(results.length).toBe(1);
 
-    const entry = results[0]!;
+    const entry = results[0];
     expect(entry.content).toBe('When refactoring auth, always run integration tests first.');
     expect(entry.metadata.source).toBe('experiential');
     expect(entry.metadata.tags).toEqual(['strategy']);

@@ -28,7 +28,7 @@ describe('operative package exports', () => {
     // would let published operative installs resolve releases outside the
     // intended compatible train.
     expect(declaredRange).toMatch(/^\^\d+\.\d+\.\d+$/);
-    expect(Bun.semver.satisfies(conversationalistPackageJson.version, declaredRange!)).toBe(true);
+    expect(Bun.semver.satisfies(conversationalistPackageJson.version, declaredRange)).toBe(true);
     // AB-283: raised from `>=20.19.0` to `>=22`, the floor CI actually exercises.
     expect(packageJson.engines?.node).toBe('>=22');
   });

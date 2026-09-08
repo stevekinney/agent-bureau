@@ -14,7 +14,7 @@ describe('ToolError model', () => {
       },
     });
 
-    const result = await tool.executeWith({ params: { value: 123 } as any });
+    const result = await tool.executeWith({ params: { value: 123 } });
 
     expect(result.error?.category).toBe('validation');
     expect(result.error?.retryable).toBe(false);

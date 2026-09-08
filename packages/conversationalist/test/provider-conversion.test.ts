@@ -740,7 +740,7 @@ describe('provider reverse conversion', () => {
               functionCall: {
                 name: 'stringified',
                 args: {
-                  weird: BigInt(5) as unknown as number,
+                  weird: BigInt(5),
                   nested: [Symbol('gemini') as unknown as string],
                 },
               },
@@ -792,7 +792,7 @@ describe('provider reverse conversion', () => {
                 name: 'stringified',
                 response: {
                   status: 'done',
-                  weird: BigInt(7) as unknown as number,
+                  weird: BigInt(7),
                 },
               },
             },

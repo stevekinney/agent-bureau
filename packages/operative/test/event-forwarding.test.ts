@@ -315,7 +315,7 @@ describe('event forwarding', () => {
 
     const forwardedErrorEvents: Array<{ originalEvent: unknown }> = [];
     activeRun.addEventListener('toolbox.error', (event) => {
-      forwardedErrorEvents.push(event as { originalEvent: unknown });
+      forwardedErrorEvents.push(event);
     });
 
     await activeRun.result;
@@ -397,7 +397,7 @@ describe('event forwarding — selectTools-swapped step toolbox (AB-239)', () =>
 
     const forwardedErrorEvents: Array<{ originalEvent: unknown }> = [];
     activeRun.addEventListener('toolbox.error', (event) => {
-      forwardedErrorEvents.push(event as { originalEvent: unknown });
+      forwardedErrorEvents.push(event);
     });
 
     await activeRun.result;

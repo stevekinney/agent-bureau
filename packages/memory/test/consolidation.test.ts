@@ -49,10 +49,10 @@ function createSearchResult(
     content,
     score: 1,
     metadata: {
-      namespace: 'default',
-      source: 'manual',
       ...metadata,
-    } as MemoryMetadata,
+      namespace: metadata.namespace ?? 'default',
+      source: metadata.source ?? 'manual',
+    },
     createdAt,
   };
 }
@@ -83,10 +83,10 @@ function createStubMemory(
         content,
         vector: [],
         metadata: {
-          namespace: metadata?.namespace ?? 'default',
-          source: 'manual',
           ...metadata,
-        } as MemoryMetadata,
+          namespace: metadata?.namespace ?? 'default',
+          source: metadata?.source ?? 'manual',
+        },
         createdAt: now,
         updatedAt: now,
       };

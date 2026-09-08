@@ -209,7 +209,7 @@ describe('createSoulDistillationTask', () => {
 
     // The current soul should still be the original
     const soul = await provider.loadSoul();
-    expect(soul[0]!.content).toBe('Existing soul item');
+    expect(soul[0].content).toBe('Existing soul item');
 
     await memory.close();
   });
@@ -278,9 +278,9 @@ describe('createSoulDistillationTask', () => {
 
     expect(receivedSoul).toBe('Be helpful.');
     expect(receivedCandidates).toHaveLength(1);
-    expect(receivedCandidates[0]!.content).toBe('Always validate inputs');
-    expect(receivedCandidates[0]!.confidence).toBe(0.95);
-    expect(receivedCandidates[0]!.topic).toBe('safety');
+    expect(receivedCandidates[0].content).toBe('Always validate inputs');
+    expect(receivedCandidates[0].confidence).toBe(0.95);
+    expect(receivedCandidates[0].topic).toBe('safety');
 
     await memory.close();
   });
@@ -358,7 +358,7 @@ describe('createSoulDistillationTask', () => {
 
     // Only the safe candidate should have made it to distill
     expect(distillCandidates).toHaveLength(1);
-    expect(distillCandidates[0]!.content).toBe('Safe principle');
+    expect(distillCandidates[0].content).toBe('Safe principle');
 
     await memory.close();
   });

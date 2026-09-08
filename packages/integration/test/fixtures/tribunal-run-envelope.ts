@@ -103,7 +103,7 @@ export function captureRunEnvelope<O, H extends boolean>(
     const parsed = runFrameSchema.parse(frame);
     if (parsed.schemaVersion !== RUN_ENVELOPE_SCHEMA_VERSION) {
       throw new Error(
-        `Frame schemaVersion ${parsed.schemaVersion} does not match RUN_ENVELOPE_SCHEMA_VERSION ${RUN_ENVELOPE_SCHEMA_VERSION}`,
+        `Frame schemaVersion ${String(parsed.schemaVersion)} does not match RUN_ENVELOPE_SCHEMA_VERSION ${String(RUN_ENVELOPE_SCHEMA_VERSION)}`,
       );
     }
     frames.push(parsed);
@@ -245,7 +245,7 @@ export function finishRunEnvelope(
   const frame = runFrameSchema.parse(createRunFinishedFrame({ runId, report }));
   if (frame.schemaVersion !== RUN_ENVELOPE_SCHEMA_VERSION) {
     throw new Error(
-      `Frame schemaVersion ${frame.schemaVersion} does not match RUN_ENVELOPE_SCHEMA_VERSION ${RUN_ENVELOPE_SCHEMA_VERSION}`,
+      `Frame schemaVersion ${String(frame.schemaVersion)} does not match RUN_ENVELOPE_SCHEMA_VERSION ${String(RUN_ENVELOPE_SCHEMA_VERSION)}`,
     );
   }
   capture.frames.push(frame);

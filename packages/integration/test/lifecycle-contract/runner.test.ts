@@ -54,7 +54,7 @@ function createFakeEventSource(): {
   const target = new EventTarget();
   return {
     addEventListener: (type, listener) => {
-      target.addEventListener(type, listener as EventListener);
+      target.addEventListener(type, listener);
     },
     emit: (type) => {
       target.dispatchEvent(new Event(type));

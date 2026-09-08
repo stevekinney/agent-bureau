@@ -95,7 +95,7 @@ describe('tool materialization helpers', () => {
           category: 'internal',
           retryable: false,
           message: 'symbolic',
-          details: Symbol('details') as never,
+          details: Symbol('details'),
         },
       }),
     ).toEqual({
@@ -189,7 +189,7 @@ describe('tool materialization helpers', () => {
             category: 'internal',
             retryable: false,
             message: 'circular',
-            details: circularDetails as never,
+            details: circularDetails,
           },
         },
       ]),

@@ -22,7 +22,7 @@ describe('Conversation state integrity', () => {
 
     conversation.appendUserMessage([{ type: 'text', text: 'hello' }]);
     const second = conversation.getSnapshot();
-    const message = second.conversation.messages[second.conversation.ids[0]!]!;
+    const message = second.conversation.messages[second.conversation.ids[0]];
     expect(second).not.toBe(first);
     expect(Object.isFrozen(message)).toBe(true);
     expect(Object.isFrozen(message.content)).toBe(true);
@@ -40,9 +40,7 @@ describe('Conversation state integrity', () => {
 
   it('detaches pure-helper output before enforcing runtime immutability', () => {
     const metadata = { mutable: true };
-    const input = structuredClone(createConversationHistory({ metadata })) as ReturnType<
-      typeof createConversationHistory
-    >;
+    const input = structuredClone(createConversationHistory({ metadata }));
     const result = appendUserMessage(input, 'hello');
 
     expect(Object.isFrozen(result)).toBe(true);
@@ -94,11 +92,11 @@ describe('Conversation state integrity', () => {
     expect(() => Conversation.from(resign(partialPath))).toThrow('current path index 99');
 
     const duplicate = structuredClone(snapshot);
-    duplicate.root.children[1]!.id = duplicate.root.children[0]!.id;
+    duplicate.root.children[1].id = duplicate.root.children[0].id;
     expect(() => Conversation.from(resign(duplicate))).toThrow('duplicate node id');
 
     const invalidRevision = structuredClone(snapshot);
-    invalidRevision.root.children[0]!.revision = snapshot.controllerRevision + 1;
+    invalidRevision.root.children[0].revision = snapshot.controllerRevision + 1;
     expect(() => Conversation.from(resign(invalidRevision))).toThrow('invalid node revision');
 
     const invalidRootRevision = structuredClone(snapshot);
@@ -109,7 +107,7 @@ describe('Conversation state integrity', () => {
   it('preserves fork and prune lineage in round trips', () => {
     const source = new Conversation(createConversationHistory(), { maxHistoryDepth: 2 });
     source.appendUserMessage('one');
-    const forkPointMessageId = source.current.ids[0]!;
+    const forkPointMessageId = source.current.ids[0];
     const forked = source.fork(forkPointMessageId);
     forked.appendAssistantMessage('two');
 
