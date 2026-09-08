@@ -618,6 +618,14 @@ export const baseConfig = [
         'warn',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', ignoreRestSiblings: true },
       ],
+      // Surfaces `@deprecated`-tagged uses at lint time (type-aware; requires the built types
+      // this config block already depends on). `warn`, not `error`: AB-242 deprecated
+      // `BureauOptions`'s agent-owned fields and `Bureau.createRun` in place rather than
+      // removing them, specifically so the three known in-repo call sites
+      // (`packages/gateway/src/start.ts`, `packages/gateway/src/routes/webhooks.ts`,
+      // `scripts/verify-bureau-tarball-boundary.ts`) keep the build green while every
+      // `bun run lint` lists them as pressure to close the gateway migration. See AB-366.
+      '@typescript-eslint/no-deprecated': 'warn',
     },
   })),
 

@@ -647,7 +647,12 @@ trio (`provider`/`providers`/`routing`), `instructions` for `systemPrompt`,
 (AB-351), closes. This document's example code stays the target end state it
 describes — every one of these fields is agent-owned configuration, with no
 bureau-level default `generate`/`provider` an agent falls back to; every
-`RunnableAgent` in `agents` supplies its own.
+`RunnableAgent` in `agents` supplies its own. AB-366 turned the `@deprecated`
+tag into live pressure rather than editor-only strikethrough:
+`@typescript-eslint/no-deprecated` runs at `warn` in `eslint.config.base.ts`,
+so every construction of these fields shows up as a warning in `bun run
+lint`'s output. That lint warning, not this paragraph, is the tracking
+mechanism for when the removal issue can close.
 
 ### `BureauRunOptions`
 
@@ -723,11 +728,15 @@ rather than collapsing to one branch.
 `createRun` on `Bureau<D>` is deprecated, not yet removed, per AB-242's
 decision record (2026-09-04): `run` is the target end-state replacement, but
 production call sites in `packages/gateway` (per-request `principal`,
-plus `webhooks.ts`'s per-request `systemPrompt`/`maximumSteps` override that
-`run` cannot express) still depend on it. `packages/bureau/src/types.ts`
-carries the `@deprecated` tag naming `run` as the replacement and pointing
-at AB-242; removal is tracked by AB-352, blocked on the gateway migration
-decision AB-351 names.
+plus `hooks.ts`'s per-request `systemPrompt`/`maximumSteps` override — the
+route AB-242 originally described as `webhooks.ts`'s, since removed as dead
+code by AB-316 — that `run` cannot express) still depend on it.
+`packages/bureau/src/types.ts` carries the `@deprecated` tag naming `run` as
+the replacement and pointing at AB-242; removal is tracked by AB-352,
+blocked on the gateway migration decision AB-351 names. AB-366 makes every
+one of these call sites, and any new one, show up as an
+`@typescript-eslint/no-deprecated` warning in `bun run lint` — the lint
+warning is the tracking mechanism, not this paragraph.
 
 ### Administrative operations
 
