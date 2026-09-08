@@ -296,6 +296,12 @@ export const SCOPE = {
    * into `runs:write`, since it grants the ability to resume a parked run or
    * execute a previously-gated tool call. */
   REVIEWS_WRITE: 'reviews:write',
+  /** List reusable approval grants (AB-46, AB-347). */
+  GRANTS_READ: 'grants:read',
+  /** Issue/revoke a reusable approval grant — deliberately its own scope, not
+   * folded into `reviews:write`, since a grant lets a matching future tool
+   * call skip human review entirely rather than resolving one pending case. */
+  GRANTS_WRITE: 'grants:write',
 } as const;
 
 export type Scope = (typeof SCOPE)[keyof typeof SCOPE];

@@ -1,0 +1,310 @@
+import type { GenerateFunction, Toolbox } from '@lostgradient/operative';
+import { stopWhen } from '@lostgradient/operative';
+import { createTool, createToolbox } from 'armorer';
+import { describe, expect, it } from 'bun:test';
+import { createBureau } from 'bureau';
+import { z } from 'zod';
+
+import { createTestGateway, requestJSON, waitForCondition, waitForRunState } from '../test';
+
+function createMockGenerate(): GenerateFunction {
+  return async () => ({ content: 'Done.', toolCalls: [] });
+}
+
+/** A toolbox with no `approvalSecret`/`grantStateStore` configured at all. */
+function createEmptyToolbox(): Toolbox {
+  return createToolbox([]) as unknown as Toolbox;
+}
+
+/**
+ * A toolbox with `approvalSecret` configured (required for `issueGrant` to
+ * mint a signed grant) and a `charge-card` tool gated behind a `needs_approval`
+ * `beforeExecute` policy, matching `reviews.test.ts`'s own fixture.
+ */
+function createNeedsApprovalToolbox(approvalSecret: string, charges: number[]): Toolbox {
+  return createToolbox(
+    [
+      createTool({
+        name: 'charge-card',
+        version: '1.0.0',
+        description: 'Charge a payment card',
+        input: z.object({ cents: z.number() }),
+        async execute({ cents }) {
+          charges.push(cents);
+          return { charged: cents };
+        },
+      }),
+    ],
+    {
+      approvalSecret,
+      policy: {
+        beforeExecute() {
+          return {
+            allow: false,
+            status: 'needs_approval',
+            reason: 'Operator approval required',
+            action: { message: 'Approve charge' },
+          };
+        },
+      },
+    },
+  ) as unknown as Toolbox;
+}
+
+// A fixed far-future epoch-ms timestamp — never `Date.now()` (deterministic
+// test directories forbid real runtime clock calls).
+const FAR_FUTURE_EXPIRY = new Date('2099-01-01T00:00:00.000Z').getTime();
+
+function validGrantBody(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    tenantId: 'bureau',
+    ownerId: 'bureau',
+    agentId: '*',
+    toolName: 'charge-card',
+    scope: 'principal',
+    expiresAt: FAR_FUTURE_EXPIRY,
+    maxUses: 5,
+    delegationBehavior: 'does-not-propagate',
+    ...overrides,
+  };
+}
+
+describe('grants routes', () => {
+  it('POST /api/v1/grants issues a signed grant attributed to the caller', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret', []),
+      authToken: 'grant-admin-token',
+    });
+    const authorization = { authorization: 'Bearer grant-admin-token' };
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      headers: authorization,
+      body: JSON.stringify(validGrantBody()),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as { id: string; principalId: string; signature: string };
+    expect(grant.principalId).toBe('static-token');
+    expect(grant.id).toStartWith('grant:');
+    expect(grant.signature.length).toBeGreaterThan(0);
+  });
+
+  it('POST /api/v1/grants ignores a client-supplied principalId in the body', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-2', []),
+      authToken: 'grant-admin-token-2',
+    });
+    const authorization = { authorization: 'Bearer grant-admin-token-2' };
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      headers: authorization,
+      body: JSON.stringify(validGrantBody({ principalId: 'someone-else' })),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as { principalId: string };
+    expect(grant.principalId).toBe('static-token');
+  });
+
+  it('POST /api/v1/grants returns 400 for a body missing required fields', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-3', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify({ toolName: 'charge-card' }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('POST /api/v1/grants maps a toolbox with no approvalSecret configured to a 500', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody()),
+    });
+    expect(response.status).toBe(500);
+  });
+
+  it('GET /api/v1/grants maps a toolbox with no grant state store configured to a 500', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants');
+    expect(response.status).toBe(500);
+  });
+
+  it('POST /api/v1/grants returns 400 for a malformed JSON body', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-4', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: '{not valid json',
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('DELETE /api/v1/grants/:id revokes a grant and GET no longer lists it', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-5', []),
+    });
+
+    const issueResponse = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody()),
+    });
+    const { id } = (await issueResponse.json()) as { id: string };
+
+    const deleteResponse = await requestJSON(gateway, `/api/v1/grants/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    expect(deleteResponse.status).toBe(204);
+
+    const listResponse = await requestJSON(gateway, '/api/v1/grants');
+    const grants = (await listResponse.json()) as Array<{ id: string; revoked: boolean }>;
+    const revoked = grants.find((grant) => grant.id === id);
+    expect(revoked?.revoked).toBe(true);
+  });
+
+  it('DELETE /api/v1/grants/:id returns 404 for an unknown grant id', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-6', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants/nope', { method: 'DELETE' });
+    expect(response.status).toBe(404);
+  });
+
+  it('GET /api/v1/grants scopes the listing to the authenticated principal', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-7', []),
+      authToken: 'grant-caller-token',
+    });
+
+    // Issue a grant as the static-token principal (the only principal this
+    // gateway's authentication middleware can produce without a managed key
+    // store) and confirm the listing returns exactly that principal's own
+    // grants — the filter this route always applies via `resolvePrincipal`.
+    await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      headers: { authorization: 'Bearer grant-caller-token' },
+      body: JSON.stringify(validGrantBody()),
+    });
+
+    const listResponse = await requestJSON(gateway, '/api/v1/grants', {
+      headers: { authorization: 'Bearer grant-caller-token' },
+    });
+    expect(listResponse.status).toBe(200);
+    const grants = (await listResponse.json()) as Array<{ principalId: string }>;
+    expect(grants.length).toBeGreaterThan(0);
+    expect(grants.every((grant) => grant.principalId === 'static-token')).toBe(true);
+  });
+
+  it('GET /api/v1/grants returns an empty array when nothing has been issued', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-8', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual([]);
+  });
+});
+
+// ── AB-346 follow-up: `combineToolboxes` and durable opt-in tools ────────
+//
+// AB-346's checkpoint comment (2026-09-04) flagged that `combineToolboxes`
+// (used by `wireDurableOptInTools` to graft the `requestHumanInput`/
+// `scheduleWakeup` tools onto a run's toolbox) rebuilds a fresh toolbox via
+// `createToolbox(configurations, { context })`, forwarding only `context` —
+// see `combine-toolboxes.ts`. This test drives a real durable run
+// (`humanInput: true`) that also carries a `needs_approval` tool and a
+// matching grant, and records what actually happens against the gateway
+// route surface this issue owns, per the coordinator's instruction to
+// report rather than widen scope.
+//
+// FINDING (reported on AB-347, not fixed here — this is `combineToolboxes`'/
+// `wireDurableOptInTools`'s own gap in `packages/armorer`/`packages/bureau`,
+// out of this gateway-only issue's scope): the gap is broader than AB-346's
+// checkpoint anticipated. `combineToolboxes` forwards neither `approvalSecret`
+// nor `grantStateStore` NOR the toolbox's `policy` (the `beforeExecute`
+// `needs_approval` hook itself) into the combined toolbox it builds. The
+// result is not "the grant fails to match and the ordinary ask pipeline
+// runs" (grants degrading safely to their documented absent-is-safe
+// behavior) — it is that EVERY tool call on a run that opts into durable
+// `humanInput`/`wakeup` tools skips capability-approval and grant-matching
+// alike, unconditionally, whether or not a grant exists. Confirmed in
+// isolation with no grant issued at all: the same `needs_approval` tool
+// still executes immediately. This is a live security-relevant regression,
+// not a grant-matching edge case, and should be tracked as its own issue
+// against `packages/armorer/src/combine-toolboxes.ts` /
+// `packages/bureau/src/runtime-composition.ts`'s `wireDurableOptInTools`.
+describe('grants routes — durable opt-in tools (AB-346 follow-up)', () => {
+  it('documents that a run opting into durable tools skips its needs_approval policy entirely, independent of any grant', async () => {
+    const charges: number[] = [];
+    const generate: GenerateFunction = async (context) =>
+      context.step === 0
+        ? {
+            content: '',
+            toolCalls: [{ id: 'call-durable-1', name: 'charge-card', arguments: { cents: 4200 } }],
+          }
+        : { content: 'ok', toolCalls: [] };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createNeedsApprovalToolbox('durable-grant-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+    });
+    const gateway = await createTestGateway(bureau, { authToken: 'durable-grant-token' });
+    const authorization = { authorization: 'Bearer durable-grant-token' };
+
+    const issueResponse = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      headers: authorization,
+      body: JSON.stringify(validGrantBody()),
+    });
+    expect(issueResponse.status).toBe(201);
+
+    const createResponse = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      headers: authorization,
+      body: JSON.stringify({ message: 'Charge the customer' }),
+    });
+    const createdRun = await createResponse.json();
+    await waitForRunState(gateway.bureau, createdRun.id);
+
+    await waitForCondition(
+      () => charges.length > 0 || gateway.bureau.listPendingReviews().length > 0,
+      'expected either the tool call to execute or a pending review to appear',
+    );
+
+    // See the FINDING above the `describe` block: the tool executes
+    // immediately (no review is ever created), but NOT because the issued
+    // grant matched — `combineToolboxes` drops the toolbox's `policy`
+    // (the `needs_approval` hook) entirely for this run, independent of
+    // grants.
+    expect(charges).toEqual([4200]);
+    expect(gateway.bureau.listPendingReviews()).toHaveLength(0);
+  });
+});

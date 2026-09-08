@@ -7,10 +7,12 @@
  * - `POST /api/v1/reviews/:id/approve` — resume the parked run (executes the
  *   tool for a `tool-approval`, delivers the signal for a `human-wait`).
  * - `POST /api/v1/reviews/:id/deny` — record the decision without resuming.
+ * - `POST /api/v1/reviews/:id/reject` — deny plus a REQUIRED caller-supplied
+ *   `reason` (AB-46): returns `400` when `reason` is missing or empty.
  *
- * Both mutating routes attribute the decision to the authenticated principal
- * (the `x-auth-principal` header the authentication middleware injects) and
- * record it in the bureau's audit trail via `Bureau.resolveReview`.
+ * All three mutating routes attribute the decision to the authenticated
+ * principal (the `x-auth-principal` header the authentication middleware
+ * injects) and record it in the bureau's audit trail via `Bureau.resolveReview`.
  */
 import { BureauError } from 'bureau';
 import { Hono } from 'hono';
@@ -34,6 +36,12 @@ const denyBodySchema = z
   })
   .partial();
 
+const rejectBodySchema = z
+  .object({
+    reason: z.string().optional(),
+  })
+  .partial();
+
 /**
  * Parses and validates a mutating review route's JSON body against `schema`.
  * Rejects with `400` for both malformed JSON AND a syntactically valid but
@@ -41,7 +49,7 @@ const denyBodySchema = z
  * route bodies (which dereference fields like `body.payload` directly) rely
  * on to never see a shape they can't index into.
  */
-async function parseReviewBody<TSchema extends z.ZodTypeAny>(
+export async function parseReviewBody<TSchema extends z.ZodTypeAny>(
   context: { req: { text(): Promise<string> } },
   schema: TSchema,
 ): Promise<z.infer<TSchema>> {
@@ -64,7 +72,7 @@ async function parseReviewBody<TSchema extends z.ZodTypeAny>(
   return result.data;
 }
 
-function toHttpException(error: unknown): HTTPException {
+export function toHttpException(error: unknown): HTTPException {
   if (error instanceof BureauError) {
     if (error.code === 'NOT_FOUND') return new HTTPException(404, { message: error.message });
     // The only NOT_CONFIGURED cause reachable here is subject: 'approval' (a
@@ -118,6 +126,23 @@ export function createReviewsRoutes(bureau: Bureau) {
       const outcome = await bureau.resolveReview({
         id,
         decision: 'deny',
+        principal: resolvePrincipal(context),
+        ...(body.reason !== undefined ? { reason: body.reason } : {}),
+      });
+      return context.json(outcome, 200);
+    } catch (error) {
+      throw toHttpException(error);
+    }
+  });
+
+  app.post('/:id/reject', async (context) => {
+    const id = context.req.param('id');
+    const body = await parseReviewBody(context, rejectBodySchema);
+
+    try {
+      const outcome = await bureau.resolveReview({
+        id,
+        decision: 'reject',
         principal: resolvePrincipal(context),
         ...(body.reason !== undefined ? { reason: body.reason } : {}),
       });
