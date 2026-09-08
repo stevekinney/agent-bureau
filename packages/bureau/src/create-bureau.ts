@@ -4871,12 +4871,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
         const prunableRunIds: string[] = [];
         for (const runId of candidateRunIds) {
-          const durableRun = runtime.durable ? await runtime.durable.engine.get(runId) : null;
+          let durableRun: Awaited<ReturnType<NonNullable<typeof runtime.durable>['engine']['get']>>;
+          try {
+            durableRun = runtime.durable ? await runtime.durable.engine.get(runId) : null;
+          } catch (error) {
+            // Cannot verify this run's terminal status right now (a
+            // storage-layer failure from `engine.get`, not "not found" —
+            // that case returns `null`, not a rejection) — fail closed by
+            // excluding it from pruning THIS cycle, and never let one
+            // unreadable run abort the whole pass for every other
+            // candidate and every other session (Copilot review, PR #568).
+            diagnose({
+              level: 'error',
+              scope: 'run-ownership-pruning',
+              message: `[bureau] Could not read the durable engine record for run "${runId}" during lastRunOwningPrincipals pruning; leaving its ownership entry in place this cycle:`,
+              cause: error,
+            });
+            continue;
+          }
+          // Prunable ONLY on a positive, terminal confirmation. `null`
+          // ("this process's durable engine has never heard of this run")
+          // is deliberately NOT treated as prunable — the doc comment
+          // above names exactly this race: a run's ownership entry is
+          // written at dispatch time, before the durable engine has
+          // necessarily registered it, so "unknown" cannot be
+          // distinguished from "not yet visible" (Copilot review, PR #568).
           if (
-            durableRun !== null &&
-            (durableRun.status === 'pending' ||
-              durableRun.status === 'running' ||
-              durableRun.status === 'suspended')
+            durableRun === null ||
+            durableRun.status === 'pending' ||
+            durableRun.status === 'running' ||
+            durableRun.status === 'suspended'
           ) {
             continue;
           }
