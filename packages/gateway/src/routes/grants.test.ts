@@ -157,7 +157,7 @@ describe('grants routes', () => {
     expect(response.status).toBe(400);
   });
 
-  it('DELETE /api/v1/grants/:id revokes a grant and GET no longer lists it', async () => {
+  it('DELETE /api/v1/grants/:id revokes a grant and GET reports it revoked', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),
       toolbox: createNeedsApprovalToolbox('grant-test-secret-5', []),
@@ -190,12 +190,47 @@ describe('grants routes', () => {
     expect(response.status).toBe(404);
   });
 
-  it('GET /api/v1/grants scopes the listing to the authenticated principal', async () => {
+  it('DELETE /api/v1/grants/:id returns 404 for a grant issued to a different principal', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-6b', []),
+    });
+
+    // Seeded directly against the Bureau method, bypassing the route (whose
+    // POST always overrides `principalId` with the caller) — the only way to
+    // get a grant on record for a principal other than the test's own caller.
+    const othersGrant = await gateway.bureau.issueGrant({
+      ...validGrantBody(),
+      principalId: 'someone-else',
+    } as Parameters<typeof gateway.bureau.issueGrant>[0]);
+
+    const response = await requestJSON(
+      gateway,
+      `/api/v1/grants/${encodeURIComponent(othersGrant.id)}`,
+      { method: 'DELETE' },
+    );
+    expect(response.status).toBe(404);
+
+    // Never actually revoked — the caller's lack of visibility isn't a
+    // side-effecting no-op on someone else's grant.
+    const stillThere = await gateway.bureau.listGrants({ principalId: 'someone-else' });
+    expect(stillThere.find((grant) => grant.id === othersGrant.id)?.revoked).toBe(false);
+  });
+
+  it("GET /api/v1/grants scopes the listing to the authenticated principal, excluding another principal's grants", async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),
       toolbox: createNeedsApprovalToolbox('grant-test-secret-7', []),
       authToken: 'grant-caller-token',
     });
+
+    // Seeded directly against the Bureau method for a DIFFERENT principal —
+    // the rollback-relevant case (AB-347's rollback trigger: "a grant route
+    // leaks another principal's grants through GET /grants").
+    await gateway.bureau.issueGrant({
+      ...validGrantBody(),
+      principalId: 'someone-else',
+    } as Parameters<typeof gateway.bureau.issueGrant>[0]);
 
     // Issue a grant as the static-token principal (the only principal this
     // gateway's authentication middleware can produce without a managed key
