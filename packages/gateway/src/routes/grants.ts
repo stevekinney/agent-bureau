@@ -28,6 +28,15 @@
  * /schedules/:id` convention this gateway already establishes
  * (`schedules.ts`): `201` for issuance, `200` for listing, `204` for
  * revocation.
+ *
+ * `scope` (AB-364): `'run'` requires a `runId` in the body and matches only
+ * calls from that run; `'session'` requires a `sessionId` and matches any
+ * run of that session; `'principal'` matches as before, with no identifier
+ * required. A body missing the identifier its chosen scope needs is
+ * rejected with `400` (`issueGrantBodySchema`'s `superRefine`) before
+ * `Toolbox.issueGrant` is ever called — which enforces the same rule
+ * independently (`GrantError`, code `invalid-scope`) for callers that mint
+ * grants directly against the toolbox rather than through this route.
  */
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
@@ -37,25 +46,50 @@ import { resolvePrincipal } from '../middleware/authentication';
 import type { Bureau } from '../types';
 import { parseReviewBody, toHttpException } from './reviews';
 
-const issueGrantBodySchema = z.object({
-  tenantId: z.string().min(1),
-  ownerId: z.string().min(1),
-  agentId: z.string().min(1),
-  toolName: z.string().min(1),
-  resourcePattern: z.string().min(1).optional(),
-  argumentConstraints: z.record(z.string(), z.unknown()).optional(),
-  scope: z.enum(['run', 'session', 'principal']),
-  expiresAt: z.number(),
-  // A fractional or non-positive maxUses would break usage-counting
-  // semantics downstream: `Toolbox.issueGrant` initializes
-  // `usesRemaining` to `maxUses` verbatim and matching only requires
-  // `usesRemaining > 0` after decrementing by exactly 1 per use, so e.g.
-  // `maxUses: 1.5` grants two uses instead of one, and `maxUses: 0` (or
-  // negative) silently mints a permanently unusable grant rather than
-  // rejecting the request (review finding, this pull request).
-  maxUses: z.number().int().positive(),
-  delegationBehavior: z.enum(['inherits-to-children', 'does-not-propagate']),
-});
+const issueGrantBodySchema = z
+  .object({
+    tenantId: z.string().min(1),
+    ownerId: z.string().min(1),
+    agentId: z.string().min(1),
+    toolName: z.string().min(1),
+    resourcePattern: z.string().min(1).optional(),
+    argumentConstraints: z.record(z.string(), z.unknown()).optional(),
+    scope: z.enum(['run', 'session', 'principal']),
+    // Required when `scope` is `'run'`/`'session'` respectively (AB-364),
+    // enforced below by `superRefine` rather than a per-scope discriminated
+    // union: a `run` grant carrying an incidental `sessionId` (or vice
+    // versa) is not itself invalid — only the identifier the CHOSEN scope
+    // needs is required — and the ruling never says the other one must be
+    // absent.
+    runId: z.string().min(1).optional(),
+    sessionId: z.string().min(1).optional(),
+    expiresAt: z.number(),
+    // A fractional or non-positive maxUses would break usage-counting
+    // semantics downstream: `Toolbox.issueGrant` initializes
+    // `usesRemaining` to `maxUses` verbatim and matching only requires
+    // `usesRemaining > 0` after decrementing by exactly 1 per use, so e.g.
+    // `maxUses: 1.5` grants two uses instead of one, and `maxUses: 0` (or
+    // negative) silently mints a permanently unusable grant rather than
+    // rejecting the request (review finding, this pull request).
+    maxUses: z.number().int().positive(),
+    delegationBehavior: z.enum(['inherits-to-children', 'does-not-propagate']),
+  })
+  .superRefine((value, ctx) => {
+    if (value.scope === 'run' && !value.runId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['runId'],
+        message: 'A "run"-scoped grant requires a runId.',
+      });
+    }
+    if (value.scope === 'session' && !value.sessionId) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['sessionId'],
+        message: 'A "session"-scoped grant requires a sessionId.',
+      });
+    }
+  });
 
 export function createGrantsRoutes(bureau: Bureau) {
   const app = new Hono();

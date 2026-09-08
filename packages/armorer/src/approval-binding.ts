@@ -333,6 +333,10 @@ export interface ReusableApprovalGrant {
   /** Zod-schema-shaped constraints checked against the resumed arguments using the same validation `resumeApproval` performs. */
   readonly argumentConstraints?: Record<string, unknown>;
   readonly scope: 'run' | 'session' | 'principal';
+  /** Required when `scope` is `'run'`: the run this grant authorizes; matching requires the request context's `runId` to equal this exactly. */
+  readonly runId?: string;
+  /** Required when `scope` is `'session'`: the session this grant authorizes; matching requires the request context's `sessionId` to equal this exactly. */
+  readonly sessionId?: string;
   readonly issuedAt: number;
   readonly expiresAt: number;
   readonly maxUses: number;
@@ -347,7 +351,7 @@ export interface ReusableApprovalGrant {
 export class GrantError extends Error {
   constructor(
     message: string,
-    readonly code: 'not-found' | 'invalid-signature',
+    readonly code: 'not-found' | 'invalid-signature' | 'invalid-scope',
   ) {
     super(message);
     this.name = 'GrantError';
@@ -362,15 +366,26 @@ export interface GrantStateStore {
   decrementUse(id: string): Promise<{ usesRemaining: number }>;
 }
 
+// `usesRemaining` is excluded from the signed payload alongside `signature`
+// itself: it is the trusted `GrantStateStore`'s own live usage counter, not
+// a caller-supplied issuance term, and `decrementUse` (which has no access
+// to `approvalSecret`) mutates it directly on every consuming call without
+// re-signing. Signing it would make every grant with `maxUses > 1`
+// permanently fail signature verification after its very first use — a
+// latent defect this issue's grant-matching tests surfaced, fixed here
+// rather than deferred, since matching a `session`-scoped grant against a
+// second run in the same session is exactly the multi-use path this
+// exposed. `maxUses` itself (the issuance-time ceiling) stays signed, so a
+// tampered ceiling is still caught; only the live countdown is exempt.
 function grantSignaturePayload(
   grant: ReusableApprovalGrant,
-): Omit<ReusableApprovalGrant, 'signature'> {
-  const { signature: _signature, ...payload } = grant;
+): Omit<ReusableApprovalGrant, 'signature' | 'usesRemaining'> {
+  const { signature: _signature, usesRemaining: _usesRemaining, ...payload } = grant;
   return payload;
 }
 
 function normalizeGrantSignaturePayload(
-  payload: Omit<ReusableApprovalGrant, 'signature'>,
+  payload: Omit<ReusableApprovalGrant, 'signature' | 'usesRemaining'>,
 ): JsonValue {
   const serialized = JSON.stringify(payload);
   return JSON.parse(serialized) as JsonValue;

@@ -199,6 +199,7 @@ const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient']
 function normalizeRunRequestContext(
   requestContext: ToolRequestContext | undefined,
   runId: string,
+  sessionId: string,
   agentName: string,
   principal: string | undefined,
 ): ToolRequestContext {
@@ -221,12 +222,18 @@ function normalizeRunRequestContext(
     audience: context.audience ?? 'operator',
     agentId: agentName,
     runId,
+    // Reusable approval grant `session` scope (AB-364) matches on this —
+    // always the run's OWNING session, never caller-suppliable via
+    // `requestContext`, so a request can never forge its way into a
+    // different session's grants.
+    sessionId,
   });
 }
 
 export function recoveredRequestContextFromMetadata(
   metadata: Record<string, JSONValue>,
   runId: string,
+  sessionId: string,
   agentName: string,
   now: () => number,
 ): ToolRequestContext | undefined {
@@ -272,6 +279,7 @@ export function recoveredRequestContextFromMetadata(
       ...(typeof deadline === 'number' ? { deadline } : {}),
     },
     runId,
+    sessionId,
     persistedAgentId ?? agentName,
     undefined,
   );
@@ -2493,6 +2501,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const requestContext = recoveredRequestContextFromMetadata(
       session.metadata,
       runId,
+      session.id,
       session.agentName,
       runtimeServices.clock.now,
     );
@@ -3022,6 +3031,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const requestContext = normalizeRunRequestContext(
       request.requestContext,
       runId,
+      sessionId,
       agentName,
       request.principal,
     );
@@ -4324,6 +4334,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               const requestContext = recoveredRequestContextFromMetadata(
                 fullSession.metadata,
                 handle.id,
+                ownedSessionId,
                 recoveredAgentName,
                 runtimeServices.clock.now,
               );

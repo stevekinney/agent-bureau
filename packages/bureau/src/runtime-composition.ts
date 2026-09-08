@@ -314,6 +314,7 @@ function isJsonRecord(value: JSONValue | undefined): value is Record<string, JSO
 function requestContextFromAuthorityValue(
   value: JSONValue | undefined,
   runId: string | undefined,
+  sessionId: string | undefined,
   agentName: string | undefined,
   now: () => number,
 ): ToolRequestContext | undefined {
@@ -350,6 +351,7 @@ function requestContextFromAuthorityValue(
     ...(typeof deadline === 'number' ? { deadline } : {}),
     ...(agentName !== undefined ? { agentId: agentName } : {}),
     ...(runId !== undefined ? { runId } : {}),
+    ...(sessionId !== undefined ? { sessionId } : {}),
   };
 }
 
@@ -364,6 +366,7 @@ function requestContextFromAuthorityValue(
 export function recoveredRequestContext(
   metadata: Record<string, JSONValue>,
   runId: string | undefined,
+  sessionId: string | undefined,
   agentName: string | undefined,
   now: () => number,
 ): ToolRequestContext | undefined {
@@ -372,6 +375,7 @@ export function recoveredRequestContext(
     return requestContextFromAuthorityValue(
       runId === undefined ? undefined : authorities[runId],
       runId,
+      sessionId,
       agentName,
       now,
     );
@@ -379,6 +383,7 @@ export function recoveredRequestContext(
   return requestContextFromAuthorityValue(
     metadata[requestAuthorityMetadataKey],
     runId,
+    sessionId,
     agentName,
     now,
   );
@@ -2278,6 +2283,7 @@ export async function createRuntimeComposition(
     const requestContext = recoveredRequestContext(
       session.metadata,
       runId,
+      session.id,
       agentName,
       runtimeServices.clock.now,
     );
@@ -3077,6 +3083,7 @@ export async function createRuntimeComposition(
     const recoveredAuthority = recoveredRequestContext(
       session.metadata,
       info.workflowId,
+      sessionId,
       info.input.agentName,
       runtimeServices.clock.now,
     );

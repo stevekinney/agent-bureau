@@ -207,6 +207,7 @@ function buildGrant(overrides: Partial<ReusableApprovalGrant> = {}): ReusableApp
     resourcePattern: 'resource:*',
     argumentConstraints: { path: 'string' },
     scope: 'run',
+    runId: 'run-1',
     issuedAt: 10_000_000_000_000,
     expiresAt: 10_000_000_000_200,
     maxUses: 3,
@@ -356,11 +357,18 @@ describe('reusable approval grant signing', () => {
 
   it('rejects a grant whose signature does not match its current field values', () => {
     const grant = buildGrant();
-    const tampered = { ...grant, usesRemaining: grant.usesRemaining - 1 };
+    const tampered = { ...grant, revoked: true };
     expect(() => verifyGrantSignature(tampered, grantSecret)).toThrow(GrantError);
     expect(() => verifyGrantSignature(tampered, grantSecret)).toThrow(
       'Reusable approval grant signature is invalid.',
     );
+  });
+
+  it('never treats a live usesRemaining change as a tampered signature: the store legitimately mutates it on every use without access to the signing secret', () => {
+    const grant = buildGrant({ maxUses: 3, usesRemaining: 3 });
+    const decremented = { ...grant, usesRemaining: grant.usesRemaining - 1 };
+    expect(() => verifyGrantSignature(decremented, grantSecret)).not.toThrow();
+    expect(signGrant(decremented, grantSecret)).toBe(grant.signature);
   });
 
   it('rejects a grant signed with a different secret', () => {
@@ -372,5 +380,19 @@ describe('reusable approval grant signing', () => {
     const grant = buildGrant({ maxUses: 3, usesRemaining: 3 });
     const tampered = { ...grant, maxUses: 30 };
     expect(signGrant(tampered, grantSecret)).not.toBe(grant.signature);
+  });
+
+  it('produces a different signature when runId changes (AB-364: scope identifiers are signed fields)', () => {
+    const grant = buildGrant({ scope: 'run', runId: 'run-1' });
+    const tampered = { ...grant, runId: 'run-2' };
+    expect(signGrant(tampered, grantSecret)).not.toBe(grant.signature);
+    expect(() => verifyGrantSignature(tampered, grantSecret)).toThrow(GrantError);
+  });
+
+  it('produces a different signature when sessionId changes (AB-364: scope identifiers are signed fields)', () => {
+    const grant = buildGrant({ scope: 'session', sessionId: 'session-1' });
+    const tampered = { ...grant, sessionId: 'session-2' };
+    expect(signGrant(tampered, grantSecret)).not.toBe(grant.signature);
+    expect(() => verifyGrantSignature(tampered, grantSecret)).toThrow(GrantError);
   });
 });
