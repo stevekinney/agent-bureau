@@ -308,20 +308,22 @@ const combined = combineToolboxes(base, adminTools);
 
 `combineToolboxes` also forwards the **first** toolbox's approval- and
 toolbox-identity-related options — `policy` (including any `needs_approval`
-`beforeExecute` hook), `approvalPolicy`, `approvalSecret`,
-`approvalStateStore`, `grantStateStore`, `approvalBindingTtlMs`, `approvalNow`,
-`approvalNonce`, `policyRevision`, `approvalRevision`, `toolboxRevision`,
-`readOnly`, `allowMutation`, and `allowDangerous` — into the combined toolbox,
-the same way `extend()` already forwards its own options into an extended
-toolbox. This is a narrow, explicit allowlist, not every option
-`ToolboxOptions` carries: `middleware` is excluded because every configuration
-`toJSON()` returns has already been transformed by it at registration time
-(forwarding it again would apply it a second time to already-transformed
-input), and `signal` is excluded because it would tie the combined toolbox's
-abort listener to a signal it never gets a chance to detach from on normal
-completion. Combining is not a merge of approval configuration across
-toolboxes: only the first toolbox's approval gating and reusable-grant
-matching governs calls to the combined toolbox. This matters whenever you
+`beforeExecute` hook), `policyContext` (the registry-level context that hook
+reads its tenant/approval-context values from), `approvalPolicy`,
+`approvalSecret`, `approvalStateStore`, `grantStateStore`,
+`approvalBindingTtlMs`, `approvalNow`, `approvalNonce`, `policyRevision`,
+`approvalRevision`, `toolboxRevision`, `readOnly`, `allowMutation`, and
+`allowDangerous` — into the combined toolbox, the same way `extend()` already
+forwards its own options into an extended toolbox. This is a narrow, explicit
+allowlist, not every option `ToolboxOptions` carries: `middleware` is excluded
+because every configuration `toJSON()` returns has already been transformed by
+it at registration time (forwarding it again would apply it a second time to
+already-transformed input), and `signal` is excluded because it would tie the
+combined toolbox's abort listener to a signal it never gets a chance to
+detach from on normal completion. Combining is not a merge of approval
+configuration across toolboxes: only the first toolbox's approval gating and
+reusable-grant matching governs calls to the combined toolbox. This matters
+whenever you
 graft extra tools onto a toolbox that already gates calls behind approval —
 the combined toolbox must keep gating them, not silently drop the policy.
 This forwarding never exposes `approvalSecret` on the combined toolbox's own
