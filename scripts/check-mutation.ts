@@ -82,8 +82,21 @@ export interface MutationTarget {
    *  unique in the file, which `findSymbolBody` still verifies on its own. */
   readonly occurrence?: number;
   /** Present only for a mutation deliberately not counted as a follow-up: a genuinely
-   *  equivalent mutant, recorded here with its reason rather than silently excluded. */
-  readonly equivalentMutants?: readonly { readonly operator: string; readonly reason: string }[];
+   *  equivalent mutant, recorded here with its reason rather than silently excluded. Matched
+   *  against a survivor by `operator` and, when `line` is given, by that exact line too — line
+   *  is optional only for backward compatibility with an entry written before this field
+   *  existed; a new entry should always pin `line`. Without it, an operator match is entry-wide:
+   *  a LATER, genuinely non-equivalent survivor of the same operator at a different line in the
+   *  same target would silently inherit this justification instead of being reported as a
+   *  missing assertion (PR #570 review). Pinning `line` closes that gap: if the code shifts and
+   *  the line no longer matches the mutant's current position, the entry simply stops applying
+   *  and the survivor reports as an unclassified missing assertion again — a loud, safe failure
+   *  that demands the justification be re-verified and re-pinned, never a silent misattribution. */
+  readonly equivalentMutants?: readonly {
+    readonly operator: string;
+    readonly line?: number;
+    readonly reason: string;
+  }[];
 }
 
 export interface MutationTest {
@@ -389,6 +402,18 @@ export function compareToBaseline(
   };
 }
 
+/**
+ * Every survivor lacking a matched `equivalentMutants` entry (no `equivalentReason`) — a
+ * missing assertion, or a previously-equivalent mutant whose pinned `line` drifted out of match.
+ * `compareToBaseline` alone cannot see this: a set can hold at its baseline COUNT while one
+ * classified survivor's `line` stops matching and a genuinely different, unclassified survivor
+ * takes its place at the same total, and the count comparison reports no regression at all
+ * (PR #570 review — identity, not just count, must gate the check).
+ */
+export function unclassifiedSurvivors(result: TargetSetResult): readonly SurvivedMutant[] {
+  return result.survived.filter((mutant) => mutant.equivalentReason === undefined);
+}
+
 // ---------------------------------------------------------------------------
 // Process execution (injectable for tests)
 // ---------------------------------------------------------------------------
@@ -573,7 +598,9 @@ export function runTargetSet(options: RunOptions, set: MutationTargetSet): Targe
         }
         if (result.allPassed) {
           const equivalent = target.equivalentMutants?.find(
-            (entry) => entry.operator === candidate.operator,
+            (entry) =>
+              entry.operator === candidate.operator &&
+              (entry.line === undefined || entry.line === candidate.line),
           );
           survived.push({
             setName: set.name,
@@ -719,6 +746,20 @@ async function main(): Promise<void> {
     // a missing assertion (or a recorded equivalent mutant) an author should be able to see
     // without first breaking the baseline.
     for (const mutant of result.survived) console.log(formatSurvivor(mutant));
+    // The count-only comparison above cannot see IDENTITY: a set can hold steady at its baseline
+    // count while a previously-equivalent mutant's `line` drifts out of match (code shifted above
+    // it) and a genuinely different, non-equivalent survivor takes its place at the same total —
+    // "N survived" stays true of the set, but which N changed. An unclassified survivor (no
+    // `equivalentReason`) is exactly that signal: either a real regression hiding behind a level
+    // count, or a stale `line` pin that needs re-verifying and re-pinning. Fail on it
+    // unconditionally, even when the count itself is within budget or improved (PR #570 review).
+    const unclassified = unclassifiedSurvivors(result);
+    if (unclassified.length > 0) {
+      failed = true;
+      console.error(
+        `\nTarget set "${result.setName}" has ${unclassified.length} unclassified surviving mutant(s) — each is either a missing assertion or a stale equivalentMutants "line" pin that no longer matches. Add a test that kills it, or fix/re-pin its equivalentMutants entry in mutation-targets.json.`,
+      );
+    }
   }
 
   if (failed) {
