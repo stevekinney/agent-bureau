@@ -13645,4 +13645,144 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       await bureau.dispose();
     }
   });
+
+  it('does not coalesce a deleteSession call for a session RECREATED with the same id while the original deletion is still finishing its post-commit cleanup (Codex follow-up review finding, PR #566)', async () => {
+    // The coalescing map above is released as soon as `sessionStore.delete`
+    // itself commits, not when the whole function (including awaiting a
+    // released paused run's own terminal event) finally resolves. Before
+    // that fix, a `deleteSession(id)` call arriving during that tail would
+    // silently resolve against the OLD, already-settled deletion's promise
+    // without ever touching the NEW session — this proves it actually
+    // deletes the new one.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const originalRun = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = originalRun.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+
+      // Deletes the ORIGINAL session — `sessionStore.delete` commits
+      // quickly (nothing here waits on the gated tool), but the returned
+      // promise stays pending, awaiting the just-released paused run's own
+      // terminal event, which the still-held tool gate blocks.
+      const originalDeletion = bureau.deleteSession(sessionId);
+      await pollUntil(async () => (await bureau.getSession(sessionId)) === undefined);
+
+      // A NEW session, reusing the SAME id, created and completed WHILE
+      // `originalDeletion` is still pending.
+      const recreatedRun = await bureau.createRun({
+        message: 'a fresh session reusing the same id',
+        sessionId,
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      expect(await bureau.getSession(sessionId)).toBeDefined();
+
+      // This must genuinely delete the RECREATED session, not silently
+      // resolve against `originalDeletion`'s stale promise.
+      const recreatedDeletion = bureau.deleteSession(sessionId);
+
+      releaseTool!();
+      await Promise.all([originalDeletion, recreatedDeletion]);
+      await waitForRunCompletion(bureau, originalRun.id);
+
+      expect(await bureau.getSession(sessionId)).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('dispatches session.deleted only after a released paused run has actually settled, so the durable record sorts after that run own terminal action (Codex follow-up review finding, PR #566)', async () => {
+    // `writeOutOfBandRecord`'s manual sequence starts near
+    // `Number.MAX_SAFE_INTEGER` so an out-of-band record always sorts LAST
+    // within its own millisecond against a real action-stream record's
+    // small per-run sequence. Dispatching `session.deleted` before the
+    // released run settles would let that run's own same-millisecond
+    // terminal action sort BEFORE the deletion that actually caused it —
+    // inverting true causal order. Dispatching only after the run settles
+    // makes the "sorts last" property match reality.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = run.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      await bureau.deleteSession(sessionId);
+      await waitForRunCompletion(bureau, run.id);
+
+      const allRecords = await bureau.auditTrail!.query({ limit: 1000 });
+      const runTerminalIndex = allRecords.findIndex(
+        (record) => record.runId === run.id && record.type === 'run.completed',
+      );
+      const sessionDeletedIndex = allRecords.findIndex(
+        (record) => record.runId === `session:${sessionId}` && record.type === 'session.deleted',
+      );
+      expect(runTerminalIndex).toBeGreaterThanOrEqual(0);
+      expect(sessionDeletedIndex).toBeGreaterThanOrEqual(0);
+      expect(runTerminalIndex).toBeLessThan(sessionDeletedIndex);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });

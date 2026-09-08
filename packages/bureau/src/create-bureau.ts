@@ -4733,18 +4733,41 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // pre-existing (not introduced by this fix) double-write of
   // `revokePendingApprovalsForRun`'s own `review.revoked` records under
   // the identical cross-process race.
+  // AB-228 (Codex follow-up review finding, PR #566): the coalescing slot
+  // above is released as soon as `sessionStore.delete(id)` itself commits
+  // (`onStoreDeletionCommitted` below), NOT when the whole function
+  // finally resolves. `performDeleteSession`'s tail after that point
+  // (releasing a paused run's steering gate, awaiting its terminal event)
+  // is cleanup for the OLD, now-actually-deleted incarnation — holding the
+  // coalescing slot open through it would make a `deleteSession(id)` call
+  // for a session RECREATED with the same id, arriving during that tail,
+  // silently resolve against the OLD promise instead of ever deleting the
+  // NEW session. `releaseCoalescing` is reset to a no-op the first time it
+  // runs (either via the commit callback or the `finally` safety net for
+  // the never-existed-session path / a thrown error before commit) so it
+  // never double-clears an entry a later, unrelated call may already own.
   const inFlightSessionDeletions = new Map<string, Promise<void>>();
   async function deleteSession(id: string): Promise<void> {
     const existing = inFlightSessionDeletions.get(id);
     if (existing) return existing;
-    const deletion = performDeleteSession(id).finally(() => {
+    let releaseCoalescing: (() => void) | undefined = () => {
       inFlightSessionDeletions.delete(id);
+    };
+    const deletion = performDeleteSession(id, () => {
+      releaseCoalescing?.();
+      releaseCoalescing = undefined;
+    }).finally(() => {
+      releaseCoalescing?.();
+      releaseCoalescing = undefined;
     });
     inFlightSessionDeletions.set(id, deletion);
     return deletion;
   }
 
-  async function performDeleteSession(id: string): Promise<void> {
+  async function performDeleteSession(
+    id: string,
+    onStoreDeletionCommitted: () => void,
+  ): Promise<void> {
     const sessionStore = requireSessionStore();
     const session = await sessionStore.load(id);
     if (session) {
@@ -4809,18 +4832,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
 
       await sessionStore.delete(id);
-      // AB-228 (Codex P1 review finding, PR #566): the durable audit trail
-      // allowlists `session.deleted`, but nothing dispatched it — this is
-      // the emission point. Dispatched on the bureau-level emitter (not
-      // via `store.recordAction`, which silently no-ops for any runId not
-      // currently `store.runs`, and a deleted session may own zero live
-      // runs) exactly once, only after `sessionStore.delete` has actually
-      // succeeded for a session that genuinely existed — the no-such-session
-      // path below (`session` was already `undefined`) dispatches nothing,
-      // since nothing was actually deleted. `audit-trail.ts`'s dedicated
-      // `sessionDeletedListener` mirrors the schedule-definition listeners'
-      // `writeOutOfBandRecord` path to turn this into a durable record.
-      emitter.dispatch(new SessionDeletedEvent(id));
+      onStoreDeletionCommitted();
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,
       // bureau-wide idempotency ledger — must not survive to be inherited
@@ -4848,6 +4860,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       steeringGates.delete(id);
 
       await Promise.allSettled(runTerminals);
+
+      // AB-228 (Codex P1 + follow-up review findings, PR #566): the durable
+      // audit trail allowlists `session.deleted`, but nothing dispatched
+      // it — this is the emission point. Dispatched on the bureau-level
+      // emitter (not via `store.recordAction`, which silently no-ops for
+      // any runId not currently `store.runs`, and a deleted session may
+      // own zero live runs) exactly once, only for a session that
+      // genuinely existed — the no-such-session path below (`session` was
+      // already `undefined`) dispatches nothing, since nothing was
+      // actually deleted. `audit-trail.ts`'s dedicated
+      // `sessionDeletedListener` mirrors the schedule-definition listeners'
+      // `writeOutOfBandRecord` path to turn this into a durable record.
+      //
+      // Deliberately dispatched HERE — after `runTerminals` settles, not
+      // right after `sessionStore.delete` above — because
+      // `writeOutOfBandRecord`'s manual sequence counter starts near
+      // `Number.MAX_SAFE_INTEGER` specifically so an out-of-band record
+      // always sorts LAST within its own millisecond against a real
+      // action-stream record's small per-run sequence. A paused run this
+      // deletion releases (`settleForDeletion` above) settles its own
+      // terminal action-stream record — chronologically AFTER this
+      // deletion decided to release it — during this very
+      // `Promise.allSettled` wait; dispatching the deletion before that
+      // wait would let a same-millisecond terminal action's small sequence
+      // sort earlier than this deletion's huge one, inverting true causal
+      // order for postmortems. Waiting until every released run has
+      // actually settled first means the deletion genuinely IS the last
+      // fact to become true, so the huge manual sequence's "sorts last"
+      // property matches reality instead of fighting it.
+      emitter.dispatch(new SessionDeletedEvent(id));
 
       for (const runId of sessionRunIds) {
         runRequestContexts.delete(runId);
