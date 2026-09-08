@@ -74,11 +74,14 @@
  * `resolveEventHistory` in `create-bureau.ts`) already knows how to read —
  * previously exercised only by that detection's own synthetic tests
  * (`Store.recordAction`/`bureau.store.recordAction`), never by a real
- * deletion. Idempotent on a duplicate dispatch of the same event: the
- * listener first checks whether the owner's own durable page already
- * carries a `'session.deleted'` record (the SAME evidence-based check
- * `resolveEventHistory` performs) and skips the write when one is already
- * present, rather than appending a second record for one logical deletion.
+ * deletion. Best-effort de-duplication on a duplicate dispatch of the same
+ * event: the listener first checks whether the owner's own durable page
+ * already carries a `'session.deleted'` record (the SAME evidence-based
+ * check `resolveEventHistory` performs) and skips the write when one is
+ * already present, rather than appending a second record for one logical
+ * deletion. This read-then-write check is NOT atomic across processes —
+ * see the listener's own doc comment for exactly which duplicate-dispatch
+ * case it does and does not cover.
  */
 import type {
   AgentScheduledEvent,
@@ -758,21 +761,18 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // decremented in the same `.finally` that already prunes `activeWrites`.
   const activeWriteCountsByOwner = new Map<string, number>();
 
-  function sink(owner: DurableEventOwner, kind: string, payload: unknown): void {
-    if (signal?.aborted) return;
-    const ownerKey = encodeOwner(owner);
+  // AB-372 — extracted out of `sink()` below so `sessionDeletedListener`'s
+  // read-then-write idempotency check (which does not call `sink()`
+  // directly, since it needs to skip the write entirely on a hit) still
+  // participates in the SAME `activeWrites`/`activeWriteCountsByOwner`
+  // bookkeeping every other listener's write does — the increment happens
+  // synchronously when the listener fires, before the async page-read even
+  // starts, so `hasActiveWrite(owner)` correctly reports `true` for the
+  // whole duration of the check-then-maybe-write, not just the write half
+  // of it (Copilot review finding, PR #580).
+  function trackWrite(ownerKey: string, work: () => Promise<void>): void {
     activeWriteCountsByOwner.set(ownerKey, (activeWriteCountsByOwner.get(ownerKey) ?? 0) + 1);
-    const write = history.record(owner, kind, payload).then(
-      () => undefined,
-      (error: unknown) => {
-        diagnose({
-          level: 'error',
-          scope: 'durable-event-history',
-          message: `[durable-event-history] Failed to record durable event "${kind}" for ${owner.kind}:${owner.id}:`,
-          cause: error,
-        });
-      },
-    );
+    const write = work();
     activeWrites.add(write);
     void write.finally(() => {
       activeWrites.delete(write);
@@ -784,6 +784,23 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       }
     });
     runtime.deferred.track(write, 'durable-event-record');
+  }
+
+  function sink(owner: DurableEventOwner, kind: string, payload: unknown): void {
+    if (signal?.aborted) return;
+    trackWrite(encodeOwner(owner), () =>
+      history.record(owner, kind, payload).then(
+        () => undefined,
+        (error: unknown) => {
+          diagnose({
+            level: 'error',
+            scope: 'durable-event-history',
+            message: `[durable-event-history] Failed to record durable event "${kind}" for ${owner.kind}:${owner.id}:`,
+            cause: error,
+          });
+        },
+      ),
+    );
   }
 
   const actionListener = (event: ActionEvent): void => {
@@ -895,37 +912,51 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // `Bureau.eventHistory`'s deleted-aggregate detection (`create-bureau.ts`'s
   // `resolveEventHistory`) already reads.
   //
-  // Idempotent on a duplicate dispatch: unlike every other listener in this
-  // producer, this one checks the owner's own durable page BEFORE writing —
-  // if a `'session.deleted'` record is already present, the write is
-  // skipped rather than appending a second record for one logical deletion.
-  // This matters because `deleteSession`'s own single-process coalescing
-  // (`create-bureau.ts`) does not cover every duplicate-dispatch path (its
-  // own doc comment names a documented cross-process race), and unlike
-  // `run.removed` (where `deleteRun` similarly guards against redundant
-  // dispatch), a session's deletion marker is what `resolveEventHistory`'s
-  // deleted-aggregate detection keys its entire "was this owner deleted"
-  // answer on — a second record would still evidence deletion just as
-  // correctly as the first, but this producer would rather write exactly
-  // one durable fact per logical deletion than rely on that detection being
-  // insensitive to a duplicate. A page-fetch failure propagates to the
-  // outer `.catch` below like any other write failure — it does not report
-  // a false "already recorded" (it throws, never returning a truthy
-  // page-with-matching-event).
+  // Best-effort de-duplication on a duplicate dispatch (Copilot review
+  // finding, PR #580 — this paragraph previously overclaimed "exactly
+  // one"): unlike every other listener in this producer, this one checks
+  // the owner's own durable page BEFORE writing — if a `'session.deleted'`
+  // record is already present, the write is skipped rather than appending
+  // a second record for one logical deletion. This matters because
+  // `deleteSession`'s own single-process coalescing (`create-bureau.ts`)
+  // does not cover every duplicate-dispatch path (its own doc comment names
+  // a documented cross-process race). The read-then-write check is NOT
+  // atomic — two producer instances (in two separate Bureau processes
+  // sharing one persistent backend) can both read "no record yet" before
+  // either has appended, and both then append, producing two
+  // `'session.deleted'` records for one logical deletion; this guard
+  // reliably prevents a duplicate from ONE process's own repeated/duplicate
+  // dispatch of the SAME event (the case this issue's own acceptance
+  // criterion tests), not every possible source of a duplicate. This is
+  // safe to be best-effort rather than exact: a second record would still
+  // evidence deletion just as correctly as the first — `resolveEventHistory`
+  // (`create-bureau.ts`) only checks for the PRESENCE of a `'session.deleted'`
+  // kind in the page (`.some(...)`), never that there is exactly one, so any
+  // reader of this durable history must already tolerate more than one
+  // `'session.deleted'` record for the same owner. A page-fetch failure
+  // propagates to the outer `.catch` below like any other write failure —
+  // it does not report a false "already recorded" (it throws, never
+  // returning a truthy page-with-matching-event).
+  //
+  // Routed through `trackWrite` (not `sink()`, which always writes) so
+  // `hasActiveWrite(owner)` reports `true` for this owner from the moment
+  // the listener fires — covering the async page-read this listener does
+  // before it decides whether to write at all — through to the write's own
+  // completion, exactly as it does for every other listener's write
+  // (Copilot review finding, PR #580).
   const sessionDeletedListener = (event: SessionDeletedEvent): void => {
     if (signal?.aborted) return;
     const owner: DurableEventOwner = { kind: 'session', id: event.sessionId };
-    const write = recordSessionDeletedIfAbsent(owner, event.sessionId).catch((error: unknown) => {
-      diagnose({
-        level: 'error',
-        scope: 'durable-event-history',
-        message: `[durable-event-history] Failed to record durable event "session.deleted" for ${owner.kind}:${owner.id}:`,
-        cause: error,
-      });
-    });
-    activeWrites.add(write);
-    void write.finally(() => activeWrites.delete(write));
-    runtime.deferred.track(write, 'durable-event-record');
+    trackWrite(encodeOwner(owner), () =>
+      recordSessionDeletedIfAbsent(owner, event.sessionId).catch((error: unknown) => {
+        diagnose({
+          level: 'error',
+          scope: 'durable-event-history',
+          message: `[durable-event-history] Failed to record durable event "session.deleted" for ${owner.kind}:${owner.id}:`,
+          cause: error,
+        });
+      }),
+    );
   };
   async function recordSessionDeletedIfAbsent(
     owner: DurableEventOwner,

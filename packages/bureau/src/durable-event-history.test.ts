@@ -1752,6 +1752,49 @@ describe('createDurableEventProducer()', () => {
     await history.dispose();
   });
 
+  it('hasActiveWrite() reports true for a session owner while the idempotency page-read AND the write are in flight, not just the write (AB-372, Copilot review finding, PR #580)', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    let releasePage!: () => void;
+    const pageGate = new Promise<void>((resolve) => {
+      releasePage = resolve;
+    });
+    const owner = { kind: 'session' as const, id: 'sess-1' };
+    const history: DurableEventHistory = {
+      record: async () => {
+        throw new Error('unused: this test never lets the read resolve');
+      },
+      page: async () => {
+        await pageGate;
+        return { events: [], hasMore: false };
+      },
+      subscribeEventHistory: () => {
+        throw new Error('unused by createDurableEventProducer');
+      },
+      retainedRunOwnerIds: () => {
+        throw new Error('unused by createDurableEventProducer');
+      },
+      dispose: async () => {},
+    };
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    expect(producer.hasActiveWrite(owner)).toBe(false);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+
+    // The listener increments the owner's active-write count SYNCHRONOUSLY
+    // when it fires — before the async idempotency page-read has even
+    // started, let alone resolved.
+    expect(producer.hasActiveWrite(owner)).toBe(true);
+
+    releasePage();
+    await runtime.deferred.drain();
+
+    expect(producer.hasActiveWrite(owner)).toBe(false);
+
+    await producer.dispose();
+  });
+
   it('diagnoses (never throws) when the session.deleted idempotency check fails to read the owner page', async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
