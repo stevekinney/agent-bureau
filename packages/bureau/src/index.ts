@@ -27,6 +27,7 @@ export {
   classifyRecoveredRun,
   classifyRecoveredRunDetailed,
   createBureau,
+  DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS,
   ScheduleLocatorUnavailableError,
 } from './create-bureau';
 export type {

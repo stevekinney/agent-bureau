@@ -95,6 +95,7 @@ import {
   CompletableEventTarget,
   createDefaultRuntimeServices,
   type RuntimeServices,
+  type RuntimeTimeoutHandle,
   type TypedEventTarget,
 } from 'lifecycle';
 
@@ -196,6 +197,20 @@ const BUREAU_AGENT_NAME = 'bureau';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
+
+/**
+ * AB-374: the cadence at which Bureau, under `durableBackgroundTasks:
+ * 'automatic'`, runs its OWN interval calling `pruneStaleRunOwnership()` —
+ * matching the cadence weft's own retention-maintenance timer uses
+ * (`DEFAULT_RETENTION_SWEEP_INTERVAL_MS` in
+ * `@lostgradient/weft/src/core/types/constants.ts`, currently 300_000ms / 5
+ * minutes) per the AB-374 coordinator ruling ("at the same cadence weft
+ * uses for retention maintenance"). Weft does not export that constant from
+ * its public surface, so this is intentionally the same literal value
+ * rather than an import — if weft's own default ever changes, this constant
+ * must be updated to match by hand.
+ */
+export const DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS = 300_000;
 
 function normalizeRunRequestContext(
   requestContext: ToolRequestContext | undefined,
@@ -1379,6 +1394,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // resolution (its contract for direct, non-Bureau callers) picks up this
   // SAME instance rather than minting a second default one.
   const runtime = await createRuntimeComposition({ ...options, runtime: runtimeServices });
+  // AB-374: whether this bureau owns the automatic-profile stale-run-
+  // ownership pruning interval at all — `'manual'` hosts already drive
+  // `runDurableMaintenance()` from their own alarm, and a bureau with no
+  // durable engine has nothing for `pruneStaleRunOwnership()` to prune.
+  const wantsAutomaticDurableMaintenance =
+    runtime.durable !== undefined && options.durableBackgroundTasks !== 'manual';
   // AB-223: scheduled fires are headless (no per-run emitter — see
   // `runtime-composition.ts`'s `buildScheduledRunServices`), so a fire's
   // terminal `schedule.completed`/`schedule.failed` has nowhere else to
@@ -1600,6 +1621,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     context.authority.authorizationRevision !== 'bureau:scheduler:1';
   let durableRecoveryDeferred = false;
   let durableRecoveryStarted = false;
+  // AB-374: set once `startDurableMaintenanceInterval()` actually starts the
+  // automatic-profile interval; cleared by `stopDurableMaintenanceInterval()`
+  // (called unconditionally at the top of `shutdown()`, and idempotent
+  // either way). `undefined` covers both "never started" (manual profile, or
+  // no durable engine at all) and "already stopped". Wrapped in an object
+  // (rather than a bare `RuntimeTimeoutHandle | undefined`) because
+  // `RuntimeTimeoutHandle` is itself `unknown`, and a union with `unknown`
+  // is flagged as redundant by `@typescript-eslint/no-redundant-type-constituents`.
+  let durableMaintenanceInterval: { readonly handle: RuntimeTimeoutHandle } | undefined;
   let durableRecoveryBarrier: Promise<BureauRecoveryReport> = Promise.resolve({
     outcome: 'clean',
     perRunFailures: [],
@@ -5068,6 +5098,78 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return true;
   }
 
+  /**
+   * AB-374: the automatic-profile interval's own tick. Fire-and-forget by
+   * necessity — `RuntimeTimers.setInterval`'s callback is synchronous
+   * (`() => void`) — but the resulting promise is registered onto the
+   * composed `RuntimeServices.deferred` tracker (the SAME seam
+   * `scheduler.stop()` above and every other Bureau-owned background
+   * promise use) under a stable label, so a test can `await
+   * runtime.deferred.drain()` after advancing the manual clock to observe
+   * exactly when a pass has settled, and `ResourceScope`/quiescence checks
+   * built on `outstandingDeferred()` see a genuinely in-flight pass rather
+   * than an invisible one. A rejection is diagnosed and swallowed here,
+   * never thrown into the interval machinery: `runMaintenance` itself is
+   * NOT called from this tick — `'automatic'` mode already has
+   * `startScheduler: true` (see `runtime-composition.ts`), so weft drives
+   * its own retention sweep on its own in-process poller; this interval
+   * exists ONLY to give `pruneStaleRunOwnership()` (bureau's own
+   * session-metadata maintenance, which weft has no hook into) an
+   * equivalent automatic driver, per the AB-374 coordinator ruling. Calling
+   * `runDurableMaintenance()` here instead would double-invoke weft's own
+   * maintenance on top of its own poller for no benefit.
+   */
+  function fireDurableMaintenanceTick(): void {
+    const attempt = pruneStaleRunOwnership().catch((error) => {
+      diagnose({
+        level: 'error',
+        scope: 'durable-maintenance',
+        message: `[bureau] Error during automatic stale-run-ownership pruning: ${serializeUnknownError(error)}`,
+      });
+    });
+    runtimeServices.deferred.track(attempt, 'durable-maintenance-tick');
+  }
+
+  /**
+   * AB-374: starts the automatic-profile stale-run-ownership pruning
+   * interval, at {@link DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS} —
+   * mirroring weft's own retention-maintenance cadence. Called only after
+   * boot recovery has settled (both the eager and the deferred-on-authority-
+   * validator recovery paths funnel through `durableRecoveryBarrier`,
+   * exactly the callers below). Idempotent: a second call is a no-op,
+   * whether because the interval is already running or because `shutdown()`
+   * has already been requested — the latter check closes the race where
+   * recovery is still deferred (no request-authority validator attached
+   * yet) when a caller shuts the bureau down; without it, a validator
+   * attached after that point would still start a brand-new interval this
+   * shutdown's own `stopDurableMaintenanceInterval()` call already ran past,
+   * leaking a timer past a supposedly-quiescent bureau.
+   */
+  function startDurableMaintenanceInterval(): void {
+    if (durableMaintenanceInterval !== undefined) return;
+    if (shutdownPromise) return;
+    durableMaintenanceInterval = {
+      handle: runtimeServices.timers.setInterval(
+        fireDurableMaintenanceTick,
+        DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS,
+      ),
+    };
+  }
+
+  /**
+   * AB-374: stops the automatic-profile interval, if one was ever started.
+   * Called unconditionally at the very top of `shutdown()`'s synchronous
+   * teardown (before any async step), so no further tick can ever fire once
+   * `shutdown()`/`dispose()` has been called — the quiescence report (AB-262)
+   * reads `RuntimeServices`' own pending-timer bookkeeping, which only ever
+   * clears once `clearInterval` actually runs.
+   */
+  function stopDurableMaintenanceInterval(): void {
+    if (durableMaintenanceInterval === undefined) return;
+    runtimeServices.timers.clearInterval(durableMaintenanceInterval.handle);
+    durableMaintenanceInterval = undefined;
+  }
+
   async function listSessions(options?: SessionListOptions) {
     return requireSessionStore().list(options);
   }
@@ -6293,6 +6395,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // was given — the FIRST call's policy is what actually ran.
     if (shutdownPromise) return shutdownPromise;
 
+    // AB-374: stop the automatic-profile stale-run-ownership pruning
+    // interval FIRST, synchronously, before anything else below — including
+    // before `shutdownPromise` itself is assigned further down, so this
+    // runs exactly once, on the real first call. A no-op under `'manual'`
+    // or with no durable engine (the handle was never set).
+    stopDurableMaintenanceInterval();
+
     const policy: 'abort' | 'drain' = shutdownOptions?.policy ?? 'abort';
     const timeoutMilliseconds = shutdownOptions?.timeoutMilliseconds;
 
@@ -7111,6 +7220,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     durableRecoveryBarrier = new Promise<BureauRecoveryReport>((resolve) => {
       resolveDurableRecoveryBarrier = resolve;
     });
+    // AB-374: recovery here only actually runs once a request-authority
+    // validator is later attached (`setRequestAuthorityValidator` resolves
+    // THIS SAME `durableRecoveryBarrier` reference) — start the interval
+    // then, not now, or a run recovered afterward could look pruned before
+    // `pruneStaleRunOwnership()` has ever seen its retained state settle.
+    if (wantsAutomaticDurableMaintenance) {
+      void durableRecoveryBarrier.finally(startDurableMaintenanceInterval);
+    }
   } else {
     durableRecoveryStarted = true;
     durableRecoveryBarrier = recoverDurableRuns().catch((error) => {
@@ -7135,6 +7252,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       } satisfies BureauRecoveryReport;
     });
     await durableRecoveryBarrier;
+    // AB-374: recovery already settled (just awaited above) — start the
+    // interval now, after boot recovery, per the coordinator ruling.
+    if (wantsAutomaticDurableMaintenance) startDurableMaintenanceInterval();
   }
 
   return bureau;

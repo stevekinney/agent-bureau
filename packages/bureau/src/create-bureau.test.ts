@@ -70,6 +70,7 @@ import {
   createDefaultSessionPersistenceSleep,
   dedupeRecoveryPerRunFailures,
   detachBestEffortPromise,
+  DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS,
   emptyRecoveredStepMetadata,
   hasRecoverableTransportAuthority,
   isRecoverableScheduledFireInput,
@@ -14136,6 +14137,211 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
       } finally {
         await bureau.shutdown();
       }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
+// ── AB-374: automatic-profile durable-maintenance interval ──────────────
+//
+// `durableBackgroundTasks: 'manual'` hosts already drive `pruneStaleRunOwnership()`
+// themselves via `bureau.runDurableMaintenance()` from their own alarm (the
+// AB-363 suite above). Under the default `'automatic'` profile, weft's own
+// retention timer has no external hook Bureau can piggyback on for its OWN
+// session-metadata maintenance — so Bureau owns a second interval, over the
+// SAME composed `RuntimeServices` clock/timers seam (AB-92), ticking at
+// `DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS` (mirroring weft's own
+// retention-sweep cadence). These tests drive that interval with a manual
+// clock rather than a real wall-clock wait.
+describe('bureau owns an automatic-profile durable-maintenance interval (AB-374)', () => {
+  // Shared setup for the first two tests: one run, deleted, with the fleet
+  // feed's retention floor advanced past every one of its durable events —
+  // the exact "stale, prunable owner" shape the AB-363 suite above
+  // constructs and verifies pruneStaleRunOwnership() against directly. Here
+  // the only variable under test is WHAT drives the pass: an automatic
+  // interval tick versus nothing at all.
+  async function createStaleOwnerFixture(databasePath: string) {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+    });
+
+    const run = await bureau.createRun({ message: 'stale owner', principal: 'alice' });
+    await waitForRunCompletion(bureau, run.id);
+
+    const before = await bureau.getSession(run.sessionId);
+    expect(before?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+
+    await bureau.deleteRun(run.id);
+    await runtime.deferred.drain();
+
+    const deletedOutcome = await bureau.eventHistory({ kind: 'run', id: run.id });
+    if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+      throw new Error(
+        `expected a deleted-aggregate outcome for the run, got ${JSON.stringify(deletedOutcome)}`,
+      );
+    }
+    const lastEvent = deletedOutcome.events.at(-1);
+    if (!lastEvent) throw new Error('expected at least one durable event for the run');
+
+    const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const adminFeed = createFleetEventFeed(adminStorage);
+    await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+    adminFeed.dispose();
+    adminStorage[Symbol.dispose]();
+
+    return { runtime, bureau, sessionId: run.sessionId, runId: run.id };
+  }
+
+  it("under durableBackgroundTasks: 'automatic' (the default), advancing the manual clock past one cadence triggers exactly one pruning pass", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-auto-maintenance-interval-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const { runtime, bureau, sessionId } = await createStaleOwnerFixture(databasePath);
+
+      try {
+        // Nothing has fired yet — the interval is armed for the FULL cadence,
+        // never on construction.
+        expect(runtime.outstandingDeferred()).not.toContain('durable-maintenance-tick');
+        const stillStale = await bureau.getSession(sessionId);
+        expect(stillStale?.metadata['lastRunOwningPrincipals']).toBeDefined();
+
+        // Advancing by exactly one period past due fires the periodic timer
+        // exactly once (it re-arms at `dueAt + period`, strictly beyond this
+        // window) — the manual clock's own semantics, not an assumption this
+        // test has to police separately. The resulting pruning pass writes
+        // through a genuine session-store optimistic-concurrency retry path
+        // (real backoff, not the fake clock), so this polls for the write to
+        // land — `runtime.deferred.drain()` alone only proves the tracked
+        // promise eventually settles, not that it settles within the pure
+        // microtask ticks that helper polls; a real macrotask yield
+        // (`pollUntil`) is what actually observes a real-timer retry.
+        await runtime.advance(DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS + 1);
+        const pruned = await pollUntil(async () => {
+          const session = await bureau.getSession(sessionId);
+          return session?.metadata['lastRunOwningPrincipals'] === undefined;
+        });
+        expect(pruned).toBe(true);
+
+        const after = await bureau.getSession(sessionId);
+        expect(after?.metadata['lastRunOwningPrincipals']).toBeUndefined();
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it("under durableBackgroundTasks: 'manual', advancing the manual clock past the same cadence triggers no pruning pass", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-manual-maintenance-interval-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+        durableBackgroundTasks: 'manual',
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'stale owner', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+        await bureau.deleteRun(run.id);
+        await runtime.deferred.drain();
+
+        const deletedOutcome = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+          throw new Error(
+            `expected a deleted-aggregate outcome for the run, got ${JSON.stringify(deletedOutcome)}`,
+          );
+        }
+        const lastEvent = deletedOutcome.events.at(-1);
+        if (!lastEvent) throw new Error('expected at least one durable event for the run');
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        const before = await bureau.getSession(run.sessionId);
+        expect(before?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+
+        // No interval was ever created under 'manual' — nothing pending to fire.
+        expect(runtime.pendingTimers()).toEqual([]);
+
+        await runtime.advance(DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS + 1);
+        // Bounded real-time yields, not a microtask-only drain, so a genuine
+        // pruning pass (had one wrongly fired) would have every chance to
+        // land before this asserts it never did.
+        for (let i = 0; i < 5; i++) await yieldToPortableEventLoop();
+
+        const after = await bureau.getSession(run.sessionId);
+        expect(after?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('shutdown() stops the interval: after shutdown, advancing the clock triggers no further pass, and no pending timer remains', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-maintenance-interval-shutdown-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const { runtime, bureau } = await createStaleOwnerFixture(databasePath);
+
+      // Sanity: the interval is genuinely armed before shutdown — otherwise
+      // "shutdown stops it" would be proven by a fixture that never started
+      // anything in the first place.
+      expect(runtime.pendingTimers().length).toBeGreaterThan(0);
+
+      const shutdownReport = await bureau.shutdown();
+      expect(shutdownReport.admissionClosed).toBe(true);
+
+      // AB-262's quiescence surface: `RuntimeServices`' own pending-timer
+      // bookkeeping shows nothing left running — the same read
+      // `resource-scope.ts`'s `pendingTimers()` check relies on for a
+      // registered-timer leak.
+      expect(runtime.pendingTimers()).toEqual([]);
+
+      // Advancing the clock past TWO full cadences, post-shutdown, must
+      // never track a new tick — `clearInterval` removed the entry from the
+      // manual clock's own schedule entirely (see `pendingTimers()` above),
+      // so there is nothing left for `advance()` to find and fire. The
+      // underlying `Storage`/session store is already disposed by
+      // `shutdown()`'s unconditional teardown at this point, so this test
+      // deliberately never reads the session back — `outstandingDeferred()`
+      // is a pure `RuntimeServices` read, not a storage read, and is
+      // sufficient proof no further pass ran.
+      await runtime.advance(DURABLE_MAINTENANCE_INTERVAL_MILLISECONDS * 2);
+      for (let i = 0; i < 5; i++) await yieldToPortableEventLoop();
+      expect(runtime.outstandingDeferred()).not.toContain('durable-maintenance-tick');
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
