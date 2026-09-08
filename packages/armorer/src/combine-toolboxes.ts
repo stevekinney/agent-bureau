@@ -29,7 +29,9 @@ type ConcatenateTools<TBoxes extends readonly unknown[]> = TBoxes extends readon
  * - If multiple toolboxes define the same tool name, the **last** one wins.
  * - Contexts are shallow-merged in the same order (last one wins on key collisions).
  * - The **first** toolbox's approval- and toolbox-identity-related options —
- *   `policy` (including any `needs_approval` `beforeExecute` hook),
+ *   `policy` (including any `needs_approval` `beforeExecute` hook) together
+ *   with the `policyContext` that hook reads its tenant/approval-context
+ *   values from,
  *   `approvalPolicy`, `approvalSecret`, `approvalStateStore`,
  *   `grantStateStore`, `approvalBindingTtlMs`, `approvalNow`,
  *   `approvalNonce`, `policyRevision`, `approvalRevision`,

@@ -201,6 +201,56 @@ describe('combineToolboxes', () => {
     expect(executions).toBe(1);
   });
 
+  it("forwards the first toolbox's registry-level policyContext alongside its policy (AB-362 review finding)", async () => {
+    let observedTenantId: unknown;
+    const gated = createToolbox(
+      [
+        createTool({
+          name: 'gated',
+          description: 'requires approval unless the registry context says otherwise',
+          version: '1.0.0',
+          input: z.object({}),
+          execute: async () => 'executed',
+        }),
+      ],
+      {
+        approvalSecret: 'combine-toolboxes-policy-context-secret',
+        policyContext: { tenantId: 'tenant-combine-policy-context' },
+        policy: {
+          beforeExecute(context) {
+            observedTenantId = context.policyContext?.['tenantId'];
+            return context.policyContext?.['tenantId'] === 'tenant-combine-policy-context'
+              ? { status: 'needs_approval' as const }
+              : { allow: true };
+          },
+        },
+      },
+    );
+    const other = createToolbox([
+      createTool({
+        name: 'other',
+        description: 'other',
+        input: z.object({}),
+        execute: async () => 'other',
+      }),
+    ]);
+
+    const combined = combineToolboxes(gated, other);
+
+    const paused = await combined.execute(
+      { id: 'gated-policy-context-1', name: 'gated', arguments: {} },
+      approvalExecutionOptions,
+    );
+
+    // Without policyContext forwarding, `tenantId` is undefined on the
+    // combined toolbox's registry-level context, `beforeExecute` falls
+    // through to `{ allow: true }`, and the tool executes immediately
+    // instead of pausing for approval.
+    expect(observedTenantId).toBe('tenant-combine-policy-context');
+    expect(paused.outcome).toBe('action_required');
+    expect(paused.pendingApproval).toBeDefined();
+  });
+
   it("keeps the first toolbox's approvalStateStore and grantStateStore in effect so a matching reusable grant short-circuits approval (AB-362)", async () => {
     const grantSecret = 'combine-toolboxes-grant-secret';
     const approvalStateStore = createProcessLocalApprovalStateStore();

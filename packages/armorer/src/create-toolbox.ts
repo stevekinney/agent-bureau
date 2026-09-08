@@ -1012,11 +1012,19 @@ interface LoopStatistics {
  * `'policy:1'` / `'approval:1'` / `'toolbox:1'` when unset), so silently
  * reverting to those defaults on combination would make every approval
  * binding issued by a toolbox with customized revisions look stale (or
- * pass when it should not) the moment it is combined.
+ * pass when it should not) the moment it is combined. `policyContext` is
+ * included alongside `policy` for the same reason they must travel
+ * together: a registry-level `policy.beforeExecute` hook that branches on
+ * `policyContext` (a tenant flag, an approval-context provider) would
+ * otherwise be forwarded without the context it reads, silently defaulting
+ * to whatever the hook does when that context is absent—which can mean
+ * a call that should return `needs_approval` executes immediately instead
+ * (AB-362 review finding).
  */
 export type InternalToolboxOptions = Pick<
   ToolboxOptions,
   | 'policy'
+  | 'policyContext'
   | 'approvalPolicy'
   | 'approvalSecret'
   | 'approvalStateStore'
@@ -2808,6 +2816,7 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   // construction.
   internalToolboxOptionsRegistry.set(toJSON, {
     ...(registryPolicy ? { policy: registryPolicy } : {}),
+    ...(registryPolicyContext ? { policyContext: registryPolicyContext } : {}),
     ...(approvalPolicy ? { approvalPolicy } : {}),
     ...(approvalSecret ? { approvalSecret } : {}),
     ...(approvalStateStore ? { approvalStateStore } : {}),
