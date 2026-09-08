@@ -309,13 +309,18 @@ const combined = combineToolboxes(base, adminTools);
 `combineToolboxes` also forwards the **first** toolbox's own options — `policy`
 (including any `needs_approval` `beforeExecute` hook), `approvalPolicy`,
 `approvalSecret`, `approvalStateStore`, `grantStateStore`, and everything else
-`ToolboxOptions` carries — into the combined toolbox, exactly the way
-`extend()` already forwards its own options into an extended toolbox.
-Combining is not a merge of approval configuration across toolboxes: only the
-first toolbox's approval gating and reusable-grant matching governs calls to
-the combined toolbox. This matters whenever you graft extra tools onto a
-toolbox that already gates calls behind approval — the combined toolbox must
-keep gating them, not silently drop the policy.
+`ToolboxOptions` carries except `middleware` — into the combined toolbox,
+exactly the way `extend()` already forwards its own options into an extended
+toolbox. (`middleware` is excluded: every configuration `toJSON()` returns has
+already been transformed by it at registration time, so forwarding it again
+would apply it a second time to already-transformed input.) Combining is not a
+merge of approval configuration across toolboxes: only the first toolbox's
+approval gating and reusable-grant matching governs calls to the combined
+toolbox. This matters whenever you graft extra tools onto a toolbox that
+already gates calls behind approval — the combined toolbox must keep gating
+them, not silently drop the policy. This forwarding never exposes
+`approvalSecret` on the combined toolbox's own public surface — it travels
+through an internal, non-enumerable channel, not a documented method.
 
 ## Safety and Policy
 

@@ -835,19 +835,6 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   getContext?: () => ToolboxContext;
 
   /**
-   * Internal method exposing this toolbox's own `ToolboxOptions` (minus
-   * `context`, which callers merge separately) so `combineToolboxes`
-   * (armorer's `combine-toolboxes.ts`) can forward them from the first
-   * toolbox into the combined toolbox — exactly the options `extend()`
-   * already forwards into an extended toolbox via `{ ...options, ... }`
-   * (AB-362). `approvalStateStore`/`grantStateStore` reflect this
-   * toolbox's *resolved* stores (which may have been defaulted from
-   * `approvalSecret` rather than explicitly configured), the same
-   * override `extend()` applies over the raw `options` spread.
-   */
-  getOptions?: () => Omit<ToolboxOptions, 'context'>;
-
-  /**
    * Creates a loop detector for this toolbox.
    * The detector is shared across all execute() calls for the toolbox's lifetime.
    *
@@ -1005,6 +992,47 @@ interface LoopStatistics {
  * });
  * ```
  */
+/**
+ * Snapshot of a toolbox's own `ToolboxOptions`, minus `context` (which
+ * callers merge separately) and `middleware` (already applied to every
+ * stored configuration at registration time — see the comment at this
+ * type's only construction site).
+ */
+export type InternalToolboxOptions = Omit<ToolboxOptions, 'context' | 'middleware'>;
+
+/**
+ * A module-private symbol key used to attach a toolbox's own
+ * {@link InternalToolboxOptions} directly to the toolbox object, so
+ * `combineToolboxes` (`combine-toolboxes.ts`) can forward them from the
+ * first toolbox into a combined toolbox — the same options `extend()`
+ * already forwards into an extended toolbox (AB-362).
+ *
+ * This is intentionally NOT a method on the public `Toolbox` interface:
+ * `approvalSecret` lives in these options, and a public accessor would let
+ * any caller holding a toolbox reference read it straight off the object
+ * (AB-362 review finding). A `WeakMap<object, ...>` keyed by the toolbox
+ * instance was tried first and rejected: `Bureau.runtime-composition.ts`'s
+ * `withDefaultToolboxRequestContext` wraps every run's toolbox in a
+ * `new Proxy(toolbox, { get(target, property, receiver) { ... } })` before
+ * `wireDurableOptInTools` ever sees it, and a `Proxy` is never `===` its
+ * target — a `WeakMap.get(proxy)` looked up against the real object's
+ * registration entry always misses, silently reproducing this issue's own
+ * bug. A symbol-keyed property on the object itself survives that Proxy:
+ * its `get` trap falls through to `Reflect.get(target, property, receiver)`
+ * for any property it doesn't special-case, symbol keys included, so the
+ * lookup transparently reaches the underlying object. `Object.keys()`,
+ * `for...in`, and `JSON.stringify()` all skip symbol-keyed properties, so
+ * this stays out of enumeration the same way a WeakMap entry would have —
+ * without the Proxy failure mode. It is exported (unlike a
+ * closure-private variable would allow) only so `combine-toolboxes.ts`
+ * can read it; it is deliberately NOT re-exported from `index.ts`, so it
+ * never reaches a consumer of the published `armorer` package. Same
+ * non-public-surface pattern as `internalToolboxTestUtilities` below.
+ */
+export const internalToolboxOptionsSymbol: unique symbol = Symbol(
+  'armorer.internal-toolbox-options',
+);
+
 function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   entries: TEntries = [] as unknown as TEntries,
   options: ToolboxOptions = {},
@@ -2659,16 +2687,6 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     },
     // Internal method to get toolbox context
     getContext: () => baseContext,
-    // Internal method exposing this toolbox's own options (minus context)
-    // so combineToolboxes can forward them, the way extend() already does.
-    getOptions: () => {
-      const { context: _context, ...rest } = options;
-      return {
-        ...rest,
-        ...(approvalStateStore ? { approvalStateStore } : {}),
-        ...(grantStateStore ? { grantStateStore } : {}),
-      };
-    },
     // Loop detection
     createLoopDetector: (options?: LoopDetectionOptions) => {
       const id = `detector-${loopDetectorIdCounter++}`;
@@ -2725,6 +2743,43 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
   if (entries.length) {
     registerSerialized(entries);
   }
+
+  // AB-362: attach a snapshot of this toolbox's own approval-related
+  // options under a module-private symbol key — never a named, typed
+  // method on the public `api` object — so `combineToolboxes`
+  // (`combine-toolboxes.ts`) can forward them into a combined toolbox the
+  // way `extend()` already forwards its own options into an extended
+  // toolbox. See `internalToolboxOptionsSymbol`'s own doc comment for why
+  // this is a symbol-keyed property rather than a public method or a
+  // `WeakMap` keyed by the toolbox instance. `middleware` is deliberately
+  // excluded from the snapshot: `registerSerialized` already applied it to
+  // every stored configuration at registration time, and `toJSON()`
+  // returns those already-transformed configurations, so forwarding
+  // `middleware` again would apply it a second time to input that has
+  // already been through it. The snapshot is taken once, here, at
+  // construction — never a live read of the caller's (possibly
+  // later-mutated) `options` object.
+  const {
+    context: _snapshotContext,
+    middleware: _snapshotMiddleware,
+    ...optionsSnapshot
+  } = options;
+  const internalOptions: InternalToolboxOptions = {
+    ...optionsSnapshot,
+    ...(approvalStateStore ? { approvalStateStore } : {}),
+    ...(grantStateStore ? { grantStateStore } : {}),
+  };
+  // `defineProperty` (not a plain assignment) both keeps this off
+  // `Object.keys()`/`for...in`/`JSON.stringify()` via `enumerable: false`
+  // and sidesteps the "excess property" error a direct assignment onto
+  // `api` (typed as the public `Toolbox<...>`, which declares no symbol
+  // index signature) would raise.
+  Object.defineProperty(api, internalToolboxOptionsSymbol, {
+    value: internalOptions,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
 
   return api;
 

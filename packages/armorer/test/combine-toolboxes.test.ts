@@ -295,4 +295,107 @@ describe('combineToolboxes', () => {
     const storedGrant = await grantStateStore.get(grant.id);
     expect(storedGrant?.usesRemaining).toBe(0);
   });
+
+  it("does not expose the first toolbox's approvalSecret on the combined toolbox's public surface (AB-362 review finding)", async () => {
+    const gated = createToolbox([], {
+      approvalSecret: 'combine-toolboxes-secret-not-public',
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    });
+    const other = createToolbox([
+      createTool({
+        name: 'other',
+        description: 'other',
+        input: z.object({}),
+        execute: async () => 'other',
+      }),
+    ]);
+
+    const combined = combineToolboxes(gated, other);
+
+    // Forwarding the first toolbox's approval configuration must not mean
+    // handing any caller holding `combined` a way to read the secret back
+    // off it — the approval policy still applies (proven by the previous
+    // test), but the secret itself stays out of the public object.
+    expect(Object.keys(combined)).not.toContain('getOptions');
+    expect(Object.keys(combined)).not.toContain('approvalSecret');
+    expect(JSON.stringify(combined)).not.toContain('combine-toolboxes-secret-not-public');
+  });
+
+  it("does not re-apply the first toolbox's middleware to already-transformed configurations (AB-362 review finding)", async () => {
+    let middlewareApplications = 0;
+    const base = createToolbox(
+      [
+        createTool({
+          name: 'counted',
+          description: 'counted',
+          input: z.object({}),
+          execute: async () => 'counted',
+        }),
+      ],
+      {
+        middleware: [
+          (configuration) => {
+            middlewareApplications += 1;
+            return configuration;
+          },
+        ],
+      },
+    );
+    expect(middlewareApplications).toBe(1);
+
+    const other = createToolbox([
+      createTool({
+        name: 'other',
+        description: 'other',
+        input: z.object({}),
+        execute: async () => 'other',
+      }),
+    ]);
+
+    combineToolboxes(base, other);
+
+    // Combining must not re-run the base toolbox's middleware against the
+    // configuration `toJSON()` already returned post-middleware.
+    expect(middlewareApplications).toBe(1);
+  });
+
+  it("forwards a snapshot of the first toolbox's options taken at construction, not a live re-read of a caller-mutated object (AB-362 review finding)", async () => {
+    const mutableOptions: { policy?: { beforeExecute: () => { status: 'needs_approval' } } } = {
+      policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+    };
+    const gated = createToolbox(
+      [
+        createTool({
+          name: 'gated',
+          description: 'gated',
+          input: z.object({}),
+          execute: async () => 'executed',
+        }),
+      ],
+      mutableOptions,
+    );
+
+    // A caller mutating the object it originally passed in must not change
+    // what a LATER combineToolboxes() call forwards — the toolbox's own
+    // approval behavior was already fixed at construction (armorer never
+    // re-reads `options.policy` per call either), so the forwarded
+    // snapshot must agree with that, not with this later mutation.
+    delete mutableOptions.policy;
+
+    const other = createToolbox([
+      createTool({
+        name: 'other',
+        description: 'other',
+        input: z.object({}),
+        execute: async () => 'other',
+      }),
+    ]);
+    const combined = combineToolboxes(gated, other);
+
+    const result = await combined.execute(
+      { id: 'gated-1', name: 'gated', arguments: {} },
+      approvalExecutionOptions,
+    );
+    expect(result.outcome).toBe('action_required');
+  });
 });
