@@ -1645,6 +1645,84 @@ describe('createBureau', () => {
     await bureau.dispose();
   });
 
+  it('createRun rejects, unregisters the run, and persists an errored session when the durable workflow write itself fails (AB-361 review PRRT_kwDORvupsc6gWc39)', async () => {
+    // Same gated-storage shape as the honesty proof above, but the
+    // intercepted `batch` call REJECTS instead of blocking — modelling a
+    // genuine persistence failure inside `context.engine.start`. Before the
+    // review fix, this rejection propagated out of `driveDurableRun`
+    // uncaught: `durablyStarted` rejected (correct), but `result` ALSO
+    // rejected raw with no `RunCompletedEvent`/`run.completed` ever
+    // dispatched — so `createRunFromRequest`'s catch block, which relies
+    // entirely on that event to unregister the run and persist its
+    // terminal session state, never got the chance to. This test proves
+    // the run is genuinely cleaned up (a quick, quiescent dispose()) and
+    // the session's `lastRunStatus` reflects the failure, not a permanent
+    // `'running'`.
+    const realStorage = await resolveStorage({ type: 'memory' });
+    const startFailure = new Error('AB-361 review: durable write persistence failure');
+    const gatedStorage = new Proxy(realStorage, {
+      get(target, property, receiver) {
+        if (property === 'batch') {
+          return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+            const isWorkflowStartWrite = operations.some(
+              (operation) => operation.type === 'put' && operation.key.startsWith('wf:'),
+            );
+            if (isWorkflowStartWrite) {
+              throw startFailure;
+            }
+            return target.batch(operations);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: gatedStorage,
+      durableExecution: true,
+    });
+
+    try {
+      const sessionId = 'ab-361-review-start-rejects';
+      const error = await bureau
+        .createRun({ message: 'AB-361 review: engine.start rejects', sessionId })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('AB-361 review: durable write persistence failure');
+
+      // The failed run's terminal `run.completed` listener (fired
+      // synchronously inside `makeErrorResult`'s dispatch, before
+      // `driveDurableRun`'s promise even settles) already unregistered the
+      // run by the time `createRun`'s rejection reaches this line — but the
+      // session WRITE `persistSessionUpdate` triggers from inside that same
+      // listener is fire-and-forget (retried in the background, never
+      // awaited by the listener itself — see `persistSessionUpdate`'s own
+      // definition), so it can genuinely land a tick or two later.
+      await waitForCondition(async () => {
+        const session = await bureau.getSession(sessionId);
+        return session?.metadata['lastRunStatus'] === 'error';
+      }, 'errored session metadata was not persisted after the durable write failure');
+
+      const session = await bureau.getSession(sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('error');
+      expect(session?.metadata['lastRunId']).toBeDefined();
+
+      // A clean shutdown with nothing unresolved proves the run was
+      // genuinely unregistered — a leaked `activeRuns`/`runToolboxes` entry
+      // would show up as an unresolved/incomplete owner in this report
+      // instead (see `BureauShutdownReport`).
+      const report = await bureau.shutdown();
+      expect(report.unresolved).toBe(0);
+      expect(report.failed).toBe(0);
+    } finally {
+      await bureau.dispose().catch(() => {});
+    }
+  });
+
   it("reattaches a catalog-dispatched bureau.run() across a process restart, rebuilding deps from the catalog agent's OWN OPERATIVE_RESOLVE_RUN_OPTIONS (AB-240)", async () => {
     // Same cross-process proof as the interactive-run recovery test above,
     // but through `bureau.run(name, input)` — a catalog dispatch, which has

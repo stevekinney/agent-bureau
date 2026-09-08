@@ -1878,20 +1878,47 @@ async function driveDurableRun(
     emitter,
     onStepToolbox,
   };
-  // Give the caller a live reference to the EXACT object Weft will hand back as
-  // `ctx.services` — see `DurableActiveRunOptions.onServices`. Must fire before
-  // `engine.start` so a tool the caller wired against this reference (e.g.
-  // `requestHumanInput`) can mutate it the moment `runStep` executes.
-  onServices?.(services);
+  // AB-361 review (copilot PRRT_kwDORvupsc6gWb3a, codex P2 PRRT_kwDORvupsc6gWc39):
+  // both `onServices` (a caller-supplied callback — genuinely reachable
+  // synchronous throw) and `context.engine.start` itself (a real
+  // persistence failure, e.g. disk-full) sit BEFORE the durable write
+  // `durablyStarted` gates on, and both need to settle that gate with the
+  // failure rather than leave a caller (bureau's `createRunFromRequest`)
+  // awaiting it forever. Unlike the `startError`/`abortedBeforeDrive`
+  // branches above, this failure happens AFTER `store.register` would have
+  // run on the bureau side, so it is routed through the SAME
+  // `makeErrorResult` helper those branches use — that dispatches
+  // `RunCompletedEvent` synchronously, which is what bureau's own
+  // `run.completed` listener needs to fire and clean up the run's
+  // registration and persist its terminal session state. A raw rethrow
+  // here would leave `result` rejecting with no terminal event ever
+  // dispatched, so a caller relying on event-driven cleanup (exactly what
+  // bureau's `createRunFromRequest` does) would leak the run forever.
+  //
+  // (`startRunLifecycle`'s own `emitter.dispatch(new RunStartedEvent(...))`
+  // is NOT wrapped the same way: native `EventTarget.dispatchEvent` — which
+  // `TypedEventTarget.dispatch` calls directly, see
+  // `packages/lifecycle/src/typed-event-target.ts` — isolates a listener's
+  // thrown exception per spec; it is reported, never rethrown to the
+  // caller. A synchronous subscriber throwing during that dispatch cannot
+  // make `startRunLifecycle` reject, so there is no analogous reachable gap
+  // there for `coverage:check` to flag as dead code.)
+  let handle: Awaited<ReturnType<typeof context.engine.start>>;
+  try {
+    // Give the caller a live reference to the EXACT object Weft will hand
+    // back as `ctx.services` — see `DurableActiveRunOptions.onServices`.
+    // Must fire before `engine.start` so a tool the caller wired against
+    // this reference (e.g. `requestHumanInput`) can mutate it the moment
+    // `runStep` executes.
+    onServices?.(services);
 
-  // AB-361: `engine.start(...)` is the write `ActiveRun.durablyStarted`
-  // exists to gate on — settled the moment this call itself settles, NOT
-  // when `handle.result()` later settles (that's the run's own completion,
-  // a wholly separate promise `result` above already tracks). A caller
-  // awaiting `durablyStarted` only ever waits for THIS commit, never for
-  // the run to finish.
-  const handle = await context.engine
-    .start(
+    // `engine.start(...)` is the write `ActiveRun.durablyStarted` exists to
+    // gate on — settled the moment this call itself settles, NOT when
+    // `handle.result()` later settles (that's the run's own completion, a
+    // wholly separate promise `result` above already tracks). A caller
+    // awaiting `durablyStarted` only ever waits for THIS commit, never for
+    // the run to finish.
+    handle = await context.engine.start(
       'agentRun',
       {
         runId,
@@ -1906,17 +1933,21 @@ async function driveDurableRun(
         id: runId,
         services,
       },
-    )
-    .then(
-      (startedHandle) => {
-        settleDurablyStarted();
-        return startedHandle;
-      },
-      (error: unknown) => {
-        settleDurablyStarted(error);
-        throw error;
-      },
     );
+  } catch (error) {
+    settleDurablyStarted(error);
+    return makeErrorResult(
+      emptyRunState(),
+      conversation,
+      hooks,
+      emitter,
+      terminalErrorFromEvent ?? toAgentRunError(error),
+      options.costEstimation,
+      undefined,
+      hookTracker,
+    );
+  }
+  settleDurablyStarted();
 
   let summary: AgentRunWorkflowResult;
   try {

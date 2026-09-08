@@ -4373,7 +4373,7 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
     context.engine[Symbol.dispose]();
   });
 
-  it('rejects when context.engine.start itself rejects, without producing an unhandled rejection for a caller that never reads it', async () => {
+  it('rejects durablyStarted but resolves result with an error RunResult when context.engine.start itself rejects (PRRT_kwDORvupsc6gWc39)', async () => {
     const context = await buildContext();
     const startFailure = new Error('sqlite: disk full');
     context.engine.start = async () => {
@@ -4381,11 +4381,6 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
     };
 
     const runId = 'ab-361-start-rejects';
-    // Deliberately not awaiting `durablyStarted` here — proves the internal
-    // `.catch(() => {})` on the field's own promise (createDurableActiveRun)
-    // suppresses what would otherwise be an unhandled rejection for a
-    // caller (scheduler, session-handle) that has no reason to read this
-    // field at all.
     const activeRun = createDurableActiveRun(
       { engine: context.engine, checkpointStore: context.checkpointStore },
       {
@@ -4396,12 +4391,65 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
       },
     );
 
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
     expect(activeRun.durablyStarted).rejects.toThrow('sqlite: disk full');
-    // `result` observes the SAME failure — `engine.start`'s rejection
-    // propagates out of `driveDurableRun` uncaught (the `try`/`catch`
-    // around `handle.result()` only wraps calls made AFTER a handle
-    // exists).
-    expect(activeRun.result).rejects.toThrow('sqlite: disk full');
+    // `result` no longer rejects raw (PRRT_kwDORvupsc6gWc39/PRRT_kwDORvupsc6gWb3a
+    // review): a bare rethrow here would leave bureau's `createRunFromRequest`
+    // — which awaits `durablyStarted`, catches its rejection, and relies on
+    // `run.completed`/`run.aborted`/`run.error` for registration cleanup and
+    // the terminal session write — with no terminal event ever dispatched,
+    // leaking the run forever. Routing through `makeErrorResult` (the SAME
+    // helper the `startError` branch above already uses) dispatches
+    // `RunCompletedEvent` synchronously instead, so `result` resolves with a
+    // `finishReason: 'error'` RunResult and that terminal event fires.
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('sqlite: disk full');
+    expect(completed).toHaveLength(1);
+  });
+
+  it('rejects durablyStarted and resolves result with an error RunResult when a caller-supplied onServices throws, never reaching engine.start (copilot PRRT_kwDORvupsc6gWb3a)', async () => {
+    const context = await buildContext();
+    const startCalls: unknown[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+    const onServicesFailure = new Error('onServices: caller-supplied callback exploded');
+
+    const runId = 'ab-361-on-services-throws';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+        onServices: () => {
+          throw onServicesFailure;
+        },
+      },
+    );
+
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
+    expect(activeRun.durablyStarted).rejects.toThrow(
+      'onServices: caller-supplied callback exploded',
+    );
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('onServices: caller-supplied callback exploded');
+    expect(completed).toHaveLength(1);
+    // The failure happened before `engine.start` was ever reached — never a
+    // durable launch to clean up, mirroring the `startError`/
+    // `abortedBeforeDrive` branches' own "never launched" guarantee.
+    expect(startCalls).toEqual([]);
   });
 
   it('resolves immediately when the run never durably launches at all (aborted before the deferred microtask fires, AB-339)', async () => {

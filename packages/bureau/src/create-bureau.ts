@@ -3452,14 +3452,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // (no terminal event to settle through — the original reason this
       // catch exists), OR because `store.register` succeeded but the
       // AWAITED `durablyStarted` above rejected (a genuine durable-write
-      // failure, e.g. `engine.start` rejecting). Either way this function
-      // is about to throw instead of returning a run identifier to its
-      // caller, so release whatever this admission claimed so it does not
-      // leak a phantom concurrency/singleton hold. In the second case the
-      // run itself is already registered and its terminal listeners
-      // already fired (or will fire) through the ordinary event path —
-      // this cleanup is scoped to per-request bookkeeping this function
-      // itself owns, not to unregistering the run.
+      // failure — `engine.start` rejecting, or a caller-supplied
+      // `onServices` throwing; see `driveDurableRun`'s own review-fixed
+      // handling of both, PRRT_kwDORvupsc6gWc39/PRRT_kwDORvupsc6gWb3a).
+      // Either way this function is about to throw instead of returning a
+      // run identifier to its caller, so release whatever this admission
+      // claimed so it does not leak a phantom concurrency/singleton hold.
+      // In the second case the run itself is already registered, but its
+      // terminal `run.completed` listener already fired SYNCHRONOUSLY,
+      // inside `makeErrorResult`'s `RunCompletedEvent` dispatch — by
+      // construction this happens before this function's own `await
+      // activeRun.durablyStarted` line can even resume (that rejection is
+      // only observed in a later microtask) — never merely "will fire"
+      // asynchronously afterward, so this cleanup is scoped to per-request
+      // bookkeeping this function itself owns, not to unregistering the
+      // run.
       flowController?.settle(runId);
       runRequestContexts.delete(runId);
       runAttribution.delete(runId);
