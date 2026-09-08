@@ -916,21 +916,23 @@ export interface BureauRunOptions {
    * session-correlation key (defaulting to the minted run id when omitted).
    * A no-op on the direct/in-memory dispatch branch — `AgentRunContext`
    * (AB-15) carries no `sessionId` field, so a bare `RunnableAgent.run()`
-   * has nowhere to observe it. Accepted without error on either branch;
-   * unlike `principal`, this is deliberate rather than a gap, since a
-   * caller cannot generally predict in advance which branch a given agent
-   * will take.
+   * has nowhere to observe it. Accepted without error on either branch,
+   * since a caller cannot generally predict in advance which branch a
+   * given agent will take.
    */
   sessionId?: string;
   signal?: AbortSignal;
   traceContext?: unknown;
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
   /**
-   * Not yet honored by `bureau.run()`: `AgentRunContext` (AB-15) has no
-   * `principal` field, so a bare `RunnableAgent.run()` has no attribution
-   * surface to record it against — that is `createRun`'s job. Supplying a
-   * value here throws synchronously (`BureauError` `BAD_REQUEST`) rather
-   * than silently discarding it.
+   * AB-241 — the authenticated principal attributed with this run, forwarded
+   * into `AgentRunContext.principal` on both dispatch branches. The direct
+   * (in-memory) branch hands it straight to the agent's own `run()`; the
+   * durable branch additionally records it exactly as `Bureau.createRun`
+   * does — `LivenessSnapshot.owner` and the in-memory `runAttribution` map
+   * `eventHistory`'s principal gate consults — so audit entries and
+   * liveness observers see the same attribution either way. A non-string
+   * value throws synchronously (`BureauError` `BAD_REQUEST`).
    */
   principal?: string;
 }

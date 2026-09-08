@@ -431,6 +431,129 @@ describe('bureau.run', () => {
     }
   });
 
+  describe('options.principal (AB-241)', () => {
+    it('throws BureauError BAD_REQUEST when options.principal is not a string', async () => {
+      const bureau = await createBureau({
+        agents: { echo: createAgent({ generate: mockGenerate() }) },
+      });
+      try {
+        expect(() =>
+          // @ts-expect-error — deliberately malformed options.principal
+          bureau.run('echo', 'hi', { principal: 42 }),
+        ).toThrow(BureauError);
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it('forwards options.principal to the agent as AgentRunContext.principal on the direct (non-durable) dispatch branch', async () => {
+      let sawContextPrincipal: string | undefined;
+      const capturingAgent: RunnableAgent<never, false> = {
+        name: 'capturing',
+        hasOutput: false,
+        run: (input, context) => {
+          sawContextPrincipal = context?.principal;
+          return createAgent({ generate: mockGenerate('captured') }).run(input, context);
+        },
+      };
+      const bureau = await createBureau({ agents: { capturing: capturingAgent } });
+      try {
+        const run = bureau.run('capturing', 'hi', { principal: 'alice' });
+        await run.result();
+        expect(sawContextPrincipal).toBe('alice');
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it('leaves AgentRunContext.principal undefined on the direct dispatch branch when options omits it, behaving exactly as before this field existed', async () => {
+      let sawContextPrincipal: string | undefined = 'not-yet-observed';
+      const capturingAgent: RunnableAgent<never, false> = {
+        name: 'capturing',
+        hasOutput: false,
+        run: (input, context) => {
+          sawContextPrincipal = context?.principal;
+          return createAgent({ generate: mockGenerate('captured') }).run(input, context);
+        },
+      };
+      const bureau = await createBureau({ agents: { capturing: capturingAgent } });
+      try {
+        const run = bureau.run('capturing', 'hi');
+        await run.result();
+        expect(sawContextPrincipal).toBeUndefined();
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it("records options.principal as the durable ActiveRun's LivenessSnapshot.owner, exactly as Bureau.createRun records request.principal", async () => {
+      const bureau = await createBureau({
+        agents: { echo: createAgent({ generate: mockGenerate('durable hello') }) },
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      try {
+        const run = bureau.run('echo', 'hi', { principal: 'alice' });
+        await run.result();
+        // Checked AFTER settlement: `bureau.run`'s durable branch resolves
+        // the underlying ActiveRun asynchronously (`OPERATIVE_RESOLVE_RUN_OPTIONS`
+        // is awaited before `createActiveRun` runs), so `snapshot()` reports
+        // a synthetic pending snapshot with no `owner` immediately after
+        // this call returns — `owner` is a fixed part of every snapshot the
+        // real underlying ActiveRun produces, including its terminal one.
+        expect(run.snapshot().owner).toBe('alice');
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it("leaves the durable ActiveRun's LivenessSnapshot.owner absent when options omits principal, matching a standalone run", async () => {
+      const bureau = await createBureau({
+        agents: { echo: createAgent({ generate: mockGenerate('durable hello') }) },
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      try {
+        const run = bureau.run('echo', 'hi');
+        await run.result();
+        expect(run.snapshot().owner).toBeUndefined();
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it('still forwards options.principal to AgentRunContext.principal when a durable bureau falls back to direct execution for a non-resolving agent', async () => {
+      // The durable branch records `runAttribution` under the durable
+      // dispatch's OWN minted `runId` before the `AgentContractError`
+      // fallback runs — this run never uses that id (the agent's own
+      // `run()` mints/owns a different one), so the fallback catch deletes
+      // that entry to avoid a permanent phantom. `context.principal` must
+      // still reach the agent either way.
+      let sawContextPrincipal: string | undefined;
+      const nonResolvingAgent: RunnableAgent<never, false> = {
+        name: 'plain',
+        hasOutput: false,
+        run: (input, context) => {
+          sawContextPrincipal = context?.principal;
+          return createAgent({ generate: mockGenerate('plain hello') }).run(input, context);
+        },
+      };
+      const bureau = await createBureau({
+        agents: { plain: nonResolvingAgent },
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      try {
+        const run = bureau.run('plain', 'hi', { principal: 'alice' });
+        const result = await run.result();
+        expect(result.content).toBe('plain hello');
+        expect(sawContextPrincipal).toBe('alice');
+      } finally {
+        await bureau.dispose();
+      }
+    });
+  });
+
   it('accepts an empty agents catalog for a bureau that only uses createRun', async () => {
     const bureau = await createBureau({ agents: {}, toolbox: createEmptyToolbox() });
     try {

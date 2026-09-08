@@ -28,6 +28,7 @@ export interface AgentRunContext {
   traceContext?: unknown;
   withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
   agentName?: string;
+  principal?: string;
 }
 ```
 

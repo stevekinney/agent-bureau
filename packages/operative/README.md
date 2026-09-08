@@ -153,7 +153,7 @@ for await (const event of run) {
 const result = await run.result(); // await — same handle
 ```
 
-`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted), a `readonly hasOutput: boolean` (AB-234 — `output !== undefined`, the runtime witness for `H`), and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, and `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing.
+`createAgent`'s return value satisfies `RunnableAgent<O, H>` (AB-21) — it carries a `readonly name` (`options.name`, defaulting to `'(agent)'` when omitted), a `readonly hasOutput: boolean` (AB-234 — `output !== undefined`, the runtime witness for `H`), and `run` accepts an optional second `AgentRunContext` argument (`{ signal, agentName, traceContext, withTraceContext, principal }`), so it slots into `createLazyAgent` or a future `AgentDefinitions` map without a cast. `context.signal` drives per-run abort, `context.agentName` overrides the run's stamped agent name, `context.traceContext` becomes the same `parentContext` field `RunOptions` already uses for nested tracing, and `context.principal` (AB-241) forwards unchanged into `RunOptions.principal` — a bureau-owned `bureau.run()` catalog dispatch sets it from `BureauRunOptions.principal`.
 
 **`CreateAgentOptions`** — key fields:
 

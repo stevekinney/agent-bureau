@@ -985,16 +985,8 @@ function validateBureauRunOptions(
   if (options.withTraceContext !== undefined && typeof options.withTraceContext !== 'function') {
     toBadRequest('"options.withTraceContext" must be a function');
   }
-  if (options.principal !== undefined) {
-    // `AgentRunContext` (AB-15) carries no `principal` field — a bare
-    // `RunnableAgent.run()` has no attribution/session system to record it
-    // against (that is `createRun`'s job, not `bureau.run`'s). Silently
-    // discarding a caller-supplied `principal` would look like an accepted
-    // no-op; reject it synchronously instead so the gap is discoverable at
-    // the call site rather than as a missing attribution nobody notices.
-    toBadRequest(
-      '"options.principal" is not supported by bureau.run() — RunnableAgent.run() has no attribution surface to record it against. Use Bureau.createRun() for principal-attributed runs.',
-    );
+  if (options.principal !== undefined && typeof options.principal !== 'string') {
+    toBadRequest('"options.principal" must be a string');
   }
 }
 
@@ -1549,8 +1541,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // of RunSummary) — a durably recovered run (process restart) has no entry
   // here and `serializeRunState` falls back to the `findRunAgentName`
   // heuristic for `agentName`; `principal` has no such fallback since it is
-  // never persisted durably. Entries are removed on `deleteRun` so this map
-  // does not outlive the run it describes.
+  // never persisted durably. Entries for a `createRun`-dispatched run are
+  // removed on `deleteRun` so this map does not outlive the run it
+  // describes; a `bureau.run()` durable catalog dispatch's entry (AB-241)
+  // has no `deleteRun` equivalent and is never removed, exactly like
+  // `createRun`'s own entry for a run nobody ever calls `deleteRun` on.
   const runAttribution = new Map<string, RunAttribution>();
   // AB-67/AB-199 — one SteeringGate per session, created (or reused)
   // EAGERLY by `createRunFromRequest` at the start of every in-memory run —
@@ -2659,6 +2654,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (runOptions?.signal) context.signal = runOptions.signal;
     if (runOptions?.traceContext !== undefined) context.traceContext = runOptions.traceContext;
     if (runOptions?.withTraceContext) context.withTraceContext = runOptions.withTraceContext;
+    // AB-241 — forwarded to both dispatch branches: the direct branch hands
+    // it straight to the agent's own `run()`/`RunOptions.principal`; the
+    // durable branch (below) additionally records it the way `createRun`
+    // does, so `eventHistory`'s principal gate sees the same attribution
+    // either way.
+    if (runOptions?.principal !== undefined) context.principal = runOptions.principal;
 
     const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
       DefinitionResolvingAgent;
@@ -2667,6 +2668,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (runtime.durable && typeof resolver === 'function') {
       const durable = runtime.durable;
       const runId = runtimeServices.identifiers.next('agent-run');
+      // AB-241 — recorded BEFORE any async work, mirroring
+      // `createRunFromRequest`'s own `runAttribution.set` (it writes before
+      // `store.register` so it's in place before any observer can see this
+      // run). Cleaned up in `trackCatalogRun`'s settlement `finally` below.
+      if (runOptions?.principal !== undefined) {
+        runAttribution.set(runId, { agentName: name, principal: runOptions.principal });
+      }
       // Captured so the wrapper below can forward an abort straight to the
       // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
       // does not close: `resolveDurableAgent` unconditionally starts the
@@ -2758,6 +2766,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // own `run()`, matching what direct registration would have done.
           // Anything else is a genuine resolver failure and must propagate.
           if (error instanceof AgentContractError) {
+            // AB-241: this fallback abandons `runId` entirely — the agent's
+            // own `run()` mints (or is given) a DIFFERENT run identity, so
+            // an attribution entry recorded above under `runId` would
+            // otherwise be a permanent phantom, keyed to a run that never
+            // existed.
+            runAttribution.delete(runId);
             return agent;
           }
           throw error;
@@ -2783,12 +2797,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           definitionRevision: readGenerationProfile(agent as RunnableAgent).revision,
           input,
         });
-        const activeRun = createActiveRun(resolvedOptions, {
-          engine: durable.engine,
-          checkpointStore: durable.checkpointStore,
-          runId,
-          sessionId: runOptions?.sessionId ?? runId,
-        });
+        const activeRun = createActiveRun(
+          resolvedOptions,
+          {
+            engine: durable.engine,
+            checkpointStore: durable.checkpointStore,
+            runId,
+            sessionId: runOptions?.sessionId ?? runId,
+          },
+          // AB-241 — thread the caller-supplied principal into
+          // `LivenessSnapshot.owner`, matching `createRunFromRequest`'s own
+          // `request.principal !== undefined ? { owner: request.principal } : undefined`.
+          runOptions?.principal !== undefined ? { owner: runOptions.principal } : undefined,
+        );
         dispatchedActiveRun = activeRun;
         if (cancellationRequested) {
           if (cancellationRequested.dispose) {
@@ -2814,6 +2835,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       const trackDispatchSettlement = async (): Promise<RunnableAgent<unknown, boolean>> => {
         try {
           return await resolveDurableAgent();
+        } catch (error) {
+          // AB-241: `resolveDurableAgent`'s `AgentContractError` fallback
+          // (above) already deletes `runAttribution` for the abandoned
+          // `runId` on ITS OWN success path (a `return`, not a throw). Any
+          // other rejection here — `persistCatalogRunRecoveryRecord`
+          // failing, `createActiveRun` throwing synchronously on an
+          // unrepresentable `output` schema, a genuine resolver failure —
+          // means this run never dispatched either, so the same cleanup
+          // applies, mirroring `createRunFromRequest`'s own
+          // `runAttribution.delete(runId)` for a run that "never reached
+          // `store.register`" (see that catch block, below).
+          runAttribution.delete(runId);
+          throw error;
         } finally {
           dispatchSettled?.();
         }

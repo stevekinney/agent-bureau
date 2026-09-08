@@ -634,6 +634,9 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       ...(context?.delegatedAuthority !== undefined
         ? { delegatedAuthority: context.delegatedAuthority }
         : {}),
+      // AB-241 — `AgentRunContext.principal` forwards into `RunOptions.principal`
+      // the same way `signal`/`traceContext` do above.
+      ...(context?.principal !== undefined ? { principal: context.principal } : {}),
       ...rest,
     };
   }

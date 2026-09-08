@@ -12488,6 +12488,131 @@ describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () 
     }
   });
 
+  it("AB-241: a durable bureau.run() catalog dispatch records options.principal in the same runAttribution map eventHistory's principal gate consults, exactly as Bureau.createRun does", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-authz-catalog-run-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureau = await createBureau({
+        agents: { echo: createAgent({ generate: createMockGenerate('Done.') }) },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      const run = bureau.run('echo', 'Attribute me to alice', { principal: 'alice' });
+      await run.result();
+      const runId = run.snapshot().id;
+
+      // A different caller's principal fails closed, matching createRun's
+      // own run-kind authorization gate exactly.
+      const deniedOutcome = await bureau.eventHistory(
+        { kind: 'run', id: runId },
+        { principal: 'mallory' },
+      );
+      expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+
+      // The attributed principal reads back successfully — never
+      // 'not-found' — proving `runAttribution` (not merely
+      // `LivenessSnapshot.owner`) carries this catalog run's principal the
+      // same way it would for a `Bureau.createRun`-dispatched run. Unlike
+      // `createRun`, a catalog run keeps no durable event of its own kind
+      // recorded against it here (no bureau session backs this dispatch),
+      // so an empty page is the expected shape — the AB-313 "never-recorded
+      // id reads as an ordinary empty page" convention, not a failure.
+      const allowedOutcome = await bureau.eventHistory(
+        { kind: 'run', id: runId },
+        { principal: 'alice' },
+      );
+      expect(allowedOutcome).toEqual({ events: [], hasMore: false });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('AB-241: does not leave a phantom runAttribution entry when the durable branch records it and then a non-AgentContractError resolver failure means the run never actually dispatched', async () => {
+    // Mirrors `createRunFromRequest`'s own cleanup for a run that "never
+    // reached `store.register`" (create-bureau.ts's runAttribution.delete
+    // at its own createRunRuntime-failure catch): `runAgent`'s durable
+    // branch records `runAttribution` under its minted `runId` BEFORE
+    // `OPERATIVE_RESOLVE_RUN_OPTIONS` resolves. A resolver rejection that
+    // is NOT an `AgentContractError` (the one case with its own dedicated
+    // fallback-and-delete) must still clean that entry up, or it becomes a
+    // permanent phantom keyed to a run that never dispatched anything.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-authz-catalog-run-failure-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    // A manual runtime gives a deterministic identifier sequence, so the
+    // durable branch's minted runId is predictable WITHOUT ever going
+    // through `listDurableRuns()` (which would never see this run — the
+    // resolver fails before any durable workflow starts).
+    const runtime = createManualRuntimeServices();
+
+    const throwingAgent: RunnableAgent<never, false> & DefinitionResolvingAgent = {
+      name: 'throwing',
+      hasOutput: false,
+      run: () => {
+        throw new Error('the direct-dispatch run() must never be reached in this test');
+      },
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: async () => {
+        throw new Error('resolver exploded — not an AgentContractError');
+      },
+    };
+
+    try {
+      // Positive control, proving the `${identifierPrefix}-agent-run-1`
+      // format assumption below against a REAL dispatch before relying on
+      // it for a run that (by design) never reaches `listDurableRuns()` —
+      // a fresh manual runtime's own independent identifier sequence, so
+      // this draws no `agent-run` id the throwing bureau's sequence below
+      // would ever produce.
+      const controlRuntime = createManualRuntimeServices();
+      const controlBureau = await createBureau({
+        agents: { echo: createAgent({ generate: createMockGenerate('control') }) },
+        storage: { type: 'memory' },
+        durableExecution: true,
+        runtime: controlRuntime,
+      });
+      const controlRun = controlBureau.run('echo', 'hi', { principal: 'alice' });
+      await controlRun.result();
+      expect(controlRun.snapshot().id).toBe(`${controlRuntime.identifierPrefix}-agent-run-1`);
+      await controlBureau.dispose();
+
+      const bureau = await createBureau({
+        agents: { throwing: throwingAgent },
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        runtime,
+      });
+
+      const expectedRunId = `${runtime.identifierPrefix}-agent-run-1`;
+      const run = bureau.run('throwing', 'hi', { principal: 'alice' });
+      const result = await run.result();
+      expect(result.error).toBeInstanceOf(Error);
+
+      // The attribution this run recorded under `expectedRunId` before the
+      // resolver rejected must be gone — a supplied principal reads it as
+      // 'not-found', identical to a run that was never attributed at all.
+      const outcome = await bureau.eventHistory(
+        { kind: 'run', id: expectedRunId },
+        { principal: 'alice' },
+      );
+      expect(outcome).toEqual({ outcome: 'not-found' });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('fails closed (not-found) for a DELETED run once a caller supplies a principal — closes the bypass a missing runAttribution entry would otherwise open (copilot review, PR #551)', async () => {
     const databasePath = join(
       tmpdir(),

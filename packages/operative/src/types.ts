@@ -567,6 +567,15 @@ export interface RunOptionsBase {
    */
   delegatedAuthority?: DelegatedAuthority;
   /**
+   * AB-241 — the authenticated principal attributed with this run, forwarded
+   * unchanged from `AgentRunContext.principal` by `createAgent`'s run path,
+   * the same way `signal`/`traceContext` forward. Bureau's durable catalog
+   * dispatch (`bureau.run`) reads this back off the resolved `RunOptions` to
+   * record the run's owner exactly as `Bureau.createRun` does. `undefined`
+   * — the default — means this run carries no attribution.
+   */
+  principal?: string;
+  /**
    * The AB-92/AB-252 injectable runtime-service seam: wall time, monotonic
    * time, timers, identifiers, randomness, and deferred-work tracking.
    * `createActiveRun` resolves `options.runtime ?? createDefaultRuntimeServices()`

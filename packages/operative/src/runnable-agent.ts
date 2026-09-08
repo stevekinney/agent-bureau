@@ -58,6 +58,16 @@ export interface AgentRunContext {
    * whatever its own `RunOptions.selection` gate already enforces.
    */
   delegatedAuthority?: DelegatedAuthority;
+  /**
+   * AB-241 — the authenticated principal attributed with this run, forwarded
+   * unchanged into `RunOptions.principal` by `createAgent`'s run path
+   * (the same way `signal`/`traceContext` forward). Bureau's catalog
+   * dispatch (`bureau.run`) sets this from `BureauRunOptions.principal`;
+   * a standalone `RunnableAgent.run()` caller may set it directly. Absent
+   * means this run carries no attribution beyond whatever the caller's own
+   * bookkeeping tracks outside this contract.
+   */
+  principal?: string;
 }
 
 /**
