@@ -3688,16 +3688,18 @@ describe('createBureau', () => {
     bureau.dispose();
   });
 
-  it("abortRun's terminal-status branch also clears abortingRunIds for a repeat call arriving before the closed() continuation has run (AB-369)", async () => {
+  it('a repeat abortRun call landing after status leaves running but before closed() settles does NOT clear abortingRunIds early (AB-369)', async () => {
     // `createBlockingGenerate` resolves on abort quickly, but the run's
     // store status (updated synchronously inside the `run.aborted` listener,
     // itself dispatched from deep inside the SAME `Promise.resolve().then()`
     // microtask that drives `executeLoop`) flips to a non-`'running'` value
     // several microtask ticks before `closed()` — chained through `result`'s
     // OWN `.then()`s — ever resolves. A repeat `abortRun` call that lands in
-    // that window exercises the early `if (runState.status !== 'running')`
-    // branch's own `abortingRunIds.delete(id)` — the mutant AB-353 recorded
-    // equivalent because nothing previously read `abortingRunIds` publicly.
+    // that window must NOT delete the `abortingRunIds` entry itself (review
+    // finding, PR #583): doing so would let `listAbortingRuns()` — and
+    // `BureauQuiescenceReport` — under-report a cleanup that has not
+    // genuinely settled yet, exactly the invisible leak this issue exists to
+    // close. Only the `closed()` continuation may clear the entry.
     const { generate } = createBlockingGenerate();
     const bureau = await createBureau({
       agents: {},
@@ -3722,7 +3724,15 @@ describe('createBureau', () => {
     expect(caughtWindow).toBe(true);
     expect(bureau.listAbortingRuns().map((entry) => entry.runId)).toContain(run.id);
 
-    bureau.abortRun(run.id);
+    // The repeat call returns the run's current (already non-running)
+    // summary, matching `abortRun`'s existing idempotency contract — but it
+    // must leave the still-pending `abortingRunIds` entry alone.
+    const repeat = bureau.abortRun(run.id);
+    expect(repeat.status).not.toBe('aborting');
+    expect(bureau.listAbortingRuns().map((entry) => entry.runId)).toContain(run.id);
+
+    // It clears only once `closed()` genuinely settles.
+    await pollUntil(() => !bureau.listAbortingRuns().some((entry) => entry.runId === run.id));
     expect(bureau.listAbortingRuns().map((entry) => entry.runId)).not.toContain(run.id);
 
     bureau.dispose();

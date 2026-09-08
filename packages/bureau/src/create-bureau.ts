@@ -4696,7 +4696,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
 
     if (runState.status !== 'running') {
-      abortingRunIds.delete(id);
+      // AB-369 review finding (PR #583, Codex): do NOT clear `abortingRunIds`
+      // here just because the run's status has left `'running'` — status can
+      // flip to a terminal value slightly BEFORE the same settlement's
+      // `closed()` continuation below actually runs (see that continuation's
+      // own comment). Deleting the entry here, on a same-run repeat call
+      // landing in that window, would make `listAbortingRuns()` under-report
+      // a cleanup that has not genuinely finished yet — exactly the
+      // invisible-leak failure mode this issue exists to close. The entry is
+      // cleared exclusively by the `closed()` continuation, the one place
+      // that actually knows cleanup settled.
       return serializeRunState(runState, getRunSessionIdentifier(runState), runAttribution.get(id));
     }
 

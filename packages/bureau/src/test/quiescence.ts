@@ -308,13 +308,6 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
       discoveredVia: 'public-child-discovery',
     }));
 
-  // AB-369: `bureau.shutdown()` aborts every active run directly
-  // (`activeRun.abort()`), never through `abortRun()` itself — so it never
-  // touches `abortingRunIds`. Reading `listAbortingRuns()` before or after
-  // `shutdown()` observes the same set; read here alongside the other
-  // before-shutdown rows for consistency.
-  const abortingRuns: AbortingRun[] = [...bureau.listAbortingRuns()];
-
   const pendingWebhookDeliveries: LeakedResource[] = [];
   const deliveries = (await bureau.webhookNotifier?.listDeliveries()) ?? [];
   for (const delivery of deliveries) {
@@ -345,6 +338,18 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
   }
 
   const shutdownReport = await bureau.shutdown(shutdownOptions);
+
+  // AB-369 review finding (PR #583): read AFTER `shutdown()` returns, never
+  // before. `shutdown()` aborts every still-active run directly
+  // (`activeRun.abort()`), never through `abortRun()` itself, so it never
+  // ADDS an `abortingRunIds` entry — but a well-behaved abort `abortRun`
+  // already requested CAN genuinely settle its `closed()` continuation
+  // while `shutdown()`'s own awaits (toolbox shutdown, backend teardown)
+  // are in flight. Reading before `shutdown()` would capture that entry
+  // and report a harness that settled cleanly during shutdown as
+  // non-quiescent; reading here reflects the set as it stands at the
+  // actual quiescence fence.
+  const abortingRuns: AbortingRun[] = [...bureau.listAbortingRuns()];
 
   // Read AFTER `shutdown()` returns (AB-322): a bounded call races a
   // still-draining owner's real work via `Promise.race` (`create-bureau.ts`'s

@@ -139,6 +139,7 @@ export type {
 } from './steering';
 export { createSteeringGate } from './steering';
 export type {
+  AbortingRun,
   Bureau,
   BureauEventType,
   BureauOptions,
