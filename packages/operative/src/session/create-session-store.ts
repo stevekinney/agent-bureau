@@ -471,7 +471,9 @@ export function createSessionStore(
       updater: (
         session: AgentSession | undefined,
       ) => AgentSession | undefined | Promise<AgentSession | undefined>,
+      options?: { refreshActivity?: boolean },
     ): Promise<AgentSession | undefined> {
+      const refreshActivity = options?.refreshActivity ?? true;
       // The updater is caller code and may itself use this store. Keep it out
       // of the local mutation queue so an asynchronous updater cannot wait on
       // an operation queued behind itself. Conditional commits still provide
@@ -495,7 +497,7 @@ export function createSessionStore(
           bodyKey,
           raw,
           current?.revision ?? 0,
-          true,
+          refreshActivity,
           summaryRaw,
           await summariesForMutation(summaryRaw),
         );

@@ -110,6 +110,36 @@ function createReplayGateBarrier(
 }
 
 /**
+ * Wraps `storage` to count `scan()` calls — `feed.replay()`'s
+ * `loadConsistentReplayPage` issues exactly one `scan()` per 128-record
+ * page it walks (weft's `fleet-event-feed.ts` `REPLAY_PAGE_SIZE`), so this
+ * counter is a direct proxy for "how many pages of the fleet feed did this
+ * call read" — the exact cost `refreshRetainedRunOwnerIds` (AB-363, Codex
+ * review PR #568, "Avoid replaying the full fleet feed per candidate
+ * session") must keep bounded by NEW activity, not by the size of the
+ * already-scanned retained window.
+ */
+function createScanCountingStorage(storage: Storage): {
+  storage: Storage;
+  scanCalls: () => number;
+} {
+  let scanCalls = 0;
+  const counting = new Proxy(storage, {
+    get(target, property, receiver) {
+      if (property === 'scan') {
+        return (...args: Parameters<Storage['scan']>) => {
+          scanCalls += 1;
+          return target.scan(...args);
+        };
+      }
+      const value = Reflect.get(target, property, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { storage: counting, scanCalls: () => scanCalls };
+}
+
+/**
  * A deterministic, non-polling collector for `subscribeEventHistory`
  * tests: every wait resolves from a callback the listener/diagnostic sink
  * itself triggers (never a real timer, never a fixed-iteration retry
@@ -426,6 +456,9 @@ describe('createDurableEventHistory', () => {
       await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {});
 
       expect(await history.retainedRunOwnerIds()).toBeUndefined();
+      // The floor stays 0, so `refreshRetainedRunOwnerIds` is never
+      // called against an `undefined` snapshot in production — the
+      // pruning pass returns early instead (see create-bureau.ts).
 
       await history.dispose();
     });
@@ -446,7 +479,7 @@ describe('createDurableEventHistory', () => {
       adminFeed.dispose();
 
       const retained = await history.retainedRunOwnerIds();
-      expect(retained).toEqual(new Set(['run-1']));
+      expect(retained?.ownerIds).toEqual(new Set(['run-1']));
 
       await history.dispose();
     });
@@ -469,7 +502,7 @@ describe('createDurableEventHistory', () => {
       adminFeed.dispose();
 
       const retained = await history.retainedRunOwnerIds();
-      expect(retained).toEqual(new Set(['run-survivor']));
+      expect(retained?.ownerIds).toEqual(new Set(['run-survivor']));
 
       await history.dispose();
     });
@@ -487,8 +520,145 @@ describe('createDurableEventHistory', () => {
       adminFeed.dispose();
 
       const retained = await history.retainedRunOwnerIds();
-      expect(retained).toEqual(new Set());
+      expect(retained?.ownerIds).toEqual(new Set());
 
+      await history.dispose();
+    });
+  });
+
+  describe('refreshRetainedRunOwnerIds() (AB-363, Codex review PR #568)', () => {
+    it("extends a snapshot with an owner whose event was appended after the snapshot's cursor", async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      // A throwaway leading record lets `retain()` push the floor above 0
+      // without evicting run-1's own event — `retain({ beforeSequence })`
+      // retires everything strictly BELOW that sequence.
+      await history.record({ kind: 'run', id: 'sacrifice' }, 'run.started', {}); // sequence 0
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {}); // sequence 1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 }); // retires only sequence 0
+
+      const snapshot = await history.retainedRunOwnerIds();
+      expect(snapshot?.ownerIds).toEqual(new Set(['run-1']));
+
+      // A run that had NO retained event at snapshot time gets one now —
+      // this is the exact staleness window "Revalidate retained owners
+      // before pruning" names.
+      await history.record({ kind: 'run', id: 'run-2' }, 'run.completed', {}); // sequence 2
+
+      const refreshed = await history.refreshRetainedRunOwnerIds(snapshot!);
+      expect(refreshed.ownerIds).toEqual(new Set(['run-1', 'run-2']));
+
+      adminFeed.dispose();
+      await history.dispose();
+    });
+
+    it('mutates the SAME underlying owner set in place rather than cloning it on every call (Codex review, PR #579, "Stop copying the full owner set on every refresh")', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'sacrifice' }, 'run.started', {}); // sequence 0
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {}); // sequence 1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 });
+
+      const snapshot = await history.retainedRunOwnerIds();
+      if (!snapshot) throw new Error('expected a snapshot');
+
+      const firstRefresh = await history.refreshRetainedRunOwnerIds(snapshot);
+      // Referentially the SAME object as `snapshot.ownerIds` — proof the
+      // refresh mutated it in place instead of allocating a fresh `Set`
+      // copy of every retained owner on this call.
+      expect(firstRefresh.ownerIds).toBe(snapshot.ownerIds);
+
+      const secondRefresh = await history.refreshRetainedRunOwnerIds(firstRefresh);
+      expect(secondRefresh.ownerIds).toBe(firstRefresh.ownerIds);
+      expect(secondRefresh.ownerIds).toBe(snapshot.ownerIds);
+
+      adminFeed.dispose();
+      await history.dispose();
+    });
+
+    it('never rescans records the prior snapshot already walked — cost tracks NEW activity, not the size of the retained window', async () => {
+      const backing = await createMemoryStorage();
+      const { storage, scanCalls } = createScanCountingStorage(backing);
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      // A throwaway leading record lets `retain()` push the floor above 0
+      // (`retainedRunOwnerIds()` returns `undefined` at floor 0) without
+      // retiring any of the "noise" owners below.
+      await history.record({ kind: 'run', id: 'sacrifice' }, 'run.started', {}); // sequence 0
+
+      // More than one 128-record replay page's worth of distinct "noise"
+      // owners, all retained — stands in for a fleet feed with a large
+      // retained window.
+      const noiseRunCount = 300;
+      for (let index = 0; index < noiseRunCount; index += 1) {
+        await history.record({ kind: 'run', id: `noise-${index}` }, 'run.started', {});
+      }
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 }); // retires only the sacrifice
+
+      const snapshot = await history.retainedRunOwnerIds();
+      expect(snapshot?.ownerIds.size).toBe(noiseRunCount);
+      const scanCallsForInitialSnapshot = scanCalls();
+      // 300 records at 128/page needs at least 3 scans — establishes this
+      // memory backend genuinely pages, so the assertion below is a real
+      // comparison, not a vacuous one against a backend that scans
+      // everything in one call regardless of page size.
+      expect(scanCallsForInitialSnapshot).toBeGreaterThanOrEqual(3);
+
+      // One new event appended after the snapshot was taken.
+      await history.record({ kind: 'run', id: 'fresh-run' }, 'run.completed', {});
+
+      const refreshed = await history.refreshRetainedRunOwnerIds(snapshot!);
+      expect(refreshed.ownerIds).toEqual(new Set([...snapshot!.ownerIds, 'fresh-run']));
+      // The refresh call's OWN scan cost — never proportional to
+      // `noiseRunCount` — is far below what a from-scratch
+      // `retainedRunOwnerIds()` over the same feed would cost.
+      const scanCallsForRefresh = scanCalls() - scanCallsForInitialSnapshot;
+      expect(scanCallsForRefresh).toBeLessThan(scanCallsForInitialSnapshot);
+      expect(scanCallsForRefresh).toBeLessThanOrEqual(2);
+
+      adminFeed.dispose();
+      await history.dispose();
+    });
+
+    it('does not remove an owner that was retired between the snapshot and the refresh — safe to be wrong in the "still retained" direction only', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'sacrifice' }, 'run.started', {}); // sequence 0
+      await history.record({ kind: 'run', id: 'run-about-to-retire' }, 'run.started', {}); // sequence 1
+      await history.record({ kind: 'run', id: 'run-survivor' }, 'run.started', {}); // sequence 2
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 }); // retires only the sacrifice
+
+      const snapshot = await history.retainedRunOwnerIds();
+      expect(snapshot?.ownerIds).toEqual(new Set(['run-about-to-retire', 'run-survivor']));
+
+      // Advance the floor past run-about-to-retire's only event, entirely
+      // AFTER the snapshot was taken.
+      await adminFeed.retain({ beforeSequence: 2 });
+
+      const refreshed = await history.refreshRetainedRunOwnerIds(snapshot!);
+      // Deliberately conservative: the refresh never re-verifies an owner
+      // already in the snapshot, so a retirement that happens after the
+      // snapshot is caught by the NEXT full `retainedRunOwnerIds()` pass,
+      // not this one. Leaving it in for one extra cycle costs one no-op
+      // write; removing it here would risk a false negative if the
+      // direction were ever reversed.
+      expect(refreshed.ownerIds).toEqual(new Set(['run-about-to-retire', 'run-survivor']));
+
+      adminFeed.dispose();
       await history.dispose();
     });
   });
@@ -1255,6 +1425,9 @@ function createRecordingHistory(
       throw new Error('unused by createDurableEventProducer');
     },
     retainedRunOwnerIds() {
+      throw new Error('unused by createDurableEventProducer');
+    },
+    refreshRetainedRunOwnerIds() {
       throw new Error('unused by createDurableEventProducer');
     },
     dispose: async () => {},

@@ -547,16 +547,16 @@ const result = await activeRun.result;
 
 **`SessionStore` interface:**
 
-| Method                         | Description                                                 |
-| ------------------------------ | ----------------------------------------------------------- |
-| `save(session)`                | Persist a session with conflict-aware merging.              |
-| `update(id, updater)`          | Read-modify-write a session through optimistic concurrency. |
-| `load(id)`                     | Load by id; returns `undefined` if not found.               |
-| `delete(id)`                   | Remove a session.                                           |
-| `exists(id)`                   | Check existence.                                            |
-| `list(options?)`               | Paginated list of `SessionSummary` objects.                 |
-| `updateMetadata(id, metadata)` | Merge metadata without rewriting the conversation.          |
-| `cleanup(options)`             | Delete sessions older than `options.olderThan` ms.          |
+| Method                          | Description                                                                                                                                                                                                                                                                      |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `save(session)`                 | Persist a session with conflict-aware merging.                                                                                                                                                                                                                                   |
+| `update(id, updater, options?)` | Read-modify-write a session through optimistic concurrency. `options.refreshActivity` (default `true`) controls whether a successful write stamps a fresh `updatedAt`; pass `false` for a background write (e.g. pruning stale metadata) that must not read as session activity. |
+| `load(id)`                      | Load by id; returns `undefined` if not found.                                                                                                                                                                                                                                    |
+| `delete(id)`                    | Remove a session.                                                                                                                                                                                                                                                                |
+| `exists(id)`                    | Check existence.                                                                                                                                                                                                                                                                 |
+| `list(options?)`                | Paginated list of `SessionSummary` objects.                                                                                                                                                                                                                                      |
+| `updateMetadata(id, metadata)`  | Merge metadata without rewriting the conversation.                                                                                                                                                                                                                               |
+| `cleanup(options)`              | Delete sessions older than `options.olderThan` ms.                                                                                                                                                                                                                               |
 
 Sessions include a persisted `revision` number. New `AgentSession` objects start
 at revision `0`; successful `SessionStore` writes increment the stored revision.
