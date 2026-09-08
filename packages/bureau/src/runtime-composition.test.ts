@@ -4416,13 +4416,27 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
           attribution: { agentName: 'echo', principal: 'alice' },
         });
 
-        // The cache entry is consumed (deleted) on first read — a second
-        // call falls back to a fresh storage read, which still succeeds
-        // against memory storage and returns the same result, proving the
-        // cache is an optimization/consistency guard, not the only path.
+        // Review finding: the cache entry is RETAINED (not evicted) after
+        // this read — `isCatalogRecoveredRun`'s own post-recovery-loop
+        // classification is a separate, later consumer of the exact same
+        // entry, and must still find it. A second `classifyCatalogRecoveredRun`
+        // call and an `isCatalogRecoveredRun` call both still see it.
         const secondClassification =
           await runtime.classifyCatalogRecoveredRun('catalog-run-classify');
         expect(secondClassification).toEqual({
+          isCatalogRun: true,
+          attribution: { agentName: 'echo', principal: 'alice' },
+        });
+        expect(await runtime.isCatalogRecoveredRun('catalog-run-classify')).toBe(true);
+
+        // `clearCatalogRunRecoveryCache` releases it — called once, at the
+        // end of the whole boot recovery pass, never per-entry.
+        runtime.clearCatalogRunRecoveryCache();
+        // Falls back to a fresh storage read once the cache is cleared,
+        // which still succeeds against memory storage and returns the same
+        // result, proving the cache is a consistency guard within one
+        // recovery pass, not the only path to a correct answer.
+        expect(await runtime.classifyCatalogRecoveredRun('catalog-run-classify')).toEqual({
           isCatalogRun: true,
           attribution: { agentName: 'echo', principal: 'alice' },
         });

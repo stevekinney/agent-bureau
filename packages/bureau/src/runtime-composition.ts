@@ -1577,6 +1577,15 @@ export interface RuntimeComposition {
     isCatalogRun: boolean;
     attribution?: { agentName: string; principal?: string };
   }>;
+  /**
+   * AB-241 review finding: releases every entry `catalogRunRecoveryCache`
+   * accumulated during the current boot recovery pass. `createBureau`'s
+   * `recoverDurableRuns` calls this exactly once, after its post-recovery
+   * loop (the last consumer of the cache) has finished — see the cache's
+   * own doc comment for why entries are retained rather than evicted
+   * per-read.
+   */
+  clearCatalogRunRecoveryCache(): void;
   ready: boolean;
   provider: RedactedProviderConfiguration | undefined;
   providers: RedactedProviderRouteConfiguration[];
@@ -1695,16 +1704,22 @@ export async function createRuntimeComposition(
 
   // AB-241 review finding: runId → the decoded `CatalogRunRecoveryRecord`
   // `resolveRunServices`'s catalog branch already successfully read during
-  // boot recovery, cached here so `classifyCatalogRecoveredRun` can reuse
-  // that SAME decode instead of hitting durable storage a second,
-  // independent time — a second read could transiently fail or succeed
-  // differently than the first, letting a workflow get classified as
-  // catalog territory (from the first read) while losing the attribution
-  // the second read should have carried, or vice versa. Recovery-scoped
-  // only: each entry is consumed and deleted the moment
-  // `classifyCatalogRecoveredRun` reads it, so this never grows past the
-  // count of catalog runs recovered in the current boot pass — unlike
-  // `runAttribution`, this is not live-dispatch state.
+  // boot recovery, cached here so BOTH `classifyCatalogRecoveredRun` (called
+  // from the awaited `onRecoveredWorkflow` hook, during `recoverAll()`) and
+  // `isCatalogRecoveredRun` (called again, LATER, from
+  // `recoverDurableRuns`'s own post-recovery loop over `recoverAll()`'s
+  // returned handles) can reuse that SAME decode instead of each issuing
+  // its own independent storage read — a transient failure on either read
+  // could disagree with the first, either losing an already-attributed
+  // run's attribution or, worse, misclassifying an already-resolved
+  // catalog run as an orphan and cancelling it. Entries are intentionally
+  // NOT evicted per-read (a second fresh review finding after an earlier,
+  // wrong per-entry-eviction attempt starved the later of these two
+  // consumers) — the whole cache is cleared in one call, once, at the end
+  // of the boot recovery pass (`clearCatalogRunRecoveryCache`, called from
+  // `recoverDurableRuns` in create-bureau.ts), so it never persists past
+  // that one pass — unlike `runAttribution`, this is not live-dispatch
+  // state.
   const catalogRunRecoveryCache = new Map<string, CatalogRunRecoveryRecord>();
   const scheduleFireEvents = new TypedEventTarget<ScheduleFireEventMap>();
 
@@ -2482,6 +2497,20 @@ export async function createRuntimeComposition(
    * `resolveRunServices`'s catalog branch already produced for it.
    */
   async function isCatalogRecoveredRun(runId: string): Promise<boolean> {
+    // AB-241 review finding: consult the cache `resolveRunServices` already
+    // populated FIRST — `recoverDurableRuns`'s post-recovery loop calls this
+    // for every handle `onRecoveredWorkflow` didn't already register, so a
+    // catalog run's classification here must stay consistent with the
+    // resolver's own earlier, successful read rather than risk a fresh,
+    // independent one transiently disagreeing with it (a `false` from a
+    // flaky second read would fall through to session-ownership
+    // classification and cancel an already-resolved-and-monitored catalog
+    // run as an orphan). See `catalogRunRecoveryCache`'s own doc comment for
+    // why entries are NOT evicted here — only `classifyCatalogRecoveredRun`
+    // (a second, later consumer of the same cache — see its own doc
+    // comment for why entries are retained for the whole recovery pass,
+    // never evicted per-read).
+    if (catalogRunRecoveryCache.has(runId)) return true;
     const load = await loadCatalogRunRecoveryRecord(runId);
     return load.status !== 'missing';
   }
@@ -2504,6 +2533,19 @@ export async function createRuntimeComposition(
    * back to a fresh read only when the cache holds nothing for `runId`
    * (e.g. a direct caller of this function outside the normal recovery
    * hook ordering, or a test exercising it in isolation).
+   *
+   * Second fresh review finding: does NOT evict the cache entry after
+   * reading it. `recoverDurableRuns`'s own post-recovery loop calls
+   * `isCatalogRecoveredRun` for the SAME workflow id, AFTER this function
+   * already ran for it (via the awaited `onRecoveredWorkflow` hook, which
+   * happens during `recoverAll()`, strictly before the post-recovery loop
+   * that iterates its returned handles) — evicting here would have starved
+   * that second, later consumer of the exact same already-successful read
+   * this function exists to reuse, sending it back to an independent
+   * storage read whose transient failure could misclassify an
+   * already-resolved-and-monitored catalog run as an orphan. The whole
+   * cache is cleared in one call at the end of the boot recovery pass
+   * instead — see `clearCatalogRunRecoveryCache`.
    */
   async function classifyCatalogRecoveredRun(runId: string): Promise<{
     isCatalogRun: boolean;
@@ -2511,7 +2553,6 @@ export async function createRuntimeComposition(
   }> {
     const cached = catalogRunRecoveryCache.get(runId);
     if (cached) {
-      catalogRunRecoveryCache.delete(runId);
       return {
         isCatalogRun: true,
         attribution: {
@@ -2530,6 +2571,13 @@ export async function createRuntimeComposition(
         ...(load.record.principal !== undefined ? { principal: load.record.principal } : {}),
       },
     };
+  }
+
+  /**
+   * AB-241 review finding: see `catalogRunRecoveryCache`'s own doc comment.
+   */
+  function clearCatalogRunRecoveryCache(): void {
+    catalogRunRecoveryCache.clear();
   }
 
   /**
@@ -3138,6 +3186,7 @@ export async function createRuntimeComposition(
     persistCatalogRunRecoveryRecord,
     isCatalogRecoveredRun,
     classifyCatalogRecoveredRun,
+    clearCatalogRunRecoveryCache,
     ready:
       options.generate !== undefined ||
       options.provider !== undefined ||

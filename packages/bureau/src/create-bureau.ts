@@ -4391,6 +4391,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
     }
 
+    // AB-241 review finding: the post-recovery loop above is the LAST
+    // consumer of `catalogRunRecoveryCache` for this boot pass (the awaited
+    // `onRecoveredWorkflow` hook, invoked earlier during `recoverAll()`
+    // above, was the first) — release every entry now rather than let them
+    // persist for the rest of this process's lifetime. Safe to call before
+    // the detached orphan-cancel promises above settle: none of them touch
+    // this cache.
+    runtime.clearCatalogRunRecoveryCache();
+
     const perRunFailures = dedupeRecoveryPerRunFailures(currentRecoveryPerRunFailures ?? []);
     currentRecoveryPerRunFailures = undefined;
     currentRecoverySweepFailure = undefined;
