@@ -575,6 +575,29 @@ export interface DurableEventProducerOptions {
  */
 export interface DurableEventProducer {
   /**
+   * Whether a `history.record()` write for `owner` is currently in flight
+   * — started (synchronously, at the same moment this producer's listener
+   * observed the source action/bureau event) but not yet settled.
+   *
+   * AB-363's `pruneStaleRunOwnership` uses this, alongside the SESSION's
+   * own `lastRequestAuthorities` presence, to close the race a run's own
+   * terminal transition can open: this producer's `sink()` increments the
+   * owner's count BEFORE starting `history.record()`, which itself starts
+   * only once the source action (e.g. the bureau-level `'action'` event
+   * carrying `run.completed`) has already been dispatched — and that
+   * action's dispatch happens no later than the SAME completion sequence
+   * that removes the run's `lastRequestAuthorities` entry (Codex review,
+   * PR #568: "Preserve ownership until pending event writes have
+   * settled"). So either `lastRequestAuthorities` still names the run
+   * (live, or a pending approval awaiting a future `review.*` event —
+   * both excluded on their own) or, once it doesn't, this method is the
+   * one remaining signal for "a write this transition started has not
+   * yet committed" — checking it is a non-destructive peek at a live
+   * count, unlike `RuntimeServices.deferred.drain()` (destructive, and
+   * shared with other consumers — never call it from here).
+   */
+  hasActiveWrite(owner: DurableEventOwner): boolean;
+  /**
    * Stop listening to the bureau's event streams and await every write
    * already in flight before resolving. Never rejects. Idempotent.
    */
@@ -697,8 +720,19 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // `activeWrites`/`trackWrite` pattern) rather than leaving an in-flight
   // `record()` unobserved.
   const activeWrites = new Set<Promise<void>>();
+  // AB-363 — per-owner in-flight write counts, checked by
+  // `hasActiveWrite()` below. Keyed by the SAME `encodeOwner` string
+  // `record()`/`page()` use, incremented synchronously BEFORE
+  // `history.record()` starts (so a caller that checks `hasActiveWrite`
+  // anywhere after this action's dispatch already sees it — see that
+  // method's own doc comment for why this closes the pruning race) and
+  // decremented in the same `.finally` that already prunes `activeWrites`.
+  const activeWriteCountsByOwner = new Map<string, number>();
+
   function sink(owner: DurableEventOwner, kind: string, payload: unknown): void {
     if (signal?.aborted) return;
+    const ownerKey = encodeOwner(owner);
+    activeWriteCountsByOwner.set(ownerKey, (activeWriteCountsByOwner.get(ownerKey) ?? 0) + 1);
     const write = history.record(owner, kind, payload).then(
       () => undefined,
       (error: unknown) => {
@@ -711,7 +745,15 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       },
     );
     activeWrites.add(write);
-    void write.finally(() => activeWrites.delete(write));
+    void write.finally(() => {
+      activeWrites.delete(write);
+      const remaining = (activeWriteCountsByOwner.get(ownerKey) ?? 1) - 1;
+      if (remaining > 0) {
+        activeWriteCountsByOwner.set(ownerKey, remaining);
+      } else {
+        activeWriteCountsByOwner.delete(ownerKey);
+      }
+    });
     runtime.deferred.track(write, 'durable-event-record');
   }
 
@@ -883,6 +925,9 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   bureau.addEventListener('review.superseded', reviewSupersededListener);
 
   return {
+    hasActiveWrite(owner: DurableEventOwner): boolean {
+      return (activeWriteCountsByOwner.get(encodeOwner(owner)) ?? 0) > 0;
+    },
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);
       bureau.removeEventListener('schedule.completed', scheduleCompletedListener);

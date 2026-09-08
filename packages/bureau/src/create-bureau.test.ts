@@ -13409,10 +13409,10 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
     }
   });
 
-  it("excludes a run unknown to this process's durable engine from pruning — 'unknown' is not evidence a history is below the floor (Copilot review, PR #568)", async () => {
+  it('excludes a run still named in lastRequestAuthorities from pruning — live or awaiting a pending-approval decision, either way a future durable write can still arrive (Codex review, PR #568)', async () => {
     const databasePath = join(
       tmpdir(),
-      `bureau-run-ownership-prune-unknown-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+      `bureau-run-ownership-prune-live-authority-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
     );
 
     try {
@@ -13432,21 +13432,29 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
         const lastEvent = completedPage.events.at(-1);
         if (!lastEvent) throw new Error('expected at least one durable event');
 
-        // Fabricate an entry for a runId this process's durable engine has
-        // NEVER heard of — sharing the completed run's own session, so both
-        // entries are scanned in the same pruning pass.
+        // Fabricate a SECOND run's entries on the SAME session: an
+        // ownership entry (a candidate once retention advances) whose
+        // `lastRequestAuthorities` entry is still present — a shape only a
+        // still-live run or a terminal-but-pending-approval run can have.
+        // Sharing `completedRun`'s session puts both entries through the
+        // same pruning pass.
         const sessionStore = bureau.sessionStore;
         if (!sessionStore) throw new Error('expected a configured session store');
         await sessionStore.update(completedRun.sessionId, (session) => {
           if (!session) return undefined;
           const currentOwners = session.metadata['lastRunOwningPrincipals'];
+          const currentAuthorities = session.metadata['lastRequestAuthorities'];
           return {
             ...session,
             metadata: {
               ...session.metadata,
               lastRunOwningPrincipals: {
                 ...(currentOwners as Record<string, string> | undefined),
-                'unknown-run-id': 'mallory',
+                'pending-run-id': 'mallory',
+              },
+              lastRequestAuthorities: {
+                ...(currentAuthorities as Record<string, unknown> | undefined),
+                'pending-run-id': { agentId: 'bureau', principalId: 'mallory' },
               },
             },
           };
@@ -13461,96 +13469,14 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
         await bureau.runDurableMaintenance();
 
         const session = await bureau.getSession(completedRun.sessionId);
-        // `completedRun`'s own entry is gone (a real, terminal run whose
-        // history fell below the floor) — but the unknown one survives:
-        // "this process's durable engine has never heard of this run" is
-        // excluded from pruning, not treated as prunable.
+        // `completedRun`'s own entry is gone (its own terminal transition
+        // already removed it from `lastRequestAuthorities`, and its
+        // history fell below the floor) — but the fabricated one survives:
+        // still named in `lastRequestAuthorities`, so it is excluded from
+        // pruning regardless of the retained-owner set.
         expect(session?.metadata['lastRunOwningPrincipals']).toEqual({
-          'unknown-run-id': 'mallory',
+          'pending-run-id': 'mallory',
         });
-      } finally {
-        await bureau.shutdown();
-      }
-    } finally {
-      await rm(databasePath, { force: true });
-      await rm(`${databasePath}-wal`, { force: true });
-      await rm(`${databasePath}-shm`, { force: true });
-    }
-  });
-
-  it('excludes a run from pruning this cycle, without aborting the pass for any other run, when engine.get itself rejects (Copilot review, PR #568)', async () => {
-    const databasePath = join(
-      tmpdir(),
-      `bureau-run-ownership-prune-engine-fault-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
-    );
-
-    // A throwaway probe purely to reach the shared `Engine` class prototype
-    // (spying on it affects every `Engine` instance, including the real
-    // bureau's own) — same technique `forwards host-driven maintenance to
-    // the durable engine` above uses; its own engine/storage are disposed
-    // immediately, unused otherwise.
-    const probe = await createRuntimeComposition({
-      generate: createMockGenerate(),
-      toolbox: createEmptyToolbox(),
-      storage: { type: 'memory' },
-      durableExecution: true,
-    });
-    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
-      get: (id: string) => Promise<unknown>;
-    };
-    probe.durable!.engine[Symbol.dispose]?.();
-    probe.disposeStorage?.();
-
-    try {
-      const bureau = await createBureau({
-        agents: {},
-        generate: createMockGenerate('Done.'),
-        toolbox: createEmptyToolbox(),
-        storage: { type: 'sqlite', path: databasePath },
-      });
-
-      try {
-        const runA = await bureau.createRun({ message: 'A', principal: 'alice' });
-        await waitForRunCompletion(bureau, runA.id);
-        const runB = await bureau.createRun({ message: 'B', principal: 'bob' });
-        await waitForRunCompletion(bureau, runB.id);
-
-        const pageB = await bureau.eventHistory({ kind: 'run', id: runB.id });
-        if ('outcome' in pageB) throw new Error('expected a page for run B');
-        const lastEventB = pageB.events.at(-1);
-        if (!lastEventB) throw new Error('expected at least one durable event for run B');
-
-        // Retire BOTH runs' durable events — each session becomes a
-        // pruning candidate this cycle.
-        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
-        const adminFeed = createFleetEventFeed(adminStorage);
-        await adminFeed.retain({ beforeSequence: lastEventB.sequence + 1 });
-        adminFeed.dispose();
-        adminStorage[Symbol.dispose]();
-
-        const getSpy = spyOn(enginePrototype, 'get').mockImplementationOnce(() => {
-          throw new Error('storage exploded');
-        });
-
-        try {
-          // Must not reject — a single unreadable candidate is excluded
-          // from pruning THIS cycle, not an uncaught failure of the whole
-          // maintenance call.
-          const result = await bureau.runDurableMaintenance();
-          expect(result).toBe(true);
-        } finally {
-          getSpy.mockRestore();
-        }
-
-        const sessionA = await bureau.getSession(runA.sessionId);
-        const sessionB = await bureau.getSession(runB.sessionId);
-        const survivedOwnership = [sessionA, sessionB].filter(
-          (session) => session?.metadata['lastRunOwningPrincipals'] !== undefined,
-        );
-        // Exactly one run's `engine.get` call hit the one-shot fault and was
-        // excluded (survives); the other's succeeded and was pruned as
-        // normal — the fault on one candidate never aborted the other.
-        expect(survivedOwnership).toHaveLength(1);
       } finally {
         await bureau.shutdown();
       }

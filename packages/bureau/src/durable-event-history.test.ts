@@ -1300,6 +1300,74 @@ describe('createDurableEventProducer()', () => {
     await producer.dispose();
   });
 
+  describe('hasActiveWrite() (AB-363)', () => {
+    it('reports true while a write is in flight and false once it settles, scoped to the exact owner', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      let releaseWrite!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      const { history } = createRecordingHistory(async () => {
+        await gate;
+      });
+      const producer = createDurableEventProducer(bureau, history, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      // Before dispatch: no write has ever started for this owner.
+      expect(producer.hasActiveWrite(owner)).toBe(false);
+
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+
+      // `sink()` increments the count SYNCHRONOUSLY, before `record()`'s
+      // gated promise ever resolves — no `await` needed to observe it.
+      expect(producer.hasActiveWrite(owner)).toBe(true);
+      // An unrelated owner is never affected.
+      expect(producer.hasActiveWrite({ kind: 'run', id: 'run-2' })).toBe(false);
+
+      releaseWrite();
+      await runtime.deferred.drain();
+
+      expect(producer.hasActiveWrite(owner)).toBe(false);
+
+      await producer.dispose();
+    });
+
+    it('drops back to false only once EVERY concurrent write for the same owner has settled', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      const gates: Array<() => void> = [];
+      let callIndex = 0;
+      const { history } = createRecordingHistory(async () => {
+        const index = callIndex;
+        callIndex += 1;
+        await new Promise<void>((resolve) => {
+          gates[index] = resolve;
+        });
+      });
+      const producer = createDurableEventProducer(bureau, history, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      // Two independent durable writes for the SAME owner in flight at
+      // once (mirrors a run's own terminal write racing a still-in-flight
+      // earlier write for that run, e.g. a prior step's durable record).
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+      dispatchAction(createAction({ type: 'run.tripwire', runId: 'run-1' }));
+      expect(producer.hasActiveWrite(owner)).toBe(true);
+
+      gates[0]?.();
+      await Promise.resolve();
+      // The SECOND write is still outstanding.
+      expect(producer.hasActiveWrite(owner)).toBe(true);
+
+      gates[1]?.();
+      await runtime.deferred.drain();
+      expect(producer.hasActiveWrite(owner)).toBe(false);
+
+      await producer.dispose();
+    });
+  });
+
   it('ignores an action type outside the durable run/session sets — tool.* and step.completed are audit-trail-only, never durable', async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchAction } = createFakeBureauEventSurface();

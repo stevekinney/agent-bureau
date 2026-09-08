@@ -4831,23 +4831,35 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * an empty set at floor 0 would read as "nothing survived" when in fact
    * nothing has even been asked to retire.
    *
-   * A run whose durable engine record is still non-terminal (`pending`,
-   * `running`, or `suspended`) — or one this process's durable engine has
-   * simply never heard of — is EXCLUDED from pruning even when the fleet
-   * feed currently shows no events for it. This is not a second pruning
-   * trigger; it is a guard against the real race the coordinator's
-   * rollback trigger names ("an owner losing access to a still-pageable
-   * run's history"): a run's `lastRunOwningPrincipals` entry is written at
-   * DISPATCH time (`createRun`, above `lastRequestAuthorities`), while its
-   * durable events are appended asynchronously off the bureau's own
-   * `'action'` stream (`createDurableEventProducer`) — a run can
-   * legitimately have an ownership entry before its first durable event has
-   * landed, or between an early event's compaction and its terminal event
-   * being recorded. Treating "not yet visible in this replay" as
-   * "permanently below the floor" for a run still in flight would prune an
-   * owner that a moment later becomes unreadable for exactly the wrong
-   * reason. `runtime.durable.engine.get` is the cross-process durable
-   * truth for this check (unlike the in-memory, process-local `store`).
+   * A candidate run (not in the retained set) is excluded from pruning —
+   * left in place for a later cycle — on either of two signals, checked
+   * against the session's OWN metadata, never `runtime.durable.engine.get`
+   * (Codex/Copilot review, PR #568 — an earlier revision used that engine
+   * read and got both the "unknown run" case and the write-in-flight race
+   * below wrong):
+   *
+   * 1. `lastRequestAuthorities` still names the run. This map is written
+   *    unconditionally at dispatch, in the SAME merge as
+   *    `lastRunOwningPrincipals`, and its entry for a run is removed ONLY
+   *    at that run's own terminal transition, and ONLY when the run has no
+   *    pending approval (see that removal's own doc comment). So presence
+   *    here means the run is either still live, or terminal-but-awaiting-
+   *    a-human-decision — the exact case that can still produce a future
+   *    `review.*` durable event.
+   * 2. `durableEventProducerInstance.hasActiveWrite({ kind: 'run', id })` —
+   *    a `history.record()` write for this run, started but not yet
+   *    settled. This closes the window `lastRequestAuthorities` alone
+   *    cannot: the bureau-level `'action'` event that removes the
+   *    authority entry is dispatched no earlier than the SAME completion
+   *    sequence that also fires the `'action'` event `createDurableEventProducer`
+   *    sinks into `history.record()` (both are driven off the same
+   *    `store`-dispatched action for this run's terminal transition) — so
+   *    by the time the authority entry is gone, that write has already
+   *    STARTED (`hasActiveWrite` synchronously flips true before
+   *    `history.record()`'s promise even begins), even if it has not yet
+   *    settled. Checking both together means: authority gone AND no write
+   *    in flight ⟹ the run's terminal outcome is fully durable, with no
+   *    future write this pass could race.
    */
   async function pruneStaleRunOwnership(): Promise<void> {
     const sessionStore = runtime.sessionStore;
@@ -4869,63 +4881,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         const candidateRunIds = Object.keys(owners).filter((runId) => !retainedRunIds.has(runId));
         if (candidateRunIds.length === 0) continue;
 
-        const prunableRunIds: string[] = [];
-        for (const runId of candidateRunIds) {
-          let durableRun: Awaited<ReturnType<NonNullable<typeof runtime.durable>['engine']['get']>>;
-          try {
-            durableRun = runtime.durable ? await runtime.durable.engine.get(runId) : null;
-          } catch (error) {
-            // Cannot verify this run's terminal status right now (a
-            // storage-layer failure from `engine.get`, not "not found" —
-            // that case returns `null`, not a rejection) — fail closed by
-            // excluding it from pruning THIS cycle, and never let one
-            // unreadable run abort the whole pass for every other
-            // candidate and every other session (Copilot review, PR #568).
-            diagnose({
-              level: 'error',
-              scope: 'run-ownership-pruning',
-              message: `[bureau] Could not read the durable engine record for run "${runId}" during lastRunOwningPrincipals pruning; leaving its ownership entry in place this cycle:`,
-              cause: error,
-            });
-            continue;
-          }
-          // Prunable ONLY on a positive, terminal confirmation. `null`
-          // ("this process's durable engine has never heard of this run")
-          // is deliberately NOT treated as prunable — the doc comment
-          // above names exactly this race: a run's ownership entry is
-          // written at dispatch time, before the durable engine has
-          // necessarily registered it, so "unknown" cannot be
-          // distinguished from "not yet visible" (Copilot review, PR #568).
-          if (
-            durableRun === null ||
-            durableRun.status === 'pending' ||
-            durableRun.status === 'running' ||
-            durableRun.status === 'suspended'
-          ) {
-            continue;
-          }
-          prunableRunIds.push(runId);
-        }
-        if (prunableRunIds.length === 0) continue;
-
         // Read-modify-write against the FRESH session inside `update`
         // (optimistic concurrency, same as every other write to this map),
         // not against the `summary` snapshot above — a concurrent dispatch's
         // union-merge (the write path this pass never touches) can add a
         // new entry between the `list()` read and this write, and it must
-        // survive.
+        // survive. `lastRequestAuthorities` is read from this SAME fresh
+        // session too, for the identical reason.
         await sessionStore.update(summary.id, (session) => {
           if (!session) return undefined;
           const currentOwners = session.metadata['lastRunOwningPrincipals'];
           if (!isPlainAuthorityRecord(currentOwners)) return undefined;
 
+          const currentAuthorities = session.metadata['lastRequestAuthorities'];
+          const liveOrPendingRunIds = isPlainAuthorityRecord(currentAuthorities)
+            ? new Set(Object.keys(currentAuthorities))
+            : new Set<string>();
+
           const nextOwners = { ...currentOwners };
           let changed = false;
-          for (const runId of prunableRunIds) {
-            if (runId in nextOwners) {
-              delete nextOwners[runId];
-              changed = true;
-            }
+          for (const runId of candidateRunIds) {
+            if (!(runId in nextOwners)) continue;
+            if (liveOrPendingRunIds.has(runId)) continue;
+            if (durableEventProducerInstance?.hasActiveWrite({ kind: 'run', id: runId })) continue;
+            delete nextOwners[runId];
+            changed = true;
           }
           if (!changed) return undefined;
 
