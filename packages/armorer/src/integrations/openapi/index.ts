@@ -224,7 +224,7 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
   const hasRequestBody = jsonRequestBodySchema !== undefined;
   const requestBodyRequired = requestBody?.required ?? false;
 
-  const inputShape: Record<string, z.ZodTypeAny> = {};
+  const inputShape: Record<string, z.ZodType> = {};
   for (const parameter of parameters) {
     if (parameter.in === 'cookie') continue;
     const dereferenced = dereference(parameter.schema, spec);

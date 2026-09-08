@@ -362,9 +362,7 @@ export function serializeRunDetail(
         toolName: result.toolName,
         result: toJsonSafe(result.result),
         error:
-          result.error?.message ??
-          result.errorMessage ??
-          (typeof result.error === 'string' ? result.error : undefined),
+          result.error?.message ?? (typeof result.error === 'string' ? result.error : undefined),
       })),
     })),
     latestSnapshot: runState.snapshots.at(-1),

@@ -225,7 +225,7 @@ const GetTaskParamsSchema = z.object({
 const CancelTaskParamsSchema = z.object({ id: z.string().min(1) });
 
 /** Parses `params` against `schema`, converting a validation failure into `InvalidParamsError`. */
-function parseParams<TSchema extends z.ZodTypeAny>(
+function parseParams<TSchema extends z.ZodType>(
   params: unknown,
   schema: TSchema,
 ): z.infer<TSchema> {

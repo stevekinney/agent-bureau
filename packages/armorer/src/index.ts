@@ -236,8 +236,6 @@ export {
   ToolValidateSuccessEvent,
 } from './events';
 export type {
-  AddEventListenerOptionsLike,
-  AsyncIteratorOptions,
   DefaultToolEvents,
   EventIteratorOptions,
   MinimalAbortSignal,

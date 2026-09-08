@@ -83,7 +83,7 @@ export function serializeRegistry(registry: ToolRegistry): SerializedToolDefinit
     .map((tool) => serializeToolDefinition(tool, { aliases: registry.aliases(tool.id) }));
 }
 
-function toJsonSchema(schema: z.ZodTypeAny): JsonSchema {
+function toJsonSchema(schema: z.ZodType): JsonSchema {
   const json = z.toJSONSchema(schema, {
     target: 'draft-2020-12',
     unrepresentable: 'throw',

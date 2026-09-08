@@ -31,7 +31,7 @@ export const jsonValueSchema: z.ZodType<JSONValue> = z.lazy(() => {
     (value, ctx) => {
       if (!isPlainObject(value)) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: 'custom',
           message: 'expected a plain object',
         });
         return z.NEVER;
@@ -61,7 +61,7 @@ const multiModalContentUnion = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('image'),
-    url: z.string().url(),
+    url: z.url(),
     mimeType: z.string().optional(),
     text: z.string().optional(),
   }),

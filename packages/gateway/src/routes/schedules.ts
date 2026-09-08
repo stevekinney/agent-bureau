@@ -58,7 +58,7 @@ export function createSchedulesRoutes(bureau: Bureau) {
 
     const parsed = CreateScheduleSchema.safeParse(rawBody);
     if (!parsed.success) {
-      const fieldErrors = parsed.error.flatten().fieldErrors;
+      const fieldErrors = z.flattenError(parsed.error).fieldErrors;
       const message = Object.entries(fieldErrors)
         .map(([field, errors]) => `${field}: ${errors?.join(', ') ?? 'invalid'}`)
         .join('; ');

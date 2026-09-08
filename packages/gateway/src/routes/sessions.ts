@@ -33,7 +33,7 @@ const userAdmissibleContentSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('image'),
-      url: z.string().url(),
+      url: z.url(),
       mimeType: z.string().optional(),
       text: z.string().optional(),
     })
@@ -317,7 +317,7 @@ export function createSessionsRoutes(bureau: Bureau) {
 
     const parsed = sessionInputAdmissionRequestBodySchema.safeParse(rawBody);
     if (!parsed.success) {
-      const fieldErrors = parsed.error.flatten().fieldErrors;
+      const fieldErrors = z.flattenError(parsed.error).fieldErrors;
       const message = Object.entries(fieldErrors)
         .map(([field, errors]) => `${field}: ${errors?.join(', ') ?? 'invalid'}`)
         .join('; ');

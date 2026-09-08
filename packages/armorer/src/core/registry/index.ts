@@ -130,7 +130,7 @@ type ToolQueryTag<TTool extends ToolDefinition> = [
 type ToolQuerySchemaKey<TTool extends ToolDefinition> = TTool extends {
   __schema?: infer TSchema;
 }
-  ? TSchema extends z.ZodTypeAny
+  ? TSchema extends z.ZodType
     ? Extract<keyof z.infer<TSchema>, string>
     : string
   : string;

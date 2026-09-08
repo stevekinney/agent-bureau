@@ -102,7 +102,7 @@ function toElicitationMessage(request: ToolElicitationRequest): string {
  * rather than building the full `notifications/elicitation/complete`
  * subsystem, which no caller of this bridge currently needs.
  */
-function toZodSchema(request: ToolElicitationRequest): z.ZodTypeAny {
+function toZodSchema(request: ToolElicitationRequest): z.ZodType {
   if (request.mode === 'url') {
     return z.object({ acknowledged: z.boolean() });
   }

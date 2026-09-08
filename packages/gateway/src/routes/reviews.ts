@@ -55,7 +55,7 @@ const rejectBodySchema = z
  * correctly rejects it with `400` via the same `safeParse` path below,
  * rather than throwing an uncaught `ZodError` that would surface as a `500`.
  */
-export async function parseReviewBody<TSchema extends z.ZodTypeAny>(
+export async function parseReviewBody<TSchema extends z.ZodType>(
   context: { req: { text(): Promise<string> } },
   schema: TSchema,
 ): Promise<z.infer<TSchema>> {

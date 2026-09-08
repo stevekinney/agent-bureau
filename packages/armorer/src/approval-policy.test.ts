@@ -326,7 +326,7 @@ describe('createToolbox — approvalPolicy composition', () => {
     expect(registryHookCalled).toBe(true);
     expect(result.outcome).toBe('error');
     expect(result.error?.code).toBe('POLICY_DENIED');
-    expect(result.errorMessage).toContain('registry says no');
+    expect(result.error?.message).toContain('registry says no');
   });
 
   it('returns the capability-tier ask only once registry and tool hooks have both allowed', async () => {
@@ -550,7 +550,7 @@ describe('createHeadlessPermissionPolicyHooks — toolbox integration', () => {
     const result = await toolbox.execute(createToolCall('shell', {}));
     expect(result.outcome).toBe('error');
     expect(result.error?.code).toBe('POLICY_DENIED');
-    expect(result.errorMessage).toContain('shell');
+    expect(result.error?.message).toContain('shell');
   });
 
   it('never returns action_required — an ask-tier tool is denied, not parked, under the headless preset', async () => {

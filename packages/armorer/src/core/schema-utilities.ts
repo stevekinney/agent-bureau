@@ -6,7 +6,7 @@
 import type { StandardSchemaV1 } from 'interoperability';
 import { z } from 'zod';
 
-export type ToolSchema = z.ZodTypeAny;
+export type ToolSchema = z.ZodType;
 
 /**
  * Internal marker set on the schema returned by {@link wrapStandardSchema} so
@@ -23,7 +23,7 @@ const WRAPPED_STANDARD_SCHEMA = Symbol('armorer.wrappedStandardSchema');
 
 /**
  * Wraps a non-Zod Standard Schema validator (Valibot, ArkType, ...) as a
- * `z.ZodTypeAny` so it flows through the rest of the tool pipeline —
+ * `z.ZodType` so it flows through the rest of the tool pipeline —
  * execution, error classification, diagnostics — unchanged. Implemented as a
  * `transform` (not a `refine`) so the validator's OUTPUT (post-coercion,
  * post-default) reaches `execute()`, not the raw input.
@@ -37,7 +37,7 @@ const WRAPPED_STANDARD_SCHEMA = Symbol('armorer.wrappedStandardSchema');
  * represent an arbitrary external validator, so callers must supply a JSON
  * Schema alongside (see `CreateToolOptions.inputSchema`).
  */
-export function wrapStandardSchema(schema: StandardSchemaV1): z.ZodTypeAny {
+export function wrapStandardSchema(schema: StandardSchemaV1): z.ZodType {
   const wrapped = z.any().transform(async (value, ctx) => {
     const result = await schema['~standard'].validate(value);
     if (result.issues) {

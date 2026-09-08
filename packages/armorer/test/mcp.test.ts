@@ -325,8 +325,8 @@ describe('createMCP', () => {
     } as unknown as AbortSignal;
     const result = await tool.executeWith({ params: {}, signal });
     expect(result.outcome).toBe('error');
-    expect(result.errorCategory).toBe('cancelled');
-    expect(result.errorMessage).toBe('foreign cancellation');
+    expect(result.error?.category).toBe('cancelled');
+    expect(result.error?.message).toBe('foreign cancellation');
   });
 
   it('checks task admission before persisting a task after shutdown', async () => {
@@ -468,15 +468,20 @@ describe('createMCP', () => {
     expect(textContent(canonicalResult.content)).toContain('"ok": true');
 
     tool.executeWith = async () => ({
-      callId: 'legacy-call',
+      callId: 'typed-error-call',
       outcome: 'error' as const,
-      content: { message: 'fallback error' },
-      errorMessage: 'legacy error',
+      content: { message: 'content fallback for typed error' },
+      error: {
+        code: 'FAILED',
+        category: 'unavailable',
+        retryable: false,
+        message: 'typed error message',
+      },
     });
 
-    const legacyErrorResult = await mcpTool.handler({});
-    expect(legacyErrorResult.isError).toBe(true);
-    expect(textContent(legacyErrorResult.content)).toBe('legacy error');
+    const typedErrorResult = await mcpTool.handler({});
+    expect(typedErrorResult.isError).toBe(true);
+    expect(textContent(typedErrorResult.content)).toBe('typed error message');
 
     tool.executeWith = async () => ({
       callId: 'content-fallback-call',
@@ -1519,7 +1524,7 @@ describe('createMCP', () => {
         schema: { enum: [] } as unknown as AnySchema,
       }),
     });
-    expect((emptyEnum?.inputSchema as z.ZodTypeAny).safeParse('value').success).toBe(false);
+    expect((emptyEnum?.inputSchema as z.ZodType).safeParse('value').success).toBe(false);
   });
 
   it('stringifies primitive successful results for MCP tool responses', async () => {

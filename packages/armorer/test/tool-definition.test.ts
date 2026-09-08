@@ -63,7 +63,7 @@ describe('defineTool', () => {
       defineTool({
         name: 'invalid-schema',
         description: 'invalid schema',
-        input: 123 as unknown as z.ZodTypeAny,
+        input: 123 as unknown as z.ZodType,
       }),
     ).toThrow('Tool input must be a Zod object schema or an object of Zod schemas');
   });
