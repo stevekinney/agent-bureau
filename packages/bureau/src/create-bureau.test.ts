@@ -12639,15 +12639,17 @@ describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () 
   });
 
   it('returns deleted-aggregate for a session.deleted owner, carrying the already-committed events, distinguishable from an unrelated empty page', async () => {
-    // `session.deleted` has no production dispatch site today (AB-87's own
-    // declared gap: "session.deleted durable only via the generic action
-    // stream, a gap" — no `emitter.dispatch(new SessionDeletedEvent(...))`
-    // call exists anywhere in `deleteSession`). This synthesizes it the
-    // same supported way the sibling "records a session-scoped action"
+    // AB-228 wired `deleteSession` (`create-bureau.ts`) to dispatch a real
+    // `SessionDeletedEvent` on the BUREAU-level emitter, closing the durable
+    // audit trail's own gap (`audit-trail.ts`'s dedicated
+    // `sessionDeletedListener`) — but that dispatch never traverses the
+    // `'action'` stream this module's `createDurableEventProducer` listens
+    // through, so it still does not reach THIS store. This synthesizes it
+    // the same supported way the sibling "records a session-scoped action"
     // test above does (`Store.recordAction`), proving this issue's own
-    // detection logic against the event shape a future dispatch site would
-    // produce, without inventing a new production dispatch beyond this
-    // issue's own delivery boundary.
+    // detection logic against the event shape a real `'action'`-stream
+    // dispatch site would produce; wiring one up here remains a follow-up,
+    // out of AB-228's `AUDIT_EVENT_TYPES`-only boundary.
     const databasePath = join(
       tmpdir(),
       `bureau-event-history-deleted-session-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
@@ -13358,7 +13360,7 @@ describe('Bureau.issueGrant / revokeGrant / listGrants (AB-46, AB-346)', () => {
   });
 });
 
-describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-detection and schedule-definition lifecycle)', () => {
+describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-detection, schedule-definition lifecycle, and session deletion)', () => {
   it('durably records a real toolbox loop-warning/loop-blocked through the SAME production wiring a run uses, under the toolbox-prefixed type', async () => {
     // Mirrors `packages/operative/test/event-forwarding.test.ts`'s own
     // loop-detection scenario (identical thresholds, identical repeated
@@ -13499,6 +13501,51 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
         type: 'schedule.cancelled',
       });
       expect(cancelledRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('durably records session.deleted through a real bureau.deleteSession call, under a session-scoped owner id (Codex P1 review finding, PR #566)', async () => {
+    // Before this fix, `deleteSession` deleted the session without ever
+    // dispatching a `session.deleted` fact of any kind — a repo-wide
+    // production search found no emission point at all, so this new
+    // allowlist entry only handled synthetic/manual actions like
+    // `audit-trail.test.ts`'s unit-level stub dispatch. This proves the
+    // real production call site (`Bureau.deleteSession`) reaches
+    // `bureau.auditTrail.query()`, not just that string sitting in
+    // `AUDIT_EVENT_TYPES`.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'A session about to be deleted' });
+      await waitForRunCompletion(bureau, run.id);
+      const session = await bureau.getSession(run.sessionId);
+      expect(session).toBeDefined();
+
+      await bureau.deleteSession(run.sessionId);
+
+      const owner = `session:${run.sessionId}`;
+      const deletedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'session.deleted',
+      });
+      expect(deletedRecords).toHaveLength(1);
+      expect(deletedRecords[0]?.detail).toEqual({ sessionId: run.sessionId });
+
+      // Deleting an id that was never a live session dispatches nothing —
+      // there is no genuine deletion fact to record.
+      await bureau.deleteSession('never-existed-session');
+      const nonExistentRecords = await bureau.auditTrail!.query({
+        runId: 'session:never-existed-session',
+        type: 'session.deleted',
+      });
+      expect(nonExistentRecords).toEqual([]);
     } finally {
       await bureau.dispose();
     }

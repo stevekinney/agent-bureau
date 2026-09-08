@@ -5,6 +5,7 @@ import type {
   ScheduleFailedEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionDeletedEvent,
 } from '@lostgradient/operative';
 import type { LivenessLeaseEvidence } from '@lostgradient/operative/liveness';
 import type { Action } from '@lostgradient/operative/store';
@@ -269,7 +270,12 @@ export class ReviewRevokedEvent extends ReviewLifecycleEvent {
  * `revokePendingApprovalsForRun` (AB-224). Always attributed to the
  * synthetic principal `'system:run-abort'`. Distinct from
  * {@link ReviewRevokedEvent} — canceled fires only from run abort, never
- * from explicit run/session deletion.
+ * from explicit run/session deletion. Because `abortRun` dispatches this
+ * review-cancellation as a detached, best-effort promise rather than
+ * awaiting it before the run's own terminal event, a `run.aborted` and its
+ * accompanying `review.canceled` can land in either order relative to each
+ * other on the bureau's `'action'`/event streams — never assume one
+ * precedes the other.
  */
 export class ReviewCanceledEvent extends ReviewLifecycleEvent {
   static readonly type = 'review.canceled' as const;
@@ -309,6 +315,13 @@ export class ReviewSupersededEvent extends ReviewLifecycleEvent {
  * `createAgentScheduler`, so `createAgentSchedule` (AB-298) dispatches
  * directly onto it, rather than `create-bureau.ts` dispatching a second copy
  * itself the way `pauseSchedule`/`resumeSchedule`/`cancelSchedule` do.
+ *
+ * `session.deleted` (`SessionDeletedEvent`, AB-228) is the same shape of
+ * bureau-level fact: `deleteSession` dispatches it directly onto this
+ * emitter once a live session is actually deleted, with no owning per-run
+ * surface to carry it — see `create-bureau.ts`'s `deleteSession` and
+ * `audit-trail.ts`'s dedicated `sessionDeletedListener` for the durable
+ * write this closes.
  */
 export interface BureauEventMap extends EventMap {
   [ActionEvent.type]: ActionEvent;
@@ -324,6 +337,7 @@ export interface BureauEventMap extends EventMap {
   'schedule.cancelled': ScheduleCancelledEvent;
   'schedule.failed': ScheduleFailedEvent;
   'schedule.completed': ScheduleCompletedEvent;
+  'session.deleted': SessionDeletedEvent;
   [ReviewApprovedEvent.type]: ReviewApprovedEvent;
   [ReviewDeniedEvent.type]: ReviewDeniedEvent;
   [ReviewRejectedEvent.type]: ReviewRejectedEvent;

@@ -17,6 +17,7 @@ import type {
   ScheduleCancelledEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionDeletedEvent,
 } from '@lostgradient/operative';
 import type { TextValueStore } from '@lostgradient/weft/storage';
 import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
@@ -32,15 +33,32 @@ import type { Bureau, DiagnosticSink } from './types';
  *
  * AB-228 closed the parity gaps AB-87's durability matrix named against the
  * original eight-entry list (`tool.started`/`settled`/`error`,
- * `run.completed`/`error`/`aborted`/`tripwire`, `step.completed`). Three of
+ * `run.completed`/`error`/`aborted`/`tripwire`, `step.completed`). Two of
  * the new entries below reach this trail through the SAME `'action'`-stream
- * listener the original eight do; two reach it through dedicated
+ * listener the original eight do; three reach it through dedicated
  * bureau-level listeners this file also had to add, because their source
  * events never traverse `'action'` at all:
  *
- * - `session.deleted` — already an `action.type` on the bureau's `'action'`
- *   stream (see `SESSION_DURABLE_ACTION_TYPES` in
- *   `durable-event-history.ts`); this array was simply missing it.
+ * - `session.deleted` — NOT already reachable when this issue started,
+ *   despite `SESSION_DURABLE_ACTION_TYPES` in `durable-event-history.ts`
+ *   listing it: that array only describes what a producer would forward IF
+ *   something dispatched it, and a repo-wide production search (Codex
+ *   review, PR #566) found no such dispatch anywhere — `deleteSession`
+ *   deleted the session without ever emitting a `session.deleted` fact of
+ *   any kind. Fixed as part of closing this gap, not merely worked around:
+ *   `deleteSession` (`create-bureau.ts`) now dispatches `SessionDeletedEvent`
+ *   directly on the bureau-level emitter once a live session is actually
+ *   deleted (no run necessarily exists to anchor an `'action'`-stream
+ *   record to, so `store.recordAction` — which silently no-ops for any
+ *   runId not currently live — was not an option); this file's dedicated
+ *   `sessionDeletedListener` below turns that into a durable record the
+ *   same way the schedule-definition listeners do. This closes the gap for
+ *   THIS trail only — `durable-event-history.ts`'s own `'action'`-stream
+ *   producer still has no listener for a directly-dispatched
+ *   `SessionDeletedEvent`, so AB-313's deleted-aggregate detection for
+ *   sessions remains synthetic-only in its own tests; that is a separate
+ *   file and a separate durable layer, out of this issue's
+ *   `AUDIT_EVENT_TYPES` boundary, and is flagged as a follow-up.
  * - `budget.exceeded` — `BudgetExceededEvent`
  *   (`packages/operative/src/events.ts`) is a real `OperativeEventMap`
  *   member and, if ever dispatched, would reach `'action'` the same way.
@@ -122,7 +140,8 @@ export const AUDIT_EVENT_TYPES = [
   'run.tripwire',
   // Step lifecycle
   'step.completed',
-  // AB-228 — session lifecycle beyond creation.
+  // AB-228 — session lifecycle beyond creation (dispatched via a dedicated
+  // listener below, never through 'action').
   'session.deleted',
   // AB-228 — budget accounting (no production emitter; see doc comment).
   'budget.exceeded',
@@ -158,12 +177,12 @@ export interface AuditRecord {
    * `api-key:<id>` or `static-token`). Only present on records written via
    * {@link AuditTrail.record} — out-of-band human decisions (AB-20 review
    * queue approve/deny). Bureau-action-stream records (`tool.*`, `run.*`,
-   * `step.completed`, `session.deleted`, `budget.exceeded`,
+   * `step.completed`, `budget.exceeded`,
    * `toolbox.loop-warning`/`loop-blocked`) have no principal; they are
-   * attributed to the run. The AB-228 `schedule.*` listeners below also
-   * write through the out-of-band path but likewise carry no principal —
-   * a schedule pause/resume/cancel has no authenticated caller to
-   * attribute today.
+   * attributed to the run. The AB-228 `schedule.*` and `session.deleted`
+   * listeners below also write through the out-of-band path but likewise
+   * carry no principal — a schedule pause/resume/cancel, or a session
+   * deletion, has no authenticated caller to attribute today.
    */
   principal?: string;
 }
@@ -475,6 +494,29 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   bureau.addEventListener('schedule.resumed', scheduleResumedListener);
   bureau.addEventListener('schedule.cancelled', scheduleCancelledListener);
 
+  // AB-228 (Codex P1 review finding, PR #566) — session-deletion listener.
+  // `deleteSession` (`create-bureau.ts`) dispatches `SessionDeletedEvent`
+  // directly on the bureau-level emitter, never through `'action'` (a
+  // deleted session may own zero live runs, and `store.recordAction`
+  // silently no-ops for any runId not currently in `store.runs`), so this
+  // needs the same dedicated-listener treatment as the schedule-definition
+  // events above. There is no run to attribute a session deletion to
+  // either, so the session id is encoded into `runId` the same way the
+  // schedule owner is: `session:<sessionId>` — `query({ runId:
+  // `session:${id}` })` retrieves one session's own durable deletion record.
+  function sessionOwnerId(sessionId: string): string {
+    return `session:${sessionId}`;
+  }
+  const sessionDeletedListener = (event: SessionDeletedEvent): void => {
+    if (!auditEventSet.has('session.deleted')) return;
+    void writeOutOfBandRecord({
+      runId: sessionOwnerId(event.sessionId),
+      type: 'session.deleted',
+      detail: { sessionId: event.sessionId },
+    });
+  };
+  bureau.addEventListener('session.deleted', sessionDeletedListener);
+
   return {
     async record(entry: {
       runId: string;
@@ -529,6 +571,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       bureau.removeEventListener('schedule.paused', schedulePausedListener);
       bureau.removeEventListener('schedule.resumed', scheduleResumedListener);
       bureau.removeEventListener('schedule.cancelled', scheduleCancelledListener);
+      bureau.removeEventListener('session.deleted', sessionDeletedListener);
       // Await every write already in flight (AB-207) — `kv.set` has no
       // cancellation hook, so there is nothing for the owner-issued `signal`
       // to bound here beyond refusing new writes (above); a write already

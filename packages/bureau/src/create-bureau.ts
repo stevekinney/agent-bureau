@@ -31,6 +31,7 @@ import {
   ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  SessionDeletedEvent,
   type SessionListOptions,
   type SessionStore,
   type SessionSummary,
@@ -4753,6 +4754,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
 
       await sessionStore.delete(id);
+      // AB-228 (Codex P1 review finding, PR #566): the durable audit trail
+      // allowlists `session.deleted`, but nothing dispatched it — this is
+      // the emission point. Dispatched on the bureau-level emitter (not
+      // via `store.recordAction`, which silently no-ops for any runId not
+      // currently `store.runs`, and a deleted session may own zero live
+      // runs) exactly once, only after `sessionStore.delete` has actually
+      // succeeded for a session that genuinely existed — the no-such-session
+      // path below (`session` was already `undefined`) dispatches nothing,
+      // since nothing was actually deleted. `audit-trail.ts`'s dedicated
+      // `sessionDeletedListener` mirrors the schedule-definition listeners'
+      // `writeOutOfBandRecord` path to turn this into a durable record.
+      emitter.dispatch(new SessionDeletedEvent(id));
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,
       // bureau-wide idempotency ledger — must not survive to be inherited
