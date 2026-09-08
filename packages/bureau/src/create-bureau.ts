@@ -3426,11 +3426,40 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       store.register(activeRun, runId);
       runSessionIdentifiers.set(activeRun, sessionId);
 
+      // AB-361/AB-34: the started-work control contract says an
+      // acknowledged durable run is durable — a caller that holds this
+      // run's identifier must be able to recover it after a crash at any
+      // later point. `activeRun.durablyStarted` settles with the SAME write
+      // `driveDurableRun`'s `context.engine.start(...)` performs on the
+      // durable branch (`durable/active-run-adapter.ts`). Awaited here,
+      // AFTER `store.register` (so `run.started` is still the first frame
+      // any live subscriber sees — an earlier await would let the deferred
+      // `drive()` microtask run before this function's own subscription
+      // exists) and immediately before returning, so this function's own
+      // promise cannot resolve until the durable record is committed.
+      // Guarded by `runtime.durable`, not an unconditional `await
+      // activeRun.durablyStarted` — that field is `undefined` on the
+      // in-memory branch (nothing durable to await), and an unconditional
+      // `await undefined` would still cost every in-memory run one extra
+      // microtask tick it does not have today.
+      if (runtime.durable) {
+        await activeRun.durablyStarted;
+      }
+
       return serializeRunState(store.getRun(runId)!, sessionId);
     } catch (error) {
-      // The run never reached `store.register` (and therefore never fired a
-      // terminal event to settle through) — release whatever this admission
-      // claimed so it does not leak a phantom concurrency/singleton hold.
+      // Reached either because the run never got as far as `store.register`
+      // (no terminal event to settle through — the original reason this
+      // catch exists), OR because `store.register` succeeded but the
+      // AWAITED `durablyStarted` above rejected (a genuine durable-write
+      // failure, e.g. `engine.start` rejecting). Either way this function
+      // is about to throw instead of returning a run identifier to its
+      // caller, so release whatever this admission claimed so it does not
+      // leak a phantom concurrency/singleton hold. In the second case the
+      // run itself is already registered and its terminal listeners
+      // already fired (or will fire) through the ordinary event path —
+      // this cleanup is scoped to per-request bookkeeping this function
+      // itself owns, not to unregistering the run.
       flowController?.settle(runId);
       runRequestContexts.delete(runId);
       runAttribution.delete(runId);

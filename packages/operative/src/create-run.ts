@@ -45,6 +45,25 @@ export interface ActiveRun {
   result: Promise<RunResult>;
   abort: (reason?: string) => void;
   /**
+   * AB-361 — settles once this run's initial durable workflow record is
+   * committed (the write `driveDurableRun`'s `await context.engine.start(...)`
+   * performs in `durable/active-run-adapter.ts`). `undefined` on the
+   * in-memory branch — there is no durable write to await, which is itself
+   * the proof that the in-memory branch's `result`/return timing is
+   * unaffected by this field's existence. A reattached/recovered durable run
+   * (`reattachDurableActiveRun`) sets this to an already-resolved promise:
+   * its durable record was committed before this process even existed.
+   *
+   * `createRunFromRequest` (bureau) awaits this before returning a run
+   * identifier to its caller on the durable branch, per the started-work
+   * control contract (AB-34/AB-15): an acknowledged durable run must be
+   * durable, so a process killed any time after the caller holds the
+   * identifier is recoverable. Never rejects for a caller that does not
+   * await it — settlement failure (a rejecting `engine.start`) is only
+   * observed by a caller that explicitly awaits this field.
+   */
+  durablyStarted?: Promise<void>;
+  /**
    * A truthful cleanup acknowledgement (AB-37 / AB-204), backed by the same
    * settlement `abort()` already uses. Never rejects; idempotent after
    * genuine settlement — see `closed-acknowledgement.ts` for the full

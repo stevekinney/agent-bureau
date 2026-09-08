@@ -697,6 +697,42 @@ export function createDurableActiveRun(
   // in — captured once, before `drive()` runs — tells the two cases apart.
   const neverLaunched = { value: false };
 
+  // AB-361: settles `durablyStarted` (below) exactly once, from inside
+  // `driveDurableRun` — resolved the moment `context.engine.start(...)`
+  // durably commits this run's initial workflow record (or, on a path that
+  // never reaches that call at all — `startError`/`abortedBeforeDrive` —
+  // resolved immediately, since there is then no durable write to await),
+  // rejected only if `engine.start` itself rejects. Never called twice: each
+  // `driveDurableRun` invocation reaches exactly one of its three call
+  // sites for this callback.
+  let settleDurablyStarted!: (error?: unknown) => void;
+  const durablyStarted = new Promise<void>((resolve, reject) => {
+    // The Promise executor runs synchronously, so `settleDurablyStarted` is
+    // assigned before this constructor call returns — no dead initial value
+    // is ever needed (and, unlike a placeholder `() => {}` default, none is
+    // ever left uncalled for coverage to flag).
+    settleDurablyStarted = (error?: unknown) => {
+      // A caller that awaits `durablyStarted` sees exactly whatever
+      // `engine.start` itself rejected with when it was already an
+      // `Error`; a non-`Error` throw (rare — Weft always rejects with a
+      // real `Error`) is wrapped via `AgentRunError`'s own unknown-error
+      // formatter rather than a bare `String(error)`, satisfying
+      // `prefer-promise-reject-errors` without risking `[object Object]`.
+      if (error !== undefined) {
+        reject(error instanceof Error ? error : toAgentRunError(error));
+      } else {
+        resolve();
+      }
+    };
+  });
+  // A caller of `createActiveRun` is not obligated to read `durablyStarted`
+  // — only `createRunFromRequest`'s durable branch does. Without this, a
+  // rejecting `engine.start` (e.g. a genuine persistence failure) would
+  // surface as an unhandled rejection for every OTHER durable caller
+  // (scheduler, session-handle, tests) that never awaits this field. A
+  // caller that DOES await it still observes the rejection normally.
+  durablyStarted.catch(() => {});
+
   function drive(abortedBeforeDrive: boolean): Promise<RunResult> {
     neverLaunched.value = abortedBeforeDrive;
     return driveDurableRun(
@@ -715,6 +751,7 @@ export function createDurableActiveRun(
       (toolbox) => toolboxForwarder.onStepToolbox(toolbox),
       runtime,
       hookTracker,
+      settleDurablyStarted,
     );
   }
 
@@ -993,6 +1030,7 @@ export function createDurableActiveRun(
     result,
     abort,
     closed,
+    durablyStarted,
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),
@@ -1443,6 +1481,9 @@ export function reattachDurableActiveRun(
     result,
     abort,
     closed,
+    // AB-361: a reattached/recovered run's durable record was committed
+    // before this process even started — nothing left to await.
+    durablyStarted: Promise.resolve(),
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
     on: emitter.on.bind(emitter),
@@ -1755,6 +1796,10 @@ async function driveDurableRun(
   onStepToolbox: ((toolbox: AnyToolbox) => void) | undefined,
   runtime: RuntimeServices,
   hookTracker: (promise: Promise<unknown>) => void,
+  // AB-361: settles `ActiveRun.durablyStarted` — see that field's doc
+  // comment and `createDurableActiveRun`'s own comment on this callback for
+  // the three call sites that reach it.
+  settleDurablyStarted: (error?: unknown) => void,
 ): Promise<RunResult> {
   const runStartTime = runtime.monotonic.now();
   const { hooks } = options;
@@ -1768,6 +1813,11 @@ async function driveDurableRun(
   // dispatch: a caller listening for these events must still see them.
   const startError = await startRunLifecycle(options, conversation, emitter);
   if (startError !== undefined) {
+    // AB-361: no `context.engine.start` call is ever reached on this path —
+    // there is no durable write for `durablyStarted` to await, so settle it
+    // immediately (success: cleanup here consisted of never durably
+    // launching at all, mirroring `abortedBeforeDrive` below).
+    settleDurablyStarted();
     return makeErrorResult(
       emptyRunState(),
       conversation,
@@ -1787,6 +1837,9 @@ async function driveDurableRun(
   // terminal branch below uses, so `run.aborted` fires (and, per AC1,
   // `onRunAbort`) exactly as it would for an ordinary abort.
   if (abortedBeforeDrive) {
+    // AB-361: same reasoning as the `startError` branch above — no durable
+    // write was ever attempted.
+    settleDurablyStarted();
     return finalizeRunResult({
       finishReason: 'aborted',
       runState: emptyRunState(),
@@ -1831,22 +1884,39 @@ async function driveDurableRun(
   // `requestHumanInput`) can mutate it the moment `runStep` executes.
   onServices?.(services);
 
-  const handle = await context.engine.start(
-    'agentRun',
-    {
-      runId,
-      sessionId,
-      // F2: thread agentName into the durable input so boot recovery can
-      // identify which agent ran this workflow without reading the session store.
-      agentName,
-      prompt,
-      maximumSteps: options.maximumSteps,
-    },
-    {
-      id: runId,
-      services,
-    },
-  );
+  // AB-361: `engine.start(...)` is the write `ActiveRun.durablyStarted`
+  // exists to gate on — settled the moment this call itself settles, NOT
+  // when `handle.result()` later settles (that's the run's own completion,
+  // a wholly separate promise `result` above already tracks). A caller
+  // awaiting `durablyStarted` only ever waits for THIS commit, never for
+  // the run to finish.
+  const handle = await context.engine
+    .start(
+      'agentRun',
+      {
+        runId,
+        sessionId,
+        // F2: thread agentName into the durable input so boot recovery can
+        // identify which agent ran this workflow without reading the session store.
+        agentName,
+        prompt,
+        maximumSteps: options.maximumSteps,
+      },
+      {
+        id: runId,
+        services,
+      },
+    )
+    .then(
+      (startedHandle) => {
+        settleDurablyStarted();
+        return startedHandle;
+      },
+      (error: unknown) => {
+        settleDurablyStarted(error);
+        throw error;
+      },
+    );
 
   let summary: AgentRunWorkflowResult;
   try {

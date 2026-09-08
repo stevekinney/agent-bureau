@@ -417,6 +417,7 @@ interface RunResult {
 | Member                                | Description                                            |
 | ------------------------------------- | ------------------------------------------------------ |
 | `result: Promise<RunResult>`          | Resolves when the loop completes.                      |
+| `durablyStarted?: Promise<void>`      | AB-361 — durable branch only; see below.               |
 | `abort(reason?)`                      | Cancels the loop immediately.                          |
 | `closed(options?)`                    | Cleanup acknowledgement — see below.                   |
 | `complete()`                          | Completes the event stream without aborting the loop.  |
@@ -430,6 +431,8 @@ interface RunResult {
 | `snapshot()`                          | Current `LivenessSnapshot` — see below.                |
 | `subscribeSnapshot(observer, opts?)`  | Non-consuming liveness observer — see below.           |
 | `[Symbol.dispose]()`                  | Aborts and completes—use with `using`.                 |
+
+**`durablyStarted` (AB-361).** On the durable branch (`createActiveRun(options, { engine, checkpointStore, runId })`), `durablyStarted` settles once this run's initial workflow record is durably committed — the write `context.engine.start(...)` performs — distinct from `result` (the run's own completion). A caller that needs the started-work control contract's durability guarantee (AB-34/AB-15: an acknowledged run is recoverable after any later crash) awaits it before treating a returned run identifier as durable; a caller that never reads it is unaffected, including when `engine.start` rejects. The in-memory branch leaves it `undefined` — there is no durable write to await.
 
 **Liveness (AB-88, AB-214).** `ActiveRun`, `AgentRun`, and `DiagnosticAgentRun`
 all implement `LivenessObservable`: `snapshot()` returns the current

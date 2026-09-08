@@ -1110,3 +1110,40 @@ describe('createActiveRun: AB-92/AB-252 RuntimeServices resolution', () => {
     expect(first.identifiers.next('run')).not.toBe(second.identifiers.next('run'));
   });
 });
+
+describe('AB-361: the in-memory branch never gains a durablyStarted settlement to await', () => {
+  it('leaves durablyStarted undefined — there is no durable write for a caller to await', async () => {
+    const activeRun = createActiveRun({
+      generate: createMockGenerate([textResponse('done')]),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    // Undefined from construction, before the run even starts — proves this
+    // is a structural property of the in-memory branch, not something that
+    // only happens to be unset before the deferred microtask fires.
+    expect(activeRun.durablyStarted).toBeUndefined();
+
+    await activeRun.result;
+
+    // Still undefined once the run has completed.
+    expect(activeRun.durablyStarted).toBeUndefined();
+  });
+
+  it('createRun resolves (the deferred microtask fires) without ever waiting on a durable write, even when generate() never settles', async () => {
+    // A hung generate() proves the in-memory `result` and construction path
+    // do nothing durable-write-shaped — there is no engine, no storage, and
+    // (per the assertion above) no `durablyStarted` promise chain that could
+    // ever gate ANYTHING on this branch.
+    const activeRun = createActiveRun({
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+    });
+
+    expect(activeRun.durablyStarted).toBeUndefined();
+    activeRun.abort('test cleanup');
+  });
+});

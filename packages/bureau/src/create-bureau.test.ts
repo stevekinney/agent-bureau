@@ -1491,6 +1491,160 @@ describe('createBureau', () => {
     }
   });
 
+  it("createRun resolves only after weft's initial durable workflow record is committed (AB-361): a fresh process over the same SQLite store always sees it", async () => {
+    // THE HONESTY PROOF: gate the SPECIFIC storage write `engine.start`
+    // performs for THIS run (a `batch` call whose first operation is
+    // `wf:<runId>` — confirmed by instrumenting a real run's storage calls;
+    // bureau's own session save is a SEPARATE `conditionalBatch` against
+    // `agent-session*` keys and is never touched by this gate) so the test
+    // can prove `bureau.createRun()`'s OWN returned promise does not
+    // resolve until that write commits — not merely that the write
+    // eventually happens before some LATER unrelated await gives it enough
+    // microtasks to sneak in first (the previous bug: `createRun` resolved
+    // once the session's `lastRunStatus: 'running'` write landed, several
+    // microtasks BEFORE `engine.start`'s own write — a race that a plain
+    // "await createRun() then reopen and check" test cannot reliably catch,
+    // since nothing here forces real I/O latency between the two writes).
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durably-started-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    let bureauA: Awaited<ReturnType<typeof createBureau>> | undefined;
+    let bureauB: Awaited<ReturnType<typeof createBureau>> | undefined;
+
+    try {
+      const realStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      let gateArmed = true;
+      // A Proxy, not an object-literal spread: `realStorage` is a real
+      // class instance (`NodeSQLiteStorage`) whose methods live on its
+      // prototype and read private fields via `this` — `{ ...realStorage }`
+      // would silently drop every method, leaving only own enumerable
+      // instance properties (there are none; the state is in `#private`
+      // fields). The proxy forwards everything except `batch` unmodified,
+      // bound to the real instance.
+      const gatedStorage = new Proxy(realStorage, {
+        get(target, property, receiver) {
+          if (property === 'batch') {
+            return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+              const isWorkflowStartWrite = operations.some(
+                (operation) => operation.type === 'put' && operation.key.startsWith('wf:run-'),
+              );
+              if (isWorkflowStartWrite && gateArmed) {
+                gateArmed = false; // only THIS run's initial write is gated
+                await startGate;
+              }
+              return target.batch(operations);
+            };
+          }
+          const value: unknown = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      bureauA = await createBureau({
+        agents: {},
+        // Never resolves — proves this run's very first step never even
+        // begins before the assertions below run; the durable write this
+        // test is about happens entirely BEFORE any step executes.
+        generate: () => new Promise<never>(() => {}),
+        toolbox: createEmptyToolbox(),
+        storage: gatedStorage,
+        durableExecution: true,
+      });
+
+      const runPromise = bureauA.createRun({ message: 'AB-361 durable write honesty' });
+      let createRunSettled = false;
+      void runPromise.then(
+        () => {
+          createRunSettled = true;
+        },
+        () => {
+          createRunSettled = true;
+        },
+      );
+
+      // Exhaust far more microtask turns than the pre-fix code needed to
+      // resolve `createRun` (it only ever needed the session-save write,
+      // already long committed by this point) — proves resolution is
+      // genuinely gated on the STILL-PENDING workflow-record write, not
+      // merely "hasn't happened yet by coincidence".
+      for (let tick = 0; tick < 50; tick += 1) {
+        await Promise.resolve();
+      }
+      expect(createRunSettled).toBe(false);
+
+      releaseStart?.();
+      const run = await runPromise;
+      expect(createRunSettled).toBe(true);
+
+      // Fresh process: a wholly separate bureau over the SAME SQLite file
+      // (the in-process reopen pattern this issue's acceptance criterion
+      // names), with no shared in-process state — bureau A's engine is a
+      // different instance entirely.
+      bureauB = await createBureau({
+        agents: {},
+        generate: () => new Promise<never>(() => {}),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+      });
+
+      const state = await bureauB.getDurableRun(run.id);
+      expect(state).not.toBeNull();
+      expect(state).not.toBeUndefined();
+      expect(state?.id).toBe(run.id);
+    } finally {
+      // In case an assertion above threw before `releaseStart` was called —
+      // dispose() must not hang on a never-committed gate.
+      releaseStart?.();
+      await bureauB?.dispose();
+      await bureauA?.dispose();
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('the in-memory branch resolves createRun without ever awaiting a durable write (AB-361 control)', async () => {
+    // The SAME hung-generate shape as the durable proof above, but with NO
+    // storage/durableExecution configured at all — `createRun` must still
+    // resolve within a handful of microtasks, proving the in-memory
+    // branch's timing is genuinely unaffected by AB-361: it has no
+    // `durablyStarted` promise to await (see `ActiveRun.durablyStarted`'s
+    // own doc comment), and `createRunFromRequest`'s new await is gated on
+    // `runtime.durable`, which is absent here.
+    const bureau = await createBureau({
+      agents: {},
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+    });
+
+    const runPromise = bureau.createRun({ message: 'in-memory, never durable' });
+    let settled = false;
+    void runPromise.then(() => {
+      settled = true;
+    });
+
+    // A handful of ticks covers every await already on the pre-fix
+    // in-memory path (session save, `store.register`). A real durable write
+    // (opening storage, an engine round-trip) could never settle this fast
+    // — so if this branch ever gained an awaited durable-write gate, it
+    // would still be unsettled here.
+    for (let tick = 0; tick < 10; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(settled).toBe(true);
+
+    const run = await runPromise;
+    expect(run.id).toBeDefined();
+
+    await bureau.dispose();
+  });
+
   it("reattaches a catalog-dispatched bureau.run() across a process restart, rebuilding deps from the catalog agent's OWN OPERATIVE_RESOLVE_RUN_OPTIONS (AB-240)", async () => {
     // Same cross-process proof as the interactive-run recovery test above,
     // but through `bureau.run(name, input)` — a catalog dispatch, which has
