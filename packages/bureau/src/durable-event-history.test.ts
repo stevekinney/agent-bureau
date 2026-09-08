@@ -1799,6 +1799,54 @@ describe('createDurableEventProducer()', () => {
     await history.dispose();
   });
 
+  it('a session recreated and deleted again WHILE the prior incarnation\'s own session.deleted write is still in flight still gets its own record (Codex P1 review finding, PR #580, "Preserve overlapping deletions of reused session IDs")', async () => {
+    // A plain in-flight-by-owner map alone still cannot tell these two
+    // cases apart: (a) a genuine duplicate dispatch of the SAME
+    // incarnation's own deletion, and (b) a DIFFERENT, later incarnation
+    // (the id reused and deleted again) whose deletion merely happens to
+    // overlap the first incarnation's still-pending write — e.g. a slow
+    // durable append for incarnation A, during which the id is recreated
+    // as incarnation B and immediately deleted. This proves the fix: a
+    // `'session.created'` action for the id (dispatched, in production,
+    // before `deleteSession` could ever fire a SECOND `SessionDeletedEvent`
+    // for it) clears the stale in-flight entry, so incarnation B's own
+    // deletion is never mistaken for a duplicate of incarnation A's.
+    const runtime = createManualRuntimeServices();
+    let releaseFirstWrite!: () => void;
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let writeCount = 0;
+    const { bureau, dispatchAction, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory(async () => {
+      writeCount += 1;
+      if (writeCount === 1) await firstWriteGate;
+    });
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    // Incarnation A: created, then deleted — its own `record()` call is
+    // gated and does not resolve yet.
+    dispatchAction(
+      createAction({ type: 'session.created', detail: { sessionId: 'sess-1', agentName: 'x' } }),
+    );
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+
+    // Incarnation B: the SAME id recreated while A's deletion write is
+    // still pending, then deleted too.
+    dispatchAction(
+      createAction({ type: 'session.created', detail: { sessionId: 'sess-1', agentName: 'x' } }),
+    );
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+
+    releaseFirstWrite();
+    await runtime.deferred.drain();
+
+    const deletionCalls = calls.filter((call) => call.kind === 'session.deleted');
+    expect(deletionCalls).toHaveLength(2);
+
+    await producer.dispose();
+  });
+
   it("hasActiveWrite() reports true for a session owner for the write's full duration (AB-372, Copilot review finding, PR #580)", async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
