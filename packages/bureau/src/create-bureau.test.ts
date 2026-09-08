@@ -42,6 +42,7 @@ import { createModelCatalog } from '@lostgradient/operative/providers';
 import { createStore } from '@lostgradient/operative/store';
 import { createMockGenerate as createSequentialGenerate } from '@lostgradient/operative/test';
 import { encode, ScheduleHandle } from '@lostgradient/weft';
+import { createFleetEventFeed } from '@lostgradient/weft/server/handler';
 import { KEYS, MemoryStorage, resolveStorage, textValueStore } from '@lostgradient/weft/storage';
 import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
@@ -13229,6 +13230,567 @@ describe('bureau.eventHistory run ownership survives a process restart (AB-359)'
       expect(asBobOnRunOne).toEqual({ outcome: 'not-found' });
 
       await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
+describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () => {
+  it("drops a session's lastRunOwningPrincipals entry once its run's entire durable history — including a later deleteRun()'s own run.removed — is below the retention floor, leaves a still-retained run's entry alone, and the pruned run's history now reads back as a gap", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      try {
+        const runA = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, runA.id);
+
+        const beforeA = await bureau.getSession(runA.sessionId);
+        expect(beforeA?.metadata['lastRunOwningPrincipals']).toEqual({ [runA.id]: 'alice' });
+
+        // Delete run A — the run store no longer holds it once this
+        // resolves, closing the window a still-in-store completed run
+        // would otherwise leave open (Codex review, PR #568, "Preserve
+        // ownership for a later run removal event"): `deleteRun()` can
+        // always be called on ANY run still present in the store, and it
+        // records a brand-new, retained `run.removed` durable event under
+        // that SAME owner. `runtime.deferred.drain()` settles the
+        // fire-and-forget `history.record()` write `run.removed` starts
+        // synchronously off `deleteRun()`'s own dispatch, so run A's own
+        // durable history is fully landed — this event included — before
+        // anything below advances the floor past it.
+        await bureau.deleteRun(runA.id);
+        await runtime.deferred.drain();
+
+        // Run B is created and completed AFTER run A's deletion has fully
+        // landed, so every one of run B's durable events sorts at a
+        // strictly higher sequence than run A's last one (`run.removed`) —
+        // the retention floor computed below from run A's own history can
+        // then advance past all of run A without touching any of run B's.
+        const runB = await bureau.createRun({ message: 'B', principal: 'bob' });
+        await waitForRunCompletion(bureau, runB.id);
+
+        const beforeB = await bureau.getSession(runB.sessionId);
+        expect(beforeB?.metadata['lastRunOwningPrincipals']).toEqual({ [runB.id]: 'bob' });
+
+        // Advance the retention floor past every one of run A's durable
+        // events (there may be more than one durable owner row for run A —
+        // e.g. its owning session's own durable lifecycle rows land at
+        // lower sequences too, and its deletion added `run.removed` on
+        // top — so the floor is derived from run A's own highest recorded
+        // sequence, not assumed) but strictly before any of run B's. A
+        // second storage handle opened over the SAME sqlite file while
+        // bureau's own handle stays open — the identical multi-consumer
+        // pattern the AB-359 recovery tests already rely on for two
+        // independently constructed bureaus sharing one path. Omitting
+        // `principal` reads the deleted-aggregate outcome as the internal/
+        // trusted caller this maintenance-adjacent assertion is — the
+        // in-memory `runAttribution` entry `deleteRun()` clears would fail
+        // an authenticated `alice` lookup closed instead (AB-313).
+        const runADeletedOutcome = await bureau.eventHistory({ kind: 'run', id: runA.id });
+        if (
+          !('outcome' in runADeletedOutcome) ||
+          runADeletedOutcome.outcome !== 'deleted-aggregate'
+        ) {
+          throw new Error(
+            `expected a deleted-aggregate outcome for run A, got ${JSON.stringify(runADeletedOutcome)}`,
+          );
+        }
+        const lastEventForA = runADeletedOutcome.events.at(-1);
+        if (!lastEventForA) throw new Error('expected at least one durable event for run A');
+        expect(lastEventForA.kind).toBe('run.removed');
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEventForA.sequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        await bureau.runDurableMaintenance();
+
+        const afterA = await bureau.getSession(runA.sessionId);
+        const afterB = await bureau.getSession(runB.sessionId);
+        // No key at all — not a present-but-empty map — matching the
+        // "never attributed" shape AB-359's own tests assert on.
+        expect(afterA?.metadata['lastRunOwningPrincipals']).toBeUndefined();
+        expect(afterB?.metadata['lastRunOwningPrincipals']).toEqual({ [runB.id]: 'bob' });
+
+        // A cursorless read always reports a gap once the floor has
+        // advanced past the beginning at all — true for EVERY owner, not
+        // only a pruned one (see `page() retention-floor gap` in
+        // `durable-event-history.test.ts`) — so this only confirms run A
+        // is no more readable than before; it is not, by itself, proof
+        // that pruning was scoped correctly. `afterA`/`afterB` above are.
+        const runAHistory = await bureau.eventHistory({ kind: 'run', id: runA.id });
+        expect(runAHistory).toMatchObject({ outcome: 'gap' });
+
+        // Run B is unaffected: still owner-authorized, and its own event —
+        // genuinely retained, just past the floor boundary — is readable
+        // from a cursor at that boundary (`lastEventForA.cursor`, exactly
+        // where the retained window now starts).
+        const asBob = await bureau.eventHistory(
+          { kind: 'run', id: runB.id },
+          { principal: 'bob', since: lastEventForA.cursor },
+        );
+        if ('outcome' in asBob) throw new Error('expected a page for bob on run B');
+        expect(asBob.events.map((event) => event.kind)).toContain('run.completed');
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it("never prunes a still-running run's ownership entry, even when the fleet feed has no retained event for it yet (the dispatch-vs-event-production race)", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-parked-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    let parkedRunReachedStep1 = false;
+    let generateCalls = 0;
+    const bureau = await createBureau({
+      agents: {},
+      // The FIRST dispatched run (`completedRun` below) completes in one
+      // step (no tool calls, so `stopWhen.noToolCalls()` stops it there).
+      // Every run dispatched after that (`parkedRun`) takes a tool call on
+      // step 0 to keep going, then parks forever on step 1 — the same
+      // "reaches step 1, then a never-resolving promise" pattern the
+      // AB-359 crash-simulation tests use, never a real sleep.
+      generate: async ({ step }) => {
+        if (step === 0) {
+          generateCalls += 1;
+          if (generateCalls === 1) return { content: 'Completed', toolCalls: [] };
+          return { content: 'parked step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+        }
+        parkedRunReachedStep1 = true;
+        return new Promise<never>(() => {}); // parks forever — never a real sleep
+      },
+      toolbox: createToolbox([createNextTool()]),
+      storage: { type: 'sqlite', path: databasePath },
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      // A completed run whose durable event(s) will be retired, to give
+      // `retainedRunOwnerIds()` a floor above 0.
+      const completedRun = await bureau.createRun({ message: 'Completed', principal: 'alice' });
+      await waitForRunCompletion(bureau, completedRun.id);
+
+      const completedPage = await bureau.eventHistory({ kind: 'run', id: completedRun.id });
+      if ('outcome' in completedPage) throw new Error('expected a page for the completed run');
+      const lastSequenceForCompleted = Math.max(
+        ...completedPage.events.map((event) => event.sequence),
+      );
+
+      // A run still in flight — its ownership entry is written at
+      // dispatch time, but it has produced no durable event yet.
+      const parkedRun = await bureau.createRun({
+        message: 'Still running',
+        principal: 'carol',
+      });
+      await pollUntil(() => parkedRunReachedStep1);
+      expect(parkedRunReachedStep1).toBe(true);
+
+      const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const adminFeed = createFleetEventFeed(adminStorage);
+      await adminFeed.retain({ beforeSequence: lastSequenceForCompleted + 1 });
+      adminFeed.dispose();
+      adminStorage[Symbol.dispose]();
+
+      await bureau.runDurableMaintenance();
+
+      const parkedSession = await bureau.getSession(parkedRun.sessionId);
+      expect(parkedSession?.metadata['lastRunOwningPrincipals']).toEqual({
+        [parkedRun.id]: 'carol',
+      });
+
+      // `completedRun` is below the floor and has no live authority or
+      // active write — every OTHER exclusion signal has already fallen
+      // away — but it was never deleted, so it is STILL present in the
+      // run store, and `deleteRun()` therefore remains callable on it at
+      // any future point (Codex review, PR #568, "Preserve ownership for
+      // a later run removal event"). Its entry survives on that signal
+      // alone.
+      const completedSession = await bureau.getSession(completedRun.sessionId);
+      expect(completedSession?.metadata['lastRunOwningPrincipals']).toEqual({
+        [completedRun.id]: 'alice',
+      });
+    } finally {
+      // `dispose()` uses the 'abort' shutdown policy (unlike a graceful
+      // `shutdown()`, which would wait forever for the parked run to
+      // settle on its own) — same cleanup shape the AB-359
+      // crash-simulation tests use once their own scenario is done, so no
+      // background maintenance timer outlives this test and later trips
+      // over the sqlite file this `finally` is about to delete.
+      await bureau.dispose();
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('is a no-op over ephemeral storage, where no durable event history store is composed at all', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Ephemeral', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const result = await bureau.runDurableMaintenance();
+      expect(result).toBe(true);
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+    } finally {
+      await bureau.shutdown();
+    }
+  });
+
+  it('excludes a run still named in lastRequestAuthorities from pruning — live or awaiting a pending-approval decision, either way a future durable write can still arrive (Codex review, PR #568)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-live-authority-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      try {
+        const completedRun = await bureau.createRun({ message: 'Completed', principal: 'alice' });
+        await waitForRunCompletion(bureau, completedRun.id);
+
+        // Delete `completedRun` — otherwise it would survive pruning
+        // itself purely by still being present in the run store (the
+        // "Preserve ownership for a later run removal event" exclusion,
+        // Codex review PR #568), which would leave this test unable to
+        // distinguish that from the `lastRequestAuthorities` exclusion it
+        // actually means to cover. `runtime.deferred.drain()` settles the
+        // `run.removed` write `deleteRun()` starts synchronously.
+        await bureau.deleteRun(completedRun.id);
+        await runtime.deferred.drain();
+
+        const completedOutcome = await bureau.eventHistory({ kind: 'run', id: completedRun.id });
+        if (!('outcome' in completedOutcome) || completedOutcome.outcome !== 'deleted-aggregate') {
+          throw new Error(
+            `expected a deleted-aggregate outcome for the completed run, got ${JSON.stringify(completedOutcome)}`,
+          );
+        }
+        const lastEvent = completedOutcome.events.at(-1);
+        if (!lastEvent) throw new Error('expected at least one durable event');
+        expect(lastEvent.kind).toBe('run.removed');
+
+        // Fabricate a SECOND run's entries on the SAME session: an
+        // ownership entry (a candidate once retention advances) whose
+        // `lastRequestAuthorities` entry is still present — a shape only a
+        // still-live run or a terminal-but-pending-approval run can have.
+        // Sharing `completedRun`'s session puts both entries through the
+        // same pruning pass.
+        const sessionStore = bureau.sessionStore;
+        if (!sessionStore) throw new Error('expected a configured session store');
+        await sessionStore.update(completedRun.sessionId, (session) => {
+          if (!session) return undefined;
+          const currentOwners = session.metadata['lastRunOwningPrincipals'];
+          const currentAuthorities = session.metadata['lastRequestAuthorities'];
+          return {
+            ...session,
+            metadata: {
+              ...session.metadata,
+              lastRunOwningPrincipals: {
+                ...(currentOwners as Record<string, string> | undefined),
+                'pending-run-id': 'mallory',
+              },
+              lastRequestAuthorities: {
+                ...(currentAuthorities as Record<string, unknown> | undefined),
+                'pending-run-id': { agentId: 'bureau', principalId: 'mallory' },
+              },
+            },
+          };
+        });
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        await bureau.runDurableMaintenance();
+
+        const session = await bureau.getSession(completedRun.sessionId);
+        // `completedRun`'s own entry is gone (its own terminal transition
+        // already removed it from `lastRequestAuthorities`, it is deleted
+        // — so no future `deleteRun()` can protect it via the run store —
+        // and its full history, `run.removed` included, fell below the
+        // floor) — but the fabricated one survives: still named in
+        // `lastRequestAuthorities`, so it is excluded from pruning
+        // regardless of the retained-owner set.
+        expect(session?.metadata['lastRunOwningPrincipals']).toEqual({
+          'pending-run-id': 'mallory',
+        });
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('revalidates the retained-owner set immediately before deleting, not against the whole pass\'s initial snapshot (Codex review, PR #568, "Revalidate retained owners before pruning")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-revalidate-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+
+        const page = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in page) throw new Error('expected a page for the run');
+        const lastEvent = page.events.at(-1);
+        if (!lastEvent) throw new Error('expected at least one durable event');
+
+        // Retire the run's only durable event — a stale candidate per
+        // whatever snapshot the maintenance pass takes BEFORE this point.
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+
+        const sessionStore = bureau.sessionStore;
+        if (!sessionStore) throw new Error('expected a configured session store');
+        const originalUpdate = sessionStore.update.bind(sessionStore);
+        // Simulates "a new durable event for this SAME run lands in the
+        // feed after the pass's initial `retainedRunOwnerIds()` snapshot,
+        // but before this session's write" — the exact staleness window
+        // the review comment names — by appending directly to the shared
+        // fleet feed the instant before the maintenance pass's own write
+        // for this session executes.
+        const updateSpy = spyOn(sessionStore, 'update').mockImplementationOnce(
+          async (id: string, updater: Parameters<typeof originalUpdate>[1]) => {
+            await adminFeed.append({
+              kind: 'review.approved',
+              workflowId: `run:${run.id}`,
+              emittedAtMs: 0,
+              payload: {},
+            });
+            return originalUpdate(id, updater);
+          },
+        );
+
+        try {
+          await bureau.runDurableMaintenance();
+        } finally {
+          updateSpy.mockRestore();
+          adminFeed.dispose();
+          adminStorage[Symbol.dispose]();
+        }
+
+        const session = await bureau.getSession(run.sessionId);
+        // The run was a candidate per whatever snapshot the pass started
+        // with — but a FRESH recheck immediately before the write sees the
+        // newly-landed event and correctly treats the run as still
+        // retained, so its ownership entry survives.
+        expect(session?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('preserves every ownership entry on a session whose lastRequestAuthorities is present but malformed, rather than treating it as absent (Codex/Copilot review, PR #568, "Preserve owners when the authority map is malformed")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-malformed-authorities-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+
+        const page = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in page) throw new Error('expected a page for the run');
+        const lastEvent = page.events.at(-1);
+        if (!lastEvent) throw new Error('expected at least one durable event');
+
+        // Corrupt `lastRequestAuthorities` to a non-record shape (a bare
+        // string) — present, not absent, the same "recorded but corrupted"
+        // shape `lookupSessionAuthority` fails closed on elsewhere in this
+        // file. The run's own `lastRequestAuthorities` entry was already
+        // cleared by its terminal transition, so nothing here recreates it
+        // — this replaces the WHOLE map with a malformed value.
+        const sessionStore = bureau.sessionStore;
+        if (!sessionStore) throw new Error('expected a configured session store');
+        await sessionStore.update(run.sessionId, (session) => {
+          if (!session) return undefined;
+          return {
+            ...session,
+            metadata: {
+              ...session.metadata,
+              lastRequestAuthorities: 'corrupt',
+            },
+          };
+        });
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        await bureau.runDurableMaintenance();
+
+        const session = await bureau.getSession(run.sessionId);
+        // The run's history is below the floor and it has no active write —
+        // by every OTHER signal it is a pruning candidate. A malformed
+        // `lastRequestAuthorities` must still block the write for this
+        // whole session, not just fail to protect this one run: the
+        // ownership entry survives.
+        expect(session?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+        expect(session?.metadata['lastRequestAuthorities']).toBe('corrupt');
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('excludes a run still present in the in-memory run store from pruning — deleteRun() remains callable on it at any point, and would record a brand-new run.removed durable event with no owner left to protect it (Codex review, PR #568, "Preserve ownership for a later run removal event")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-still-in-store-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+
+        const page = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in page) throw new Error('expected a page for the run');
+        const lastEventBeforeDeletion = page.events.at(-1);
+        if (!lastEventBeforeDeletion) throw new Error('expected at least one durable event');
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        try {
+          // First cycle: advance the floor past the run's own terminal
+          // transition WITHOUT deleting it. Every other exclusion signal
+          // is already gone (no live authority, no write in flight) — the
+          // run store is the only thing standing between this run and
+          // being pruned while `deleteRun()` remains callable on it.
+          await adminFeed.retain({ beforeSequence: lastEventBeforeDeletion.sequence + 1 });
+          await bureau.runDurableMaintenance();
+
+          const stillInStore = await bureau.getSession(run.sessionId);
+          expect(stillInStore?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+
+          // Delete the run — the run store no longer holds it, and the
+          // deletion's own `run.removed` durable event lands (settled via
+          // `runtime.deferred.drain()`, the fire-and-forget write
+          // `deleteRun()`'s dispatch starts synchronously).
+          await bureau.deleteRun(run.id);
+          await runtime.deferred.drain();
+
+          // A cursorless read always reports a gap once ANY retention has
+          // ever happened, for every owner, not only a pruned one (see
+          // the equivalent note earlier in this describe block) — reading
+          // `since` the run's own last pre-deletion cursor instead scopes
+          // this to exactly the one new event deletion added.
+          const deletedOutcome = await bureau.eventHistory(
+            { kind: 'run', id: run.id },
+            { since: lastEventBeforeDeletion.cursor },
+          );
+          if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+            throw new Error(
+              `expected a deleted-aggregate outcome after deletion, got ${JSON.stringify(deletedOutcome)}`,
+            );
+          }
+          const lastEventAfterDeletion = deletedOutcome.events.at(-1);
+          if (!lastEventAfterDeletion) throw new Error('expected at least one durable event');
+          expect(lastEventAfterDeletion.kind).toBe('run.removed');
+
+          // Second cycle: advance the floor past `run.removed` too — now
+          // the run's ENTIRE durable history, deletion included, is
+          // unreadable, and it can never be deleted again (`deleteRun()`
+          // throws NOT_FOUND once a run is gone from the store), so no
+          // further durable write for it is possible. The entry is
+          // finally prunable.
+          await adminFeed.retain({ beforeSequence: lastEventAfterDeletion.sequence + 1 });
+          await bureau.runDurableMaintenance();
+        } finally {
+          adminFeed.dispose();
+          adminStorage[Symbol.dispose]();
+        }
+
+        const afterDeletionAndRetention = await bureau.getSession(run.sessionId);
+        expect(afterDeletionAndRetention?.metadata['lastRunOwningPrincipals']).toBeUndefined();
+      } finally {
+        await bureau.shutdown();
+      }
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });

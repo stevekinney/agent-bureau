@@ -186,6 +186,28 @@ export interface DurableEventHistory {
     listener: (event: DurableEventEnvelope) => void,
     options?: DurableEventHistorySubscribeOptions,
   ): Subscription;
+  /**
+   * Snapshots the `run`-owner ids that still have at least one durable
+   * event at or above the feed's CURRENT retention floor — the primitive
+   * `Bureau.runDurableMaintenance` uses to prune a session's
+   * `lastRunOwningPrincipals` entries once a run's entire durable history
+   * has been compacted away (AB-363's coordinator ruling). A single full
+   * replay of the currently-retained window, not one `page()` call per
+   * candidate run: `feed.replay()` with no cursor already walks exactly
+   * the retained records once (Weft's own `retain()` pays the same cost),
+   * so this collects every survivor's owner in one pass rather than
+   * re-scanning the feed once per run.
+   *
+   * Returns `undefined` when the floor is still 0 — nothing has been
+   * retired yet, so nothing can be "entirely below" it, and an
+   * empty-so-far history is still fully pageable (an empty page, never a
+   * gap); reporting a real (possibly empty) set at floor 0 would
+   * indistinguishably read as "prune everything," which is wrong.
+   * `retain()` never runs on its own — nothing in this codebase calls it
+   * yet — so in practice this returns `undefined` until an operator or a
+   * future retention driver advances the floor.
+   */
+  retainedRunOwnerIds(): Promise<Set<string> | undefined>;
   /** Releases the underlying `FleetEventFeed`. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -501,12 +523,36 @@ export function createDurableEventHistory(
     return subscription;
   }
 
+  async function retainedRunOwnerIds(): Promise<Set<string> | undefined> {
+    const floor = await feed.snapshotRetentionFloor();
+    if (floor === 0) return undefined;
+
+    const owners = new Set<string>();
+    // No `since`/`fromCursor`: this walks every record the feed currently
+    // retains, exactly once. A record at or before the floor never
+    // appears here (weft's own `retain()` already deleted it) — we don't
+    // decode the stored payload at all (unlike `page()`), since only the
+    // envelope's `workflowId` is needed and a corrupt/unrecognized
+    // `schemaVersion` on some OTHER owner's record must never stop this
+    // scan.
+    for await (const envelope of feed.replay()) {
+      const workflowId = envelope.workflowId;
+      if (workflowId === undefined) continue; // e.g. the internal `fleet:gap` marker
+      const separator = workflowId.indexOf(':');
+      if (separator < 0) continue;
+      const ownerKind = workflowId.slice(0, separator);
+      if (ownerKind !== 'run') continue;
+      owners.add(workflowId.slice(separator + 1));
+    }
+    return owners;
+  }
+
   function dispose(): Promise<void> {
     feed.dispose();
     return Promise.resolve();
   }
 
-  return { record, page, subscribeEventHistory, dispose };
+  return { record, page, subscribeEventHistory, retainedRunOwnerIds, dispose };
 }
 
 // ── Producer wiring (AB-311) ────────────────────────────────────────
@@ -528,6 +574,29 @@ export interface DurableEventProducerOptions {
  * every in-flight `record()` write.
  */
 export interface DurableEventProducer {
+  /**
+   * Whether a `history.record()` write for `owner` is currently in flight
+   * — started (synchronously, at the same moment this producer's listener
+   * observed the source action/bureau event) but not yet settled.
+   *
+   * AB-363's `pruneStaleRunOwnership` uses this, alongside the SESSION's
+   * own `lastRequestAuthorities` presence, to close the race a run's own
+   * terminal transition can open: this producer's `sink()` increments the
+   * owner's count BEFORE starting `history.record()`, which itself starts
+   * only once the source action (e.g. the bureau-level `'action'` event
+   * carrying `run.completed`) has already been dispatched — and that
+   * action's dispatch happens no later than the SAME completion sequence
+   * that removes the run's `lastRequestAuthorities` entry (Codex review,
+   * PR #568: "Preserve ownership until pending event writes have
+   * settled"). So either `lastRequestAuthorities` still names the run
+   * (live, or a pending approval awaiting a future `review.*` event —
+   * both excluded on their own) or, once it doesn't, this method is the
+   * one remaining signal for "a write this transition started has not
+   * yet committed" — checking it is a non-destructive peek at a live
+   * count, unlike `RuntimeServices.deferred.drain()` (destructive, and
+   * shared with other consumers — never call it from here).
+   */
+  hasActiveWrite(owner: DurableEventOwner): boolean;
   /**
    * Stop listening to the bureau's event streams and await every write
    * already in flight before resolving. Never rejects. Idempotent.
@@ -651,8 +720,19 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // `activeWrites`/`trackWrite` pattern) rather than leaving an in-flight
   // `record()` unobserved.
   const activeWrites = new Set<Promise<void>>();
+  // AB-363 — per-owner in-flight write counts, checked by
+  // `hasActiveWrite()` below. Keyed by the SAME `encodeOwner` string
+  // `record()`/`page()` use, incremented synchronously BEFORE
+  // `history.record()` starts (so a caller that checks `hasActiveWrite`
+  // anywhere after this action's dispatch already sees it — see that
+  // method's own doc comment for why this closes the pruning race) and
+  // decremented in the same `.finally` that already prunes `activeWrites`.
+  const activeWriteCountsByOwner = new Map<string, number>();
+
   function sink(owner: DurableEventOwner, kind: string, payload: unknown): void {
     if (signal?.aborted) return;
+    const ownerKey = encodeOwner(owner);
+    activeWriteCountsByOwner.set(ownerKey, (activeWriteCountsByOwner.get(ownerKey) ?? 0) + 1);
     const write = history.record(owner, kind, payload).then(
       () => undefined,
       (error: unknown) => {
@@ -665,7 +745,15 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       },
     );
     activeWrites.add(write);
-    void write.finally(() => activeWrites.delete(write));
+    void write.finally(() => {
+      activeWrites.delete(write);
+      const remaining = (activeWriteCountsByOwner.get(ownerKey) ?? 1) - 1;
+      if (remaining > 0) {
+        activeWriteCountsByOwner.set(ownerKey, remaining);
+      } else {
+        activeWriteCountsByOwner.delete(ownerKey);
+      }
+    });
     runtime.deferred.track(write, 'durable-event-record');
   }
 
@@ -837,6 +925,9 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   bureau.addEventListener('review.superseded', reviewSupersededListener);
 
   return {
+    hasActiveWrite(owner: DurableEventOwner): boolean {
+      return (activeWriteCountsByOwner.get(encodeOwner(owner)) ?? 0) > 0;
+    },
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);
       bureau.removeEventListener('schedule.completed', scheduleCompletedListener);

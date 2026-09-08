@@ -1942,10 +1942,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           : {}),
         // AB-359 — same per-run union-merge as `lastRequestAuthorities`
         // immediately above (never overwrite an unrelated concurrent run's
-        // entry), but this map is never pruned on terminal transition: it is
-        // the run's OWNERSHIP record for durable `eventHistory` authorization
-        // (AB-313), which must stay resolvable for the run's whole durable
-        // lifetime, not just while it is live.
+        // entry). This map is never pruned HERE, on this write path, or on
+        // a run's terminal transition, or on any count: it is the run's
+        // OWNERSHIP record for durable `eventHistory` authorization
+        // (AB-313), which must stay resolvable for as long as the run's
+        // durable history is still pageable. The ONLY pruning is AB-363's
+        // `pruneStaleRunOwnership`, run from `runDurableMaintenance`, which
+        // drops an entry once its run's entire durable history has fallen
+        // below the fleet feed's retention floor — a history that can no
+        // longer be paged needs no owner.
         ...(metadata['lastRunOwningPrincipals'] !== undefined
           ? {
               lastRunOwningPrincipals: {
@@ -4812,9 +4817,184 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return runtime.durable.engine.list(filter, options);
   }
 
+  /**
+   * AB-363 — drops a session's `lastRunOwningPrincipals` entries whose run's
+   * ENTIRE durable event history has fallen below the fleet feed's
+   * retention floor (coordinator ruling, 2026-09-08): a history that can no
+   * longer be paged needs no owner. This is the only place that map is
+   * pruned — see the "never pruned HERE" comment on the `lastRunOwningPrincipals`
+   * write above for what this deliberately does NOT do (no pruning on
+   * terminal transition, no pruning on a count).
+   *
+   * `eventHistoryInstance.retainedRunOwnerIds()` returns `undefined` when
+   * the retention floor is still 0 (nothing retired yet); this function
+   * then does nothing at all, rather than pruning against an empty set —
+   * an empty set at floor 0 would read as "nothing survived" when in fact
+   * nothing has even been asked to retire.
+   *
+   * A candidate run (not in the retained set) is excluded from pruning —
+   * left in place for a later cycle — on either of two signals, checked
+   * against the session's OWN metadata, never `runtime.durable.engine.get`
+   * (Codex/Copilot review, PR #568 — an earlier revision used that engine
+   * read and got both the "unknown run" case and the write-in-flight race
+   * below wrong):
+   *
+   * 1. `lastRequestAuthorities` still names the run. This map is written
+   *    unconditionally at dispatch, in the SAME merge as
+   *    `lastRunOwningPrincipals`, and its entry for a run is removed ONLY
+   *    at that run's own terminal transition, and ONLY when the run has no
+   *    pending approval (see that removal's own doc comment). So presence
+   *    here means the run is either still live, or terminal-but-awaiting-
+   *    a-human-decision — the exact case that can still produce a future
+   *    `review.*` durable event.
+   * 2. `durableEventProducerInstance.hasActiveWrite({ kind: 'run', id })` —
+   *    a `history.record()` write for this run, started but not yet
+   *    settled. This closes the window `lastRequestAuthorities` alone
+   *    cannot: the bureau-level `'action'` event that removes the
+   *    authority entry is dispatched no earlier than the SAME completion
+   *    sequence that also fires the `'action'` event `createDurableEventProducer`
+   *    sinks into `history.record()` (both are driven off the same
+   *    `store`-dispatched action for this run's terminal transition) — so
+   *    by the time the authority entry is gone, that write has already
+   *    STARTED (`hasActiveWrite` synchronously flips true before
+   *    `history.record()`'s promise even begins), even if it has not yet
+   *    settled. Checking both together means: authority gone AND no write
+   *    in flight ⟹ the run's terminal outcome is fully durable, with no
+   *    future write this pass could race.
+   *
+   * The retained-owner set itself is REVALIDATED immediately before each
+   * session's write, not read once for the whole pass (Codex review, PR
+   * #568, "Revalidate retained owners before pruning"): a run can
+   * dispatch, complete, and have its terminal event land in the feed
+   * ENTIRELY within the time this function spends paging through other
+   * sessions, which would make a single up-front snapshot stale by the
+   * time this run's own session is reached. `initialRetainedRunIds`
+   * (fetched once) is used only as a cheap, always-safe-to-be-wrong
+   * pre-filter — wrongly treating an already-retained run as a candidate
+   * costs one extra no-op `update()`, and wrongly skipping a genuinely
+   * stale one just leaves it for a later cycle; either way, no incorrect
+   * deletion. The actual deletion inside `update()`'s (possibly
+   * conflict-retried) callback re-fetches `retainedRunOwnerIds()` fresh,
+   * narrowing the staleness window to essentially the storage layer's own
+   * conditional-write retry loop. This does not close a genuinely
+   * cross-process race (another Bureau instance's write, committed after
+   * this process's fresh check but before this write lands) — no primitive
+   * here spans both the fleet feed and the session store in one atomic
+   * operation; see this issue's `followUps`.
+   */
+  async function pruneStaleRunOwnership(): Promise<void> {
+    const sessionStore = runtime.sessionStore;
+    if (!eventHistoryInstance || !sessionStore) return;
+
+    const initialRetainedRunIds = await eventHistoryInstance.retainedRunOwnerIds();
+    if (initialRetainedRunIds === undefined) return;
+
+    const pageLimit = 100;
+    let offset = 0;
+    for (;;) {
+      const page = await sessionStore.list({ limit: pageLimit, offset });
+      if (page.length === 0) break;
+
+      for (const summary of page) {
+        const owners = summary.metadata['lastRunOwningPrincipals'];
+        if (!isPlainAuthorityRecord(owners)) continue;
+
+        const hasCandidate = Object.keys(owners).some((runId) => !initialRetainedRunIds.has(runId));
+        if (!hasCandidate) continue;
+
+        // Read-modify-write against the FRESH session inside `update`
+        // (optimistic concurrency, same as every other write to this map),
+        // not against the `summary` snapshot above — a concurrent dispatch's
+        // union-merge (the write path this pass never touches) can add a
+        // new entry between the `list()` read and this write, and it must
+        // survive. `lastRequestAuthorities` is read from this SAME fresh
+        // session too, for the identical reason. The updater is async so
+        // it can revalidate `retainedRunOwnerIds()` fresh on every attempt
+        // (including a conflict retry), per this function's own doc
+        // comment.
+        await sessionStore.update(summary.id, async (session) => {
+          if (!session) return undefined;
+          const currentOwners = session.metadata['lastRunOwningPrincipals'];
+          if (!isPlainAuthorityRecord(currentOwners)) return undefined;
+
+          const freshRetainedRunIds = await eventHistoryInstance.retainedRunOwnerIds();
+          if (freshRetainedRunIds === undefined) return undefined;
+
+          const currentAuthorities = session.metadata['lastRequestAuthorities'];
+          // A PRESENT-but-malformed `lastRequestAuthorities` value (not
+          // absent — a string or array where a map belongs) is itself
+          // evidence something was recorded and corrupted, the same
+          // fail-closed shape `lookupSessionAuthority` above treats as
+          // "recorded" rather than "nothing recorded" (Codex/Copilot review,
+          // PR #568, "Preserve owners when the authority map is
+          // malformed"). Reading it as absent here would let every
+          // candidate run in this session lose its `liveOrPendingRunIds`
+          // protection instead of none of them — skip the whole session for
+          // this cycle rather than risk pruning a run this corrupted map may
+          // still be recording.
+          if (currentAuthorities !== undefined && !isPlainAuthorityRecord(currentAuthorities)) {
+            return undefined;
+          }
+          const liveOrPendingRunIds = isPlainAuthorityRecord(currentAuthorities)
+            ? new Set(Object.keys(currentAuthorities))
+            : new Set<string>();
+
+          const nextOwners = { ...currentOwners };
+          let changed = false;
+          for (const runId of Object.keys(nextOwners)) {
+            if (freshRetainedRunIds.has(runId)) continue;
+            if (liveOrPendingRunIds.has(runId)) continue;
+            if (durableEventProducerInstance?.hasActiveWrite({ kind: 'run', id: runId })) continue;
+            // A run still present in the in-memory run `store` can still be
+            // handed to `deleteRun()` at any future point — which records a
+            // brand-new, retained `run.removed` durable event under this
+            // SAME owner (Codex review, PR #568, "Preserve ownership for a
+            // later run removal event"). Before AB-363 this map was never
+            // pruned at all, so that future write always had an owner
+            // waiting for it; excluding a still-present run here restores
+            // that guarantee. `deleteRun()` throws NOT_FOUND once a run is
+            // gone from `store` — the exact same check, so this is really
+            // "can a future deleteRun() still fire for this run", not a
+            // proxy for it. It is also process-bound: `store` is never
+            // repopulated with a TERMINAL run at boot (only recovered
+            // in-flight ones are), so a run this process never held can
+            // never be deleted again by any process, and gets no
+            // protection here — correctly, since no future `run.removed`
+            // is possible for it either. Once `deleteRun()` actually runs,
+            // `store.getRun` returns `undefined` immediately, and
+            // `hasActiveWrite` above already protects the write it starts
+            // synchronously in the same call.
+            if (store.getRun(runId) !== undefined) continue;
+            delete nextOwners[runId];
+            changed = true;
+          }
+          if (!changed) return undefined;
+
+          // Rest-spread the key out entirely once emptied, rather than
+          // persisting `{}`, so a fully-pruned session reads back with NO
+          // `lastRunOwningPrincipals` key at all — the same shape a
+          // never-attributed session already has (AB-359's "no principal
+          // recorded" test).
+          const { lastRunOwningPrincipals: _pruned, ...restMetadata } = session.metadata;
+          return {
+            ...session,
+            metadata:
+              Object.keys(nextOwners).length > 0
+                ? { ...restMetadata, lastRunOwningPrincipals: nextOwners }
+                : restMetadata,
+          };
+        });
+      }
+
+      if (page.length < pageLimit) break;
+      offset += pageLimit;
+    }
+  }
+
   async function runDurableMaintenance(now?: number): Promise<true | undefined> {
     if (!runtime.durable) return undefined;
     await runtime.durable.engine.runMaintenance(now);
+    await pruneStaleRunOwnership();
     return true;
   }
 
