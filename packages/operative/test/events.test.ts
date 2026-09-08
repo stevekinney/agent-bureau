@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- exercises the deprecated `BudgetExceededEvent` on purpose for its own construction-payload coverage. */
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
@@ -628,3 +629,4 @@ describe('events', () => {
     });
   });
 });
+/* eslint-enable @typescript-eslint/no-deprecated */

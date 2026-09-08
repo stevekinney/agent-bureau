@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- exercises the deprecated `searchTools` on purpose, alongside `queryTools`, for registry helper coverage. */
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
@@ -498,3 +499,4 @@ describe('registry helpers', () => {
     });
   });
 });
+/* eslint-enable @typescript-eslint/no-deprecated */

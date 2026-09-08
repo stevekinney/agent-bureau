@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- exercises the deprecated `searchTools` on purpose, alongside `queryTools`, for registry-internal coverage. */
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
@@ -552,3 +553,4 @@ describe('registry internal coverage', () => {
     expect(iterableResolved.getTextIndex()).toBeDefined();
   });
 });
+/* eslint-enable @typescript-eslint/no-deprecated */
