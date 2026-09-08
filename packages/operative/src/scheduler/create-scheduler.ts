@@ -192,7 +192,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   let started = false;
   let stopping = false;
   let loopPromise: Promise<void> | undefined;
-  let lastTaskCompletedAt = 0;
+  let lastTaskCompletedAt: number | undefined;
 
   // Resolvers for tasks awaiting completion via submit()
   const taskResolvers = new Map<
@@ -459,7 +459,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       }
 
       // Apply idle delay for non-immediate tasks
-      if (nextTask.priority !== 'immediate' && lastTaskCompletedAt > 0) {
+      if (nextTask.priority !== 'immediate' && lastTaskCompletedAt !== undefined) {
         const elapsed = runtime.monotonic.now() - lastTaskCompletedAt;
         if (elapsed < idleDelay) {
           await waitForWake(idleDelay - elapsed);

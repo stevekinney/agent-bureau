@@ -154,4 +154,83 @@ describe('createScheduler — idleDelay against a manual runtime', () => {
       await scheduler.stop();
     }
   });
+
+  it('gates the second dispatch even when the first task completes at manual clock zero (AB-357)', async () => {
+    // Regression test for AB-357: `lastTaskCompletedAt` used to be a `number`
+    // with `0` doubling as the "no task has ever completed" sentinel
+    // (`lastTaskCompletedAt > 0`). A manual runtime's monotonic clock starts
+    // at exactly 0, so a task that completes before any `advance()` call —
+    // as this test deliberately does not perform, unlike the test above —
+    // stamped a legitimate completion timestamp of 0, which the sentinel
+    // misread as "never completed" and skipped the idle-delay gate
+    // entirely. The fix types `lastTaskCompletedAt` as `number | undefined`
+    // with `undefined` as the sentinel, so a completion at clock zero is
+    // indistinguishable from any other completion.
+    const runtime = createManualRuntimeServices();
+    const dispatchOrder: string[] = [];
+    const idleDelay = 30;
+
+    const scheduler = createScheduler({
+      generate: createMockGenerate([textResponse('default')]),
+      toolbox: createTestToolbox([]),
+      idleDelay,
+      runtime,
+    });
+
+    const results: Promise<unknown>[] = [];
+    for (const name of ['first', 'second']) {
+      results.push(
+        scheduler.submit(
+          makeTask({
+            priority: 'background',
+            id: name,
+            createRun: () => {
+              dispatchOrder.push(name);
+              return {
+                generate: createMockGenerate([textResponse(name)]),
+                toolbox: createTestToolbox([]),
+                conversation: new Conversation(),
+                maximumSteps: 1,
+              };
+            },
+          }),
+        ),
+      );
+    }
+
+    scheduler.start();
+
+    try {
+      // The first task has no prior completion to gate against, so it
+      // dispatches immediately — at clock 0, since we never advanced the
+      // manual clock before this point.
+      await waitForEventLoop(() => dispatchOrder.length >= 1);
+      expect(dispatchOrder).toEqual(['first']);
+      expect(runtime.monotonic.now()).toBe(0);
+
+      // The first task's completion stamps `lastTaskCompletedAt` at exactly
+      // 0. If the sentinel bug is present, the idle-gate check
+      // (`lastTaskCompletedAt > 0`) reads this as "never completed" and the
+      // second task dispatches immediately with no gate timer armed at all.
+      await waitForEventLoop(() => runtime.pendingTimers().length > 0);
+      const [gateTimer] = runtime.pendingTimers();
+      if (!gateTimer) throw new Error('expected an idle-gate timer to be armed at clock zero');
+      expect(gateTimer.dueAt).toBe(idleDelay);
+
+      // Advancing to just short of the gate's due time must NOT release the
+      // second dispatch.
+      await runtime.advance(idleDelay - 1);
+      expect(dispatchOrder).toEqual(['first']);
+
+      // The remaining millisecond crosses the gate's due time and releases
+      // it.
+      await runtime.advance(1);
+      await waitForEventLoop(() => dispatchOrder.length >= 2);
+      expect(dispatchOrder).toEqual(['first', 'second']);
+
+      await Promise.all(results);
+    } finally {
+      await scheduler.stop();
+    }
+  });
 });
