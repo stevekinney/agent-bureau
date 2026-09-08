@@ -450,6 +450,7 @@ const grant: ReusableApprovalGrant = {
   agentId: 'agent-1',
   toolName: 'read-file',
   scope: 'session',
+  sessionId: 'session-1', // required when scope is 'session' — see "Scoping a grant" below
   issuedAt: Date.now(),
   expiresAt: Date.now() + 60 * 60 * 1000,
   maxUses: 5,
@@ -467,7 +468,17 @@ await grantStore.decrementUse(signed.id); // { usesRemaining: 4 }
 await grantStore.revoke(signed.id); // idempotent; never throws on an unknown or already-revoked id
 ```
 
-`signGrant` and `verifyGrantSignature` use the same HMAC primitive as `signPendingApproval`, applied to every grant field except `signature` itself. `createProcessLocalGrantStateStore()` is process-local, in-memory storage: `issue` always initializes `usesRemaining` to `maxUses` regardless of what the caller passed, and `decrementUse` is the only method that ever changes `usesRemaining`, floored at `0`.
+`signGrant` and `verifyGrantSignature` use the same HMAC primitive as `signPendingApproval`, applied to every grant field except `signature` and `usesRemaining`. `usesRemaining` is excluded deliberately: it's the trusted `GrantStateStore`'s own live usage counter, mutated directly by `decrementUse` (which has no access to the signing secret) on every consuming call, so signing it would make any grant with `maxUses > 1` fail signature verification after its first use. `maxUses` itself — the issuance-time ceiling — stays signed, so a tampered ceiling is still caught. `createProcessLocalGrantStateStore()` is process-local, in-memory storage: `issue` always initializes `usesRemaining` to `maxUses` regardless of what the caller passed, and `decrementUse` is the only method that ever changes `usesRemaining`, floored at `0`.
+
+#### Scoping a grant
+
+`scope` bounds which calls a grant can authorize, beyond the principal/tenant/owner/agent/tool/resource checks below:
+
+- `'principal'` matches any call under the same principal, tenant, owner, agent, and tool — the same behavior as before scoping was enforced. Neither `runId` nor `sessionId` is required or read.
+- `'run'` requires `runId` and matches only a call whose request context carries that exact `runId` — a sibling run under the same principal never matches, even mid-session.
+- `'session'` requires `sessionId` and matches any call whose request context carries that exact `sessionId`, spanning every run of that session.
+
+`Toolbox.issueGrant` (and the gateway's `POST /grants`, below) validates the identifier is present for the chosen scope, rejecting `run` without `runId` and `session` without `sessionId` — a `GrantError` with code `'invalid-scope'` from the toolbox, a `400` from the gateway. Matching is symmetric: a `run`/`session` grant missing its own identifier (which issuance now prevents, but a grant restored from an untrusted or pre-AB-364 store still could) never matches — comparing two `undefined`s would let it authorize every call under the same principal, tenant, owner, agent, and tool, exactly the gap this closes. A request context supplies `runId`/`sessionId` itself; Bureau always stamps both onto every run it starts, so a bureau-hosted toolbox never needs to set them by hand.
 
 #### Matching a grant against an incoming call
 
@@ -488,24 +499,30 @@ const grant = await toolbox.issueGrant({
   toolName: 'read-file',
   resourcePattern: 'reports/*',
   scope: 'session',
+  sessionId: 'session-1', // required for 'session' scope; throws GrantError('...', 'invalid-scope') otherwise
   expiresAt: Date.now() + 60 * 60 * 1000,
   maxUses: 5,
   delegationBehavior: 'does-not-propagate',
 }); // mints id/issuedAt/usesRemaining/policyRevision and signs the result
 
 // A call whose requestContext.authority reauthorizes the grant's principal,
-// tenant, and owner, and whose `resource` argument matches the pattern,
-// executes without prompting for approval:
+// tenant, and owner, whose `sessionId` matches the grant's (any run of that
+// session), and whose `resource` argument matches the pattern, executes
+// without prompting for approval:
 await toolbox.execute(
   { id: 'call-1', name: 'read-file', arguments: { resource: 'reports/q1' } },
-  { requestContext },
+  { requestContext: { ...requestContext, sessionId: 'session-1' } },
 );
 
 await toolbox.listGrants({ principalId: 'principal-1' });
 await toolbox.revokeGrant(grant.id); // idempotent
 ```
 
-A match decrements `usesRemaining` by one and emits a `'grant.used'` toolbox event carrying the grant id, the matched tool call, the deciding principal, and the grant's remaining uses — the audit entry the decision record calls for. A grant failing any check (no match, expired, revoked, exhausted, a stale `policyRevision`, or a signature that no longer verifies) is treated as absent, never an implicit deny or approve — the ordinary `ask` pipeline runs unchanged, and a capability `deny` is never overridden by a grant. `resourcePattern` is a glob-style match (`*` wildcard) against a caller-declared `resource` field in the call's arguments; `argumentConstraints` is plain JSON data (never a live Zod schema instance — a grant's signature is computed over its JSON-serialized fields) matched by deep equality per declared key.
+A match decrements `usesRemaining` by one and emits a `'grant.used'` toolbox event carrying the grant id, the matched tool call, the deciding principal, and the grant's remaining uses — the audit entry the decision record calls for. A grant failing any check (no match, wrong scope, expired, revoked, exhausted, a stale `policyRevision`, or a signature that no longer verifies) is treated as absent, never an implicit deny or approve — the ordinary `ask` pipeline runs unchanged, and a capability `deny` is never overridden by a grant. `resourcePattern` is a glob-style match (`*` wildcard) against a caller-declared `resource` field in the call's arguments; `argumentConstraints` is plain JSON data (never a live Zod schema instance — a grant's signature is computed over its JSON-serialized fields) matched by deep equality per declared key.
+
+#### Gateway grant routes
+
+The gateway's `POST /api/v1/grants` accepts the same fields (`principalId` is always the authenticated caller, never a body field): a `scope: 'run'` body without `runId`, or `scope: 'session'` without `sessionId`, is rejected with `400` before the toolbox is ever called. `GET /api/v1/grants` and `DELETE /api/v1/grants/:id` are scoped to the caller's own grants, mirroring the review routes.
 
 ### Request Authority and Execution Projections
 

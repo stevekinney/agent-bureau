@@ -267,6 +267,7 @@ describe('combineToolboxes', () => {
       audience: 'tenant' as const,
       agentId: 'agent-grant-combine',
       runId: 'run-grant-combine',
+      sessionId: 'session-grant-combine',
     };
 
     // A fixed epoch-ms timestamp in the past and a far-future expiry —
@@ -284,6 +285,7 @@ describe('combineToolboxes', () => {
       agentId: grantRequestContext.agentId,
       toolName: 'read-file',
       scope: 'session',
+      sessionId: grantRequestContext.sessionId,
       issuedAt,
       expiresAt: farFutureExpiry,
       maxUses: 1,

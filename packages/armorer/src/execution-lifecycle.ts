@@ -211,6 +211,11 @@ function retainTerminalPrivilegedContext(
     ...(context.audience !== undefined ? { audience: context.audience } : {}),
     ...(context.agentId !== undefined ? { agentId: context.agentId } : {}),
     ...(context.runId !== undefined ? { runId: context.runId } : {}),
+    // AB-364 review finding (chatgpt-codex-connector): without this,
+    // sessionId was visible on a live call's privilegedSnapshot()/
+    // inspectPrivileged() but unexpectedly dropped once the call settled —
+    // the same retention analogous runId/agentId already get.
+    ...(context.sessionId !== undefined ? { sessionId: context.sessionId } : {}),
     ...(context.requestId !== undefined ? { requestId: context.requestId } : {}),
     ...(context.locale !== undefined ? { locale: context.locale } : {}),
     ...(context.deadline !== undefined ? { deadline: context.deadline } : {}),

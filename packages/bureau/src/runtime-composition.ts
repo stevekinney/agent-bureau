@@ -314,6 +314,7 @@ function isJsonRecord(value: JSONValue | undefined): value is Record<string, JSO
 function requestContextFromAuthorityValue(
   value: JSONValue | undefined,
   runId: string | undefined,
+  sessionId: string | undefined,
   agentName: string | undefined,
   now: () => number,
 ): ToolRequestContext | undefined {
@@ -350,6 +351,7 @@ function requestContextFromAuthorityValue(
     ...(typeof deadline === 'number' ? { deadline } : {}),
     ...(agentName !== undefined ? { agentId: agentName } : {}),
     ...(runId !== undefined ? { runId } : {}),
+    ...(sessionId !== undefined ? { sessionId } : {}),
   };
 }
 
@@ -364,6 +366,7 @@ function requestContextFromAuthorityValue(
 export function recoveredRequestContext(
   metadata: Record<string, JSONValue>,
   runId: string | undefined,
+  sessionId: string | undefined,
   agentName: string | undefined,
   now: () => number,
 ): ToolRequestContext | undefined {
@@ -372,6 +375,7 @@ export function recoveredRequestContext(
     return requestContextFromAuthorityValue(
       runId === undefined ? undefined : authorities[runId],
       runId,
+      sessionId,
       agentName,
       now,
     );
@@ -379,6 +383,7 @@ export function recoveredRequestContext(
   return requestContextFromAuthorityValue(
     metadata[requestAuthorityMetadataKey],
     runId,
+    sessionId,
     agentName,
     now,
   );
@@ -389,7 +394,11 @@ function normalizedServiceAgentName(agentName: string | undefined): string {
   return trimmed && trimmed.length > 0 ? trimmed : defaultBureauAgentName;
 }
 
-export function createSchedulerServiceRequestContext(runId: string, agentName: string | undefined) {
+export function createSchedulerServiceRequestContext(
+  runId: string,
+  agentName: string | undefined,
+  sessionId?: string,
+) {
   const ownerId = normalizedServiceAgentName(agentName);
   return {
     authority: {
@@ -402,6 +411,13 @@ export function createSchedulerServiceRequestContext(runId: string, agentName: s
     audience: 'operator',
     agentId: ownerId,
     runId,
+    // AB-364 review finding (chatgpt-codex-connector): stamped for
+    // consistency with every other request context this module builds —
+    // NOT a fix for scheduled-fire grant matching, which the fixed
+    // `principalId` above (always `schedulerServicePrincipalId`, never the
+    // triggering user's own principal) already blocks unconditionally,
+    // independent of scope or sessionId.
+    ...(sessionId !== undefined ? { sessionId } : {}),
   } satisfies ToolRequestContext;
 }
 
@@ -2278,6 +2294,7 @@ export async function createRuntimeComposition(
     const requestContext = recoveredRequestContext(
       session.metadata,
       runId,
+      session.id,
       agentName,
       runtimeServices.clock.now,
     );
@@ -2869,7 +2886,7 @@ export async function createRuntimeComposition(
       runId,
       isRecoveredFireReplay,
     );
-    const requestContext = createSchedulerServiceRequestContext(runId, agentName);
+    const requestContext = createSchedulerServiceRequestContext(runId, agentName, sessionId);
 
     const runRuntime = await createRunRuntime(
       { message: scheduledInput.input, sessionId, runId, agentName, requestContext },
@@ -3077,6 +3094,7 @@ export async function createRuntimeComposition(
     const recoveredAuthority = recoveredRequestContext(
       session.metadata,
       info.workflowId,
+      sessionId,
       info.input.agentName,
       runtimeServices.clock.now,
     );

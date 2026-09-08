@@ -13,6 +13,13 @@ export interface ToolRequestContext {
   readonly audience?: 'public' | 'tenant' | 'operator';
   readonly agentId?: string;
   readonly runId?: string;
+  /**
+   * The session this call's run belongs to (AB-364): distinct from `runId`
+   * because one session's runs share it across turns. Used only by reusable
+   * approval grant matching's `session` scope; nothing else in this module
+   * reads it.
+   */
+  readonly sessionId?: string;
   readonly requestId?: string;
   readonly locale?: string;
   readonly traceContext?: unknown;
@@ -70,6 +77,11 @@ const fieldClasses: Readonly<Record<string, ExternalFieldClass>> = Object.freeze
   requestId: 'tenant-private',
   agentId: 'tenant-private',
   runId: 'tenant-private',
+  // AB-364 review finding (chatgpt-codex-connector): unclassified fields
+  // default to 'never-exported' (see `redact` below), so `sessionId` was
+  // silently dropped from every tenant/operator projection even though the
+  // analogous `runId`/`agentId` fields are retained.
+  sessionId: 'tenant-private',
   locale: 'tenant-private',
   principalId: 'operator-private',
   authorizationRevision: 'operator-private',

@@ -7886,6 +7886,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
     audience: 'tenant' as const,
     agentId: 'agent-grant',
     runId: 'run-grant',
+    sessionId: 'session-grant',
   };
 
   function buildGrant(overrides?: Partial<ReusableApprovalGrant>): ReusableApprovalGrant {
@@ -7898,6 +7899,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
       agentId: grantRequestContext.agentId,
       toolName: 'read-file',
       scope: 'session',
+      sessionId: grantRequestContext.sessionId,
       issuedAt: FIXED_NOW,
       expiresAt: FIXED_NOW + 60_000,
       maxUses: 3,
@@ -8115,7 +8117,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
     // The HMAC alone can't protect against a version bump changing matching
     // semantics — a grant must also declare the exact version this toolbox
     // understands (Copilot review PRRT_kwDORvupsc6fN8yV).
-    const grant = buildGrant({ version: 2 as unknown as typeof GRANT_VERSION });
+    const grant = buildGrant({ version: 3 as unknown as typeof GRANT_VERSION });
     const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
 
     const result = await toolbox.execute(
@@ -8318,6 +8320,137 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
     expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
   });
 
+  describe('grant scope enforcement (AB-364)', () => {
+    it('matches a run-scoped grant against its own run', async () => {
+      const grant = buildGrant({ scope: 'run', runId: grantRequestContext.runId });
+      const { toolbox } = await buildGrantToolbox([grant]);
+
+      const result = await toolbox.execute(
+        { id: 'call-run-match', name: 'read-file', arguments: {} },
+        { requestContext: grantRequestContext },
+      );
+
+      expect(result.outcome).toBe('success');
+    });
+
+    it('never matches a run-scoped grant against a sibling run under the same principal', async () => {
+      const grant = buildGrant({ scope: 'run', runId: grantRequestContext.runId });
+      const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+      const result = await toolbox.execute(
+        { id: 'call-run-sibling', name: 'read-file', arguments: {} },
+        { requestContext: { ...grantRequestContext, runId: 'run-grant-sibling' } },
+      );
+
+      expect(result.outcome).toBe('action_required');
+      expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+    });
+
+    it('never matches a run-scoped grant with no runId against a request with no runId either', async () => {
+      // The trap this issue closes: comparing two `undefined`s would let an
+      // improperly-issued run grant match every call under the same
+      // principal, tenant, owner, agent, and tool — never an implicit
+      // approve. A request context with no `runId` also can't sign an
+      // ordinary pending approval (`agentId`/`runId`/`audience` are all
+      // required there), so the fallback path settles as `error` rather
+      // than `action_required` — asserting `not.toBe('success')` is the
+      // same pattern the "no request context at all" test above uses.
+      const grant = buildGrant({ scope: 'run', runId: undefined });
+      const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+      const { runId: _runId, ...requestContextWithoutRun } = grantRequestContext;
+
+      const result = await toolbox.execute(
+        { id: 'call-run-missing-both', name: 'read-file', arguments: {} },
+        { requestContext: requestContextWithoutRun },
+      );
+
+      expect(result.outcome).not.toBe('success');
+      expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+    });
+
+    it('matches a session-scoped grant across two different runs of the same session', async () => {
+      const grant = buildGrant({ scope: 'session', sessionId: grantRequestContext.sessionId });
+      const { toolbox } = await buildGrantToolbox([grant]);
+
+      const firstRun = await toolbox.execute(
+        { id: 'call-session-run-1', name: 'read-file', arguments: {} },
+        { requestContext: { ...grantRequestContext, runId: 'run-grant-a' } },
+      );
+      const secondRun = await toolbox.execute(
+        { id: 'call-session-run-2', name: 'read-file', arguments: {} },
+        { requestContext: { ...grantRequestContext, runId: 'run-grant-b' } },
+      );
+
+      expect(firstRun.outcome).toBe('success');
+      expect(secondRun.outcome).toBe('success');
+    });
+
+    it("never matches a session-scoped grant against a different session's run", async () => {
+      const grant = buildGrant({ scope: 'session', sessionId: grantRequestContext.sessionId });
+      const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+      const result = await toolbox.execute(
+        { id: 'call-session-other', name: 'read-file', arguments: {} },
+        { requestContext: { ...grantRequestContext, sessionId: 'session-grant-other' } },
+      );
+
+      expect(result.outcome).toBe('action_required');
+      expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+    });
+
+    it('never matches a session-scoped grant with no sessionId against a request with no sessionId either', async () => {
+      const grant = buildGrant({ scope: 'session', sessionId: undefined });
+      const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+      const { sessionId: _sessionId, ...requestContextWithoutSession } = grantRequestContext;
+
+      const result = await toolbox.execute(
+        { id: 'call-session-missing-both', name: 'read-file', arguments: {} },
+        { requestContext: requestContextWithoutSession },
+      );
+
+      expect(result.outcome).toBe('action_required');
+      expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+    });
+
+    it('matches a principal-scoped grant regardless of runId/sessionId, unchanged from before this issue', async () => {
+      const grant = buildGrant({ scope: 'principal', runId: undefined, sessionId: undefined });
+      const { toolbox } = await buildGrantToolbox([grant]);
+
+      const result = await toolbox.execute(
+        { id: 'call-principal-any', name: 'read-file', arguments: {} },
+        {
+          requestContext: {
+            ...grantRequestContext,
+            runId: 'run-grant-unrelated',
+            sessionId: 'session-grant-unrelated',
+          },
+        },
+      );
+
+      expect(result.outcome).toBe('success');
+    });
+
+    it('treats an already-issued version-1 grant (pre-AB-364 signature shape) as absent, never a crash or an implicit deny', async () => {
+      // Review finding (chatgpt-codex-connector): GRANT_VERSION bumped 1 -> 2
+      // because version 1's signature covered `usesRemaining`, which this
+      // issue's payload no longer signs. A durable store carrying a
+      // version-1 grant from before this change must not crash
+      // `verifyGrantSignature` (it's never reached — the version check
+      // short-circuits first) and must never silently match despite the
+      // signature shape mismatch.
+      const grant = buildGrant({ version: 1 as unknown as typeof GRANT_VERSION });
+      const { toolbox, grantStateStore } = await buildGrantToolbox([grant]);
+
+      const result = await toolbox.execute(
+        { id: 'call-legacy-version', name: 'read-file', arguments: {} },
+        { requestContext: grantRequestContext },
+      );
+
+      expect(result.outcome).toBe('action_required');
+      expect(await usesRemainingOf(grantStateStore, grant.id)).toBe(3);
+    });
+  });
+
   describe('Toolbox.issueGrant / revokeGrant / listGrants', () => {
     it('mints and signs a grant with usesRemaining initialized to maxUses', async () => {
       const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
@@ -8329,6 +8462,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
         agentId: 'agent-issue',
         toolName: 'read-file',
         scope: 'session',
+        sessionId: 'session-issue',
         expiresAt: FIXED_NOW + 60_000,
         maxUses: 5,
         delegationBehavior: 'does-not-propagate',
@@ -8353,11 +8487,86 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
           agentId: 'agent-issue',
           toolName: 'read-file',
           scope: 'session',
+          sessionId: 'session-issue',
           expiresAt: FIXED_NOW + 60_000,
           maxUses: 5,
           delegationBehavior: 'does-not-propagate',
         }),
       ).rejects.toThrow('approvalSecret is required');
+    });
+
+    it('rejects issuing a "run"-scoped grant with no runId', async () => {
+      const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
+
+      await expect(
+        toolbox.issueGrant({
+          principalId: 'principal-issue',
+          tenantId: 'tenant-issue',
+          ownerId: 'owner-issue',
+          agentId: 'agent-issue',
+          toolName: 'read-file',
+          scope: 'run',
+          expiresAt: FIXED_NOW + 60_000,
+          maxUses: 5,
+          delegationBehavior: 'does-not-propagate',
+        }),
+      ).rejects.toThrow('"run"-scoped grant requires a runId');
+    });
+
+    it('rejects issuing a "session"-scoped grant with no sessionId', async () => {
+      const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
+
+      await expect(
+        toolbox.issueGrant({
+          principalId: 'principal-issue',
+          tenantId: 'tenant-issue',
+          ownerId: 'owner-issue',
+          agentId: 'agent-issue',
+          toolName: 'read-file',
+          scope: 'session',
+          expiresAt: FIXED_NOW + 60_000,
+          maxUses: 5,
+          delegationBehavior: 'does-not-propagate',
+        }),
+      ).rejects.toThrow('"session"-scoped grant requires a sessionId');
+    });
+
+    it('issues a "run"-scoped grant when runId is present', async () => {
+      const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
+
+      const grant = await toolbox.issueGrant({
+        principalId: 'principal-issue',
+        tenantId: 'tenant-issue',
+        ownerId: 'owner-issue',
+        agentId: 'agent-issue',
+        toolName: 'read-file',
+        scope: 'run',
+        runId: 'run-issue',
+        expiresAt: FIXED_NOW + 60_000,
+        maxUses: 5,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      expect(grant.runId).toBe('run-issue');
+    });
+
+    it('issues a "principal"-scoped grant with neither runId nor sessionId', async () => {
+      const toolbox = createToolbox([], { approvalSecret: grantSecret, approvalNow });
+
+      const grant = await toolbox.issueGrant({
+        principalId: 'principal-issue',
+        tenantId: 'tenant-issue',
+        ownerId: 'owner-issue',
+        agentId: 'agent-issue',
+        toolName: 'read-file',
+        scope: 'principal',
+        expiresAt: FIXED_NOW + 60_000,
+        maxUses: 5,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      expect(grant.runId).toBeUndefined();
+      expect(grant.sessionId).toBeUndefined();
     });
 
     it('rejects revokeGrant and listGrants when no grant state store is configured', async () => {
@@ -8378,6 +8587,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
         agentId: 'agent-revoke',
         toolName: 'read-file',
         scope: 'session',
+        sessionId: 'session-issue',
         expiresAt: FIXED_NOW + 60_000,
         maxUses: 1,
         delegationBehavior: 'does-not-propagate',
@@ -8400,6 +8610,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
         agentId: 'agent-a',
         toolName: 'read-file',
         scope: 'session',
+        sessionId: 'session-issue',
         expiresAt: FIXED_NOW + 60_000,
         maxUses: 1,
         delegationBehavior: 'does-not-propagate',
@@ -8411,6 +8622,7 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
         agentId: 'agent-a',
         toolName: 'read-file',
         scope: 'session',
+        sessionId: 'session-issue',
         expiresAt: FIXED_NOW + 60_000,
         maxUses: 1,
         delegationBehavior: 'does-not-propagate',

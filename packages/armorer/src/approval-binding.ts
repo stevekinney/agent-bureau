@@ -316,7 +316,16 @@ export function createProcessLocalApprovalStateStore(
 // wiring belong to AB-346, this module only owns the type, storage, and
 // signing primitives.
 
-export const GRANT_VERSION = 1 as const;
+// Bumped 1 -> 2 (AB-364 review finding, chatgpt-codex-connector): version 1's
+// signature covered `usesRemaining`; this version's `grantSignaturePayload`
+// excludes it. A grant signed under version 1 would silently fail
+// `verifyGrantSignature` under version 2's payload shape — bumping the
+// version instead makes `findMatchingGrant`'s existing `grant.version !==
+// GRANT_VERSION` check (already exercised by "treats a grant with an
+// unrecognized version as absent") the compatibility boundary: an
+// already-issued version-1 grant is treated as absent, never crashes, and
+// never silently misverifies under the new payload shape.
+export const GRANT_VERSION = 2 as const;
 
 export interface ReusableApprovalGrant {
   readonly version: typeof GRANT_VERSION;
@@ -333,6 +342,10 @@ export interface ReusableApprovalGrant {
   /** Zod-schema-shaped constraints checked against the resumed arguments using the same validation `resumeApproval` performs. */
   readonly argumentConstraints?: Record<string, unknown>;
   readonly scope: 'run' | 'session' | 'principal';
+  /** Required when `scope` is `'run'`: the run this grant authorizes; matching requires the request context's `runId` to equal this exactly. */
+  readonly runId?: string;
+  /** Required when `scope` is `'session'`: the session this grant authorizes; matching requires the request context's `sessionId` to equal this exactly. */
+  readonly sessionId?: string;
   readonly issuedAt: number;
   readonly expiresAt: number;
   readonly maxUses: number;
@@ -347,7 +360,7 @@ export interface ReusableApprovalGrant {
 export class GrantError extends Error {
   constructor(
     message: string,
-    readonly code: 'not-found' | 'invalid-signature',
+    readonly code: 'not-found' | 'invalid-signature' | 'invalid-scope',
   ) {
     super(message);
     this.name = 'GrantError';
@@ -362,21 +375,32 @@ export interface GrantStateStore {
   decrementUse(id: string): Promise<{ usesRemaining: number }>;
 }
 
+// `usesRemaining` is excluded from the signed payload alongside `signature`
+// itself: it is the trusted `GrantStateStore`'s own live usage counter, not
+// a caller-supplied issuance term, and `decrementUse` (which has no access
+// to `approvalSecret`) mutates it directly on every consuming call without
+// re-signing. Signing it would make every grant with `maxUses > 1`
+// permanently fail signature verification after its very first use — a
+// latent defect this issue's grant-matching tests surfaced, fixed here
+// rather than deferred, since matching a `session`-scoped grant against a
+// second run in the same session is exactly the multi-use path this
+// exposed. `maxUses` itself (the issuance-time ceiling) stays signed, so a
+// tampered ceiling is still caught; only the live countdown is exempt.
 function grantSignaturePayload(
   grant: ReusableApprovalGrant,
-): Omit<ReusableApprovalGrant, 'signature'> {
-  const { signature: _signature, ...payload } = grant;
+): Omit<ReusableApprovalGrant, 'signature' | 'usesRemaining'> {
+  const { signature: _signature, usesRemaining: _usesRemaining, ...payload } = grant;
   return payload;
 }
 
 function normalizeGrantSignaturePayload(
-  payload: Omit<ReusableApprovalGrant, 'signature'>,
+  payload: Omit<ReusableApprovalGrant, 'signature' | 'usesRemaining'>,
 ): JsonValue {
   const serialized = JSON.stringify(payload);
   return JSON.parse(serialized) as JsonValue;
 }
 
-/** Signs a grant's canonical fields (every field but `signature`) with the same HMAC primitive `signPendingApproval` uses. */
+/** Signs a grant's canonical fields (every field but `signature` and `usesRemaining`, see {@link grantSignaturePayload}) with the same HMAC primitive `signPendingApproval` uses. */
 export function signGrant(grant: ReusableApprovalGrant, secret: string): string {
   return hmacSha256HexSync(
     secret,
@@ -384,7 +408,7 @@ export function signGrant(grant: ReusableApprovalGrant, secret: string): string 
   );
 }
 
-/** Verifies a grant's signature against its current field values; throws `GrantError` with code `invalid-signature` on mismatch. */
+/** Verifies a grant's signature against its current field values (excluding the live `usesRemaining` counter, see {@link grantSignaturePayload}); throws `GrantError` with code `invalid-signature` on mismatch. */
 export function verifyGrantSignature(grant: ReusableApprovalGrant, secret: string): void {
   if (!timingSafeEqualHex(grant.signature, signGrant(grant, secret))) {
     throw new GrantError('Reusable approval grant signature is invalid.', 'invalid-signature');

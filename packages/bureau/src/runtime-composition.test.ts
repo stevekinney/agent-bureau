@@ -49,6 +49,7 @@ import {
   createMemoryRecallHook,
   createRoutingStrategy,
   createRuntimeComposition,
+  createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
   isActiveSkillEntryArray,
   recordedAgentStep,
@@ -400,9 +401,9 @@ describe('createRuntimeComposition', () => {
     function recover(
       metadataArgument: Parameters<typeof recoveredRequestContext>[0],
       runId: Parameters<typeof recoveredRequestContext>[1],
-      agentName: Parameters<typeof recoveredRequestContext>[2],
+      agentName: Parameters<typeof recoveredRequestContext>[3],
     ) {
-      return recoveredRequestContext(metadataArgument, runId, agentName, () => 0);
+      return recoveredRequestContext(metadataArgument, runId, 'session-a', agentName, () => 0);
     }
     const metadata = {
       lastRequestAuthority: {
@@ -418,6 +419,10 @@ describe('createRuntimeComposition', () => {
       audience: 'tenant',
       agentId: 'agent-a',
       runId: 'run-a',
+      // AB-364: the durable recovery path also restores `sessionId` onto the
+      // rebuilt request context, since a `session`-scoped reusable approval
+      // grant must keep matching a run resumed after a process restart.
+      sessionId: 'session-a',
       authority: {
         principalId: 'principal-a',
         tenantId: 'tenant-a',
@@ -444,9 +449,9 @@ describe('createRuntimeComposition', () => {
     function recover(
       metadataArgument: Parameters<typeof recoveredRequestContext>[0],
       runId: Parameters<typeof recoveredRequestContext>[1],
-      agentName: Parameters<typeof recoveredRequestContext>[2],
+      agentName: Parameters<typeof recoveredRequestContext>[3],
     ) {
-      return recoveredRequestContext(metadataArgument, runId, agentName, () => 0);
+      return recoveredRequestContext(metadataArgument, runId, 'session-b', agentName, () => 0);
     }
     const metadata = {
       lastRequestAuthority: {
@@ -474,6 +479,7 @@ describe('createRuntimeComposition', () => {
       audience: 'operator',
       agentId: 'agent-b',
       runId: 'run-b',
+      sessionId: 'session-b',
       authority: {
         principalId: 'principal-b',
         tenantId: 'tenant-b',
@@ -482,6 +488,16 @@ describe('createRuntimeComposition', () => {
         authorizationRevision: 'authorization:2',
       },
     });
+  });
+
+  it('createSchedulerServiceRequestContext stamps sessionId for consistency, without changing the fixed scheduler-service principal that already blocks grant matching (AB-364 review finding)', () => {
+    const withSession = createSchedulerServiceRequestContext('run-a', 'agent-a', 'session-a');
+    expect(withSession.sessionId).toBe('session-a');
+    expect(withSession.runId).toBe('run-a');
+    expect(withSession.authority.principalId).toBe('service:scheduler');
+
+    const withoutSession = createSchedulerServiceRequestContext('run-a', 'agent-a');
+    expect(withoutSession.sessionId).toBeUndefined();
   });
 
   it('provides an unavailable toolbox that accepts empty calls and rejects tool calls', async () => {

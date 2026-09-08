@@ -23,6 +23,7 @@ import {
   createProcessLocalApprovalStateStore,
   createProcessLocalGrantStateStore,
   GRANT_VERSION,
+  GrantError,
   type GrantStateStore,
   type ReusableApprovalGrant,
   signGrant,
@@ -2351,6 +2352,12 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     if (!approvalSecret || !grantStateStore) {
       throw new Error('Toolbox approvalSecret is required to issue reusable approval grants.');
     }
+    if (input.scope === 'run' && !input.runId) {
+      throw new GrantError('A "run"-scoped grant requires a runId.', 'invalid-scope');
+    }
+    if (input.scope === 'session' && !input.sessionId) {
+      throw new GrantError('A "session"-scoped grant requires a sessionId.', 'invalid-scope');
+    }
     const unsigned: ReusableApprovalGrant = {
       ...input,
       version: GRANT_VERSION,
@@ -3559,15 +3566,16 @@ function isStringArray(value: unknown): value is readonly string[] {
 }
 
 /**
- * Finds the first reusable approval grant (AB-46, AB-346) whose principal,
- * tenant, owner, agent, tool, resource pattern, argument constraints, and
- * policy revision all match the current call and whose `requestContext`
- * authority reauthorizes it, is unrevoked, unexpired, has `usesRemaining >
- * 0`, and whose signature still verifies against `approvalSecret`. Every
- * check failing treats the grant as absent — this function never throws for
- * a mismatch, only returns `undefined` — so a stale, tampered, or
- * over-scoped grant falls through to the ordinary `ask` pipeline exactly as
- * it would with no grant at all.
+ * Finds the first reusable approval grant (AB-46, AB-346, AB-364) whose
+ * principal, tenant, owner, agent, tool, resource pattern, argument
+ * constraints, policy revision, and `scope` (see {@link matchesGrantScope})
+ * all match the current call and whose `requestContext` authority
+ * reauthorizes it, is unrevoked, unexpired, has `usesRemaining > 0`, and
+ * whose signature still verifies against `approvalSecret`. Every check
+ * failing treats the grant as absent — this function never throws for a
+ * mismatch, only returns `undefined` — so a stale, tampered, or over-scoped
+ * grant falls through to the ordinary `ask` pipeline exactly as it would
+ * with no grant at all.
  */
 async function findMatchingGrant(
   context: ToolPolicyContext,
@@ -3598,7 +3606,8 @@ async function findMatchingGrant(
       grant.ownerId !== authority.ownerId ||
       (grant.agentId !== '*' && grant.agentId !== requestContext.agentId) ||
       !matchesResourcePattern(grant.resourcePattern, context.params) ||
-      !matchesArgumentConstraints(grant.argumentConstraints, context.params)
+      !matchesArgumentConstraints(grant.argumentConstraints, context.params) ||
+      !matchesGrantScope(grant, requestContext)
     ) {
       continue;
     }
@@ -3612,6 +3621,32 @@ async function findMatchingGrant(
     return grant;
   }
   return undefined;
+}
+
+/**
+ * Enforces `ReusableApprovalGrant.scope` (AB-364): a `run`-scoped grant
+ * matches only calls whose request context carries the SAME `runId`; a
+ * `session`-scoped grant matches only calls whose request context carries
+ * the same `sessionId`; and a `principal`-scoped grant matches as before (no
+ * additional identifier check). A `run`/`session` grant missing its own
+ * scoping identifier (should never happen — `issueGrant` validates this at
+ * mint time — but a persisted grant predating this validation, or one
+ * restored from an untrusted store, could still lack it) never matches:
+ * comparing two `undefined`s would otherwise let it match every call under
+ * the same principal, tenant, owner, agent, and tool, exactly the gap this
+ * issue closes.
+ */
+function matchesGrantScope(
+  grant: ReusableApprovalGrant,
+  requestContext: ToolRequestContext,
+): boolean {
+  if (grant.scope === 'run') {
+    return grant.runId !== undefined && grant.runId === requestContext.runId;
+  }
+  if (grant.scope === 'session') {
+    return grant.sessionId !== undefined && grant.sessionId === requestContext.sessionId;
+  }
+  return true;
 }
 
 /**

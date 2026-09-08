@@ -321,6 +321,123 @@ describe('grants routes', () => {
   });
 });
 
+describe('grants routes — scope identifiers (AB-364)', () => {
+  it('POST /api/v1/grants returns 400 for a "run"-scoped grant with no runId', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-run', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'run' })),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { message: string } };
+    expect(body.error.message).toContain('runId');
+  });
+
+  it('POST /api/v1/grants returns 400 for a "session"-scoped grant with no sessionId', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-session', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'session' })),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { message: string } };
+    expect(body.error.message).toContain('sessionId');
+  });
+
+  it('POST /api/v1/grants issues a "run"-scoped grant when runId is present', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-run-ok', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'run', runId: 'run-1' })),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as { scope: string; runId: string };
+    expect(grant.scope).toBe('run');
+    expect(grant.runId).toBe('run-1');
+  });
+
+  it('POST /api/v1/grants issues a "session"-scoped grant when sessionId is present', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-session-ok', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'session', sessionId: 'session-1' })),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as { scope: string; sessionId: string };
+    expect(grant.scope).toBe('session');
+    expect(grant.sessionId).toBe('session-1');
+  });
+
+  it("POST /api/v1/grants trims incidental whitespace from sessionId, matching Bureau's own request.sessionId?.trim() canonicalization", async () => {
+    // Review finding (chatgpt-codex-connector): without trimming here, a
+    // session id supplied with incidental whitespace would sign a grant
+    // that can never match the trimmed session id a real run actually
+    // carries (`createRunFromRequest` trims `request.sessionId`).
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-session-trim', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'session', sessionId: '  session-1  ' })),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as { sessionId: string };
+    expect(grant.sessionId).toBe('session-1');
+  });
+
+  it("POST /api/v1/grants returns 400 for a whitespace-only sessionId, matching Bureau's rejection of the same value for a run", async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-session-blank', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'session', sessionId: '   ' })),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it('POST /api/v1/grants issues a "principal"-scoped grant with neither runId nor sessionId', async () => {
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-scope-principal-ok', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(validGrantBody({ scope: 'principal' })),
+    });
+    expect(response.status).toBe(201);
+    const grant = (await response.json()) as {
+      scope: string;
+      runId?: string;
+      sessionId?: string;
+    };
+    expect(grant.scope).toBe('principal');
+    expect(grant.runId).toBeUndefined();
+    expect(grant.sessionId).toBeUndefined();
+  });
+});
+
 // ── AB-346 follow-up, fixed by AB-362: `combineToolboxes` and durable
 // opt-in tools ────────────────────────────────────────────────────────────
 //
