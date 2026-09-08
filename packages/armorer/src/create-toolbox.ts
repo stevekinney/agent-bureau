@@ -835,6 +835,19 @@ export interface Toolbox<TTools extends readonly Tool[] = readonly Tool[]> {
   getContext?: () => ToolboxContext;
 
   /**
+   * Internal method exposing this toolbox's own `ToolboxOptions` (minus
+   * `context`, which callers merge separately) so `combineToolboxes`
+   * (armorer's `combine-toolboxes.ts`) can forward them from the first
+   * toolbox into the combined toolbox — exactly the options `extend()`
+   * already forwards into an extended toolbox via `{ ...options, ... }`
+   * (AB-362). `approvalStateStore`/`grantStateStore` reflect this
+   * toolbox's *resolved* stores (which may have been defaulted from
+   * `approvalSecret` rather than explicitly configured), the same
+   * override `extend()` applies over the raw `options` spread.
+   */
+  getOptions?: () => Omit<ToolboxOptions, 'context'>;
+
+  /**
    * Creates a loop detector for this toolbox.
    * The detector is shared across all execute() calls for the toolbox's lifetime.
    *
@@ -2646,6 +2659,16 @@ function createToolboxBase<const TEntries extends ToolboxEntries = []>(
     },
     // Internal method to get toolbox context
     getContext: () => baseContext,
+    // Internal method exposing this toolbox's own options (minus context)
+    // so combineToolboxes can forward them, the way extend() already does.
+    getOptions: () => {
+      const { context: _context, ...rest } = options;
+      return {
+        ...rest,
+        ...(approvalStateStore ? { approvalStateStore } : {}),
+        ...(grantStateStore ? { grantStateStore } : {}),
+      };
+    },
     // Loop detection
     createLoopDetector: (options?: LoopDetectionOptions) => {
       const id = `detector-${loopDetectorIdCounter++}`;

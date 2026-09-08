@@ -306,6 +306,17 @@ const combined = combineToolboxes(base, adminTools);
 // Same merge rules, useful when combining many toolboxes at once.
 ```
 
+`combineToolboxes` also forwards the **first** toolbox's own options — `policy`
+(including any `needs_approval` `beforeExecute` hook), `approvalPolicy`,
+`approvalSecret`, `approvalStateStore`, `grantStateStore`, and everything else
+`ToolboxOptions` carries — into the combined toolbox, exactly the way
+`extend()` already forwards its own options into an extended toolbox.
+Combining is not a merge of approval configuration across toolboxes: only the
+first toolbox's approval gating and reusable-grant matching governs calls to
+the combined toolbox. This matters whenever you graft extra tools onto a
+toolbox that already gates calls behind approval — the combined toolbox must
+keep gating them, not silently drop the policy.
+
 ## Safety and Policy
 
 Use policy hooks to block or gate risky actions before execution.

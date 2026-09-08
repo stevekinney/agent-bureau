@@ -32,7 +32,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { type GenerateFunction, stopWhen } from '@lostgradient/operative';
-import { createTool, createToolbox, type Toolbox } from 'armorer';
+import {
+  createProcessLocalGrantStateStore,
+  createTool,
+  createToolbox,
+  type Toolbox,
+} from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
@@ -432,6 +437,165 @@ describe('a run recovered mid-step whose replay reaches requestHumanInput actual
     } finally {
       await bureauA.dispose();
       await bureauB.dispose();
+    }
+  });
+});
+
+// AB-362 — regression coverage for `combineToolboxes` dropping the base
+// toolbox's `policy`, `approvalSecret`, `approvalStateStore`, and
+// `grantStateStore` when `wireDurableOptInTools` grafts the durable
+// `requestHumanInput`/`scheduleWakeup` tools onto a run's toolbox (AB-336).
+// Before the fix, a run opting into `humanInput: true` alongside a
+// `needs_approval`-gated tool skipped capability-approval AND
+// reusable-grant matching entirely: the tool executed immediately, no
+// pending review was ever created, and a matching grant never got the
+// chance to short-circuit anything because there was nothing to
+// short-circuit. These two tests exercise the fix through Bureau's public
+// surface exactly as a durable `humanInput` run would.
+describe("combineToolboxes forwards the base toolbox's approval gating to a humanInput run (AB-362)", () => {
+  /**
+   * Grant matching (AB-46, AB-346) is wired inside armorer's `mergePolicies`
+   * `approvalPolicy` branch, ahead of `evaluateCapabilityApproval`'s `ask`
+   * outcome — so, unlike some of this file's other fixtures, this one uses
+   * `approvalPolicy: { mode: 'always' }` rather than a bespoke
+   * `policy.beforeExecute` hook, so a call actually reaches the
+   * grant-matching check once combined with the humanInput toolbox.
+   */
+  function createGrantMatchableToolbox(
+    approvalSecret: string,
+    charges: number[],
+    grantStateStore?: ReturnType<typeof createProcessLocalGrantStateStore>,
+  ): Toolbox {
+    return createToolbox(
+      [
+        createTool({
+          name: 'charge-card',
+          version: '1.0.0',
+          description: 'Charge a payment card',
+          input: z.object({ cents: z.number() }),
+          async execute({ cents }) {
+            charges.push(cents);
+            return { charged: cents };
+          },
+        }),
+      ],
+      {
+        approvalSecret,
+        approvalPolicy: { mode: 'always' },
+        ...(grantStateStore ? { grantStateStore } : {}),
+      },
+    ) as unknown as Toolbox;
+  }
+
+  function createChargeGenerate(): GenerateFunction {
+    let calls = 0;
+    return async () => {
+      calls += 1;
+      return calls === 1
+        ? {
+            content: '',
+            toolCalls: [{ id: 'call-1', name: 'charge-card', arguments: { cents: 4200 } }],
+          }
+        : { content: 'ok', toolCalls: [] };
+    };
+  }
+
+  it('a needs_approval tool call on a humanInput run produces a pending review and does not execute', async () => {
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createChargeGenerate(),
+      toolbox: createGrantMatchableToolbox('humaninput-no-grant-secret', charges),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+
+      await waitForCondition(
+        () => bureau.listPendingReviews().some((review) => review.runId === run.id),
+        'expected the needs_approval tool call to produce a pending review',
+      );
+
+      expect(charges).toEqual([]);
+      const reviews = bureau.listPendingReviews();
+      expect(reviews).toHaveLength(1);
+      const [review] = reviews;
+      expect(review?.kind).toBe('tool-approval');
+      if (review?.kind !== 'tool-approval') throw new Error('unreachable');
+      expect(review.approval.toolName).toBe('charge-card');
+
+      // Approving resumes the call — proving the review this run produced
+      // was a genuine, resumable armorer approval, not a coincidental stall.
+      const result = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'test-operator',
+      });
+      expect(result.decision).toBe('approve');
+      expect(charges).toEqual([4200]);
+    } finally {
+      bureau.dispose();
+    }
+  });
+
+  it('a matching reusable grant short-circuits the needs_approval policy on a humanInput run, consuming the grant', async () => {
+    const charges: number[] = [];
+    const approvalSecret = 'humaninput-grant-match-secret';
+    const grantStateStore = createProcessLocalGrantStateStore();
+    const decrementCalls: string[] = [];
+    const observedGrantStateStore: typeof grantStateStore = {
+      ...grantStateStore,
+      decrementUse: async (id: string) => {
+        decrementCalls.push(id);
+        return grantStateStore.decrementUse(id);
+      },
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createChargeGenerate(),
+      toolbox: createGrantMatchableToolbox(approvalSecret, charges, observedGrantStateStore),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+      stopWhen: stopWhen.toolOutcome('action_required'),
+    });
+
+    try {
+      const principal = 'humaninput-grant-principal';
+      const grant = await bureau.issueGrant({
+        principalId: principal,
+        tenantId: 'bureau',
+        ownerId: 'bureau',
+        agentId: 'bureau',
+        toolName: 'charge-card',
+        scope: 'principal',
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        maxUses: 1,
+        delegationBehavior: 'does-not-propagate',
+      });
+
+      const run = await bureau.createRun({ message: 'Charge the customer', principal });
+
+      await waitForCondition(() => charges.length > 0, 'expected the tool call to execute');
+
+      expect(charges).toEqual([4200]);
+      expect(bureau.listPendingReviews().filter((review) => review.runId === run.id)).toHaveLength(
+        0,
+      );
+      // Proof the grant was actually consumed by the combined toolbox
+      // (armorer's own `grant.used` toolbox event, which bureau does not
+      // forward): the SAME grantStateStore reference `combineToolboxes`
+      // must carry through was decremented.
+      expect(decrementCalls).toEqual([grant.id]);
+      const [stored] = await grantStateStore.list();
+      expect(stored?.usesRemaining).toBe(0);
+    } finally {
+      bureau.dispose();
     }
   });
 });

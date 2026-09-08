@@ -321,67 +321,84 @@ describe('grants routes', () => {
   });
 });
 
-// ── AB-346 follow-up: `combineToolboxes` and durable opt-in tools ────────
+// ── AB-346 follow-up, fixed by AB-362: `combineToolboxes` and durable
+// opt-in tools ────────────────────────────────────────────────────────────
 //
 // AB-346's checkpoint comment (2026-09-04) flagged that `combineToolboxes`
 // (used by `wireDurableOptInTools` to graft the `requestHumanInput`/
-// `scheduleWakeup` tools onto a run's toolbox) rebuilds a fresh toolbox via
+// `scheduleWakeup` tools onto a run's toolbox) rebuilt a fresh toolbox via
 // `createToolbox(configurations, { context })`, forwarding only `context` —
-// see `combine-toolboxes.ts`. This test drives a real durable run
-// (`humanInput: true`) that also carries a `needs_approval` tool, and
-// records what actually happens against the gateway route surface this
-// issue owns, per the coordinator's instruction to report rather than
-// widen scope. It deliberately issues NO grant at all (a review finding on
-// this pull request: an earlier version of this test issued a matching
-// grant, which would silently stop detecting the `policy`-dropping
-// regression — and start passing for the WRONG reason — the moment AB-362
-// restores grant-matching without also restoring the policy hook itself).
-//
-// FINDING (reported on AB-347, not fixed here — this is `combineToolboxes`'/
-// `wireDurableOptInTools`'s own gap in `packages/armorer`/`packages/bureau`,
-// out of this gateway-only issue's scope): the gap is broader than AB-346's
-// checkpoint anticipated. `combineToolboxes` forwards neither `approvalSecret`
-// nor `grantStateStore` NOR the toolbox's `policy` (the `beforeExecute`
-// `needs_approval` hook itself) into the combined toolbox it builds. The
-// result is not "the grant fails to match and the ordinary ask pipeline
-// runs" (grants degrading safely to their documented absent-is-safe
-// behavior) — it is that EVERY tool call on a run that opts into durable
-// `humanInput`/`wakeup` tools skips capability-approval and grant-matching
-// alike, unconditionally, whether or not a grant exists. Confirmed in
-// isolation with no grant issued at all: the same `needs_approval` tool
-// still executes immediately. This is a live security-relevant regression,
-// not a grant-matching edge case, and is tracked as AB-362 against
-// `packages/armorer/src/combine-toolboxes.ts` /
-// `packages/bureau/src/runtime-composition.ts`'s `wireDurableOptInTools`.
-// This test is intentionally pending on AB-362: it locks in and documents
-// the current (broken) behavior so the suite breaks loudly, forcing an
-// update, once AB-362 lands a fix.
-describe('grants routes — durable opt-in tools (AB-346 follow-up, gap tracked as AB-362)', () => {
-  it('documents that a run opting into durable tools skips its needs_approval policy entirely, independent of any grant (pending AB-362)', async () => {
-    const charges: number[] = [];
-    const generate: GenerateFunction = async (context) =>
+// see `combine-toolboxes.ts`. The gap was broader than that checkpoint
+// anticipated: `combineToolboxes` forwarded neither `approvalSecret` nor
+// `grantStateStore` NOR the toolbox's `policy` (the capability-approval
+// hook itself) into the combined toolbox it built, so EVERY tool call on a
+// run that opted into durable `humanInput`/`wakeup` tools skipped
+// capability-approval and grant-matching alike, unconditionally, whether
+// or not a grant existed. AB-362 fixed the primitive in
+// `packages/armorer/src/combine-toolboxes.ts`: it now forwards the first
+// toolbox's `policy`, `approvalSecret`, `approvalStateStore`, and
+// `grantStateStore`, the same way `Toolbox.extend()` already does. These
+// two tests replace the single test that used to document the gap: the
+// first proves a durable run's `needs_approval` policy survives
+// combination with no grant issued; the second proves a matching reusable
+// grant still short-circuits it once combined.
+describe('grants routes — durable opt-in tools (AB-346 follow-up, fixed by AB-362)', () => {
+  /**
+   * Grant matching (AB-46, AB-346) is wired inside `mergePolicies`'s
+   * `approvalPolicy` branch, ahead of `evaluateCapabilityApproval`'s `ask`
+   * outcome (`packages/armorer/src/create-toolbox.ts`) — unlike
+   * `createNeedsApprovalToolbox` above, this fixture uses `approvalPolicy:
+   * { mode: 'always' }` rather than a bespoke `policy.beforeExecute` hook,
+   * so a call actually reaches the grant-matching check.
+   */
+  function createGrantMatchableToolbox(approvalSecret: string, charges: number[]): Toolbox {
+    return createToolbox(
+      [
+        createTool({
+          name: 'charge-card',
+          version: '1.0.0',
+          description: 'Charge a payment card',
+          input: z.object({ cents: z.number() }),
+          async execute({ cents }) {
+            charges.push(cents);
+            return { charged: cents };
+          },
+        }),
+      ],
+      {
+        approvalSecret,
+        approvalPolicy: { mode: 'always' },
+      },
+    ) as unknown as Toolbox;
+  }
+
+  function createDurableChargeGenerate(): GenerateFunction {
+    return async (context) =>
       context.step === 0
         ? {
             content: '',
             toolCalls: [{ id: 'call-durable-1', name: 'charge-card', arguments: { cents: 4200 } }],
           }
         : { content: 'ok', toolCalls: [] };
+  }
+
+  it("keeps a durable run's needs_approval policy in effect: no grant means a pending review and the tool does not execute", async () => {
+    const charges: number[] = [];
 
     const bureau = await createBureau({
       agents: {},
-      generate,
-      toolbox: createNeedsApprovalToolbox('durable-grant-secret', charges),
+      generate: createDurableChargeGenerate(),
+      toolbox: createGrantMatchableToolbox('durable-grant-secret-no-match', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
       storage: { type: 'memory' },
       durableExecution: true,
       humanInput: true,
     });
-    const gateway = await createTestGateway(bureau, { authToken: 'durable-grant-token' });
-    const authorization = { authorization: 'Bearer durable-grant-token' };
+    const gateway = await createTestGateway(bureau, { authToken: 'durable-grant-token-no-match' });
+    const authorization = { authorization: 'Bearer durable-grant-token-no-match' };
 
-    // No grant is issued here — see the module comment above the
-    // `describe` block for why proving the tool still executes with NO
-    // grant at all is the stronger, regression-resistant assertion.
+    // No grant is issued — the ordinary `ask` pipeline must still gate this
+    // call through combineToolboxes.
     const createResponse = await requestJSON(gateway, '/api/v1/runs', {
       method: 'POST',
       headers: authorization,
@@ -391,14 +408,47 @@ describe('grants routes — durable opt-in tools (AB-346 follow-up, gap tracked 
     await waitForRunState(gateway.bureau, createdRun.id);
 
     await waitForCondition(
-      () => charges.length > 0 || gateway.bureau.listPendingReviews().length > 0,
-      'expected either the tool call to execute or a pending review to appear',
+      () => gateway.bureau.listPendingReviews().length > 0,
+      'expected a pending review to appear',
     );
 
-    // See the FINDING above the `describe` block: the tool executes
-    // immediately (no review is ever created) with NO grant issued —
-    // `combineToolboxes` drops the toolbox's `policy` (the
-    // `needs_approval` hook) entirely for this run, independent of grants.
+    expect(charges).toEqual([]);
+    expect(gateway.bureau.listPendingReviews()).toHaveLength(1);
+  });
+
+  it("lets a matching reusable grant short-circuit a durable run's needs_approval policy", async () => {
+    const charges: number[] = [];
+    const approvalSecret = 'durable-grant-secret-match';
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createDurableChargeGenerate(),
+      toolbox: createGrantMatchableToolbox(approvalSecret, charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      storage: { type: 'memory' },
+      durableExecution: true,
+      humanInput: true,
+    });
+    const gateway = await createTestGateway(bureau, { authToken: 'durable-grant-token-match' });
+    const authorization = { authorization: 'Bearer durable-grant-token-match' };
+
+    const grantResponse = await requestJSON(gateway, '/api/v1/grants', {
+      method: 'POST',
+      headers: authorization,
+      body: JSON.stringify(validGrantBody()),
+    });
+    expect(grantResponse.status).toBe(201);
+
+    const createResponse = await requestJSON(gateway, '/api/v1/runs', {
+      method: 'POST',
+      headers: authorization,
+      body: JSON.stringify({ message: 'Charge the customer' }),
+    });
+    const createdRun = await createResponse.json();
+    await waitForRunState(gateway.bureau, createdRun.id);
+
+    await waitForCondition(() => charges.length > 0, 'expected the tool call to execute');
+
     expect(charges).toEqual([4200]);
     expect(gateway.bureau.listPendingReviews()).toHaveLength(0);
   });
