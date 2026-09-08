@@ -72,6 +72,7 @@ import type {
 import type { Subscription } from '@lostgradient/operative/liveness';
 import {
   createFleetEventFeed,
+  type Cursor,
   type FleetEventEnvelope,
   type FleetEventFeed,
 } from '@lostgradient/weft/server/handler';
@@ -111,6 +112,21 @@ export interface DurableEventHistoryPageOptions {
    * authorization concern, rather than a second parameter.
    */
   principal?: string;
+}
+
+/**
+ * A resumable point-in-time view of which `run`-owner ids the fleet feed's
+ * current retention floor still has at least one durable event for, as
+ * returned by {@link DurableEventHistory.retainedRunOwnerIds}. `cursor` is
+ * opaque — pass the WHOLE snapshot back to
+ * {@link DurableEventHistory.refreshRetainedRunOwnerIds} to extend it
+ * cheaply rather than re-scanning from scratch. See AB-363's
+ * `pruneStaleRunOwnership` (`create-bureau.ts`) for the caller.
+ */
+export interface RetainedRunOwnerSnapshot {
+  readonly ownerIds: ReadonlySet<string>;
+  /** Resume point for `feed.replay({ fromCursor: cursor })`. `undefined` means "replay from the start". */
+  readonly cursor: Cursor | undefined;
 }
 
 /** Options for {@link DurableEventHistory.subscribeEventHistory}. */
@@ -195,8 +211,7 @@ export interface DurableEventHistory {
    * replay of the currently-retained window, not one `page()` call per
    * candidate run: `feed.replay()` with no cursor already walks exactly
    * the retained records once (Weft's own `retain()` pays the same cost),
-   * so this collects every survivor's owner in one pass rather than
-   * re-scanning the feed once per run.
+   * so this collects every survivor's owner in one pass.
    *
    * Returns `undefined` when the floor is still 0 — nothing has been
    * retired yet, so nothing can be "entirely below" it, and an
@@ -206,8 +221,55 @@ export interface DurableEventHistory {
    * `retain()` never runs on its own — nothing in this codebase calls it
    * yet — so in practice this returns `undefined` until an operator or a
    * future retention driver advances the floor.
+   *
+   * This is the EXPENSIVE, from-scratch call — use it once, at the start
+   * of a pruning pass, to obtain a {@link RetainedRunOwnerSnapshot}. Every
+   * later revalidation within the SAME pass (immediately before each
+   * session's write, per Codex review PR #568's "Revalidate retained
+   * owners before pruning") must go through
+   * {@link refreshRetainedRunOwnerIds} instead, passing this snapshot
+   * back — see that function's doc comment for why (PR #568, "Avoid
+   * replaying the full fleet feed per candidate session").
    */
-  retainedRunOwnerIds(): Promise<Set<string> | undefined>;
+  retainedRunOwnerIds(): Promise<RetainedRunOwnerSnapshot | undefined>;
+  /**
+   * Cheaply extends a {@link RetainedRunOwnerSnapshot} to reflect any
+   * durable event appended to the feed since it was taken, WITHOUT
+   * rescanning the records the snapshot already walked.
+   *
+   * `pruneStaleRunOwnership` (`create-bureau.ts`) revalidates immediately
+   * before every session's write, and again on every optimistic-
+   * concurrency retry — a correctness requirement (PR #568, "Revalidate
+   * retained owners before pruning": a run can complete and its terminal
+   * event become pageable entirely within the time this function's
+   * caller spends paging through other sessions). Re-running
+   * {@link retainedRunOwnerIds} for that check would replay the ENTIRE
+   * retained window once per candidate session (and again per retry),
+   * turning one maintenance pass into O(candidate sessions × retained
+   * events) storage reads (PR #568, "Avoid replaying the full fleet feed
+   * per candidate session").
+   *
+   * Instead, this resumes `feed.replay()` from `snapshot.cursor` — the
+   * position the previous call (either `retainedRunOwnerIds` or this same
+   * function) stopped at — so it only reads records appended since then.
+   * In the common case (nothing new happened between two calls in the
+   * same pass) that is zero storage reads. It reads the SAME shared feed
+   * every other write goes through, so it also observes a write committed
+   * by another Bureau instance in the interim, not only this process's
+   * own in-flight writes.
+   *
+   * The floor is monotonically non-decreasing once it has left 0 (nothing
+   * un-retires a record), so a snapshot obtained while the floor was
+   * already > 0 never needs re-checking for floor-0; this never returns
+   * `undefined`. Never rescans anything before `snapshot.cursor` — an
+   * owner already retired between the two calls (the floor having
+   * advanced past it) is NOT removed from the returned set. That is
+   * deliberately the same "safe to be wrong" direction as the rest of
+   * this pruning pass: treating an already-retired run as still retained
+   * costs one extra no-op write this cycle and leaves it for the next
+   * one; it never causes an incorrect deletion.
+   */
+  refreshRetainedRunOwnerIds(snapshot: RetainedRunOwnerSnapshot): Promise<RetainedRunOwnerSnapshot>;
   /** Releases the underlying `FleetEventFeed`. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -523,28 +585,55 @@ export function createDurableEventHistory(
     return subscription;
   }
 
-  async function retainedRunOwnerIds(): Promise<Set<string> | undefined> {
-    const floor = await feed.snapshotRetentionFloor();
-    if (floor === 0) return undefined;
-
-    const owners = new Set<string>();
-    // No `since`/`fromCursor`: this walks every record the feed currently
-    // retains, exactly once. A record at or before the floor never
-    // appears here (weft's own `retain()` already deleted it) — we don't
-    // decode the stored payload at all (unlike `page()`), since only the
-    // envelope's `workflowId` is needed and a corrupt/unrecognized
-    // `schemaVersion` on some OTHER owner's record must never stop this
-    // scan.
-    for await (const envelope of feed.replay()) {
+  /**
+   * Shared scan body for both `retainedRunOwnerIds` and
+   * `refreshRetainedRunOwnerIds`: resumes `feed.replay()` from
+   * `fromCursor` (or the very start, when `undefined`), adding every `run`
+   * owner it walks to `owners` (mutated and returned in place — callers
+   * pass a fresh `Set` or a copy of a prior snapshot's, never the
+   * snapshot's own `ReadonlySet` reference). We don't decode the stored
+   * payload at all (unlike `page()`), since only the envelope's
+   * `workflowId` is needed and a corrupt/unrecognized `schemaVersion` on
+   * some OTHER owner's record must never stop this scan. `cursor` is
+   * captured from EVERY envelope, including one with no `workflowId`
+   * (e.g. the internal `fleet:gap` marker) — the resume point must
+   * advance regardless of whether that particular record named an owner.
+   */
+  async function scanRunOwnerIdsFrom(
+    owners: Set<string>,
+    fromCursor: Cursor | undefined,
+  ): Promise<RetainedRunOwnerSnapshot> {
+    let cursor = fromCursor;
+    for await (const envelope of feed.replay(fromCursor === undefined ? {} : { fromCursor })) {
+      cursor = envelope.cursor;
       const workflowId = envelope.workflowId;
-      if (workflowId === undefined) continue; // e.g. the internal `fleet:gap` marker
+      if (workflowId === undefined) continue;
       const separator = workflowId.indexOf(':');
       if (separator < 0) continue;
       const ownerKind = workflowId.slice(0, separator);
       if (ownerKind !== 'run') continue;
       owners.add(workflowId.slice(separator + 1));
     }
-    return owners;
+    return { ownerIds: owners, cursor };
+  }
+
+  async function retainedRunOwnerIds(): Promise<RetainedRunOwnerSnapshot | undefined> {
+    const floor = await feed.snapshotRetentionFloor();
+    if (floor === 0) return undefined;
+
+    // No `fromCursor`: this walks every record the feed currently retains,
+    // exactly once. A record at or before the floor never appears here
+    // (weft's own `retain()` already deleted it).
+    return scanRunOwnerIdsFrom(new Set(), undefined);
+  }
+
+  async function refreshRetainedRunOwnerIds(
+    snapshot: RetainedRunOwnerSnapshot,
+  ): Promise<RetainedRunOwnerSnapshot> {
+    // The floor is monotonically non-decreasing once above 0, so a
+    // snapshot taken while it was already > 0 never needs a fresh
+    // floor === 0 check here.
+    return scanRunOwnerIdsFrom(new Set(snapshot.ownerIds), snapshot.cursor);
   }
 
   function dispose(): Promise<void> {
@@ -552,7 +641,14 @@ export function createDurableEventHistory(
     return Promise.resolve();
   }
 
-  return { record, page, subscribeEventHistory, retainedRunOwnerIds, dispose };
+  return {
+    record,
+    page,
+    subscribeEventHistory,
+    retainedRunOwnerIds,
+    refreshRetainedRunOwnerIds,
+    dispose,
+  };
 }
 
 // ── Producer wiring (AB-311) ────────────────────────────────────────

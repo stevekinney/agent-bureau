@@ -474,6 +474,52 @@ describe('createSessionStore', () => {
     expect(loaded!.updatedAt).not.toBe('2025-01-01T00:00:00.000Z');
   });
 
+  it('preserves updatedAt when update() is called with refreshActivity: false', async () => {
+    const runtime = createManualRuntimeServices({ origin: '2024-01-03T00:00:00.000Z' });
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    const session = makeSession({
+      id: 'no-refresh-session',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    });
+    await store.save(session);
+    const savedUpdatedAt = (await store.load(session.id))!.updatedAt;
+
+    // Advance the manual clock so a refreshing write WOULD read back
+    // differently — proving this update genuinely skipped the refresh
+    // rather than merely landing at the same instant.
+    await runtime.advance(60_000);
+
+    await store.update(
+      session.id,
+      (current) => (current ? { ...current, agentName: 'renamed-agent' } : undefined),
+      { refreshActivity: false },
+    );
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.agentName).toBe('renamed-agent');
+    expect(loaded!.updatedAt).toBe(savedUpdatedAt);
+  });
+
+  it('still refreshes updatedAt on a default update() call (refreshActivity defaults to true)', async () => {
+    const runtime = createManualRuntimeServices({ origin: '2024-01-03T00:00:00.000Z' });
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    const session = makeSession({
+      id: 'default-refresh-session',
+      updatedAt: '2025-01-01T00:00:00.000Z',
+    });
+    await store.save(session);
+    const savedUpdatedAt = (await store.load(session.id))!.updatedAt;
+
+    await runtime.advance(60_000);
+
+    await store.update(session.id, (current) =>
+      current ? { ...current, agentName: 'renamed-agent' } : undefined,
+    );
+
+    const loaded = await store.load(session.id);
+    expect(loaded!.updatedAt).not.toBe(savedUpdatedAt);
+  });
+
   it('load returns undefined for nonexistent session', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const loaded = await store.load('does-not-exist');

@@ -51,12 +51,23 @@ export interface SessionStore {
   /**
    * Load the latest session and persist the updater result with optimistic
    * concurrency. Returning undefined leaves the session unchanged.
+   *
+   * `options.refreshActivity` (default `true`) controls whether a
+   * successful write stamps a fresh `updatedAt`. Pass `false` for a write
+   * that must not read as session activity — `listSessions()` sorts by
+   * `updatedAt` by default and `cleanup({ olderThan })` uses the same field
+   * as its age cutoff, so an ordinary content update refreshing it is
+   * correct, but a background maintenance write (pruning stale metadata,
+   * for example) must not reorder or resurrect an otherwise-inactive
+   * session purely by touching it (AB-363, Codex review PR #568, "Avoid
+   * refreshing session activity during retention pruning").
    */
   update(
     id: string,
     updater: (
       session: AgentSession | undefined,
     ) => AgentSession | undefined | Promise<AgentSession | undefined>,
+    options?: { refreshActivity?: boolean },
   ): Promise<AgentSession | undefined>;
 
   /** Load a session by id. Returns undefined when no session exists. */
