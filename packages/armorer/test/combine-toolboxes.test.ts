@@ -315,10 +315,63 @@ describe('combineToolboxes', () => {
     // Forwarding the first toolbox's approval configuration must not mean
     // handing any caller holding `combined` a way to read the secret back
     // off it — the approval policy still applies (proven by the previous
-    // test), but the secret itself stays out of the public object.
+    // test), but the secret itself stays out of the public object. This
+    // covers every reflection surface a caller could use, not just
+    // `Object.keys()`: a non-enumerable symbol-keyed property is still
+    // discoverable via `Object.getOwnPropertySymbols()` (an earlier
+    // version of this fix relied on exactly that and was correctly
+    // flagged in review), so this also asserts there are no OWN symbol
+    // properties on the object at all.
     expect(Object.keys(combined)).not.toContain('getOptions');
     expect(Object.keys(combined)).not.toContain('approvalSecret');
+    expect(Object.getOwnPropertyNames(combined)).not.toContain('approvalSecret');
+    expect(Object.getOwnPropertySymbols(combined)).toEqual([]);
     expect(JSON.stringify(combined)).not.toContain('combine-toolboxes-secret-not-public');
+  });
+
+  it("still forwards approval gating when the first toolbox is wrapped in a transparent Proxy (AB-362 review finding, matches Bureau's withDefaultToolboxRequestContext)", async () => {
+    const gated = createToolbox(
+      [
+        createTool({
+          name: 'gated',
+          description: 'requires approval',
+          version: '1.0.0',
+          input: z.object({}),
+          execute: async () => 'executed',
+        }),
+      ],
+      {
+        approvalSecret: 'combine-toolboxes-proxy-secret',
+        policy: { beforeExecute: () => ({ status: 'needs_approval' as const }) },
+      },
+    );
+    // The exact wrapping shape `packages/bureau/src/runtime-composition.ts`'s
+    // `withDefaultToolboxRequestContext` uses: a pass-through `Proxy` that
+    // only special-cases one property and forwards everything else —
+    // `execute`, in the real code — via `Reflect.get`.
+    const proxied = new Proxy(gated, {
+      get(target, property, receiver) {
+        if (property === 'tools') return () => target.tools();
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    const other = createToolbox([
+      createTool({
+        name: 'other',
+        description: 'other',
+        input: z.object({}),
+        execute: async () => 'other',
+      }),
+    ]);
+
+    const combined = combineToolboxes(proxied, other);
+
+    const paused = await combined.execute(
+      { id: 'gated-1', name: 'gated', arguments: {} },
+      approvalExecutionOptions,
+    );
+
+    expect(paused.outcome).toBe('action_required');
   });
 
   it("does not re-apply the first toolbox's middleware to already-transformed configurations (AB-362 review finding)", async () => {

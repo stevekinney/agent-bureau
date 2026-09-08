@@ -1,7 +1,6 @@
 import {
   createToolbox,
-  type InternalToolboxOptions,
-  internalToolboxOptionsSymbol,
+  internalToolboxOptionsRegistry,
   type SerializedToolbox,
   type Toolbox,
   type ToolboxContext,
@@ -12,11 +11,6 @@ type ToolboxLike<TTools extends readonly Tool[] = readonly Tool[]> = {
   toJSON: () => SerializedToolbox;
   tools: () => TTools;
   getContext?: () => ToolboxContext;
-};
-
-/** The shape a real armorer-constructed toolbox carries under the symbol key. */
-type WithInternalToolboxOptions = {
-  [internalToolboxOptionsSymbol]?: InternalToolboxOptions;
 };
 
 type ToolsFromToolbox<TBox> = TBox extends ToolboxLike<infer TTools> ? TTools : readonly Tool[];
@@ -34,25 +28,32 @@ type ConcatenateTools<TBoxes extends readonly unknown[]> = TBoxes extends readon
  * - Tools are copied via `toJSON()` and provided to a new immutable toolbox.
  * - If multiple toolboxes define the same tool name, the **last** one wins.
  * - Contexts are shallow-merged in the same order (last one wins on key collisions).
- * - The **first** toolbox's own options — `policy`, `approvalPolicy`,
- *   `approvalSecret`, `approvalStateStore`, `grantStateStore`,
- *   `approvalBindingTtlMs`, `approvalNow`, `approvalNonce`, `readOnly`,
- *   `allowMutation`, `allowDangerous`, and everything else `ToolboxOptions`
- *   carries except `context` and `middleware` — are forwarded into the
- *   combined toolbox, the same way `Toolbox.extend()` already forwards its
- *   own options into an extended toolbox (`create-toolbox.ts`'s `extend()`,
- *   which spreads `{ ...options, ... }`). `middleware` is excluded because
+ * - The **first** toolbox's approval- and toolbox-identity-related options —
+ *   `policy` (including any `needs_approval` `beforeExecute` hook),
+ *   `approvalPolicy`, `approvalSecret`, `approvalStateStore`,
+ *   `grantStateStore`, `approvalBindingTtlMs`, `approvalNow`,
+ *   `approvalNonce`, `policyRevision`, `approvalRevision`,
+ *   `toolboxRevision`, `readOnly`, `allowMutation`, and `allowDangerous` —
+ *   are forwarded into the combined toolbox, the same way `Toolbox.extend()`
+ *   already forwards its own options into an extended toolbox
+ *   (`create-toolbox.ts`'s `extend()`). This is a narrow, explicit
+ *   allowlist (`InternalToolboxOptions` in `create-toolbox.ts`), not every
+ *   option `ToolboxOptions` carries: `middleware` is excluded because
  *   every configuration `toJSON()` returns has already been transformed by
- *   it at registration time; forwarding it here would apply it a second
- *   time to already-transformed input. Combining is not a merge of
- *   approval configuration across toolboxes: only the first toolbox's
- *   approval gating (including any `needs_approval` `policy.beforeExecute`
- *   hook, capability-tier `approvalPolicy`, and reusable-grant matching,
- *   which only ever runs when `approvalPolicy` is configured) governs
- *   calls to the combined toolbox. Losing this silently would mean
- *   approval gating — and any pending review or reusable-grant matching
- *   built on it — disappears for every tool call routed through the
- *   combination (AB-362).
+ *   it at registration time, so forwarding it again would apply it a
+ *   second time to already-transformed input; `signal` is excluded because
+ *   it would tie the combined toolbox's abort listener to a signal it
+ *   never gets a chance to detach from on normal completion, accumulating
+ *   listeners across repeated short-lived combinations under one
+ *   long-lived signal (both AB-362 review findings). Combining is not a
+ *   merge of approval configuration across toolboxes: only the first
+ *   toolbox's approval gating (including any `needs_approval`
+ *   `policy.beforeExecute` hook, capability-tier `approvalPolicy`, and
+ *   reusable-grant matching, which only ever runs when `approvalPolicy`
+ *   is configured) governs calls to the combined toolbox. Losing this
+ *   silently would mean approval gating — and any pending review or
+ *   reusable-grant matching built on it — disappears for every tool call
+ *   routed through the combination (AB-362).
  */
 export function combineToolboxes<const TBoxes extends readonly [ToolboxLike, ...ToolboxLike[]]>(
   ...toolboxes: TBoxes
@@ -70,26 +71,21 @@ export function combineToolboxes<const TBoxes extends readonly [ToolboxLike, ...
   }
 
   const [firstToolbox] = toolboxes;
-  // Reads the first toolbox's approval-related options off a
-  // module-private symbol key, never a public accessor — see
-  // `internalToolboxOptionsSymbol`'s own doc comment in `create-toolbox.ts`
-  // for why (AB-362 review finding: exposing `approvalSecret` on the
-  // public `Toolbox` interface would let any caller holding a toolbox
-  // reference read it straight off the object) and why this must be a
-  // symbol-keyed property rather than a `WeakMap` keyed by the toolbox
-  // instance (a `WeakMap` lookup misses when the toolbox bureau hands in
-  // has been wrapped in a `Proxy`, as `withDefaultToolboxRequestContext`
-  // does — a symbol property survives that because the proxy's `get` trap
-  // forwards unrecognized property reads, symbol keys included, straight
-  // to the underlying target). `firstToolbox` is typed as the minimal
-  // structural `ToolboxLike`, which declares no symbol index signature —
-  // the cast to `WithInternalToolboxOptions` only adds that one optional
-  // symbol-keyed field, so a toolbox this package didn't construct (a
-  // duck-typed `ToolboxLike` from a test double, say) simply reads
-  // `undefined` off it, falling back to `{}` exactly like the removed
-  // optional-method call it replaced.
-  const firstToolboxOptions =
-    (firstToolbox as WithInternalToolboxOptions)[internalToolboxOptionsSymbol] ?? {};
+  // Reads the first toolbox's approval-related options out of a `WeakMap`
+  // keyed by its `toJSON` function reference, never a public accessor —
+  // see `internalToolboxOptionsRegistry`'s own doc comment in
+  // `create-toolbox.ts` for why: exposing `approvalSecret` on the public
+  // `Toolbox` interface, or even as a non-enumerable symbol-keyed property
+  // on the object, would let any caller holding a toolbox reference read
+  // it back off (two separate AB-362 review findings) — a `WeakMap` is the
+  // one mechanism nothing can enumerate its way into without already
+  // holding a reference to the map itself. Keying by `toJSON` (not the
+  // toolbox object) is what survives Bureau wrapping the toolbox in a
+  // transparent `Proxy` before this ever runs. A toolbox this package
+  // didn't construct (a duck-typed `ToolboxLike` from a test double, say)
+  // simply has no registry entry for its `toJSON`, so this falls back to
+  // `{}` exactly like the removed optional-method call it replaced.
+  const firstToolboxOptions = internalToolboxOptionsRegistry.get(firstToolbox.toJSON) ?? {};
 
   const configurations = toolboxes.flatMap((toolbox) => toolbox.toJSON());
   // `createToolbox`'s return type is inferred from the runtime-flattened
