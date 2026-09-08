@@ -2666,6 +2666,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     validateAgentRunInput(input);
     validateBureauRunOptions(runOptions);
 
+    // AB-241 review finding: snapshotted HERE, synchronously, rather than
+    // re-read as `runOptions?.principal` later (at the `persistCatalogRunRecoveryRecord`
+    // call and the direct-branch `createActiveRun` call, both AFTER an
+    // `await`) — `runOptions` is the caller's own object, not a copy, and a
+    // caller who mutates or reuses it once `bureau.run()` has returned
+    // synchronously (but before the awaited resolver settles) could
+    // otherwise have a run started as one principal persist and later
+    // report a DIFFERENT principal as its recovery record and liveness
+    // owner, while `context.principal`/`runAttribution` (both already set
+    // below, before any `await`) stayed correctly pinned to the original.
+    const principal = runOptions?.principal;
+
     const context: AgentRunContext = { agentName: name };
     if (runOptions?.signal) context.signal = runOptions.signal;
     if (runOptions?.traceContext !== undefined) context.traceContext = runOptions.traceContext;
@@ -2675,7 +2687,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // durable branch (below) additionally records it the way `createRun`
     // does, so `eventHistory`'s principal gate sees the same attribution
     // either way.
-    if (runOptions?.principal !== undefined) context.principal = runOptions.principal;
+    if (principal !== undefined) context.principal = principal;
 
     const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
       DefinitionResolvingAgent;
@@ -2694,8 +2706,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // existed would otherwise be a permanent phantom. A run that DOES
       // dispatch and settle keeps its attribution indefinitely (see
       // `trackCatalogRun`'s own doc comment) — it is not cleaned up here.
-      if (runOptions?.principal !== undefined) {
-        runAttribution.set(runId, { agentName: name, principal: runOptions.principal });
+      if (principal !== undefined) {
+        runAttribution.set(runId, { agentName: name, principal });
       }
       // Captured so the wrapper below can forward an abort straight to the
       // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
@@ -2823,7 +2835,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // resumed resolver's rebuilt `AgentRunContext` carried no
           // `principal`, and `runAttribution` (in-memory only) started
           // empty on the new process.
-          ...(runOptions?.principal !== undefined ? { principal: runOptions.principal } : {}),
+          ...(principal !== undefined ? { principal } : {}),
         });
         const activeRun = createActiveRun(
           resolvedOptions,
@@ -2836,7 +2848,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // AB-241 — thread the caller-supplied principal into
           // `LivenessSnapshot.owner`, matching `createRunFromRequest`'s own
           // `request.principal !== undefined ? { owner: request.principal } : undefined`.
-          runOptions?.principal !== undefined ? { owner: runOptions.principal } : undefined,
+          principal !== undefined ? { owner: principal } : undefined,
         );
         dispatchedActiveRun = activeRun;
         if (cancellationRequested) {
