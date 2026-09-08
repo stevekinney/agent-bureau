@@ -427,13 +427,19 @@ export class BudgetThresholdEvent extends Event {
 }
 
 /**
- * @deprecated AB-231 settled budget-exceeded accounting through
- * `RunCompletedEvent`'s `finishReason: 'budget-exceeded'` rather than a
- * dispatched event. Nothing in `packages/operative/src` constructs or
- * dispatches this event, so a subscriber never receives it. Read
- * `event.finishReason === 'budget-exceeded'` on `run.completed` instead.
- * This class and its `OperativeEventClassMap` entry are removed in the
- * next major.
+ * @deprecated AB-231 settled budget-exceeded accounting through a
+ * `run.completed` event whose `finishReason` is `'budget-exceeded'`,
+ * rather than a dispatched event. Nothing in `packages/operative/src`
+ * constructs or dispatches this event, so a subscriber never receives it.
+ * Check `event.finishReason === 'budget-exceeded'` on `run.completed`
+ * instead — but only a thrown `BudgetExceededError` reaches that
+ * `finishReason` (e.g. armorer's toolbox budget rejection, reclassified in
+ * `errors.ts`). A caller using {@link createCostBudgetMonitor}'s
+ * `stopCondition` directly does NOT get `'budget-exceeded'`: exceeding the
+ * budget there resolves with `finishReason: 'stop-condition'` instead, so
+ * that caller should keep observing `CostBudgetOptions.onExceeded`, not
+ * this `finishReason`. This class and its `OperativeEventClassMap` entry
+ * are removed in the next major.
  */
 export class BudgetExceededEvent extends Event {
   static readonly type = 'budget.exceeded' as const;

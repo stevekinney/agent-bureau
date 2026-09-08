@@ -1062,17 +1062,27 @@ consumers can keep reading the flattened fields. There is no
 ### `BudgetExceededEvent` is deprecated (AB-231, AB-365)
 
 `BudgetExceededEvent` (`budget.exceeded`) and its `OperativeEventClassMap`
-entry are `@deprecated`. AB-231 settled budget-exceeded accounting through
-`RunCompletedEvent`'s `finishReason: 'budget-exceeded'` rather than a
-dispatched event, so `BudgetExceededEvent` has never had a production
-dispatch site in `packages/operative/src` — a subscriber cannot observe it.
-The class and its map entry stay exported for this minor to avoid a breaking
-removal; they are removed in the next major. New code should read
-`RunCompletedEvent.finishReason === 'budget-exceeded'` (or the equivalent
-field on `RunResult`) instead of listening for `budget.exceeded`. This does
-not affect armorer's distinct `ToolboxBudgetExceededEvent`
-(`toolbox.budget-exceeded`), which has its own real production emitter and
-is unrelated to this deprecation.
+entry are `@deprecated`. AB-231 settled budget-exceeded accounting through a
+`run.completed` event whose `finishReason` is `'budget-exceeded'`, rather
+than a dedicated dispatched event, so `BudgetExceededEvent` has never had a
+production dispatch site in `packages/operative/src` — a subscriber cannot
+observe it. The class and its map entry stay exported for this minor to
+avoid a breaking removal; they are removed in the next major. New code
+should check `event.finishReason === 'budget-exceeded'` on a `run.completed`
+event (or the equivalent field on `RunResult`) instead of listening for
+`budget.exceeded`.
+
+That `finishReason` value is reached only through a thrown
+`BudgetExceededError` — today, armorer's toolbox budget rejection is
+reclassified into one (see `errors.ts`'s `toRunError`). A caller using
+`createCostBudgetMonitor`'s `stopCondition` directly does NOT get this
+value: exceeding the budget there resolves the run with
+`finishReason: 'stop-condition'` instead (an ordinary stop condition, not
+the error path), so that caller should keep using `CostBudgetOptions`'s
+`onExceeded` callback to observe budget exhaustion, not this `finishReason`
+check. This does not affect armorer's distinct
+`ToolboxBudgetExceededEvent` (`toolbox.budget-exceeded`), which has its own
+real production emitter and is unrelated to this deprecation.
 
 ### `generate.completed` carries post-guardrail content (AB-302)
 
