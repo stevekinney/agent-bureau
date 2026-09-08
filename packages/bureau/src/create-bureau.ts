@@ -4860,13 +4860,33 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    *    settled. Checking both together means: authority gone AND no write
    *    in flight ⟹ the run's terminal outcome is fully durable, with no
    *    future write this pass could race.
+   *
+   * The retained-owner set itself is REVALIDATED immediately before each
+   * session's write, not read once for the whole pass (Codex review, PR
+   * #568, "Revalidate retained owners before pruning"): a run can
+   * dispatch, complete, and have its terminal event land in the feed
+   * ENTIRELY within the time this function spends paging through other
+   * sessions, which would make a single up-front snapshot stale by the
+   * time this run's own session is reached. `initialRetainedRunIds`
+   * (fetched once) is used only as a cheap, always-safe-to-be-wrong
+   * pre-filter — wrongly treating an already-retained run as a candidate
+   * costs one extra no-op `update()`, and wrongly skipping a genuinely
+   * stale one just leaves it for a later cycle; either way, no incorrect
+   * deletion. The actual deletion inside `update()`'s (possibly
+   * conflict-retried) callback re-fetches `retainedRunOwnerIds()` fresh,
+   * narrowing the staleness window to essentially the storage layer's own
+   * conditional-write retry loop. This does not close a genuinely
+   * cross-process race (another Bureau instance's write, committed after
+   * this process's fresh check but before this write lands) — no primitive
+   * here spans both the fleet feed and the session store in one atomic
+   * operation; see this issue's `followUps`.
    */
   async function pruneStaleRunOwnership(): Promise<void> {
     const sessionStore = runtime.sessionStore;
     if (!eventHistoryInstance || !sessionStore) return;
 
-    const retainedRunIds = await eventHistoryInstance.retainedRunOwnerIds();
-    if (retainedRunIds === undefined) return;
+    const initialRetainedRunIds = await eventHistoryInstance.retainedRunOwnerIds();
+    if (initialRetainedRunIds === undefined) return;
 
     const pageLimit = 100;
     let offset = 0;
@@ -4878,8 +4898,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         const owners = summary.metadata['lastRunOwningPrincipals'];
         if (!isPlainAuthorityRecord(owners)) continue;
 
-        const candidateRunIds = Object.keys(owners).filter((runId) => !retainedRunIds.has(runId));
-        if (candidateRunIds.length === 0) continue;
+        const hasCandidate = Object.keys(owners).some((runId) => !initialRetainedRunIds.has(runId));
+        if (!hasCandidate) continue;
 
         // Read-modify-write against the FRESH session inside `update`
         // (optimistic concurrency, same as every other write to this map),
@@ -4887,11 +4907,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // union-merge (the write path this pass never touches) can add a
         // new entry between the `list()` read and this write, and it must
         // survive. `lastRequestAuthorities` is read from this SAME fresh
-        // session too, for the identical reason.
-        await sessionStore.update(summary.id, (session) => {
+        // session too, for the identical reason. The updater is async so
+        // it can revalidate `retainedRunOwnerIds()` fresh on every attempt
+        // (including a conflict retry), per this function's own doc
+        // comment.
+        await sessionStore.update(summary.id, async (session) => {
           if (!session) return undefined;
           const currentOwners = session.metadata['lastRunOwningPrincipals'];
           if (!isPlainAuthorityRecord(currentOwners)) return undefined;
+
+          const freshRetainedRunIds = await eventHistoryInstance.retainedRunOwnerIds();
+          if (freshRetainedRunIds === undefined) return undefined;
 
           const currentAuthorities = session.metadata['lastRequestAuthorities'];
           const liveOrPendingRunIds = isPlainAuthorityRecord(currentAuthorities)
@@ -4900,8 +4926,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
           const nextOwners = { ...currentOwners };
           let changed = false;
-          for (const runId of candidateRunIds) {
-            if (!(runId in nextOwners)) continue;
+          for (const runId of Object.keys(nextOwners)) {
+            if (freshRetainedRunIds.has(runId)) continue;
             if (liveOrPendingRunIds.has(runId)) continue;
             if (durableEventProducerInstance?.hasActiveWrite({ kind: 'run', id: runId })) continue;
             delete nextOwners[runId];

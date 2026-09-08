@@ -13486,6 +13486,80 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('revalidates the retained-owner set immediately before deleting, not against the whole pass\'s initial snapshot (Codex review, PR #568, "Revalidate retained owners before pruning")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-revalidate-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+
+        const page = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in page) throw new Error('expected a page for the run');
+        const lastEvent = page.events.at(-1);
+        if (!lastEvent) throw new Error('expected at least one durable event');
+
+        // Retire the run's only durable event — a stale candidate per
+        // whatever snapshot the maintenance pass takes BEFORE this point.
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+
+        const sessionStore = bureau.sessionStore;
+        if (!sessionStore) throw new Error('expected a configured session store');
+        const originalUpdate = sessionStore.update.bind(sessionStore);
+        // Simulates "a new durable event for this SAME run lands in the
+        // feed after the pass's initial `retainedRunOwnerIds()` snapshot,
+        // but before this session's write" — the exact staleness window
+        // the review comment names — by appending directly to the shared
+        // fleet feed the instant before the maintenance pass's own write
+        // for this session executes.
+        const updateSpy = spyOn(sessionStore, 'update').mockImplementationOnce(
+          async (id: string, updater: Parameters<typeof originalUpdate>[1]) => {
+            await adminFeed.append({
+              kind: 'review.approved',
+              workflowId: `run:${run.id}`,
+              emittedAtMs: 0,
+              payload: {},
+            });
+            return originalUpdate(id, updater);
+          },
+        );
+
+        try {
+          await bureau.runDurableMaintenance();
+        } finally {
+          updateSpy.mockRestore();
+          adminFeed.dispose();
+          adminStorage[Symbol.dispose]();
+        }
+
+        const session = await bureau.getSession(run.sessionId);
+        // The run was a candidate per whatever snapshot the pass started
+        // with — but a FRESH recheck immediately before the write sees the
+        // newly-landed event and correctly treats the run as still
+        // retained, so its ownership entry survives.
+        expect(session?.metadata['lastRunOwningPrincipals']).toEqual({ [run.id]: 'alice' });
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('deleteSession aborts every run it owns (AB-207)', () => {
