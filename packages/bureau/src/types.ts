@@ -291,10 +291,42 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * AB-64's decision record, `## AB-15 and AB-22 boundaries (AC9)`.
    */
   modelPolicy?: BureauModelPolicyOptions;
+  /**
+   * @deprecated Agent-owned. Configure `generate` on the agent passed to
+   * `createAgent` instead and dispatch it through {@link Bureau.run}. Not yet
+   * removed — see AB-242's decision record and the removal issue it names
+   * (AB-352).
+   */
   generate?: GenerateFunction;
+  /**
+   * @deprecated Agent-owned. Resolve the provider into a `GenerateFunction`
+   * and pass it as `generate` on the agent passed to `createAgent` instead,
+   * then dispatch it through {@link Bureau.run}. Not yet removed — see
+   * AB-242's decision record and the removal issue it names (AB-352).
+   */
   provider?: ProviderConfiguration;
+  /**
+   * @deprecated Agent-owned. Resolve the provider fallback into a
+   * `GenerateFunction` and pass it as `generate` on the agent passed to
+   * `createAgent` instead, then dispatch it through {@link Bureau.run}. Not
+   * yet removed — see AB-242's decision record and the removal issue it
+   * names (AB-352).
+   */
   providers?: ProviderRouteConfiguration[];
+  /**
+   * @deprecated Agent-owned. Resolve the routing strategy into a
+   * `GenerateFunction` and pass it as `generate` on the agent passed to
+   * `createAgent` instead, then dispatch it through {@link Bureau.run}. Not
+   * yet removed — see AB-242's decision record and the removal issue it
+   * names (AB-352).
+   */
   routing?: RoutingConfiguration;
+  /**
+   * @deprecated Agent-owned. Configure `toolbox` on the agent passed to
+   * `createAgent` instead and dispatch it through {@link Bureau.run}. Not yet
+   * removed — see AB-242's decision record and the removal issue it names
+   * (AB-352).
+   */
   toolbox?: AnyToolbox;
   store?: Store;
   /**
@@ -363,11 +395,24 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * run with `finishReason: 'tripwire'` rather than substituting a response).
    * Pass a `GuardrailsOptions` to override the preset entirely (input/output
    * detectors, taint, `mode`), or `false` to opt out of guardrails altogether.
+   *
+   * @deprecated Agent-owned. AB-15's end state moves this per-agent onto
+   * `createAgent`, dispatched through {@link Bureau.run}; that field has
+   * not landed on `CreateAgentOptions` yet, which is part of why this stays
+   * deprecated rather than removed — see AB-242's decision record and the
+   * removal issue it names (AB-352).
    */
   guardrails?: GuardrailsOptions | false;
   identity?: IdentityConfiguration;
   /** Host-owned authority check used before durable recovery resumes user code. */
   requestAuthorityValidator?: (context: ToolRequestContext) => boolean | Promise<boolean>;
+  /**
+   * @deprecated Agent-owned. AB-15's end state moves this per-agent onto
+   * `createAgent`, dispatched through {@link Bureau.run}; that field has
+   * not landed on `CreateAgentOptions` yet, which is part of why this stays
+   * deprecated rather than removed — see AB-242's decision record and the
+   * removal issue it names (AB-352).
+   */
   skills?: SkillRuntimeConfiguration;
   streaming?: StreamingConfiguration;
   scheduler?: SchedulerConfiguration;
@@ -414,6 +459,12 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * this option.
    */
   wakeup?: boolean;
+  /**
+   * @deprecated Agent-owned. Configure `stopWhen` on the agent passed to
+   * `createAgent` instead and dispatch it through {@link Bureau.run}. Not yet
+   * removed — see AB-242's decision record and the removal issue it names
+   * (AB-352).
+   */
   stopWhen?: StopCondition | StopCondition[];
   sessionPersistenceRetryDelayMilliseconds?: number;
   sessionPersistenceSleep?: (milliseconds: number) => Promise<void>;
@@ -430,7 +481,19 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * `signal` so it does not itself leak a pending timer/interval.
    */
   shutdownTimeoutSleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  /**
+   * @deprecated Agent-owned. Configure `maximumSteps` on the agent passed to
+   * `createAgent` instead and dispatch it through {@link Bureau.run}. Not yet
+   * removed — see AB-242's decision record and the removal issue it names
+   * (AB-352).
+   */
   maximumSteps?: number;
+  /**
+   * @deprecated Agent-owned. Configure `instructions` on the agent passed to
+   * `createAgent` instead and dispatch it through {@link Bureau.run}. Not yet
+   * removed — see AB-242's decision record and the removal issue it names
+   * (AB-352).
+   */
   systemPrompt?: string;
   /**
    * Opt into OpenTelemetry spans + metrics for durable runs. `true` enables the
@@ -933,6 +996,12 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
     options?: BureauRunOptions,
   ): AgentRunForName<D, TName>;
 
+  /**
+   * @deprecated Use {@link Bureau.run} with a catalog `RunnableAgent` instead
+   * (per-agent `generate`/tools on `createAgent`, and AB-241's `principal`
+   * on `BureauRunOptions` for attribution). Not yet removed — see AB-242's
+   * decision record and the removal issue it names (AB-352).
+   */
   createRun(request: CreateRunRequest): Promise<RunSummary>;
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
   listRuns(status?: string): RunSummary[];
