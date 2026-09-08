@@ -4511,4 +4511,96 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
       context.engine[Symbol.dispose]();
     }
   });
+
+  it('rejects durablyStarted and resolves result with an error RunResult when a toObservable() subscriber throws on run.started, never reaching engine.start (codex P2 PRRT_kwDORvupsc6gXHn4)', async () => {
+    const context = await buildContext();
+    const startCalls: unknown[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+    const subscriberFailure = new Error('observable subscriber exploded on run.started');
+
+    const runId = 'ab-361-observable-throws-on-run-started';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+      },
+    );
+
+    // `CompletableEventTarget.dispatchEvent` (packages/lifecycle/src/completable.ts)
+    // calls every `toObservable()` subscriber directly, unguarded, after the
+    // native dispatch returns — a synchronous throw here propagates straight
+    // out of `startRunLifecycle`'s own `emitter.dispatch(new
+    // RunStartedEvent(...))` call, before `driveDurableRun` ever reaches its
+    // `startError !== undefined` check.
+    activeRun.toObservable().subscribe({
+      next(event) {
+        if (event.type === 'run.started') throw subscriberFailure;
+      },
+    });
+
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
+    expect(activeRun.durablyStarted).rejects.toThrow(
+      'observable subscriber exploded on run.started',
+    );
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect((result.error as Error).message).toBe('observable subscriber exploded on run.started');
+    expect(completed).toHaveLength(1);
+    // The failure happened before `engine.start` was ever reached — never a
+    // durable launch to clean up, mirroring the sibling `onServices`/
+    // `startError` branches' own "never launched" guarantee.
+    expect(startCalls).toEqual([]);
+  });
+
+  it('rejects durablyStarted (never resolves) when a caller-supplied onServices throws a literal undefined, never reaching engine.start (codex P2 PRRT_kwDORvupsc6gXHn8)', async () => {
+    const context = await buildContext();
+    const startCalls: unknown[] = [];
+    const realStart = context.engine.start.bind(context.engine);
+    context.engine.start = async (...args: Parameters<RegistryAgnosticEngine['start']>) => {
+      startCalls.push(args);
+      return realStart(...args);
+    };
+
+    const runId = 'ab-361-on-services-throws-undefined';
+    const activeRun = createDurableActiveRun(
+      { engine: context.engine, checkpointStore: context.checkpointStore },
+      {
+        runId,
+        sessionId: runId,
+        options: runOptions(createMockGenerate([{ content: 'Done.', toolCalls: [] }])),
+        prompt: 'Hello',
+        // Exercises exactly the discriminator gap PRRT_kwDORvupsc6gXHn8
+        // flagged: a caught value of literal `undefined` must still reject
+        // the gate, not be mistaken for a successful settlement.
+        onServices: () => {
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
+          throw undefined;
+        },
+      },
+    );
+
+    const completed: unknown[] = [];
+    activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
+
+    // Before the fix, `settleDurablyStarted(undefined)` treated a caught
+    // `undefined` identically to a plain no-argument success call, so this
+    // assertion is exactly the one that used to fail: `durablyStarted`
+    // resolved instead of rejecting even though no durable write happened.
+    expect(activeRun.durablyStarted).rejects.toThrow();
+    const result = await activeRun.result;
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toBeInstanceOf(Error);
+    expect(completed).toHaveLength(1);
+    expect(startCalls).toEqual([]);
+  });
 });
