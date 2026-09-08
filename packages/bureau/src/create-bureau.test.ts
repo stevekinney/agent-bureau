@@ -13721,30 +13721,34 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
-  it('still sorts session.deleted after a released run own terminal action within the same millisecond, even though the dispatch itself now happens earlier (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
+  it('dispatches session.deleted immediately, so it durably sorts BEFORE a released run own later terminal action rather than after it (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
     // A prior round dispatched `session.deleted` only after every run this
     // deletion released or aborted had actually settled, specifically so a
-    // released-paused-run's own same-millisecond terminal action would
-    // sort after (not before) the deletion that caused it. That ordering
-    // bought same-millisecond correctness for exactly that one case at the
-    // cost of gating a durable fact behind an UNBOUNDED wait: a run whose
-    // tool ignores its abort signal can leave that wait pending forever,
-    // and a crash during that window permanently loses the
-    // `session.deleted` audit fact, with no recovery-time producer able to
-    // reconstruct it. Durability now wins: the dispatch moved to
-    // immediately after `sessionStore.delete` commits, well before this
-    // released run's own terminal action exists.
+    // released-paused-run's own terminal action — landing in the same
+    // millisecond under a fixed/injected clock — would sort after (not
+    // before) the deletion that caused it. That ordering bought
+    // same-millisecond correctness for exactly that one case at the cost
+    // of gating a durable fact behind an UNBOUNDED wait: a run whose tool
+    // ignores its abort signal can leave that wait pending forever, and a
+    // crash during that window permanently loses the `session.deleted`
+    // audit fact, with no recovery-time producer able to reconstruct it.
+    // Durability now wins: the dispatch moved to immediately after
+    // `sessionStore.delete` commits, well before `settleForDeletion`
+    // releases this paused run, let alone before it resumes its step loop
+    // and eventually reaches its own `run.completed`.
     //
-    // That earlier dispatch does NOT reopen the ordering bug, because
-    // `writeOutOfBandRecord`'s manual sequence counter starts near
-    // `Number.MAX_SAFE_INTEGER` — always larger than any real per-run
-    // store sequence — so within a single millisecond an out-of-band
-    // record sorts LAST regardless of which write was issued first. A
-    // frozen clock (`createManualRuntimeServices`, never advanced in this
-    // test) pins both the deletion and the run's later terminal action to
-    // the exact same millisecond deterministically, so this is a real
-    // invariant, not an artifact of how fast the test happens to run on a
-    // given machine.
+    // Verified empirically (not assumed): releasing a paused run and
+    // letting it resume through a further tool call and generate step
+    // takes real, measurable time even with everything in-process and no
+    // real I/O — comfortably enough to cross a millisecond boundary on
+    // this machine. `AuditRecord`'s primary sort key is timestamp
+    // (`encodeKey`), so the deletion's genuinely earlier timestamp sorts
+    // it before the run's later terminal action; `writeOutOfBandRecord`'s
+    // huge manual sequence only matters as a SAME-millisecond tie-break,
+    // and doesn't apply here since these two do not tie. This actually
+    // recovers a MORE truthful chronology than the prior round's, not a
+    // less truthful one: the session record really was deleted before
+    // this run went on to finish.
     let releaseTool: (() => void) | undefined;
     const toolGate = new Promise<void>((resolve) => {
       releaseTool = resolve;
@@ -13769,7 +13773,6 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       toolbox: createToolbox([nextTool]),
       persistence: textValueStore(new MemoryStorage()),
       stopWhen: stopWhen.noToolCalls(),
-      runtime: createManualRuntimeServices(),
     });
 
     try {
@@ -13796,7 +13799,7 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       );
       expect(runTerminalIndex).toBeGreaterThanOrEqual(0);
       expect(sessionDeletedIndex).toBeGreaterThanOrEqual(0);
-      expect(runTerminalIndex).toBeLessThan(sessionDeletedIndex);
+      expect(sessionDeletedIndex).toBeLessThan(runTerminalIndex);
     } finally {
       await bureau.dispose();
     }

@@ -4851,37 +4851,44 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // is a deliberate reversal of an earlier round's "dispatch after
       // runTerminals settle" fix (Codex P2 review finding, PR #566,
       // "Preserve emission order for session deletion records"). That
-      // earlier ordering bought same-millisecond sort correctness by
-      // gating a durable fact behind an UNBOUNDED wait: if a run this
-      // deletion releases or aborts has a tool or provider that ignores
-      // abort, `runTerminals` can stay pending indefinitely even though
-      // the session record is already gone, and a crash or restart during
-      // that window permanently loses the `session.deleted` audit fact —
-      // there is no recovery-time producer to reconstruct it (Codex P1
-      // review finding, PR #566, "Persist deletion before waiting for run
-      // terminals").
+      // earlier ordering bought same-millisecond sort correctness for a
+      // released-paused-run's own terminal action by gating a durable fact
+      // behind an UNBOUNDED wait: if a run this deletion releases or
+      // aborts has a tool or provider that ignores abort, `runTerminals`
+      // can stay pending indefinitely even though the session record is
+      // already gone, and a crash or restart during that window
+      // permanently loses the `session.deleted` audit fact — there is no
+      // recovery-time producer to reconstruct it (Codex P1 review finding,
+      // PR #566, "Persist deletion before waiting for run terminals").
       //
-      // This does NOT reopen the same-millisecond ordering bug the earlier
-      // round closed: `writeOutOfBandRecord`'s manual sequence counter
-      // starts near `Number.MAX_SAFE_INTEGER`, always larger than any real
-      // per-run `action.sequence`, so an out-of-band record still sorts
-      // LAST within a shared millisecond regardless of which write was
-      // actually issued first — dispatching earlier changes nothing about
-      // that tie-break (see the regression test asserting exactly this
-      // with a frozen clock). The residual, deliberately accepted risk is
-      // narrower: if enough real wall-clock time elapses between this
-      // dispatch and a same-deletion run's later terminal action to cross
-      // a millisecond boundary, `encodeKey`'s primary (timestamp) sort key
-      // now makes the deletion — timestamped earlier — sort BEFORE that
-      // later terminal, which is arguably the more truthful order anyway
-      // (the deletion really did happen when the store committed, not
-      // when the last released run's cleanup happened to finish). A
-      // single ordering source shared across the store's own per-run
-      // sequence space and this trail's process-local `manualSequence`
-      // would remove even that residual case, but requires a new field on
-      // `AuditRecord` itself — the same "schema-version field" this
-      // issue's own out-of-scope section already assigns to whoever ships
-      // the next audit-record schema change, not this fix.
+      // Verified empirically (regression test in `create-bureau.test.ts`),
+      // dispatching this early does not reopen a same-millisecond
+      // ordering bug: it instead makes `session.deleted` sort BEFORE a
+      // released run's own later terminal action, because that run
+      // resuming its step loop after `settleForDeletion` (below) and
+      // reaching its own terminal takes real, measurable time even
+      // in-process with no real I/O — comfortably enough, on this
+      // machine, to land at a strictly LATER millisecond than this
+      // dispatch. `encodeKey`'s primary sort key is timestamp, so the
+      // genuinely earlier deletion sorts first; `writeOutOfBandRecord`'s
+      // huge manual sequence (`Number.MAX_SAFE_INTEGER`-adjacent, always
+      // larger than any real per-run `action.sequence`) only matters as a
+      // SAME-millisecond tie-break and doesn't apply when the two don't
+      // tie. This is arguably a MORE truthful chronology than the earlier
+      // round's, not a less truthful one: the session record really was
+      // deleted before this run went on to finish. The residual,
+      // deliberately accepted risk is a same-millisecond collision (a
+      // faster machine, or a run releasing to an already-satisfied step
+      // with nothing left to do) — in that narrow case the huge manual
+      // sequence still forces this out-of-band record to sort AFTER the
+      // action-stream one, exactly as before this change. A single
+      // ordering source shared across the store's own per-run sequence
+      // space and this trail's process-local `manualSequence` would
+      // remove that narrow case's dependency on wall-clock timing
+      // entirely, but requires a new field on `AuditRecord` itself — the
+      // same "schema-version field" this issue's own out-of-scope section
+      // already assigns to whoever ships the next audit-record schema
+      // change, not this fix.
       emitter.dispatch(new SessionDeletedEvent(id));
 
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
