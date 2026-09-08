@@ -506,8 +506,23 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     // below, at agent construction, and that SAME instance handed to every
     // run this agent starts.
     runtime: providedRuntime,
+    // Review findings (AB-241): `principal` is inherently per-call
+    // attribution (AB-21's `AgentRunContext.principal`), never a
+    // construction-time concept — `CreateAgentOptionsBase` declares no such
+    // field. But TypeScript's excess-property check only fires against an
+    // object LITERAL, so a caller passing a widened or plain-JS options
+    // object that happens to carry a `principal` key would otherwise have
+    // it survive into `rest` undetected. Destructured out and discarded
+    // here (the cast is narrow and exists ONLY to name and strip this one
+    // unsupported key; `principal` itself is never read from `options`)
+    // rather than merely reordering the later spread, since reordering
+    // alone still leaked a construction-time value through on a run whose
+    // own `context.principal` was omitted (the later conditional spread is
+    // a no-op when `context?.principal` is `undefined`, so nothing
+    // overwrites whatever `rest.principal` would otherwise have carried).
+    principal: _discardedConstructionTimePrincipal,
     ...rest
-  } = options;
+  } = options as CreateAgentOptions & { principal?: unknown };
 
   const resolvedName = configuredName ?? '(agent)';
 
@@ -613,6 +628,18 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       // AB-92/AB-252 — the SAME instance resolved once above, shared by
       // every run this agent starts.
       runtime,
+      // Review finding (AB-241): `rest` comes BEFORE every per-call
+      // `AgentRunContext`-derived field below, not after. `CreateAgentOptions`
+      // declares no `principal` (or `signal`/`childRegistry`/etc.) of its own,
+      // but TypeScript's excess-property check only fires against an object
+      // LITERAL — a caller passing a widened or plain-JS options object that
+      // happens to carry one of these keys would otherwise have it survive
+      // into `rest` and silently clobber the correct per-call value spread
+      // after it. `principal` in particular is inherently per-call
+      // attribution, never a construction-time concept, so a stray
+      // construction-time value must never be able to override the run's
+      // actual caller-supplied principal.
+      ...rest,
       // AB-21: `AgentRunContext` fields translate onto their `RunOptions`
       // equivalents — `agentName` stamps curated `tool.*` events (falling
       // back to this agent's own `name`), `signal` drives per-run abort,
@@ -634,7 +661,9 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       ...(context?.delegatedAuthority !== undefined
         ? { delegatedAuthority: context.delegatedAuthority }
         : {}),
-      ...rest,
+      // AB-241 — `AgentRunContext.principal` forwards into `RunOptions.principal`
+      // the same way `signal`/`traceContext` do above.
+      ...(context?.principal !== undefined ? { principal: context.principal } : {}),
     };
   }
 
@@ -646,7 +675,18 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       input: string | { conversation: ConversationHistory },
       context?: AgentRunContext,
     ): AgentRun<unknown, boolean> {
-      const activeRun = createActiveRun(buildRunOptions(input, context));
+      // AB-241 review finding: `createActiveRun` derives `LivenessSnapshot.owner`
+      // exclusively from its third `dependencies.owner` argument, not from
+      // `RunOptions.principal` — passing `principal` only into `RunOptions` (via
+      // `buildRunOptions` above) left every direct-dispatch run's settled
+      // snapshot reporting `owner: undefined` regardless of the supplied
+      // principal, contradicting the promised branch-independent attribution.
+      const runOptions = buildRunOptions(input, context);
+      const activeRun = createActiveRun(
+        runOptions,
+        undefined,
+        runOptions.principal !== undefined ? { owner: runOptions.principal } : undefined,
+      );
       return createAgentRun<unknown, boolean>(activeRun, {
         hasOutput: output !== undefined,
         // AB-50 — opt-in: only present when the caller supplied one.

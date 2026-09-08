@@ -967,6 +967,17 @@ function validateAgentRunInput(input: unknown): asserts input is AgentInput {
 
 function validateBureauRunOptions(
   options: BureauRunOptions | undefined,
+  // AB-241 review finding: a `principal` value re-read from `options` here
+  // (a second, independent property access) could differ from the value
+  // the caller snapshots before/after this call if `options.principal` is
+  // a getter/proxy whose result changes between reads — a JavaScript
+  // caller could observe a validated string on the first read and hand a
+  // non-string (or a different principal entirely) to whichever read
+  // actually gets persisted, bypassing this synchronous `BAD_REQUEST`.
+  // The caller captures `options?.principal` exactly ONCE and passes that
+  // captured value here, so this validates the SAME value every other
+  // consumer downstream (context, recovery record, liveness owner) uses.
+  capturedPrincipal: unknown,
 ): asserts options is BureauRunOptions | undefined {
   if (options === undefined) return;
   // `typeof [] === 'object'` — without excluding arrays explicitly, a
@@ -985,16 +996,8 @@ function validateBureauRunOptions(
   if (options.withTraceContext !== undefined && typeof options.withTraceContext !== 'function') {
     toBadRequest('"options.withTraceContext" must be a function');
   }
-  if (options.principal !== undefined) {
-    // `AgentRunContext` (AB-15) carries no `principal` field — a bare
-    // `RunnableAgent.run()` has no attribution/session system to record it
-    // against (that is `createRun`'s job, not `bureau.run`'s). Silently
-    // discarding a caller-supplied `principal` would look like an accepted
-    // no-op; reject it synchronously instead so the gap is discoverable at
-    // the call site rather than as a missing attribution nobody notices.
-    toBadRequest(
-      '"options.principal" is not supported by bureau.run() — RunnableAgent.run() has no attribution surface to record it against. Use Bureau.createRun() for principal-attributed runs.',
-    );
+  if (capturedPrincipal !== undefined && typeof capturedPrincipal !== 'string') {
+    toBadRequest('"options.principal" must be a string');
   }
 }
 
@@ -1549,8 +1552,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // of RunSummary) — a durably recovered run (process restart) has no entry
   // here and `serializeRunState` falls back to the `findRunAgentName`
   // heuristic for `agentName`; `principal` has no such fallback since it is
-  // never persisted durably. Entries are removed on `deleteRun` so this map
-  // does not outlive the run it describes.
+  // never persisted durably. Entries for a `createRun`-dispatched run are
+  // removed on `deleteRun` so this map does not outlive the run it
+  // describes; a `bureau.run()` durable catalog dispatch's entry (AB-241)
+  // has no `deleteRun` equivalent and is never removed, exactly like
+  // `createRun`'s own entry for a run nobody ever calls `deleteRun` on.
   const runAttribution = new Map<string, RunAttribution>();
   // AB-67/AB-199 — one SteeringGate per session, created (or reused)
   // EAGERLY by `createRunFromRequest` at the start of every in-memory run —
@@ -2622,6 +2628,22 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * flight the same way it already aborts bureau-owned `ActiveRun`s.
    * Untracked on terminal settlement so a long-lived bureau does not retain
    * one entry per historical run forever.
+   *
+   * This does NOT also untrack `runAttribution` (review finding
+   * PRRT_kwDORvupsc6gUhzr): a settled catalog run's attribution must
+   * survive its own settlement, matching `Bureau.createRun`'s session
+   * record, which likewise lives until an explicit `deleteRun` — the
+   * `eventHistory` authorization test above (`bureau-run.test.ts`) reads
+   * `runAttribution` back AFTER `await run.result()` and requires it still
+   * be there. `runAttribution.delete` for a catalog run's minted `runId`
+   * only ever runs for a run that never actually dispatched (the
+   * `AgentContractError` fallback and non-`AgentContractError` resolver
+   * failure paths below), never for one that reached the durable engine and
+   * settled. Catalog runs have no `deleteRun` equivalent to bound this the
+   * way a bureau session's attribution is bounded — a real gap, tracked as
+   * a follow-up rather than fixed here, since closing it means giving
+   * catalog runs their own deletion surface, which is its own design
+   * problem outside AB-241's attribution-forwarding scope.
    */
   function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
     catalogRuns.add(handle);
@@ -2653,12 +2675,32 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       throw new BureauError(`Unknown agent "${name}"`, 'NOT_FOUND');
     }
     validateAgentRunInput(input);
-    validateBureauRunOptions(runOptions);
+
+    // AB-241 review finding: captured HERE, in one property access, BEFORE
+    // `validateBureauRunOptions` — not re-read a second time either inside
+    // that validation or later (at the `persistCatalogRunRecoveryRecord`
+    // call and the direct-branch `createActiveRun` call, both AFTER an
+    // `await`). `runOptions` is the caller's own object, not a copy: a
+    // getter/proxy `principal` whose result changes between reads could
+    // otherwise pass a validated string on one read while a DIFFERENT
+    // (possibly non-string) value reaches the context/attribution/recovery
+    // record on another read. Capturing once and validating that same
+    // captured value pins every downstream consumer to what was actually
+    // checked.
+    const capturedRunOptionsPrincipal = runOptions?.principal;
+    validateBureauRunOptions(runOptions, capturedRunOptionsPrincipal);
+    const principal = capturedRunOptionsPrincipal;
 
     const context: AgentRunContext = { agentName: name };
     if (runOptions?.signal) context.signal = runOptions.signal;
     if (runOptions?.traceContext !== undefined) context.traceContext = runOptions.traceContext;
     if (runOptions?.withTraceContext) context.withTraceContext = runOptions.withTraceContext;
+    // AB-241 — forwarded to both dispatch branches: the direct branch hands
+    // it straight to the agent's own `run()`/`RunOptions.principal`; the
+    // durable branch (below) additionally records it the way `createRun`
+    // does, so `eventHistory`'s principal gate sees the same attribution
+    // either way.
+    if (principal !== undefined) context.principal = principal;
 
     const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
       DefinitionResolvingAgent;
@@ -2667,6 +2709,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (runtime.durable && typeof resolver === 'function') {
       const durable = runtime.durable;
       const runId = runtimeServices.identifiers.next('agent-run');
+      // AB-241 — recorded BEFORE any async work, mirroring
+      // `createRunFromRequest`'s own `runAttribution.set` (it writes before
+      // `store.register` so it's in place before any observer can see this
+      // run). Review finding: cleaned up ONLY when this minted `runId` is
+      // abandoned before it ever actually dispatches — the `AgentContractError`
+      // fallback and the non-`AgentContractError` resolver-failure catch
+      // below, both because an attribution entry keyed to a run that never
+      // existed would otherwise be a permanent phantom. A run that DOES
+      // dispatch and settle keeps its attribution indefinitely (see
+      // `trackCatalogRun`'s own doc comment) — it is not cleaned up here.
+      if (principal !== undefined) {
+        runAttribution.set(runId, { agentName: name, principal });
+      }
       // Captured so the wrapper below can forward an abort straight to the
       // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
       // does not close: `resolveDurableAgent` unconditionally starts the
@@ -2758,6 +2813,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // own `run()`, matching what direct registration would have done.
           // Anything else is a genuine resolver failure and must propagate.
           if (error instanceof AgentContractError) {
+            // AB-241: this fallback abandons `runId` entirely — the agent's
+            // own `run()` mints (or is given) a DIFFERENT run identity, so
+            // an attribution entry recorded above under `runId` would
+            // otherwise be a permanent phantom, keyed to a run that never
+            // existed.
+            runAttribution.delete(runId);
             return agent;
           }
           throw error;
@@ -2782,13 +2843,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // assignable from `AnyRunnableAgent`'s `RunnableAgent<any, true>` half.
           definitionRevision: readGenerationProfile(agent as RunnableAgent).revision,
           input,
+          // AB-241 review finding: without this, a durable catalog run that
+          // crosses a process restart lost its attribution entirely — the
+          // resumed resolver's rebuilt `AgentRunContext` carried no
+          // `principal`, and `runAttribution` (in-memory only) started
+          // empty on the new process.
+          ...(principal !== undefined ? { principal } : {}),
         });
-        const activeRun = createActiveRun(resolvedOptions, {
-          engine: durable.engine,
-          checkpointStore: durable.checkpointStore,
-          runId,
-          sessionId: runOptions?.sessionId ?? runId,
-        });
+        const activeRun = createActiveRun(
+          resolvedOptions,
+          {
+            engine: durable.engine,
+            checkpointStore: durable.checkpointStore,
+            runId,
+            sessionId: runOptions?.sessionId ?? runId,
+          },
+          // AB-241 — thread the caller-supplied principal into
+          // `LivenessSnapshot.owner`, matching `createRunFromRequest`'s own
+          // `request.principal !== undefined ? { owner: request.principal } : undefined`.
+          principal !== undefined ? { owner: principal } : undefined,
+        );
         dispatchedActiveRun = activeRun;
         if (cancellationRequested) {
           if (cancellationRequested.dispose) {
@@ -2814,6 +2888,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       const trackDispatchSettlement = async (): Promise<RunnableAgent<unknown, boolean>> => {
         try {
           return await resolveDurableAgent();
+        } catch (error) {
+          // AB-241: `resolveDurableAgent`'s `AgentContractError` fallback
+          // (above) already deletes `runAttribution` for the abandoned
+          // `runId` on ITS OWN success path (a `return`, not a throw). Any
+          // other rejection here — `persistCatalogRunRecoveryRecord`
+          // failing, `createActiveRun` throwing synchronously on an
+          // unrepresentable `output` schema, a genuine resolver failure —
+          // means this run never dispatched either, so the same cleanup
+          // applies, mirroring `createRunFromRequest`'s own
+          // `runAttribution.delete(runId)` for a run that "never reached
+          // `store.register`" (see that catch block, below).
+          runAttribution.delete(runId);
+          throw error;
         } finally {
           dispatchSettled?.();
         }
@@ -3909,7 +3996,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // the same headless monitor a native scheduled fire gets instead of the
     // session-ownership classification below, which would otherwise treat
     // it as an orphaned run and cancel it.
-    if (await runtime.isCatalogRecoveredRun(info.workflowId)) {
+    // AB-241 review finding: ONE combined classify-and-attribute read
+    // (`classifyCatalogRecoveredRun`), not a separate `isCatalogRecoveredRun`
+    // check followed by an independent attribution lookup — two reads could
+    // let a transient storage failure on the SECOND one silently demote an
+    // attributed run to unattributed even though the FIRST read (deciding
+    // this is catalog territory at all) succeeded. See that function's own
+    // doc comment on the `RuntimeComposition` interface.
+    const catalogRecovery = await runtime.classifyCatalogRecoveredRun(info.workflowId);
+    if (catalogRecovery.isCatalogRun) {
+      // Reseed `runAttribution` from the persisted recovery record — the
+      // in-memory map a live dispatch populates is empty on a freshly
+      // booted process, so without this a recovered catalog run's principal
+      // (and `eventHistory`'s principal gate, which consults this map)
+      // would silently revert to unattributed. Not cleaned up on
+      // settlement, matching a live dispatch's own attribution lifetime
+      // (see `trackCatalogRun`'s doc comment) — a settled run's attribution
+      // must survive so `eventHistory` can still read it back afterward.
+      if (catalogRecovery.attribution) {
+        runAttribution.set(info.workflowId, catalogRecovery.attribution);
+      }
       void monitorRecoveredCatalogRun(info.handle, info.input.agentName, diagnose);
       return;
     }
@@ -4055,247 +4161,278 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // their existing `onDiagnostic` message unchanged — this function's own
     // diagnostic logging is scoped to failures it can isolate (the sweep,
     // per-handle reads) without losing the caller's identity.
-    const handles = await durable.engine.recoverAll({ onRecoveredWorkflow });
+    // AB-241 review finding: everything from here through the post-recovery
+    // loop below runs inside a `try` whose `finally` releases
+    // `catalogRunRecoveryCache` unconditionally — including when
+    // `recoverAll()` itself throws after already populating the cache for
+    // one or more successfully-resolved catalog workflows (each resolved
+    // via `onRecoveredWorkflow`'s services resolver, BEFORE the throw). The
+    // earlier plain end-of-function call left those entries in the cache
+    // for the rest of this process's lifetime whenever the batch-failure
+    // path below was taken; `finally` runs on both the normal-return and
+    // rejection paths, so no failure mode leaks them. The rejection itself
+    // is still deliberately allowed to propagate uncaught afterward — the
+    // batch-failure handling this doc comment describes further up is
+    // unchanged.
+    try {
+      const handles = await durable.engine.recoverAll({ onRecoveredWorkflow });
 
-    // Read each handle's launch metadata CONCURRENTLY, so one slow/stuck read does
-    // not block registration of the rest (no head-of-line blocking). The read is
-    // caught PER HANDLE so the resolved value always carries the handle identity —
-    // a rejected read must not lose the handle, or we could not cancel the
-    // now-resumed-but-unidentifiable run (committee round-2 finding 1). Then
-    // reattach each owned handle SYNCHRONOUSLY in one turn, preserving the
-    // register-before-terminal-event ordering invariant.
-    const resolved = await Promise.all(
-      handles.map(async (handle) => {
-        try {
-          return { handle, metadata: await handle.getLaunchMetadata() };
-        } catch (error) {
-          return { handle, metadata: null, error };
-        }
-      }),
-    );
-
-    const orphanCancellations: Array<{ runId: string; cancel: Promise<void> }> = [];
-    const sessionStore = runtime.sessionStore;
-    for (const { handle, metadata, ...rest } of resolved) {
-      // The awaited recovery hook already registered owned interactive runs
-      // before replay. The post-recovery pass only classifies the remaining
-      // handles (scheduled fires, orphans, and unknown ownership).
-      if (store.getRun(handle.id)) continue;
-
-      // AB-240: the awaited recovery hook (`onRecoveredWorkflow`) already
-      // routed a catalog-dispatched run to its own headless monitor above —
-      // skip it here too, the same way an already-registered interactive
-      // run is skipped, so it is never re-classified by the session-ownership
-      // logic below (which would treat its absent session as "orphaned" and
-      // cancel it).
-      if (await runtime.isCatalogRecoveredRun(handle.id)) continue;
-
-      const readError = 'error' in rest ? rest.error : undefined;
-      if (readError !== undefined) {
-        diagnose({
-          level: 'error',
-          scope: 'recovery',
-          message: `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
-        });
-      }
-
-      // A run is bureau-owned only if its launch metadata narrows to an agentRun
-      // input AND its input runId matches this handle's id (the workflow id is the
-      // run id).
-      const ownedSessionId =
-        readError === undefined &&
-        metadata &&
-        isAgentRunWorkflowInput(metadata.input) &&
-        metadata.input.runId === handle.id
-          ? metadata.input.sessionId
-          : undefined;
-
-      const recoveredScheduleMarker =
-        readError === undefined &&
-        metadata != null &&
-        !isAgentRunWorkflowInput(metadata.input) &&
-        isScheduledAgentRunInput(metadata.input) &&
-        !isRecoverableScheduledFireInput(metadata.input)
-          ? await loadScheduleIdForRecoveredRun(durable.engine, handle.id)
-          : undefined;
-      let recoveredScheduledSessionId: string | undefined;
-      if (
-        recoveredScheduleMarker !== undefined &&
-        recoveredScheduleMarker.status !== 'found' &&
-        sessionStore &&
-        metadata != null &&
-        isScheduledAgentRunInput(metadata.input)
-      ) {
-        try {
-          recoveredScheduledSessionId = await loadExistingScheduledSessionId(
-            sessionStore,
-            metadata.input,
-            handle.id,
-          );
-        } catch (error) {
-          diagnose({
-            level: 'error',
-            scope: 'recovery',
-            message: `[bureau] Could not inspect scheduled session proof for recovered run "${handle.id}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
-          });
-        }
-      }
-      const scheduledFire =
-        readError === undefined &&
-        metadata != null &&
-        !isAgentRunWorkflowInput(metadata.input) &&
-        (isRecoverableScheduledFireInput(metadata.input) ||
-          recoveredScheduleMarker?.status === 'found' ||
-          recoveredScheduledSessionId !== undefined);
-
-      // Load the owning session (only meaningful for an owned run with a store).
-      // A throw leaves ownership UNKNOWN — classifyRecoveredRun then skips rather
-      // than cancels, so a transient read blip never terminates a legitimately
-      // recovering run.
-      let sessionLoad: SessionLoadOutcome = { ok: true, session: null };
-      if (ownedSessionId !== undefined && sessionStore) {
-        try {
-          const session = await sessionStore.load(ownedSessionId);
-          sessionLoad = { ok: true, session: session ? { ...session.metadata } : null };
-        } catch (error) {
-          diagnose({
-            level: 'error',
-            scope: 'recovery',
-            message: `[bureau] Could not load owning session for recovered run "${handle.id}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
-          });
-          sessionLoad = { ok: false };
-        }
-      }
-
-      const classification = classifyRecoveredRunDetailed({
-        handleId: handle.id,
-        scheduledFire,
-        ownedSessionId,
-        metadataReadFailed: readError !== undefined,
-        hasSessionStore: sessionStore !== undefined,
-        sessionLoad,
-        versionMismatch: runtime.workflowVersionMismatches.has(handle.id),
-      });
-      const { verdict } = classification;
-      dispatchRecoveryClassification(handle.id, classification);
-      dispatchRecoveryLeaseReleasedIfAny(handle.id);
-
-      if (verdict === 'reattach' || verdict === 'reattach-version-mismatch') {
-        if (verdict === 'reattach-version-mismatch') {
-          diagnose({
-            level: 'warn',
-            scope: 'recovery',
-            message:
-              `[bureau] Reattaching recovered run "${handle.id}" that resumed under a ` +
-              `different workflow version than it was checkpointed with (pin-and-warn; ` +
-              `see documentation/workflow-versioning.md).`,
-          });
-        }
-        // A mocked/custom engine that does not invoke Weft's recovery hook can
-        // still reattach terminal visibility here. Real Weft recovery has
-        // already taken the hook path above, including live event forwarding.
-        let recoveredServices: DurableRunDeps | undefined;
-        if (sessionStore && ownedSessionId) {
-          const fullSession = await sessionStore.load(ownedSessionId);
-          if (fullSession) {
-            const recoveredAgentName = isAgentRunWorkflowInput(metadata?.input)
-              ? metadata.input.agentName
-              : BUREAU_AGENT_NAME;
-            const requestContext = recoveredRequestContextFromMetadata(
-              fullSession.metadata,
-              handle.id,
-              recoveredAgentName,
-              runtimeServices.clock.now,
-            );
-            const runRuntime = await runtime.createRunRuntime(
-              {
-                message:
-                  typeof fullSession.metadata['lastUserMessage'] === 'string'
-                    ? fullSession.metadata['lastUserMessage']
-                    : '',
-                sessionId: ownedSessionId,
-                runId: handle.id,
-                agentName: recoveredAgentName,
-                requestContext,
-              },
-              { liveStreaming: false },
-            );
-            recoveredServices = {
-              toolbox: runRuntime.toolbox,
-              getStepMetadata: emptyRecoveredStepMetadata,
-              options: {
-                generate: runRuntime.generate,
-                toolbox: runRuntime.toolbox,
-                conversation: new Conversation(fullSession.conversationHistory),
-                // AB-260: the bureau's single composed RuntimeServices
-                // instance, snapshotted into every run it starts — including
-                // a mocked/custom-engine reattach.
-                runtime: runtimeServices,
-                prepareStep: runRuntime.prepareStep,
-                onStep: runRuntime.onStep,
-                validateResponse: runRuntime.validateResponse,
-                executeOptions: { requestContext },
-                agentName: recoveredAgentName,
-                runId: handle.id,
-              },
-            };
+      // Read each handle's launch metadata CONCURRENTLY, so one slow/stuck read does
+      // not block registration of the rest (no head-of-line blocking). The read is
+      // caught PER HANDLE so the resolved value always carries the handle identity —
+      // a rejected read must not lose the handle, or we could not cancel the
+      // now-resumed-but-unidentifiable run (committee round-2 finding 1). Then
+      // reattach each owned handle SYNCHRONOUSLY in one turn, preserving the
+      // register-before-terminal-event ordering invariant.
+      const resolved = await Promise.all(
+        handles.map(async (handle) => {
+          try {
+            return { handle, metadata: await handle.getLaunchMetadata() };
+          } catch (error) {
+            return { handle, metadata: null, error };
           }
-        }
-        if (recoveredServices) {
-          const fullSession = await sessionStore?.load(ownedSessionId!);
-          await restorePendingApprovalStates(
-            recoveredServices.toolbox,
-            fullSession?.metadata,
-            handle.id,
-            ownedSessionId!,
-          );
-        }
-        reattachRecoveredRun(
-          handle.id,
-          ownedSessionId!,
-          handle,
-          undefined,
-          recoveredServices,
-          sessionLoad.ok ? sessionLoad.session : null,
-        );
-        // AB-336 — same reconstruction as the primary reattach path above
-        // (`onRecoveredWorkflow`); this post-recovery classification pass
-        // reattaches runs whose live services were rebuilt from config
-        // rather than captured before the crash, but the checkpoint gap
-        // this closes is identical either way.
-        await reconstructHumanWaitReviewIfParked(handle.id);
-      } else if (verdict === 'monitor') {
-        // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
-        // still needs a detached result monitor so failures are visible.
-        void monitorRecoveredScheduledFire(handle, diagnose);
-      } else {
-        if (verdict === 'cancel') {
-          // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
-          // could leave an unowned, already-resumed run live with no monitor, so
-          // its failure must be surfaced for operators. engine.cancel terminalizes
-          // the run and rejects its waiter — covering metadata-less / read-failed /
-          // foreign-input / orphaned-session residue without store.register'ing it.
-          orphanCancellations.push({ runId: handle.id, cancel: durable.engine.cancel(handle.id) });
-        }
-        // 'skip' — ownership unknown; leave the run to resume without live visibility.
-      }
-    }
+        }),
+      );
 
-    // Await the orphan cancels DETACHED — boot must not block on them (same as the
-    // recovered-run monitors), but a cancel that REJECTS leaves an unowned run
-    // running, which is an operator-actionable failure, not something to swallow.
-    if (orphanCancellations.length > 0) {
-      void Promise.allSettled(orphanCancellations.map(({ cancel }) => cancel)).then((outcomes) => {
-        outcomes.forEach((outcome, index) => {
-          if (outcome.status === 'rejected') {
+      const orphanCancellations: Array<{ runId: string; cancel: Promise<void> }> = [];
+      const sessionStore = runtime.sessionStore;
+      for (const { handle, metadata, ...rest } of resolved) {
+        // The awaited recovery hook already registered owned interactive runs
+        // before replay. The post-recovery pass only classifies the remaining
+        // handles (scheduled fires, orphans, and unknown ownership).
+        if (store.getRun(handle.id)) continue;
+
+        // AB-240: the awaited recovery hook (`onRecoveredWorkflow`) already
+        // routed a catalog-dispatched run to its own headless monitor above —
+        // skip it here too, the same way an already-registered interactive
+        // run is skipped, so it is never re-classified by the session-ownership
+        // logic below (which would treat its absent session as "orphaned" and
+        // cancel it).
+        if (await runtime.isCatalogRecoveredRun(handle.id)) continue;
+
+        const readError = 'error' in rest ? rest.error : undefined;
+        if (readError !== undefined) {
+          diagnose({
+            level: 'error',
+            scope: 'recovery',
+            message: `[bureau] Could not read launch metadata for recovered run "${handle.id}"; cancelling: ${serializeUnknownError(readError)}`,
+          });
+        }
+
+        // A run is bureau-owned only if its launch metadata narrows to an agentRun
+        // input AND its input runId matches this handle's id (the workflow id is the
+        // run id).
+        const ownedSessionId =
+          readError === undefined &&
+          metadata &&
+          isAgentRunWorkflowInput(metadata.input) &&
+          metadata.input.runId === handle.id
+            ? metadata.input.sessionId
+            : undefined;
+
+        const recoveredScheduleMarker =
+          readError === undefined &&
+          metadata != null &&
+          !isAgentRunWorkflowInput(metadata.input) &&
+          isScheduledAgentRunInput(metadata.input) &&
+          !isRecoverableScheduledFireInput(metadata.input)
+            ? await loadScheduleIdForRecoveredRun(durable.engine, handle.id)
+            : undefined;
+        let recoveredScheduledSessionId: string | undefined;
+        if (
+          recoveredScheduleMarker !== undefined &&
+          recoveredScheduleMarker.status !== 'found' &&
+          sessionStore &&
+          metadata != null &&
+          isScheduledAgentRunInput(metadata.input)
+        ) {
+          try {
+            recoveredScheduledSessionId = await loadExistingScheduledSessionId(
+              sessionStore,
+              metadata.input,
+              handle.id,
+            );
+          } catch (error) {
             diagnose({
               level: 'error',
               scope: 'recovery',
-              message: `[bureau] Failed to cancel unowned recovered run "${orphanCancellations[index]!.runId}" — it may still be running: ${serializeUnknownError(outcome.reason)}`,
+              message: `[bureau] Could not inspect scheduled session proof for recovered run "${handle.id}"; continuing without scheduled-fire classification: ${serializeUnknownError(error)}`,
             });
           }
+        }
+        const scheduledFire =
+          readError === undefined &&
+          metadata != null &&
+          !isAgentRunWorkflowInput(metadata.input) &&
+          (isRecoverableScheduledFireInput(metadata.input) ||
+            recoveredScheduleMarker?.status === 'found' ||
+            recoveredScheduledSessionId !== undefined);
+
+        // Load the owning session (only meaningful for an owned run with a store).
+        // A throw leaves ownership UNKNOWN — classifyRecoveredRun then skips rather
+        // than cancels, so a transient read blip never terminates a legitimately
+        // recovering run.
+        let sessionLoad: SessionLoadOutcome = { ok: true, session: null };
+        if (ownedSessionId !== undefined && sessionStore) {
+          try {
+            const session = await sessionStore.load(ownedSessionId);
+            sessionLoad = { ok: true, session: session ? { ...session.metadata } : null };
+          } catch (error) {
+            diagnose({
+              level: 'error',
+              scope: 'recovery',
+              message: `[bureau] Could not load owning session for recovered run "${handle.id}"; leaving it to resume without live visibility: ${serializeUnknownError(error)}`,
+            });
+            sessionLoad = { ok: false };
+          }
+        }
+
+        const classification = classifyRecoveredRunDetailed({
+          handleId: handle.id,
+          scheduledFire,
+          ownedSessionId,
+          metadataReadFailed: readError !== undefined,
+          hasSessionStore: sessionStore !== undefined,
+          sessionLoad,
+          versionMismatch: runtime.workflowVersionMismatches.has(handle.id),
         });
-      });
+        const { verdict } = classification;
+        dispatchRecoveryClassification(handle.id, classification);
+        dispatchRecoveryLeaseReleasedIfAny(handle.id);
+
+        if (verdict === 'reattach' || verdict === 'reattach-version-mismatch') {
+          if (verdict === 'reattach-version-mismatch') {
+            diagnose({
+              level: 'warn',
+              scope: 'recovery',
+              message:
+                `[bureau] Reattaching recovered run "${handle.id}" that resumed under a ` +
+                `different workflow version than it was checkpointed with (pin-and-warn; ` +
+                `see documentation/workflow-versioning.md).`,
+            });
+          }
+          // A mocked/custom engine that does not invoke Weft's recovery hook can
+          // still reattach terminal visibility here. Real Weft recovery has
+          // already taken the hook path above, including live event forwarding.
+          let recoveredServices: DurableRunDeps | undefined;
+          if (sessionStore && ownedSessionId) {
+            const fullSession = await sessionStore.load(ownedSessionId);
+            if (fullSession) {
+              const recoveredAgentName = isAgentRunWorkflowInput(metadata?.input)
+                ? metadata.input.agentName
+                : BUREAU_AGENT_NAME;
+              const requestContext = recoveredRequestContextFromMetadata(
+                fullSession.metadata,
+                handle.id,
+                recoveredAgentName,
+                runtimeServices.clock.now,
+              );
+              const runRuntime = await runtime.createRunRuntime(
+                {
+                  message:
+                    typeof fullSession.metadata['lastUserMessage'] === 'string'
+                      ? fullSession.metadata['lastUserMessage']
+                      : '',
+                  sessionId: ownedSessionId,
+                  runId: handle.id,
+                  agentName: recoveredAgentName,
+                  requestContext,
+                },
+                { liveStreaming: false },
+              );
+              recoveredServices = {
+                toolbox: runRuntime.toolbox,
+                getStepMetadata: emptyRecoveredStepMetadata,
+                options: {
+                  generate: runRuntime.generate,
+                  toolbox: runRuntime.toolbox,
+                  conversation: new Conversation(fullSession.conversationHistory),
+                  // AB-260: the bureau's single composed RuntimeServices
+                  // instance, snapshotted into every run it starts — including
+                  // a mocked/custom-engine reattach.
+                  runtime: runtimeServices,
+                  prepareStep: runRuntime.prepareStep,
+                  onStep: runRuntime.onStep,
+                  validateResponse: runRuntime.validateResponse,
+                  executeOptions: { requestContext },
+                  agentName: recoveredAgentName,
+                  runId: handle.id,
+                },
+              };
+            }
+          }
+          if (recoveredServices) {
+            const fullSession = await sessionStore?.load(ownedSessionId!);
+            await restorePendingApprovalStates(
+              recoveredServices.toolbox,
+              fullSession?.metadata,
+              handle.id,
+              ownedSessionId!,
+            );
+          }
+          reattachRecoveredRun(
+            handle.id,
+            ownedSessionId!,
+            handle,
+            undefined,
+            recoveredServices,
+            sessionLoad.ok ? sessionLoad.session : null,
+          );
+          // AB-336 — same reconstruction as the primary reattach path above
+          // (`onRecoveredWorkflow`); this post-recovery classification pass
+          // reattaches runs whose live services were rebuilt from config
+          // rather than captured before the crash, but the checkpoint gap
+          // this closes is identical either way.
+          await reconstructHumanWaitReviewIfParked(handle.id);
+        } else if (verdict === 'monitor') {
+          // Scheduled fires have no ActiveRun surface, but the recovered Weft handle
+          // still needs a detached result monitor so failures are visible.
+          void monitorRecoveredScheduledFire(handle, diagnose);
+        } else {
+          if (verdict === 'cancel') {
+            // Collect the cancel (do NOT fire-and-forget swallow): a rejected cancel
+            // could leave an unowned, already-resumed run live with no monitor, so
+            // its failure must be surfaced for operators. engine.cancel terminalizes
+            // the run and rejects its waiter — covering metadata-less / read-failed /
+            // foreign-input / orphaned-session residue without store.register'ing it.
+            orphanCancellations.push({
+              runId: handle.id,
+              cancel: durable.engine.cancel(handle.id),
+            });
+          }
+          // 'skip' — ownership unknown; leave the run to resume without live visibility.
+        }
+      }
+
+      // Await the orphan cancels DETACHED — boot must not block on them (same as the
+      // recovered-run monitors), but a cancel that REJECTS leaves an unowned run
+      // running, which is an operator-actionable failure, not something to swallow.
+      if (orphanCancellations.length > 0) {
+        void Promise.allSettled(orphanCancellations.map(({ cancel }) => cancel)).then(
+          (outcomes) => {
+            outcomes.forEach((outcome, index) => {
+              if (outcome.status === 'rejected') {
+                diagnose({
+                  level: 'error',
+                  scope: 'recovery',
+                  message: `[bureau] Failed to cancel unowned recovered run "${orphanCancellations[index]!.runId}" — it may still be running: ${serializeUnknownError(outcome.reason)}`,
+                });
+              }
+            });
+          },
+        );
+      }
+    } finally {
+      // AB-241 review finding: the post-recovery loop above is the LAST
+      // consumer of `catalogRunRecoveryCache` for this boot pass (the
+      // awaited `onRecoveredWorkflow` hook, invoked earlier during
+      // `recoverAll()` above, was the first) — release every entry now
+      // rather than let them persist for the rest of this process's
+      // lifetime. `finally` also covers `recoverAll()` itself throwing
+      // after populating one or more entries, which the surrounding `try`
+      // exists to catch. Safe to run before the detached orphan-cancel
+      // promises above settle: none of them touch this cache.
+      runtime.clearCatalogRunRecoveryCache();
     }
 
     const perRunFailures = dedupeRecoveryPerRunFailures(currentRecoveryPerRunFailures ?? []);
