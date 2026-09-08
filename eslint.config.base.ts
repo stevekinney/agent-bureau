@@ -618,6 +618,13 @@ export const baseConfig = [
         'warn',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', ignoreRestSiblings: true },
       ],
+      // Surfaces `@deprecated`-tagged uses at lint time (type-aware; requires the built types
+      // this config block already depends on). `warn`, not `error`: AB-242 deprecated
+      // `BureauOptions`'s agent-owned fields and `Bureau.createRun` in place rather than
+      // removing them, so the build stays green while every `bun run lint` lists every
+      // current call site as pressure to close the gateway migration (AB-352/AB-351). See
+      // AB-366.
+      '@typescript-eslint/no-deprecated': 'warn',
     },
   })),
 
