@@ -11,8 +11,11 @@ import {
   MUTATION_OPERATORS,
   realFileSystem as fs,
   type MutationTargetSet,
+  type SurvivedMutant,
+  type TargetSetResult,
   runTargetSet,
   spawnCommand as spawn,
+  unclassifiedSurvivors,
 } from './check-mutation';
 
 const FIXTURE_DIR = join(import.meta.dir, 'fixtures/mutation');
@@ -223,6 +226,49 @@ describe('compareToBaseline', () => {
     const comparison = compareToBaseline('unseen', 1, {});
     expect(comparison.baselineCount).toBe(0);
     expect(comparison.regressed).toBe(true);
+  });
+});
+
+describe('unclassifiedSurvivors', () => {
+  const survivor = (overrides: Partial<SurvivedMutant> = {}): SurvivedMutant => ({
+    setName: 'set-a',
+    file: 'fixture.ts',
+    symbol: 'fn',
+    operator: 'remove-statement',
+    line: 1,
+    originalText: 'x();',
+    replacementText: '',
+    testsPassed: ['fixture.test.ts'],
+    ...overrides,
+  });
+
+  it('returns empty when every survivor carries a matched equivalentReason', () => {
+    const result: TargetSetResult = {
+      setName: 'set-a',
+      killedCount: 0,
+      survived: [survivor({ equivalentReason: 'documented equivalence' })],
+    };
+    expect(unclassifiedSurvivors(result)).toEqual([]);
+  });
+
+  it('reports a survivor with no equivalentReason, even when the set holds at its baseline count (PR #570 review)', () => {
+    // This is exactly the identity-drift scenario compareToBaseline cannot see on its own: the
+    // COUNT can match baseline while ONE of the survivors making up that count is unclassified —
+    // either a real regression or a stale `line` pin — and compareToBaseline alone reports no
+    // regression at all.
+    const result: TargetSetResult = {
+      setName: 'set-a',
+      killedCount: 0,
+      survived: [
+        survivor({ line: 10, equivalentReason: 'documented equivalence' }),
+        survivor({ line: 20 }),
+      ],
+    };
+    const comparison = compareToBaseline(result.setName, result.survived.length, { 'set-a': 2 });
+    expect(comparison.regressed).toBe(false);
+    const unclassified = unclassifiedSurvivors(result);
+    expect(unclassified).toHaveLength(1);
+    expect(unclassified[0]?.line).toBe(20);
   });
 });
 
