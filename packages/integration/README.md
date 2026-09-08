@@ -88,7 +88,7 @@ release — the crash-recovery tier AB-92's test-tier matrix assigns its own
 command:
 
 ```bash
-# Full matrix (eleven scenarios, defined once in test/crash/scenarios.ts and
+# Full matrix (twelve scenarios, defined once in test/crash/scenarios.ts and
 # driven identically against SQLite (sqlite.test.ts) and LMDB
 # (lmdb.test.ts)) — the stable root command
 bun run test:crash-conformance
@@ -98,6 +98,47 @@ bun run test:crash-conformance
 # runs at tst-09e's cadence
 bun test test/crash --test-name-pattern smoke
 ```
+
+### The kill point is a parent-to-child hold, never a signal-timing race (AB-354)
+
+`harness.ts`'s `driveProcess` sends the fixture's `SIGKILL` the INSTANT it
+observes `killAtMarker` on the fixture's stdout — no acknowledgement is ever
+written to the fixture's stdin for that marker. That is deliberate, not an
+oversight: `fixture.ts` blocks on exactly one stdin line after every marker
+it reports, `killAtMarker` included, so a kill scenario's fixture process is
+already parked, awaiting a command line that will never arrive, before the
+`SIGKILL` is even sent. The scenario therefore proves what happened by
+construction — because the child was held at the marker — never because a
+real OS signal happened to win a race against a fast child's own execution.
+`SIGKILL` delivery latency under CPU contention (a busy host, a loaded CI
+runner) changes nothing about the outcome: a longer wait before the signal
+lands is still a wait spent entirely parked.
+
+The `[smoke]` honesty pair's control kills at the `pre-dispatch` marker
+(AB-361), reported strictly before `bureau.createRun` is even called — so
+there is no durable engine running yet for anything to race, by
+construction, independent of the stdin hold above. `killed at run-started`
+(a positive recovery scenario since AB-361, not a control: `createRun`'s
+durable branch now resolves only after the engine commits its initial
+workflow record, so a run killed there is always durably recoverable) faces
+a narrower, second race: Weft's own durable engine can dispatch the root
+run's step-0 `generate` call — `register-child`/`register-children`/
+`register-schedule`, depending on scenario kind — as soon as that initial
+record commits, which is strictly BEFORE `main()`'s own driver loop gets
+around to reporting `'run-started'` and blocking on its acknowledgement.
+Left alone, a fast engine tick could dispatch step 0 before the `SIGKILL`
+lands, regardless of how promptly `main()` itself parks. `fixture.ts` closes
+this from the child's side too: the root run's step-0 `generate` call
+(`createFixtureGenerate`'s `waitForRunStartedRelease` gate) awaits the SAME
+hold `main()` releases only after `'run-started'`'s acknowledgement lands —
+never for a process killed at that marker, whose engine therefore stays
+deterministically parked before its very first tool dispatch for the rest
+of that process's short life. Recovery mode (and the `recovery-failure`
+kind, which never dispatches through this shared `generate` at all) never
+reports `'run-started'`, so `main()` releases the same hold unconditionally
+once it has finished handling its own root-run-start branch, regardless of
+mode or kind — otherwise a recovered process replaying step 0 would park on
+`generate` forever.
 
 `test/crash/scenarios.ts` (AB-271) is the shared scenario list both backend
 files consume — `sqlite.test.ts` and `lmdb.test.ts` are now thin `for`-loops
@@ -122,8 +163,13 @@ a pre-kill signal delivery (proving no double-delivery), and the
 AB-29 recovery-failure scenario (a second process missing the catalog agent
 its recovered `bureau.run()` dispatch needs, observed failing through
 `bureau.getDurableRun`'s `error`/`failureCategory` fields — never a bare
-`null`). No LMDB-specific incapability was found for any of the eleven; the
-full matrix runs unmodified on both backends. `harness.ts`'s
+`null`). The twelfth, `killed at run-started`, is AB-361's own scope: once
+the `[smoke]` pair's control point moved to `pre-dispatch`, a run killed the
+instant after `createRun` hands its caller an identifier became a positive
+recovery scenario in its own right (the started-work contract, AB-34/AB-15,
+means it is recoverable, not lost) rather than a second control. No
+LMDB-specific incapability was found for any of the twelve; the full matrix
+runs unmodified on both backends. `harness.ts`'s
 `CrashHarnessUnsupportedBehaviorError` stays exported as a typed escape
 hatch for a future gap.
 
