@@ -8221,7 +8221,7 @@ describe('createBureau review queue (AB-20)', () => {
           expect(bureauB.getRun(run.id)).toBeDefined();
         } finally {
           recoverAllSpy.mockRestore();
-          bureauB.dispose();
+          await bureauB.dispose();
           await bureauA.dispose();
         }
       } finally {
@@ -8268,6 +8268,52 @@ describe('createBureau review queue (AB-20)', () => {
         }
       } finally {
         recoverAllSpy.mockRestore();
+      }
+    });
+
+    it('does not drop a sweep failure that happened just before recoverAll() itself throws (code-review regression fixture)', async () => {
+      const probe = await createRuntimeComposition({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+        list: (filter: unknown) => Promise<unknown>;
+        recoverAll: () => Promise<unknown[]>;
+      };
+      probe.durable!.engine[Symbol.dispose]?.();
+      probe.disposeStorage?.();
+      const listSpy = spyOn(enginePrototype, 'list').mockRejectedValue(
+        new Error('scheduler-residue sweep unavailable'),
+      );
+      const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockRejectedValue(
+        new Error('boot recovery unavailable'),
+      );
+
+      try {
+        const bureau = await createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'memory' },
+          durableExecution: true,
+        });
+        try {
+          const report = await bureau.waitForRecovery?.();
+          expect(report?.outcome).toBe('failed');
+          expect(report?.batchFailure?.message).toContain('boot recovery unavailable');
+          // The sweep failure that happened BEFORE recoverAll() threw must
+          // still surface on the resolved report, not be silently dropped
+          // by the batch-failure path.
+          expect(report?.sweepFailure?.message).toContain('scheduler-residue sweep unavailable');
+          expect(report?.perRunFailures).toEqual([]);
+        } finally {
+          await bureau.dispose();
+        }
+      } finally {
+        recoverAllSpy.mockRestore();
+        listSpy.mockRestore();
       }
     });
 
@@ -8340,7 +8386,7 @@ describe('createBureau review queue (AB-20)', () => {
           expect(bureauB.getRun(run.id)).toBeDefined();
         } finally {
           listSpy.mockRestore();
-          bureauB.dispose();
+          await bureauB.dispose();
           await bureauA.dispose();
         }
       } finally {
