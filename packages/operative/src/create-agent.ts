@@ -613,6 +613,18 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       // AB-92/AB-252 — the SAME instance resolved once above, shared by
       // every run this agent starts.
       runtime,
+      // Review finding (AB-241): `rest` comes BEFORE every per-call
+      // `AgentRunContext`-derived field below, not after. `CreateAgentOptions`
+      // declares no `principal` (or `signal`/`childRegistry`/etc.) of its own,
+      // but TypeScript's excess-property check only fires against an object
+      // LITERAL — a caller passing a widened or plain-JS options object that
+      // happens to carry one of these keys would otherwise have it survive
+      // into `rest` and silently clobber the correct per-call value spread
+      // after it. `principal` in particular is inherently per-call
+      // attribution, never a construction-time concept, so a stray
+      // construction-time value must never be able to override the run's
+      // actual caller-supplied principal.
+      ...rest,
       // AB-21: `AgentRunContext` fields translate onto their `RunOptions`
       // equivalents — `agentName` stamps curated `tool.*` events (falling
       // back to this agent's own `name`), `signal` drives per-run abort,
@@ -637,7 +649,6 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       // AB-241 — `AgentRunContext.principal` forwards into `RunOptions.principal`
       // the same way `signal`/`traceContext` do above.
       ...(context?.principal !== undefined ? { principal: context.principal } : {}),
-      ...rest,
     };
   }
 
