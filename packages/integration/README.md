@@ -162,9 +162,14 @@ resume` scenario, AB-271): there, `driveProcess` writes and flushes
 died — the harness never confirms the dying child actually read or applied
 that write before `SIGKILL` landed (`scenarios.ts`'s own comment allows for
 either outcome), so this proves the write was in flight at the moment of
-death, not that a consumed command is safe from replay. The recovery
-assertions afterward send a fresh `proceed` and check the final state, which
-covers both possibilities. Outside that one case, the control proves nothing
+death, not that a consumed command is safe from replay. The scenario's own
+assertions assume the unconsumed case — `report.first` shows exactly one
+`signal-parked` marker and never reaches `cancellation-recorded`, and
+recovery is asserted to reach a fresh `signal-parked` of its own before the
+recovery assertions send a second `proceed` — so this scenario proves no
+double-delivery for a write that was in flight but not yet applied when the
+process died, not for every possible timing of that write. Outside that one
+case, the control proves nothing
 happened past the marker because the child was physically held there — not
 because the signal happened to win a race.
 
