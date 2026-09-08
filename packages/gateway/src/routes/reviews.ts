@@ -44,30 +44,41 @@ const rejectBodySchema = z
 
 /**
  * Parses and validates a mutating review route's JSON body against `schema`.
- * Rejects with `400` for both malformed JSON AND a syntactically valid but
+ * Rejects with `400` for malformed JSON, a syntactically valid but
  * non-object payload (e.g. `null`, `"hi"`, `[]`) — the boundary check the
  * route bodies (which dereference fields like `body.payload` directly) rely
- * on to never see a shape they can't index into.
+ * on to never see a shape they can't index into — AND a well-formed object
+ * that simply fails `schema`'s own validation (e.g. a required grant field
+ * missing). An empty request body is treated as `{}`, so a schema whose
+ * fields are all optional (the review routes' schemas) still parses; a
+ * schema with required fields (e.g. `grants.ts`'s `issueGrantBodySchema`)
+ * correctly rejects it with `400` via the same `safeParse` path below,
+ * rather than throwing an uncaught `ZodError` that would surface as a `500`.
  */
 export async function parseReviewBody<TSchema extends z.ZodTypeAny>(
   context: { req: { text(): Promise<string> } },
   schema: TSchema,
 ): Promise<z.infer<TSchema>> {
   const rawBody = await context.req.text();
-  if (rawBody.length === 0) {
-    return schema.parse({});
-  }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawBody);
-  } catch {
-    throw new HTTPException(400, { message: 'Invalid JSON body' });
+  let parsed: unknown = {};
+  if (rawBody.length > 0) {
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new HTTPException(400, { message: 'Invalid JSON body' });
+    }
   }
 
   const result = schema.safeParse(parsed);
   if (!result.success) {
-    throw new HTTPException(400, { message: 'Request body must be a JSON object' });
+    const isObjectShaped = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+    const message = isObjectShaped
+      ? `Request body failed validation: ${result.error.issues
+          .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+          .join('; ')}`
+      : 'Request body must be a JSON object';
+    throw new HTTPException(400, { message });
   }
   return result.data;
 }

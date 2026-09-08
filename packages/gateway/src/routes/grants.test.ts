@@ -121,6 +121,20 @@ describe('grants routes', () => {
     expect(response.status).toBe(400);
   });
 
+  it('POST /api/v1/grants returns 400 (not 500) for a completely empty request body', async () => {
+    // Regression test: `parseReviewBody` treats an empty body as `{}`, which
+    // parses fine against the review routes' all-optional schemas but must
+    // still fail `issueGrantBodySchema`'s required fields through the same
+    // `safeParse` → 400 path, not an uncaught `ZodError` from `schema.parse`.
+    const gateway = await createTestGateway({
+      generate: createMockGenerate(),
+      toolbox: createNeedsApprovalToolbox('grant-test-secret-empty-body', []),
+    });
+
+    const response = await requestJSON(gateway, '/api/v1/grants', { method: 'POST' });
+    expect(response.status).toBe(400);
+  });
+
   it('POST /api/v1/grants maps a toolbox with no approvalSecret configured to a 500', async () => {
     const gateway = await createTestGateway({
       generate: createMockGenerate(),
@@ -288,11 +302,14 @@ describe('grants routes', () => {
 // alike, unconditionally, whether or not a grant exists. Confirmed in
 // isolation with no grant issued at all: the same `needs_approval` tool
 // still executes immediately. This is a live security-relevant regression,
-// not a grant-matching edge case, and should be tracked as its own issue
-// against `packages/armorer/src/combine-toolboxes.ts` /
+// not a grant-matching edge case, and is tracked as AB-362 against
+// `packages/armorer/src/combine-toolboxes.ts` /
 // `packages/bureau/src/runtime-composition.ts`'s `wireDurableOptInTools`.
-describe('grants routes — durable opt-in tools (AB-346 follow-up)', () => {
-  it('documents that a run opting into durable tools skips its needs_approval policy entirely, independent of any grant', async () => {
+// This test is intentionally pending on AB-362: it locks in and documents
+// the current (broken) behavior so the suite breaks loudly, forcing an
+// update, once AB-362 lands a fix.
+describe('grants routes — durable opt-in tools (AB-346 follow-up, gap tracked as AB-362)', () => {
+  it('documents that a run opting into durable tools skips its needs_approval policy entirely, independent of any grant (pending AB-362)', async () => {
     const charges: number[] = [];
     const generate: GenerateFunction = async (context) =>
       context.step === 0
