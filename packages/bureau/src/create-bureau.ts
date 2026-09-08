@@ -5128,17 +5128,29 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // a separate boolean tracks whether the timer was actually started.
   let automaticRunOwnershipPruneTimer: RuntimeTimeoutHandle;
   let automaticRunOwnershipPruneTimerStarted = false;
+  // Guards against overlapping passes (Copilot review, PR #579): if a pass
+  // ever takes longer than the interval — many sessions, slow storage, a
+  // conflict-retry storm — the next tick must skip rather than start a
+  // SECOND concurrent `pruneStaleRunOwnership()` call piling on extra I/O
+  // and `sessionStore.update()` contention against the first.
+  let automaticRunOwnershipPruneInFlight = false;
   if (runtime.durable && options.durableBackgroundTasks !== 'manual') {
     automaticRunOwnershipPruneTimerStarted = true;
     automaticRunOwnershipPruneTimer = runtimeServices.timers.setInterval(() => {
-      const pass = pruneStaleRunOwnership().catch((error: unknown) => {
-        diagnose({
-          level: 'error',
-          scope: 'durable-maintenance',
-          message: `[bureau] Automatic run-ownership pruning pass failed: ${serializeUnknownError(error)}`,
-          cause: error,
+      if (automaticRunOwnershipPruneInFlight) return;
+      automaticRunOwnershipPruneInFlight = true;
+      const pass = pruneStaleRunOwnership()
+        .catch((error: unknown) => {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Automatic run-ownership pruning pass failed: ${serializeUnknownError(error)}`,
+            cause: error,
+          });
+        })
+        .finally(() => {
+          automaticRunOwnershipPruneInFlight = false;
         });
-      });
       // Tracked (AB-260's `RuntimeServices.deferred` seam), not merely
       // detached: a `createManualRuntimeServices()` test drives this timer
       // via `runtime.advance(...)`, which only awaits ONE microtask tick

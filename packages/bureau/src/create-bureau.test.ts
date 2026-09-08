@@ -14423,6 +14423,108 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
     }
   });
 
+  it('skips a new automatic pruning pass while the prior one is still in flight, instead of overlapping them (Copilot review, PR #579)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-run-ownership-prune-automatic-overlap-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+        await runtime.deferred.drain();
+
+        // `store.getRun(runId) !== undefined` excludes a still-present run
+        // from pruning — delete it first so the released first pass
+        // actually has something prunable to prove it completed.
+        const page = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in page) throw new Error('expected a page for the run');
+        const lastEventBeforeDeletion = page.events.at(-1);
+        if (!lastEventBeforeDeletion) throw new Error('expected at least one durable event');
+        await bureau.deleteRun(run.id);
+        const deletedOutcome = await bureau.eventHistory(
+          { kind: 'run', id: run.id },
+          { since: lastEventBeforeDeletion.cursor },
+        );
+        if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+          throw new Error(
+            `expected a deleted-aggregate outcome after deletion, got ${JSON.stringify(deletedOutcome)}`,
+          );
+        }
+        const lastEvent = deletedOutcome.events.at(-1);
+        if (!lastEvent) throw new Error('expected a run.removed durable event');
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        // Blocks the FIRST pruning pass's `sessionStore.list()` call
+        // indefinitely — it never resolves until `releaseFirstPass()` is
+        // called — so the pass stays "in flight" across a second timer
+        // tick, without a real sleep.
+        let releaseFirstPass!: () => void;
+        const firstPassGate = new Promise<void>((resolve) => {
+          releaseFirstPass = resolve;
+        });
+        const sessionStore = bureau.sessionStore;
+        if (!sessionStore) throw new Error('expected a configured session store');
+        const originalList = sessionStore.list.bind(sessionStore);
+        let listCallCount = 0;
+        const listSpy = spyOn(sessionStore, 'list').mockImplementation(async (...args) => {
+          listCallCount += 1;
+          if (listCallCount === 1) await firstPassGate;
+          return originalList(...args);
+        });
+
+        // First tick starts a pass that blocks on `list()`.
+        await runtime.advance(300_000);
+        await waitForCondition(() => listCallCount >= 1, 'expected the first pass to call list()');
+
+        // Second tick fires while the first pass is still in flight — the
+        // in-flight guard must skip starting a second pass entirely,
+        // so `list()` is not called again yet.
+        await runtime.advance(300_000);
+        expect(listCallCount).toBe(1);
+
+        // Release the first pass; it completes normally.
+        releaseFirstPass();
+        await waitForCondition(async () => {
+          const session = await bureau.getSession(run.sessionId);
+          return session?.metadata['lastRunOwningPrincipals'] === undefined;
+        }, 'expected the first pass to finish pruning once released');
+
+        // A THIRD tick, now that no pass is in flight, calls list() again —
+        // proving the guard skips only while genuinely overlapping, not
+        // forever.
+        await runtime.advance(300_000);
+        await waitForCondition(
+          () => listCallCount >= 2,
+          'expected a later tick, once the guard clears, to call list() again',
+        );
+
+        listSpy.mockRestore();
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('never starts the automatic pruning timer under durableBackgroundTasks: "manual" — a manual host drives pruning only through its own runDurableMaintenance() calls', async () => {
     const databasePath = join(
       tmpdir(),

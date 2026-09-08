@@ -54,7 +54,7 @@ export interface SessionStore {
    *
    * `options.refreshActivity` (default `true`) controls whether a
    * successful write stamps a fresh `updatedAt`. Pass `false` for a write
-   * that must not read as session activity — `listSessions()` sorts by
+   * that must not read as session activity — `list()` sorts by
    * `updatedAt` by default and `cleanup({ olderThan })` uses the same field
    * as its age cutoff, so an ordinary content update refreshing it is
    * correct, but a background maintenance write (pruning stale metadata,
