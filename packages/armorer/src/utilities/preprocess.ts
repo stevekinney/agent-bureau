@@ -49,7 +49,8 @@ export function preprocess<TTool extends AnyTool, TNewInput extends object>(
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
 
   // Create a schema that matches the new input type
-  // We use a passthrough object schema since we can't infer the exact schema from the mapper
+  // We use a loose object schema (Zod v4's z.object({}).loose(), formerly .passthrough())
+  // since we can't infer the exact schema from the mapper
   // The mapper is responsible for transforming to the tool's expected input
   const schema = z.object({}).loose() as z.ZodType<TNewInput>;
 

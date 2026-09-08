@@ -76,7 +76,11 @@ const storedRowSchema = z.object({
   updated_at: z.number(),
 });
 
-/** Schema for the decoded JSON `vector` column: a finite number array. */
+/**
+ * Schema for the decoded JSON `vector` column: a number array. Zod v4's
+ * `z.number()` already rejects `Infinity`/`NaN` by default, so no explicit
+ * `.finite()` check is needed to keep this finite.
+ */
 const vectorJsonSchema = z.array(z.number());
 
 /** Schema for the decoded JSON `metadata` column: an arbitrary string-keyed map. */

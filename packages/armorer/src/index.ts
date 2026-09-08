@@ -1,3 +1,5 @@
+import type { EventIteratorOptions } from 'lifecycle';
+
 export type {
   ApprovalMode,
   ApprovalPolicyConfiguration,
@@ -235,6 +237,12 @@ export {
   ToolValidateErrorEvent,
   ToolValidateSuccessEvent,
 } from './events';
+
+/** @deprecated Use the global `AddEventListenerOptions` type directly. */
+export type AddEventListenerOptionsLike = AddEventListenerOptions;
+/** @deprecated Use `EventIteratorOptions`, also exported from this module, directly. */
+export type AsyncIteratorOptions = EventIteratorOptions;
+
 export type {
   DefaultToolEvents,
   EventIteratorOptions,
