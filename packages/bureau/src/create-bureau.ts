@@ -1106,6 +1106,31 @@ export function classifyRecoveredRun(args: ClassifyRecoveredRunArgs): RecoveredR
   return classifyRecoveredRunDetailed(args).verdict;
 }
 
+/**
+ * Dedupes {@link BureauRecoveryReport.perRunFailures} by `runId`, keeping
+ * the FIRST entry seen. A recovered handle whose owning session is absent/
+ * mismatched/not-running is classified once by the awaited `onRecoveredWorkflow`
+ * hook (during `recoverAll()`) and, because that verdict never registers an
+ * `ActiveRun`, classified AGAIN by `recoverDurableRuns`'s own post-`recoverAll()`
+ * pass over every unregistered handle — both classifications agree (nothing
+ * about the handle changed between them), so without this dedupe the SAME
+ * `{runId, reason}` would appear twice, violating the one-entry-per-handle
+ * contract (code-review regression fixture, AB-349). Pure and exported for
+ * direct unit testing, matching {@link classifyRecoveredRunDetailed}.
+ */
+export function dedupeRecoveryPerRunFailures(
+  perRunFailures: readonly { readonly runId: string; readonly reason: string }[],
+): { readonly runId: string; readonly reason: string }[] {
+  const seen = new Set<string>();
+  const deduped: { readonly runId: string; readonly reason: string }[] = [];
+  for (const failure of perRunFailures) {
+    if (seen.has(failure.runId)) continue;
+    seen.add(failure.runId);
+    deduped.push(failure);
+  }
+  return deduped;
+}
+
 export function isRecoverableScheduledFireInput(input: unknown): input is ScheduledAgentRunInput {
   return (
     isScheduledAgentRunInput(input) &&
@@ -3679,9 +3704,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * try/catch logs it, and the operator sees a clear signal instead of a quiet
    * partial sweep.
    */
+  /**
+   * Returns the number of suspended-residue ids this sweep found but could
+   * NOT cancel (each such rejection is also diagnosed individually below).
+   * A non-zero count means real collision-risk residue survives the sweep
+   * even though the function itself did not throw — the caller folds this
+   * into `BureauRecoveryReport.sweepFailure` (code-review regression
+   * fixture, AB-349) so that outcome is not misreported `'clean'`.
+   */
   async function sweepSuspendedSchedulerRuns(
     engine: NonNullable<typeof runtime.durable>['engine'],
-  ) {
+  ): Promise<number> {
     const PAGE_SIZE = 100;
     // Sanity cap on TOTAL pages — far above any plausible suspended-residue count.
     // Hitting it means something is wrong (a runaway backlog or a store that is
@@ -3721,11 +3754,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
 
-    if (ids.length === 0) return;
+    if (ids.length === 0) return 0;
 
     const outcomes = await Promise.allSettled(ids.map((id) => engine.cancel(id)));
+    let failedCancellations = 0;
     outcomes.forEach((outcome, index) => {
       if (outcome.status === 'rejected') {
+        failedCancellations += 1;
         diagnose({
           level: 'error',
           scope: 'recovery',
@@ -3733,6 +3768,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         });
       }
     });
+    return failedCancellations;
   }
 
   /**
@@ -3901,7 +3937,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // through that shared, boot-call-site-read variable.
     let sweepFailure: { message: string } | undefined;
     try {
-      await sweepSuspendedSchedulerRuns(durable.engine);
+      const failedCancellations = await sweepSuspendedSchedulerRuns(durable.engine);
+      if (failedCancellations > 0) {
+        // The sweep itself didn't throw, but real collision-risk residue
+        // survived it (each rejection already diagnosed individually inside
+        // sweepSuspendedSchedulerRuns) — an outcome of 'clean' would
+        // misreport that. See sweepSuspendedSchedulerRuns's own doc comment.
+        sweepFailure = {
+          message: `${failedCancellations} suspended scheduler run(s) could not be cancelled during the sweep.`,
+        };
+        currentRecoverySweepFailure = sweepFailure;
+      }
     } catch (error) {
       sweepFailure = { message: serializeUnknownError(error) };
       currentRecoverySweepFailure = sweepFailure;
@@ -4175,7 +4221,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
     }
 
-    const perRunFailures = currentRecoveryPerRunFailures ?? [];
+    const perRunFailures = dedupeRecoveryPerRunFailures(currentRecoveryPerRunFailures ?? []);
     currentRecoveryPerRunFailures = undefined;
     currentRecoverySweepFailure = undefined;
     const outcome: BureauRecoveryReport['outcome'] =
@@ -6243,18 +6289,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             scope: 'recovery',
             message: `[bureau] Deferred durable run recovery failed: ${serializeUnknownError(error)}`,
           });
-          // The sweep may have already failed before recoverAll() threw —
-          // fold it in rather than dropping it (see `currentRecoverySweepFailure`'s
-          // own doc comment), then reset both this-pass collectors so neither
-          // leaks into a later recovery pass.
+          // The sweep, and any handle `onRecoveredWorkflow` classified before
+          // `recoverAll()` itself threw, may have already produced real
+          // failures — fold both in rather than dropping them (see
+          // `currentRecoverySweepFailure`'s own doc comment; code-review
+          // regression fixture), then reset both this-pass collectors so
+          // neither leaks into a later recovery pass.
           const sweepFailure = currentRecoverySweepFailure;
+          const perRunFailures = dedupeRecoveryPerRunFailures(currentRecoveryPerRunFailures ?? []);
           currentRecoverySweepFailure = undefined;
           currentRecoveryPerRunFailures = undefined;
           return {
             outcome: 'failed',
             ...(sweepFailure ? { sweepFailure } : {}),
             batchFailure: { message: serializeUnknownError(error) },
-            perRunFailures: [],
+            perRunFailures,
           } satisfies BureauRecoveryReport;
         });
         void recovery.then((report) => resolveDurableRecoveryBarrier?.(report));
@@ -6440,17 +6489,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         scope: 'recovery',
         message: `[bureau] Durable run recovery failed during boot: ${serializeUnknownError(error)}`,
       });
-      // See the deferred-path `.catch()` above: fold in a sweep failure that
-      // happened just before recoverAll() threw, then reset both this-pass
-      // collectors so neither leaks into a later recovery pass.
+      // See the deferred-path `.catch()` above: fold in a sweep failure and
+      // any per-handle failures classified before recoverAll() threw, then
+      // reset both this-pass collectors so neither leaks into a later
+      // recovery pass.
       const sweepFailure = currentRecoverySweepFailure;
+      const perRunFailures = dedupeRecoveryPerRunFailures(currentRecoveryPerRunFailures ?? []);
       currentRecoverySweepFailure = undefined;
       currentRecoveryPerRunFailures = undefined;
       return {
         outcome: 'failed',
         ...(sweepFailure ? { sweepFailure } : {}),
         batchFailure: { message: serializeUnknownError(error) },
-        perRunFailures: [],
+        perRunFailures,
       } satisfies BureauRecoveryReport;
     });
     await durableRecoveryBarrier;

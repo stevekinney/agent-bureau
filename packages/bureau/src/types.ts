@@ -1223,16 +1223,31 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * registered — not once recovery, or the resumed runs themselves, have
    * completed. A recovered run's first step can dispatch tool calls before a
    * caller's own post-boot dependency wiring (webhook targets, event
-   * listeners, and the like) is ready. A caller who wires dependencies that
-   * a recovered run will use must either finish that wiring before calling
-   * `createBureau()`, or `await waitForRecovery()` before relying on it —
-   * awaiting the returned bureau alone is not enough.
+   * listeners, and the like) is ready.
    *
-   * This is also the seam for deferred recovery: when a request-authority
-   * validator is attached after boot (the standard `createBureau()` then
-   * `createGateway()` sequence), recovery does not start until
-   * `setRequestAuthorityValidator()` is called, and `waitForRecovery()` is
-   * the only way to observe when that deferred pass finishes.
+   * That timing is DIFFERENT on the two paths this method covers, so what
+   * `await waitForRecovery()` buys a caller is different too:
+   *
+   * - **No deferred authority validator** (the common case: a bare
+   *   `createBureau()`, or one immediately given `requestAuthorityValidator`
+   *   in `BureauOptions`). `createBureau()` itself already awaits this same
+   *   barrier before resolving, so by the time a caller HAS a `bureau` to
+   *   call `waitForRecovery()` on, recovery classification is already done
+   *   and any recovered run may already be advancing. Calling
+   *   `waitForRecovery()` here reports that (already-settled) fact; it
+   *   cannot retroactively delay a recovered run's already-dispatched first
+   *   step. A caller with post-boot dependency wiring that a recovered run
+   *   will need must finish that wiring BEFORE calling `createBureau()` (or
+   *   supply it via `BureauOptions` at construction) — there is no
+   *   after-the-fact seam on this path.
+   * - **Deferred authority validator** (the standard `createBureau()` then
+   *   `createGateway()` sequence, with no `requestAuthorityValidator` set
+   *   upfront). Recovery does not start at all until
+   *   `setRequestAuthorityValidator()` is called, so a caller that finishes
+   *   its dependency wiring before or immediately after that call, then
+   *   `await`s `waitForRecovery()`, genuinely gates on recovery's
+   *   classification/reattachment pass completing. `waitForRecovery()` is
+   *   the only way to observe when that deferred pass finishes.
    */
   waitForRecovery?(): Promise<BureauRecoveryReport>;
 

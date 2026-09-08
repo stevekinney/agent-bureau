@@ -67,6 +67,7 @@ import {
   classifyRecoveredRunDetailed,
   createBureau,
   createDefaultSessionPersistenceSleep,
+  dedupeRecoveryPerRunFailures,
   detachBestEffortPromise,
   emptyRecoveredStepMetadata,
   hasRecoverableTransportAuthority,
@@ -8394,6 +8395,137 @@ describe('createBureau review queue (AB-20)', () => {
         await rm(`${databasePath}-wal`, { force: true });
         await rm(`${databasePath}-shm`, { force: true });
       }
+    });
+
+    it('deduplicates a handle classified "cancel" by both the awaited recovery hook and the post-recoverAll() pass (code-review regression fixture)', async () => {
+      const probe = await createRuntimeComposition({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+        recoverAll: (options: {
+          onRecoveredWorkflow: (info: unknown) => Promise<void>;
+        }) => Promise<unknown[]>;
+      };
+      probe.durable!.engine[Symbol.dispose]?.();
+      probe.disposeStorage?.();
+
+      // A bureau-owned agentRun input whose session is absent: the awaited
+      // hook (onRecoveredWorkflow) classifies it 'cancel'/'session-absent'
+      // but — because 'cancel' never registers an ActiveRun — the SAME
+      // handle is also present in recoverAll()'s returned array, so the
+      // post-recoverAll() pass classifies it a second time with an
+      // identical verdict.
+      const duplicateInput = {
+        runId: 'dup-run',
+        sessionId: 'missing-session',
+        agentName: 'bureau',
+      };
+      const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockImplementation(
+        async ({ onRecoveredWorkflow }) => {
+          await onRecoveredWorkflow({ workflowId: 'dup-run', input: duplicateInput });
+          return [{ id: 'dup-run', getLaunchMetadata: async () => ({ input: duplicateInput }) }];
+        },
+      );
+
+      try {
+        const bureau = await createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'memory' },
+          durableExecution: true,
+        });
+        try {
+          const report = await bureau.waitForRecovery?.();
+          expect(report?.outcome).toBe('partial');
+          // Exactly ONE entry, not two, even though both classification
+          // passes independently agree on 'cancel'/'session-absent'.
+          expect(report?.perRunFailures).toEqual([{ runId: 'dup-run', reason: 'session-absent' }]);
+        } finally {
+          await bureau.dispose();
+        }
+      } finally {
+        recoverAllSpy.mockRestore();
+      }
+    });
+
+    it('reports outcome: "partial" via sweepFailure when a suspended scheduler run cannot be cancelled, even though the sweep itself never throws (code-review regression fixture)', async () => {
+      const probe = await createRuntimeComposition({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+        list: (filter: unknown) => Promise<{ items: { id: string }[]; total: number }>;
+        cancel: (runId: string) => Promise<void>;
+        recoverAll: () => Promise<unknown[]>;
+      };
+      probe.durable!.engine[Symbol.dispose]?.();
+      probe.disposeStorage?.();
+
+      const listSpy = spyOn(enginePrototype, 'list').mockResolvedValue({
+        items: [{ id: 'scheduler-run-stuck-1' }],
+        total: 1,
+      });
+      const cancelSpy = spyOn(enginePrototype, 'cancel').mockRejectedValue(
+        new Error('cancel unavailable'),
+      );
+      const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([]);
+
+      try {
+        const bureau = await createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'memory' },
+          durableExecution: true,
+        });
+        try {
+          const report = await bureau.waitForRecovery?.();
+          expect(report?.outcome).toBe('partial');
+          expect(report?.sweepFailure?.message).toContain(
+            '1 suspended scheduler run(s) could not be cancelled',
+          );
+          expect(report?.perRunFailures).toEqual([]);
+          expect(report?.batchFailure).toBeUndefined();
+        } finally {
+          await bureau.dispose();
+        }
+      } finally {
+        recoverAllSpy.mockRestore();
+        cancelSpy.mockRestore();
+        listSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('dedupeRecoveryPerRunFailures (AB-349)', () => {
+    it('returns an empty array for an empty input', () => {
+      expect(dedupeRecoveryPerRunFailures([])).toEqual([]);
+    });
+
+    it('keeps every entry when runIds are distinct', () => {
+      const input = [
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-b', reason: 'session-absent' },
+      ];
+      expect(dedupeRecoveryPerRunFailures(input)).toEqual(input);
+    });
+
+    it('keeps only the FIRST entry for a repeated runId', () => {
+      const input = [
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-b', reason: 'session-absent' },
+      ];
+      expect(dedupeRecoveryPerRunFailures(input)).toEqual([
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-b', reason: 'session-absent' },
+      ]);
     });
   });
 
