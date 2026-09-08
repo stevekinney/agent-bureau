@@ -2,6 +2,8 @@ import { rmSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { NIGHTLY_TEST_NAME_PATTERN } from './nightly-test-pattern.ts';
+
 type CoverageTotals = {
   functions: { covered: number; total: number };
   lines: { covered: number; total: number };
@@ -139,7 +141,21 @@ function formatPercentage(covered: number, total: number): string {
 rmSync(coverageDirectory, { recursive: true, force: true });
 
 const command = Bun.spawnSync(
-  ['bun', 'test', '--coverage', '--coverage-reporter=lcov', '--coverage-dir', coverageDirectory],
+  [
+    'bun',
+    'test',
+    '--coverage',
+    '--coverage-reporter=lcov',
+    '--coverage-dir',
+    coverageDirectory,
+    // Mirror the pull-request lane's exclusion (AB-275, AB-356): this script
+    // invokes `bun test --coverage` directly rather than through a package's
+    // filtered `test` script, so without this flag it would separately
+    // re-execute nightly-tagged scenarios (e.g. gateway's restart-and-replay
+    // conformance test) on every `bun run coverage:check`.
+    '--test-name-pattern',
+    NIGHTLY_TEST_NAME_PATTERN,
+  ],
   {
     cwd: packageRoot,
     stdout: 'inherit',

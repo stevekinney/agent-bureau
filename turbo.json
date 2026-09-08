@@ -6,7 +6,9 @@
     "bunfig.toml",
     "tsconfig.base.json",
     "eslint.config.base.ts",
-    "scripts/determinism-manifest.json"
+    "scripts/determinism-manifest.json",
+    "scripts/nightly-test-pattern.ts",
+    "scripts/run-tests-excluding-nightly.ts"
   ],
   "tasks": {
     "build": {
