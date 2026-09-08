@@ -11,7 +11,7 @@
  * root-caused and fixed the one real LMDB-specific defect this matrix
  * exposed (the recovered-run tool-dependency race — see `fixture.ts`'s
  * `getDeps()` comment); no other backend-specific gap was found, so the
- * full eleven-scenario matrix runs unmodified here (`harness.ts`'s
+ * full twelve-scenario matrix runs unmodified here (`harness.ts`'s
  * `CrashHarnessUnsupportedBehaviorError` stays available as a typed escape
  * hatch for a future gap, but nothing in this matrix trips it).
  *

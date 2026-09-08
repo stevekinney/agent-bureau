@@ -13,20 +13,25 @@
  * the `[smoke]` honesty check), and asserts. `run(backend)` is called from
  * inside a `bun:test` `it(...)`, so `expect` failures surface normally.
  *
- * Scope note: seven of these eleven scenarios (the `[smoke]` pair plus
+ * Scope note: seven of these twelve scenarios (the `[smoke]` pair plus
  * `ready`/`child-registered`/`effect-attempted`/`signal-parked`/
  * `cancellation-recorded`/`cleanup-completed`) are AB-270's original matrix,
- * extracted here unchanged. The remaining four are AB-271's own scope:
- * `nested children`, a schedule DEFINITION surviving a crash during
- * registration (see that scenario's own comment for why it does not drive
- * an actual fire), `signal-parked resume with a pre-kill signal`, and the
- * AB-29 `recovery failure`. AB-271's own "cancellation" acceptance
- * criterion — "crashes at the
+ * extracted here unchanged. Four are AB-271's own scope: `nested children`,
+ * a schedule DEFINITION surviving a crash during registration (see that
+ * scenario's own comment for why it does not drive an actual fire),
+ * `signal-parked resume with a pre-kill signal`, and the AB-29
+ * `recovery failure`. AB-271's own "cancellation" acceptance criterion —
+ * "crashes at the
  * `'cancellation-recorded'` marker and asserts the recovered process
  * observes the cancellation as recorded rather than replaying the run" — is
  * satisfied by the pre-existing `killed at cancellation-recorded` scenario
  * below, now running over LMDB for the first time via `lmdb.test.ts`; no
- * new scenario was needed for it.
+ * new scenario was needed for it. The twelfth, `killed at run-started`, is
+ * AB-361's own scope: the started-work contract (AB-34/AB-15) means a run
+ * killed the instant after `createRun` hands its caller an identifier is
+ * recoverable, so this became a positive recovery scenario once the
+ * `[smoke]` pair's control point moved to the new `pre-dispatch` marker
+ * (see that scenario's own comment).
  */
 import { createManualRuntimeServices } from '@lostgradient/operative/test';
 import { expect } from 'bun:test';
@@ -82,7 +87,7 @@ export interface CrashScenario {
 export const CRASH_SCENARIOS: readonly CrashScenario[] = [
   // ── AB-270's original seven scenarios ──────────────────────────────
   {
-    name: '[smoke] kill-vs-control honesty pair: killing at checkpoint-committed recovers a committed effect; a control killed at run-started never reaches it',
+    name: '[smoke] kill-vs-control honesty pair: killing at checkpoint-committed recovers a committed effect; a control killed at pre-dispatch never reaches it',
     timeoutMs: 60_000,
     async run(backend) {
       const runtime = createManualRuntimeServices();
@@ -92,14 +97,22 @@ export const CRASH_SCENARIOS: readonly CrashScenario[] = [
         backend,
         killAtMarker: 'checkpoint-committed',
       });
-      const control = await runCrashScenario({ runtime, backend, killAtMarker: 'run-started' });
+      // AB-361: the control kills BEFORE `bureau.createRun` is even called,
+      // so nothing durable can exist by construction. It used to kill at
+      // `run-started`, but `createRun`'s durable branch now resolves only
+      // after the engine's initial workflow record commits, so a kill at
+      // `run-started` always has a durable record to recover — asserting
+      // "nothing durable" there would assert the very bug this fix closes.
+      // See `run-started`'s own positive-recovery scenario below.
+      const control = await runCrashScenario({ runtime, backend, killAtMarker: 'pre-dispatch' });
 
       expectCleanRecoveryShape(killed);
       expectCleanRecoveryShape(control);
 
       expect(marker(killed.first, 'checkpoint-committed')).toBeDefined();
       expect(marker(killed.first, 'effect-attempted')).toBeDefined();
-      expect(marker(control.first, 'run-started')).toBeDefined();
+      expect(marker(control.first, 'pre-dispatch')).toBeDefined();
+      expect(marker(control.first, 'run-started')).toBeUndefined();
       expect(marker(control.first, 'checkpoint-committed')).toBeUndefined();
       expect(marker(control.first, 'effect-attempted')).toBeUndefined();
 
@@ -118,6 +131,58 @@ export const CRASH_SCENARIOS: readonly CrashScenario[] = [
       } | null;
       expect(recoveredState?.id).toBe(runId as string);
       expect(recoveredState?.status).toBe('cancelled');
+    },
+  },
+  {
+    name: 'killed at run-started: the durable workflow record already committed, so recovery resumes the SAME run and its effect happens exactly once',
+    timeoutMs: 30_000,
+    async run(backend) {
+      const runtime = createManualRuntimeServices();
+      const report = await runCrashScenario({ runtime, backend, killAtMarker: 'run-started' });
+
+      expectCleanRecoveryShape(report);
+      expect(marker(report.first, 'pre-dispatch')).toBeDefined();
+      expect(marker(report.first, 'run-started')).toBeDefined();
+      expect(marker(report.first, 'child-registered')).toBeUndefined();
+      expect(marker(report.first, 'effect-attempted')).toBeUndefined();
+
+      const runId = marker(report.first, 'run-started')?.detail?.['runId'];
+      expect(typeof runId).toBe('string');
+
+      // AB-34/AB-15's started-work contract in action: a process killed the
+      // instant after it receives an acknowledged run identifier finds that
+      // run recoverable, not lost — the second process reattaches the SAME
+      // run (never mints a second one) and drives it all the way through
+      // its own child registration, effect, park, and cancellation.
+      const recoveredState = observation(report.second, 'final-root-workflow-state') as {
+        id?: string;
+        status?: string;
+      } | null;
+      expect(recoveredState?.id).toBe(runId as string);
+      expect(recoveredState?.status).toBe('cancelled');
+
+      // The effect ran exactly once — never twice — because nothing had
+      // dispatched it before the kill; recovery registers the child and
+      // performs the effect fresh, a single time each, never as a replayed
+      // "duplicate attempt" of something the killed process had already
+      // started. Strict, not a subset check: the full recorded shape, not
+      // just the fields that happen to match.
+      expect(markersNamed(report.second, 'child-registered').length).toBe(1);
+      expect(
+        marker(report.second, 'child-registered')?.detail?.['duplicateAttempt'],
+      ).toBeUndefined();
+      expect(markersNamed(report.second, 'effect-attempted').length).toBe(1);
+      expect(
+        marker(report.second, 'effect-attempted')?.detail?.['duplicateAttempt'],
+      ).toBeUndefined();
+      expect(observation(report.second, 'effect-count')).toBe('1');
+      expect(observation(report.second, 'effect-cache-entry')).toEqual({
+        status: 'completed',
+        result: { ok: true, effectCount: 1 },
+        toolName: 'perform-effect',
+        executedAt: expect.any(Number),
+        ttl: 0,
+      });
     },
   },
   {
