@@ -14468,18 +14468,23 @@ describe('bureau owns an automatic-profile durable-maintenance interval (AB-374)
         // The tick fully settled as part of `shutdown()` itself — nothing
         // left outstanding once it returns.
         expect(runtime.outstandingDeferred()).not.toContain('durable-maintenance-tick');
-        // No closed-database/finalized-statement failure landed — the
-        // pass was awaited to completion before teardown, not raced past it.
+        // The tick's own error-diagnosis wrapper (`fireDurableMaintenanceTick`'s
+        // `.catch`) never fired — backend-independent, unlike matching the
+        // specific bun:sqlite error strings this fix was discovered against.
+        expect(
+          diagnostics.some((message) =>
+            message.includes('Error during automatic stale-run-ownership pruning'),
+          ),
+        ).toBe(false);
+        // Belt-and-suspenders: the exact failure this fix closes never
+        // landed either, however a future storage backend might phrase it.
         expect(
           diagnostics.some(
             (message) => message.includes('closed database') || message.includes('finalized'),
           ),
         ).toBe(false);
-      } catch (error) {
-        // Ensure teardown still happens even if an assertion above throws,
-        // without double-disposing (shutdown() is idempotent either way).
+      } finally {
         await bureau.shutdown();
-        throw error;
       }
     } finally {
       await rm(databasePath, { force: true });
