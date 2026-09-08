@@ -151,21 +151,31 @@ own control flow cannot proceed past a marker without that acknowledgement.
 `harness.ts`'s `driveProcess` acknowledges every marker before
 `killAtMarker` with `{ type: 'proceed' }` (or `{ type: 'cancel' }` for
 `signal-parked`, unless resuming), but for the `killAtMarker` marker itself
-it sends no acknowledgement at all and issues `SIGKILL` immediately: the
-child is left parked on its own `await stdin.nextCommand()` with nothing
-ever arriving to resolve it, so it cannot execute one more line of its own
-logic before the kill lands. The control proves nothing happened past the
-marker because the child was physically held there — not because the signal
-happened to win a race.
+it normally sends no acknowledgement at all and issues `SIGKILL`
+immediately: the child is left parked on its own `await
+stdin.nextCommand()` with nothing ever arriving to resolve it, so it cannot
+execute one more line of its own logic before the kill lands. The one
+deliberate exception is `deliverSignalBeforeKill` (the `signal-parked
+resume` scenario, AB-271): there, `driveProcess` sends `{ type: 'proceed'
+}` at the kill marker itself, simulating a signal that was already
+in-flight when the process died, before still issuing `SIGKILL` — the hold
+is what lets that scenario prove the delivered command is never
+double-applied after recovery, not a hole in the hold's guarantee for every
+other scenario. Outside that one case, the control proves nothing happened
+past the marker because the child was physically held there — not because
+the signal happened to win a race.
 
 This hold is what makes `pre-dispatch` (AB-361) a valid control point: it is
 a marker `fixture.ts` reports immediately after `ready` and strictly before
-`bureau.createRun` is ever called, for every scenario kind that dispatches a
-root run. A child held at `pre-dispatch` cannot have called `createRun` —
-there is no path to reach the call after the marker report returns, because
-the hold never lets that report return before the kill. Killing there is
-therefore a genuine "nothing durable can exist" control, independent of how
-fast or slow `SIGKILL` is actually delivered.
+`bureau.createRun` is called, for every scenario kind that dispatches its
+root run through `bureau.createRun` — which is every kind except
+`recovery-failure`, whose root run instead goes through the catalog
+dispatch path (`bureau.run()`/`harness.startRun`) and so never reports
+`pre-dispatch` at all. A child held at `pre-dispatch` cannot have called
+`createRun` — there is no path to reach the call after the marker report
+returns, because the hold never lets that report return before the kill.
+Killing there is therefore a genuine "nothing durable can exist" control,
+independent of how fast or slow `SIGKILL` is actually delivered.
 
 `test/crash/harness.ts` exports `runCrashScenario` (the parent driver) and
 `test/crash/fixture.ts` is the child-process entry point; neither is part of
