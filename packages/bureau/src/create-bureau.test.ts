@@ -196,6 +196,29 @@ function createBlockingGenerate(): {
   return { generate, resolve: resolveResponse! };
 }
 
+/**
+ * AB-369: a `generate` that genuinely never resolves once invoked and never
+ * checks its `AbortSignal` — unlike `() => new Promise(() => {})` used
+ * elsewhere in this file (which never actually runs, because `abortRun` is
+ * called before the run's queued microtask ever reaches step 0's `generate`
+ * call, so the step's own `signal.aborted` guard short-circuits before
+ * `generate` is invoked at all), this resolves `invoked` the instant
+ * `generate` is actually called — a caller awaits `invoked` before calling
+ * `abortRun`, guaranteeing `generate` is genuinely in flight and will never
+ * settle, so `abortRun`'s cleanup continuation never runs either.
+ */
+function createTrulyHungGenerate(): { generate: GenerateFunction; invoked: Promise<void> } {
+  let resolveInvoked: (() => void) | undefined;
+  const invoked = new Promise<void>((resolve) => {
+    resolveInvoked = resolve;
+  });
+  const generate: GenerateFunction = () => {
+    resolveInvoked?.();
+    return new Promise<never>(() => {});
+  };
+  return { generate, invoked };
+}
+
 async function waitForRunCompletion(bureau: Bureau, runId: string) {
   await waitForRunState(bureau, runId);
   // Drain Weft's deferred inline-launch queue (its `setTimeout(0)` starts) so the
@@ -3625,6 +3648,100 @@ describe('createBureau', () => {
 
     await pollUntil(() => bureau.getRun(run.id)?.status === 'aborted');
     expect(bureau.getRun(run.id)?.status).toBe('aborted');
+
+    bureau.dispose();
+  });
+
+  it('listAbortingRuns names a run whose abort was requested but whose cleanup never settles (AB-369)', async () => {
+    const runtime = createManualRuntimeServices();
+    const { generate, invoked } = createTrulyHungGenerate();
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+      runtime,
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    await invoked;
+
+    expect(bureau.listAbortingRuns()).toEqual([]);
+
+    const expectedSince = runtime.clock.now();
+    const aborted = bureau.abortRun(run.id);
+    expect(aborted.status).toBe('aborting');
+
+    const abortingRuns = bureau.listAbortingRuns();
+    expect(abortingRuns).toHaveLength(1);
+    expect(abortingRuns[0]?.runId).toBe(run.id);
+    expect(abortingRuns[0]?.since).toBe(expectedSince);
+
+    // Cleanup genuinely never settles (`generate` never resolves and the run
+    // never checks its abort signal): several microtask flushes later the
+    // entry is still there, and the run's own store status never advances
+    // past `'running'` either — this is a leak the pre-AB-369 baseline could
+    // only prove via mutation testing, never observe from a public surface.
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(bureau.listAbortingRuns().map((entry) => entry.runId)).toContain(run.id);
+    expect(bureau.getRun(run.id)?.status).toBe('running');
+
+    bureau.dispose();
+  });
+
+  it("abortRun's terminal-status branch also clears abortingRunIds for a repeat call arriving before the closed() continuation has run (AB-369)", async () => {
+    // `createBlockingGenerate` resolves on abort quickly, but the run's
+    // store status (updated synchronously inside the `run.aborted` listener,
+    // itself dispatched from deep inside the SAME `Promise.resolve().then()`
+    // microtask that drives `executeLoop`) flips to a non-`'running'` value
+    // several microtask ticks before `closed()` — chained through `result`'s
+    // OWN `.then()`s — ever resolves. A repeat `abortRun` call that lands in
+    // that window exercises the early `if (runState.status !== 'running')`
+    // branch's own `abortingRunIds.delete(id)` — the mutant AB-353 recorded
+    // equivalent because nothing previously read `abortingRunIds` publicly.
+    const { generate } = createBlockingGenerate();
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    bureau.abortRun(run.id);
+
+    let caughtWindow = false;
+    for (let i = 0; i < 200; i++) {
+      const status = bureau.getRun(run.id)?.status;
+      const hasEntry = bureau.listAbortingRuns().some((entry) => entry.runId === run.id);
+      if (status !== 'running' && hasEntry) {
+        caughtWindow = true;
+        break;
+      }
+      if (status !== 'running' && !hasEntry) break;
+      await Promise.resolve();
+    }
+    expect(caughtWindow).toBe(true);
+    expect(bureau.listAbortingRuns().map((entry) => entry.runId)).toContain(run.id);
+
+    bureau.abortRun(run.id);
+    expect(bureau.listAbortingRuns().map((entry) => entry.runId)).not.toContain(run.id);
+
+    bureau.dispose();
+  });
+
+  it('abortRun clears abortingRunIds once the closed() continuation genuinely settles, with no repeat call (AB-369)', async () => {
+    const { generate } = createBlockingGenerate();
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+    });
+
+    const run = await bureau.createRun({ message: 'Hello' });
+    bureau.abortRun(run.id);
+    expect(bureau.listAbortingRuns().map((entry) => entry.runId)).toContain(run.id);
+
+    await pollUntil(() => !bureau.listAbortingRuns().some((entry) => entry.runId === run.id));
+    expect(bureau.listAbortingRuns().map((entry) => entry.runId)).not.toContain(run.id);
 
     bureau.dispose();
   });

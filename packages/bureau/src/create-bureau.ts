@@ -163,6 +163,7 @@ import {
   type SteeringCommandRequest,
 } from './steering';
 import type {
+  AbortingRun,
   Bureau,
   BureauOptions,
   BureauRecoveryReport,
@@ -1636,7 +1637,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // return reports. An entry is removed once `ActiveRun.closed()` genuinely
   // settles (AB-204); `Store` itself never writes `'aborting'` (see
   // `RunStatus`'s doc comment in `operative/src/store/types.ts`).
-  const abortingRunIds = new Set<string>();
+  //
+  // AB-369: the value is the `runtimeServices.clock.now()` timestamp
+  // recorded when `abortRun` first requested cancellation for that run —
+  // exposed publicly via `listAbortingRuns()` so a regression in the
+  // `closed().then(() => abortingRunIds.delete(id))` cleanup below surfaces
+  // as a genuinely observable leak (`BureauQuiescenceReport`, `bureau/test`)
+  // instead of an invisible, unbounded-growth bookkeeping mutation.
+  const abortingRunIds = new Map<string, number>();
   // AB-15: per-run monotonic sequence counter for run-scoped live frames
   // (`event` and `stream:*`). Stamped once here — the single point where
   // frames reach `emitLiveFrame` — so `streamEventToFrame` and the store
@@ -4693,7 +4701,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
 
     if (!abortingRunIds.has(id)) {
-      abortingRunIds.add(id);
+      abortingRunIds.set(id, runtimeServices.clock.now());
       runState.activeRun.abort('Aborted via API');
       // Evict the transitional marker once cleanup genuinely settles — never
       // on `abort()` returning, which is synchronous and proves nothing
@@ -4718,6 +4726,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       ...serializeRunState(runState, getRunSessionIdentifier(runState), runAttribution.get(id)),
       status: 'aborting',
     };
+  }
+
+  /**
+   * AB-369: publicly read snapshot of `abortingRunIds` — every run
+   * `abortRun` has requested cancellation for whose `activeRun.closed()`
+   * has not yet settled, paired with the `runtimeServices.clock.now()`
+   * timestamp recorded when cancellation was first requested. A run that
+   * regresses the `closed().then(() => abortingRunIds.delete(id))` cleanup
+   * above stays listed here for the life of the process — exactly the leak
+   * `BureauQuiescenceReport` (`bureau/test`) surfaces at shutdown.
+   */
+  function listAbortingRuns(): readonly AbortingRun[] {
+    return Array.from(abortingRunIds, ([runId, since]) => ({ runId, since }));
   }
 
   /**
@@ -6858,6 +6879,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     subscribeRunSnapshot,
     getRunReport,
     abortRun,
+    listAbortingRuns,
     deleteRun,
     getDurableRun,
     cancelDurableRun,
