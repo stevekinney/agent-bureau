@@ -4376,6 +4376,104 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
     }
   });
 
+  describe('classifyCatalogRecoveredRun (AB-241 review finding)', () => {
+    it('consumes the cache resolveRunServices already populated, without a second storage read', async () => {
+      const runtime = await createRuntimeComposition({
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const catalogOptions = fakeRunOptions();
+        runtime.setCatalogAgentRunOptionsResolver(async () => ({
+          status: 'resolved',
+          options: catalogOptions,
+          definitionRevision: 1,
+        }));
+
+        await runtime.persistCatalogRunRecoveryRecord('catalog-run-classify', {
+          agentName: 'echo',
+          definitionRevision: 1,
+          input: 'hello',
+          principal: 'alice',
+        });
+
+        // Populates `catalogRunRecoveryCache` as a side effect, exactly as
+        // boot recovery does before invoking `onRecoveredWorkflow`.
+        await runtime.resolveRunServices({
+          workflowId: 'catalog-run-classify',
+          workflowType: 'agentRun',
+          input: {
+            runId: 'catalog-run-classify',
+            sessionId: 'catalog-run-classify',
+            agentName: 'echo',
+          },
+        });
+
+        const classification = await runtime.classifyCatalogRecoveredRun('catalog-run-classify');
+        expect(classification).toEqual({
+          isCatalogRun: true,
+          attribution: { agentName: 'echo', principal: 'alice' },
+        });
+
+        // The cache entry is consumed (deleted) on first read — a second
+        // call falls back to a fresh storage read, which still succeeds
+        // against memory storage and returns the same result, proving the
+        // cache is an optimization/consistency guard, not the only path.
+        const secondClassification =
+          await runtime.classifyCatalogRecoveredRun('catalog-run-classify');
+        expect(secondClassification).toEqual({
+          isCatalogRun: true,
+          attribution: { agentName: 'echo', principal: 'alice' },
+        });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('falls back to a fresh storage read when called without a cache entry (no principal recorded)', async () => {
+      const runtime = await createRuntimeComposition({
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        // No `resolveRunServices` call first — this is the "direct caller
+        // outside the normal recovery hook ordering" case the function's
+        // own doc comment names.
+        await runtime.persistCatalogRunRecoveryRecord('catalog-run-classify-fallback', {
+          agentName: 'echo',
+          definitionRevision: 1,
+          input: 'hello',
+        });
+
+        const classification = await runtime.classifyCatalogRecoveredRun(
+          'catalog-run-classify-fallback',
+        );
+        expect(classification).toEqual({
+          isCatalogRun: true,
+          attribution: { agentName: 'echo' },
+        });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('classifies a genuinely unrecognized run id as not-catalog, with no attribution', async () => {
+      const runtime = await createRuntimeComposition({
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+
+      try {
+        const classification = await runtime.classifyCatalogRecoveredRun('never-persisted-run');
+        expect(classification).toEqual({ isCatalogRun: false });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+  });
+
   it('round-trips a conversation-shaped (not plain-string) AgentInput through the recovery record', async () => {
     const runtime = await createRuntimeComposition({
       storage: { type: 'memory' },
@@ -4595,6 +4693,13 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
       // rather than falling through to session-ownership classification
       // (which would otherwise cancel it as an orphan).
       expect(await runtime.isCatalogRecoveredRun('catalog-run-corrupt')).toBe(true);
+      // `classifyCatalogRecoveredRun`'s own read-error handling (no cache
+      // entry here, since `resolveRunServices`'s catalog branch only caches
+      // on a `'found'` decode, never on `'read-error'`): still classified
+      // as catalog territory, with no attribution to offer.
+      expect(await runtime.classifyCatalogRecoveredRun('catalog-run-corrupt')).toEqual({
+        isCatalogRun: true,
+      });
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }

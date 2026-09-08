@@ -1692,6 +1692,20 @@ export async function createRuntimeComposition(
   // terminal event dispatches, so it never grows past the count of in-flight
   // scheduled fires.
   const scheduledFireScheduleIds = new Map<string, string>();
+
+  // AB-241 review finding: runId → the decoded `CatalogRunRecoveryRecord`
+  // `resolveRunServices`'s catalog branch already successfully read during
+  // boot recovery, cached here so `classifyCatalogRecoveredRun` can reuse
+  // that SAME decode instead of hitting durable storage a second,
+  // independent time — a second read could transiently fail or succeed
+  // differently than the first, letting a workflow get classified as
+  // catalog territory (from the first read) while losing the attribution
+  // the second read should have carried, or vice versa. Recovery-scoped
+  // only: each entry is consumed and deleted the moment
+  // `classifyCatalogRecoveredRun` reads it, so this never grows past the
+  // count of catalog runs recovered in the current boot pass — unlike
+  // `runAttribution`, this is not live-dispatch state.
+  const catalogRunRecoveryCache = new Map<string, CatalogRunRecoveryRecord>();
   const scheduleFireEvents = new TypedEventTarget<ScheduleFireEventMap>();
 
   // Resolve the `persistence` option into its components. The three forms are:
@@ -2475,14 +2489,37 @@ export async function createRuntimeComposition(
   /**
    * AB-241 review finding: `create-bureau.ts`'s `onRecoveredWorkflow` calls
    * this ONCE to both classify a recovered workflow as catalog territory
-   * and, in the same read, reseed `runAttribution` — see this function's
-   * own doc comment on the `RuntimeComposition` interface for why a single
-   * combined read replaces what would otherwise be two independent ones.
+   * and reseed `runAttribution` — see this function's own doc comment on
+   * the `RuntimeComposition` interface for why a single combined read
+   * replaces what would otherwise be two independent ones.
+   *
+   * Fresh review finding: `resolveRunServices`'s catalog branch ALREADY
+   * reads and decodes this exact record, earlier, for the same workflow
+   * (Weft always resolves a recovered workflow's services before invoking
+   * the awaited `onRecoveredWorkflow` hook this function is called from).
+   * Rather than issue a THIRD independent storage read here, this consumes
+   * `catalogRunRecoveryCache`'s entry from that earlier, already-successful
+   * read — a transient failure on a fresh read can no longer diverge from
+   * the classification `resolveRunServices` already committed to. Falls
+   * back to a fresh read only when the cache holds nothing for `runId`
+   * (e.g. a direct caller of this function outside the normal recovery
+   * hook ordering, or a test exercising it in isolation).
    */
   async function classifyCatalogRecoveredRun(runId: string): Promise<{
     isCatalogRun: boolean;
     attribution?: { agentName: string; principal?: string };
   }> {
+    const cached = catalogRunRecoveryCache.get(runId);
+    if (cached) {
+      catalogRunRecoveryCache.delete(runId);
+      return {
+        isCatalogRun: true,
+        attribution: {
+          agentName: cached.agentName,
+          ...(cached.principal !== undefined ? { principal: cached.principal } : {}),
+        },
+      };
+    }
     const load = await loadCatalogRunRecoveryRecord(runId);
     if (load.status === 'missing') return { isCatalogRun: false };
     if (load.status === 'read-error') return { isCatalogRun: true };
@@ -2881,6 +2918,11 @@ export async function createRuntimeComposition(
       };
     }
     if (catalogRecovery.status === 'found') {
+      // AB-241 review finding: cache the successfully decoded record so
+      // `classifyCatalogRecoveredRun` (called from `onRecoveredWorkflow`,
+      // always AFTER this resolver for the same workflow) reuses this exact
+      // read instead of issuing its own independent one.
+      catalogRunRecoveryCache.set(info.workflowId, catalogRecovery.record);
       return resolveCatalogAgentRunServices(info.workflowId, catalogRecovery.record);
     }
     // NATIVE SCHEDULED FIRE (#109/#126): Weft sets `info.schedule` for a live
