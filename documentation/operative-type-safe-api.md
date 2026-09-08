@@ -1314,11 +1314,11 @@ export interface StartedWorkIdentity {
   readonly id: string;
   readonly kind: string; // e.g. 'agent-run', 'session', 'schedule-fire', 'goal-attempt'
   /**
-   * Principal or bureau identifier. Absent for a standalone `RunnableAgent.run`,
-   * which has neither: `AgentRunContext` carries no principal and no Bureau
-   * issued the handle. Optional rather than required so no implementer has to
-   * fabricate a value to satisfy this floor — an absent owner is a truthful
-   * statement that the work has no authorization context, not missing data.
+   * Principal or bureau identifier. Absent for a standalone `RunnableAgent.run`
+   * given no `AgentRunContext.principal` and issued by no Bureau. Optional
+   * rather than required so no implementer has to fabricate a value to
+   * satisfy this floor — an absent owner is a truthful statement that the
+   * work has no authorization context, not missing data.
    */
   readonly owner?: string;
   readonly parentId?: string;
@@ -1420,8 +1420,9 @@ requirement `LivenessSnapshot.id` (AB-88) depends on. Should
 candidate, not a divergence to leave standing.
 
 **Amendment 2.** Standalone runs are declared single-projection permanently:
-`AgentRunContext` gains no principal field, and a standalone run's
-`LivenessSnapshot.projection` is always `'redacted'`. A caller needing a
+`AgentRunContext.principal` (AB-241) is an attribution field only, carrying
+no authorization semantics, so a standalone run's `LivenessSnapshot.projection`
+is always `'redacted'` regardless of whether it is set. A caller needing a
 privileged view starts the work through `bureau.run`.
 
 **Amendment 3 — child-liveness aggregation (AB-216, obs-03).**
@@ -1509,7 +1510,7 @@ What this amendment requires is the **projection distinction**, not a particular
 - **Authorization-selected** — a single accessor whose returned projection is determined by the principal **of whoever is observing, resolved at observation time**. Not the principal that started the work: `BureauRunOptions.principal` identifies the starter only, and a handle can be passed to another caller, so binding the projection at creation would hand the privileged view to anyone holding the handle.
 - **Projection-bound**, where a handle carries a fixed projection decided when it was issued, and obtaining a differently-projected view means obtaining a different handle.
 
-**Standalone runs are a declared gap.** `AgentRunContext` carries no principal at all, so a `RunnableAgent.run` handle has no authorization input to select against and no issuer to bind a projection at. Such a run has exactly one projection, and this contract does not pretend otherwise. AB-88 owns deciding whether standalone runs gain a principal or are declared single-projection permanently; either is defensible, and neither may be assumed.
+**Standalone runs are a declared gap.** `AgentRunContext.principal` (AB-241) is an attribution field only, not an authorization input: a `RunnableAgent.run` handle still has nothing to select a projection against and no issuer to bind one at. Such a run has exactly one projection, and this contract does not pretend otherwise. AB-88 owns deciding whether standalone runs gain an authorization-grade principal or are declared single-projection permanently; either is defensible, and neither may be assumed.
 
 Requiring twin accessors universally would have forced a `privilegedSnapshot()` onto `AgentRun`, which has no authorization argument and no way to acquire one without reopening AB-15's fixed signatures. What a caller must never have to do is _guess_ which projection it received: whichever form a resource picks, the projection in force is stated on the snapshot itself, so a caller reads it rather than inferring it.
 
