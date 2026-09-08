@@ -998,9 +998,12 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
 
   /**
    * @deprecated Use {@link Bureau.run} with a catalog `RunnableAgent` instead
-   * (per-agent `generate`/tools on `createAgent`, and AB-241's `principal`
-   * on `BureauRunOptions` for attribution). Not yet removed — see AB-242's
-   * decision record and the removal issue it names (AB-352).
+   * (per-agent `generate`/tools on `createAgent`). For a call that passes
+   * `principal`, `bureau.run` does NOT yet accept it — `BureauRunOptions`
+   * validation rejects any defined `principal` with `BAD_REQUEST` until
+   * AB-241 lands; stay on `createRun` for principal-attributed calls until
+   * then. Not yet removed — see AB-242's decision record and the removal
+   * issue it names (AB-352).
    */
   createRun(request: CreateRunRequest): Promise<RunSummary>;
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
