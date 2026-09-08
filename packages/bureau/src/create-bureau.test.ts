@@ -13453,6 +13453,61 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
+  it('durably records a real toolbox.budget-exceeded through the SAME production wiring a run uses, under the toolbox-prefixed type (Codex P2 review finding, PR #566)', async () => {
+    // The bare `budget.exceeded` entry only covers the orphaned
+    // `BudgetExceededEvent` class (see `audit-trail.ts`'s own doc comment):
+    // it never matches this REAL production path, where the toolbox's own
+    // `checkBudget` rejection emits `'budget-exceeded'`, forwarded with the
+    // `toolbox.` prefix the same way `loop-warning`/`loop-blocked` are.
+    // Mirrors `packages/operative/test/event-forwarding.test.ts`'s own
+    // `budget: { maxCalls: 1 }` scenario, but through a real `createBureau`.
+    const weatherTool = createTool({
+      name: 'weather',
+      description: 'look up the weather',
+      input: z.object({ city: z.string() }),
+      execute: async () => 'sunny',
+    });
+    const toolbox = createToolbox([weatherTool], { budget: { maxCalls: 1 } });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'call-budget-1', name: 'weather', arguments: { city: 'Denver' } }],
+        },
+        {
+          content: '',
+          toolCalls: [{ id: 'call-budget-2', name: 'weather', arguments: { city: 'Boulder' } }],
+        },
+        { content: 'Done.', toolCalls: [] },
+      ]),
+      toolbox,
+      stopWhen: stopWhen.noToolCalls(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Check the weather twice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const exceededRecords = await bureau.auditTrail!.query({
+        runId: run.id,
+        type: 'toolbox.budget-exceeded',
+      });
+      expect(exceededRecords.length).toBeGreaterThan(0);
+
+      // Confirm the bare, un-prefixed `budget.exceeded` never matches this
+      // real emission — proves the trail is keyed on the ACTUAL wire
+      // string, not the class name that never dispatches in production.
+      expect(await bureau.auditTrail!.query({ runId: run.id, type: 'budget.exceeded' })).toEqual(
+        [],
+      );
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('durably records schedule.created/paused/resumed/cancelled through a real bureau, under a schedule-scoped owner id', async () => {
     // Mirrors `schedule-fire.test.ts`'s own
     // "dispatches SchedulePausedEvent/ScheduleResumedEvent/ScheduleCancelledEvent"
@@ -13546,6 +13601,46 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
         type: 'session.deleted',
       });
       expect(nonExistentRecords).toEqual([]);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('dispatches session.deleted exactly once for two concurrent deleteSession(id) calls on the same session (Codex P2 review finding, PR #566)', async () => {
+    // Both callers' own `sessionStore.load(id)` can resolve truthy before
+    // either has actually deleted the record — `SessionStore.delete` is an
+    // idempotent no-op for an already-removed id, not a "did I win"
+    // signal — so an unguarded dispatch would fire twice for one real
+    // deletion. `deleteSession` coalesces concurrent calls for the same id
+    // onto a single in-flight `performDeleteSession` run.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'A session deleted concurrently' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const deleted: string[] = [];
+      bureau.addEventListener('session.deleted', (event) => deleted.push(event.sessionId));
+
+      await Promise.all([
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+      ]);
+
+      expect(deleted).toEqual([run.sessionId]);
+
+      const owner = `session:${run.sessionId}`;
+      const deletedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'session.deleted',
+      });
+      expect(deletedRecords).toHaveLength(1);
     } finally {
       await bureau.dispose();
     }

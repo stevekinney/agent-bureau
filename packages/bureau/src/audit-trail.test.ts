@@ -9,6 +9,7 @@ import {
   ScheduleCancelledEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionDeletedEvent,
 } from '@lostgradient/operative';
 import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
@@ -25,7 +26,7 @@ import type { Bureau } from './types';
 /**
  * A minimal bureau stub that only supports the event subscriptions the
  * audit trail requires (`'action'` plus, as of AB-228, the bureau-level
- * `schedule.*` lifecycle events, which never traverse `'action'` — see
+ * `schedule.*` and `session.deleted` lifecycle events, which never traverse `'action'` — see
  * `audit-trail.ts`'s own doc comment). Backed by a real, typed
  * `CompletableEventTarget<BureauEventMap>` (the same base class
  * `create-bureau.ts`'s own `emitter` uses) so `emit` routes by the
@@ -821,23 +822,17 @@ describe('createAuditTrail', () => {
    * allowlist array.
    */
   describe('AB-228 parity gaps', () => {
-    it('sinks session.deleted action events (already on the action stream, previously missing from the allowlist)', async () => {
+    it('sinks session.deleted bureau-level events under a synthetic session:<id> owner, which never traverse the action stream (Codex P1 review finding, PR #566)', async () => {
       const kv = textValueStore(new MemoryStorage());
       const { bureau, emit } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);
 
-      const action: Action = {
-        type: 'session.deleted',
-        timestamp: 9000,
-        sequence: 1,
-        runId: 'run-session-deleted',
-        detail: { sessionId: 'session-1' },
-      };
-      emit(new ActionEvent(action));
+      emit(new SessionDeletedEvent('session-1'));
       await yieldToPortableEventLoop();
 
-      const records = await trail.query({ type: 'session.deleted' });
+      const records = await trail.query({ runId: 'session:session-1' });
       expect(records).toHaveLength(1);
+      expect(records[0]?.type).toBe('session.deleted');
       expect(records[0]?.detail).toEqual({ sessionId: 'session-1' });
       trail.dispose();
     });
@@ -924,6 +919,33 @@ describe('createAuditTrail', () => {
       await yieldToPortableEventLoop();
 
       expect(await trail.query({ type: 'loop-warning' })).toHaveLength(0);
+      trail.dispose();
+    });
+
+    it('sinks toolbox.budget-exceeded action events under the toolbox-forwarded wire string, distinct from the orphaned bare budget.exceeded (Codex P2 review finding, PR #566)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // The armorer event's own `.type` is the bare `budget-exceeded`
+      // (`ToolboxBudgetExceededEvent.type`), but `forwardEvents`
+      // re-dispatches every toolbox event onto the run's emitter as
+      // `toolbox.<type>` before the operative store turns it into an
+      // `Action` — the SAME mechanism `toolbox.loop-warning`/`loop-blocked`
+      // above go through, and distinct from the orphaned operative-level
+      // `BudgetExceededEvent` class the bare `budget.exceeded` entry covers.
+      const action: Action = {
+        type: 'toolbox.budget-exceeded',
+        timestamp: 9350,
+        sequence: 1,
+        runId: 'run-budget-exceeded-toolbox',
+        detail: { reason: 'max-calls' },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'toolbox.budget-exceeded' });
+      expect(records).toHaveLength(1);
       trail.dispose();
     });
 

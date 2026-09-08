@@ -63,9 +63,9 @@ import type { Bureau, DiagnosticSink } from './types';
  *   (`packages/operative/src/events.ts`) is a real `OperativeEventMap`
  *   member and, if ever dispatched, would reach `'action'` the same way.
  *   Verified (`grep -rn "new BudgetExceededEvent" packages`, non-test files
- *   only): NOTHING dispatches it in production, and this is now SETTLED
- *   behavior, not a pending gap — AB-231 (merged, `bbfe5178`) considered
- *   this exact question and chose a different path: it reclassifies a
+ *   only): NOTHING dispatches THAT SPECIFIC CLASS in production, and that
+ *   part is a SETTLED non-gap — AB-231 (merged, `bbfe5178`) considered this
+ *   exact question and chose a different path: it reclassifies a
  *   toolbox-level budget rejection to `BudgetExceededError` inside
  *   `run-step.ts`, upstream of `run.completed`'s `finishReason`
  *   classification, specifically so the run terminates with
@@ -79,19 +79,30 @@ import type { Bureau, DiagnosticSink } from './types';
  *   surface of `@lostgradient/operative`, `packages/operative/src/index.ts`
  *   — removing it would be a breaking change, not a same-PR cleanup)
  *   rather than fixed here, which is out of this child's
- *   `packages/bureau`-only boundary.
- * - `toolbox.loop-warning` / `toolbox.loop-blocked` — AB-87's prose names
- *   these `loop-warning`/`loop-blocked`, the bare type strings
- *   `ToolboxLoopWarningEvent`/`ToolboxLoopBlockedEvent`
- *   (`packages/armorer/src/events.ts`) carry at the armorer layer. But
- *   EVERY toolbox event is re-dispatched onto the run's own emitter with a
- *   `toolbox.` prefix (`forwardEvents`,
+ *   `packages/bureau`-only boundary. That verification, though, only
+ *   covered the bare operative event class — it MISSED a completely
+ *   different, real production path (Codex review finding, PR #566):
+ *   armorer's toolbox itself emits its OWN `'budget-exceeded'` event
+ *   (`ToolboxBudgetExceededEvent`, `create-toolbox.ts`'s `checkBudget`
+ *   rejection) whenever a toolbox call exceeds its configured
+ *   calls/time/cost budget — forwarded with the `toolbox.` prefix the same
+ *   way `loop-warning`/`loop-blocked` are (see the very next bullet), so
+ *   the real wire string is `toolbox.budget-exceeded`, never `budget.exceeded`.
+ *   That IS a real, currently-reachable production emission this trail was
+ *   missing — see `toolbox.budget-exceeded` below, added alongside the
+ *   loop-detection pair for exactly this reason.
+ * - `toolbox.loop-warning` / `toolbox.loop-blocked` / `toolbox.budget-exceeded`
+ *   — AB-87's prose names the first two `loop-warning`/`loop-blocked`; the
+ *   bare type strings `ToolboxLoopWarningEvent`/`ToolboxLoopBlockedEvent`/
+ *   `ToolboxBudgetExceededEvent` (`packages/armorer/src/events.ts`) carry
+ *   at the armorer layer. But EVERY toolbox event is re-dispatched onto the
+ *   run's own emitter with a `toolbox.` prefix (`forwardEvents`,
  *   `packages/operative/src/toolbox-event-forwarding.ts`) before the
- *   operative store turns it into an `Action` — so the string that
- *   actually reaches this trail's `'action'` listener is
- *   `toolbox.loop-warning`/`toolbox.loop-blocked`. The bare, un-prefixed
- *   names would never match a real `action.type` and were deliberately NOT
- *   used here.
+ *   operative store turns it into an `Action` — so the strings that
+ *   actually reach this trail's `'action'` listener are
+ *   `toolbox.loop-warning`/`toolbox.loop-blocked`/`toolbox.budget-exceeded`.
+ *   The bare, un-prefixed names would never match a real `action.type` and
+ *   were deliberately NOT used here.
  * - `schedule.created` / `schedule.paused` / `schedule.resumed` /
  *   `schedule.cancelled` — the four schedule-DEFINITION lifecycle events
  *   AB-223/`ab90-03` actually built (verified:
@@ -148,6 +159,10 @@ export const AUDIT_EVENT_TYPES = [
   // AB-228 — toolbox-level safety events, under their forwarded wire strings.
   'toolbox.loop-warning',
   'toolbox.loop-blocked',
+  // AB-228 (Codex P2 review finding, PR #566) — the toolbox's OWN real
+  // budget-exceeded emission, distinct from the orphaned bare
+  // `budget.exceeded` above; see this array's own doc comment.
+  'toolbox.budget-exceeded',
   // AB-228 — schedule-definition lifecycle (dispatched via dedicated
   // listeners below, never through 'action').
   'schedule.created',
@@ -178,7 +193,7 @@ export interface AuditRecord {
    * {@link AuditTrail.record} — out-of-band human decisions (AB-20 review
    * queue approve/deny). Bureau-action-stream records (`tool.*`, `run.*`,
    * `step.completed`, `budget.exceeded`,
-   * `toolbox.loop-warning`/`loop-blocked`) have no principal; they are
+   * `toolbox.loop-warning`/`loop-blocked`/`budget-exceeded`) have no principal; they are
    * attributed to the run. The AB-228 `schedule.*` and `session.deleted`
    * listeners below also write through the out-of-band path but likewise
    * carry no principal — a schedule pause/resume/cancel, or a session

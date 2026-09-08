@@ -4689,7 +4689,34 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return requireSessionStore().load(id);
   }
 
+  // AB-228 (Codex P2 review finding, PR #566): two concurrent
+  // `deleteSession(id)` calls can both observe a truthy `session` from
+  // their own `sessionStore.load(id)` before either has actually deleted
+  // it — `SessionStore.delete` is an idempotent no-op for an
+  // already-removed id, not a signal of who "won" — so both would
+  // otherwise reach the unconditional `SessionDeletedEvent` dispatch
+  // below, producing two durable `session.deleted` records (and notifying
+  // subscribers twice) for one real deletion. Coalescing concurrent calls
+  // for the same id onto a single in-flight promise makes exactly one of
+  // them actually run `performDeleteSession` (and its single dispatch);
+  // every other concurrent caller awaits that same result instead of
+  // starting a second, redundant run. A call that arrives strictly AFTER
+  // the first has already settled (id reused, or genuinely deleting again)
+  // is unaffected — the map entry is cleared in `finally`, so it starts a
+  // fresh `performDeleteSession` and gets the normal "already gone, no
+  // session to dispatch for" behavior.
+  const inFlightSessionDeletions = new Map<string, Promise<void>>();
   async function deleteSession(id: string): Promise<void> {
+    const existing = inFlightSessionDeletions.get(id);
+    if (existing) return existing;
+    const deletion = performDeleteSession(id).finally(() => {
+      inFlightSessionDeletions.delete(id);
+    });
+    inFlightSessionDeletions.set(id, deletion);
+    return deletion;
+  }
+
+  async function performDeleteSession(id: string): Promise<void> {
     const sessionStore = requireSessionStore();
     const session = await sessionStore.load(id);
     if (session) {
