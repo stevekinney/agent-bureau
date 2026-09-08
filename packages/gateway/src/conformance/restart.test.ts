@@ -22,32 +22,36 @@
  *
  * Scenario: a root run is started, killed with a real `SIGKILL` at the
  * `'checkpoint-committed'` marker, and recovered in a fresh process over
- * the SAME SQLite backend. The recovered run is driven to cancellation
- * (this fixture's own one linear scenario), which durably records exactly
- * one event for the run: `run.aborted` (`RUN_DURABLE_ACTION_TYPES` in
- * `bureau/src/durable-event-history.ts` — the only durable kind this
- * scenario's own fixture can ever reach). Everything below is built around
- * that one terminal fact:
+ * the SAME SQLite backend. The recovered run parks on a real
+ * `requestHumanInput` (AB-336) and is then driven to cancellation (this
+ * fixture's own one linear scenario) via `bureau.abortRun`, which durably
+ * records exactly two events for the run: `run.aborted`
+ * (`RUN_DURABLE_ACTION_TYPES` in `bureau/src/durable-event-history.ts`) and
+ * `review.canceled` — AB-224's live/durable event for AB-46's
+ * run-cancellation-to-`canceled` transition, dispatched because the abort
+ * cancels the pending review the park created. Everything below is built
+ * around that two-event terminal fact:
  *
  * - Positive: durable history is paged from the last cursor a real client
  *   observed on the FIRST process (empty — nothing durable exists yet),
  *   then a real SSE and a real WebSocket tail are opened BEFORE the
  *   fixture's own park is answered with `cancel` — so nothing durable can
  *   commit between "the page" and "the tail starts covering." The union of
- *   that page and each tail contains `run.aborted` exactly once, over BOTH
- *   transports, checked by stable identity (`kind`, `owner.kind`,
- *   `owner.id` — never a sequence number; AB-91/AB-312's durable `sequence`
- *   and the live broker's `runSeq` are unrelated counters, per this
- *   issue's own coordinator ruling).
+ *   that page and each tail contains both `run.aborted` and
+ *   `review.canceled` exactly once each, over BOTH transports, checked by
+ *   stable identity (`kind`, `owner.kind`, `owner.id` — never a sequence
+ *   number; AB-91/AB-312's durable `sequence` and the live broker's
+ *   `runSeq` are unrelated counters, per this issue's own coordinator
+ *   ruling).
  * - Negative (written first, per this issue's testing plan): the SAME
- *   page is retaken AFTER the tails have already delivered `run.aborted`
- *   — i.e. the paging boundary is deliberately shifted one event too late,
+ *   page is retaken AFTER the tails have already delivered both events —
+ *   i.e. the paging boundary is deliberately shifted one event too late,
  *   the concrete way an off-by-one in "the last cursor observed" surfaces
- *   here (this scenario's run reaches at most one durable event ever, so
- *   there is no earlier boundary to skip past into a gap — only a later
- *   one to double-count into a duplicate). `assertUnionExactlyOnce` must
- *   throw for that union and must NOT throw for the correct one, proving
- *   the identity check is load-bearing rather than vacuously true.
+ *   here (this scenario's run reaches at most these two durable events
+ *   ever, so there is no earlier boundary to skip past into a gap — only a
+ *   later one to double-count into a duplicate). `assertUnionExactlyOnce`
+ *   must throw for that union and must NOT throw for the correct one,
+ *   proving the identity check is load-bearing rather than vacuously true.
  *
  * AC6 (idempotent command retry across a restart) is OUT of this issue's
  * scope per the coordinator's 2026-09-04 ruling — that is AB-109's
@@ -132,6 +136,28 @@ function identityOfEnvelope(envelope: DurableEventEnvelope): string {
 /** The `'durable-event'` frame's own equivalent identity (`event`, `'run'`, `runId`), matching {@link identityOfEnvelope}. `undefined` for any other frame type (e.g. a live `'event'`/`'subscribed'` frame), which callers filter out. */
 function identityOfDurableFrame(frame: ServerFrame): string | undefined {
   return frame.type === 'durable-event' ? `${frame.event}:run:${frame.runId}` : undefined;
+}
+
+/**
+ * Builds a fresh `readTailUntil` predicate that stops only once EVERY
+ * name in `expectedEventNames` has appeared as a `'durable-event'` frame
+ * at least once. `abortRun`'s synchronous `run.aborted` and its detached
+ * `review.canceled` revocation (AB-46/AB-224) race each other and can
+ * arrive in either order, so stopping at the first durable frame seen (as
+ * this predicate did before AB-224 added a second durable event to this
+ * scenario) can return before the other one has been delivered — a false
+ * "gap" against the oracle rather than a real one. Each call returns its
+ * own closure so the two tails (SSE, WebSocket) track their own progress
+ * independently.
+ */
+function waitingForEveryDurableEvent(
+  expectedEventNames: ReadonlySet<string>,
+): (frame: ServerFrame) => boolean {
+  const seen = new Set<string>();
+  return (frame: ServerFrame) => {
+    if (frame.type === 'durable-event') seen.add(frame.event);
+    return [...expectedEventNames].every((name) => seen.has(name));
+  };
 }
 
 /**
@@ -269,14 +295,15 @@ describe('Gateway restart and durable-history replay conformance (AB-275)', () =
           // making a later wait fail immediately against an already-
           // aborted signal rather than genuinely being given its own
           // full allowance (copilot review, PR #553).
+          const expectedDurableEventNames = new Set(['run.aborted', 'review.canceled']);
           sseFramesSeen = await readTailUntil(
             (signal) => sseTail?.next(signal) ?? Promise.resolve(undefined),
-            (frame) => frame.type === 'durable-event',
+            waitingForEveryDurableEvent(expectedDurableEventNames),
             AbortSignal.timeout(TAIL_READ_BOUND_MS),
           );
           wsFramesSeen = await readTailUntil(
             (signal) => wsTail?.next(signal) ?? Promise.resolve(undefined),
-            (frame) => frame.type === 'durable-event',
+            waitingForEveryDurableEvent(expectedDurableEventNames),
             AbortSignal.timeout(TAIL_READ_BOUND_MS),
           );
 
@@ -305,8 +332,12 @@ describe('Gateway restart and durable-history replay conformance (AB-275)', () =
       throw new Error('restart conformance: scenario did not reach every expected marker');
     }
 
+    // AB-224 dispatches `review.canceled` for the run's pending review as
+    // part of the same abort that produces `run.aborted` (AB-46's
+    // run-cancellation-to-`canceled` transition), so the durable set this
+    // abort produces is now both identities, not `run.aborted` alone.
     const oracle = new Set(pageAfterCancel.events.map(identityOfEnvelope));
-    expect(oracle).toEqual(new Set([`run.aborted:run:${runId}`]));
+    expect(oracle).toEqual(new Set([`run.aborted:run:${runId}`, `review.canceled:run:${runId}`]));
 
     const sseDurableIdentities = sseFramesSeen
       .map(identityOfDurableFrame)
@@ -342,14 +373,22 @@ describe('Gateway restart and durable-history replay conformance (AB-275)', () =
       assertUnionExactlyOnce([...pageAfterIdentities, ...wsDurableIdentities], oracle),
     ).toThrow(/duplicate/);
 
-    // Neither tail ever saw an ordinary LIVE 'event' copy of the same
+    // Neither tail ever saw an ordinary LIVE 'event' copy of either
     // terminal fact — the broadcast-suppression path (AB-312) owns
-    // exactly-once delivery for a subscriber in durable-fallback mode.
+    // exactly-once delivery for a subscriber in durable-fallback mode,
+    // for AB-224's `review.canceled` exactly as it already did for
+    // `run.aborted`.
     expect(
       sseFramesSeen.some((frame) => frame.type === 'event' && frame.event === 'run.aborted'),
     ).toBe(false);
     expect(
       wsFramesSeen.some((frame) => frame.type === 'event' && frame.event === 'run.aborted'),
+    ).toBe(false);
+    expect(
+      sseFramesSeen.some((frame) => frame.type === 'event' && frame.event === 'review.canceled'),
+    ).toBe(false);
+    expect(
+      wsFramesSeen.some((frame) => frame.type === 'event' && frame.event === 'review.canceled'),
     ).toBe(false);
 
     // The production shutdown boundary: both processes exited cleanly
