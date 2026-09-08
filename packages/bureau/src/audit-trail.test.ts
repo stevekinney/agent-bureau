@@ -4,39 +4,46 @@
  * Uses a hand-crafted `TextValueStore` stub so tests are fully deterministic
  * without starting a live bureau or durable engine.
  */
+import {
+  AgentScheduledEvent,
+  ScheduleCancelledEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from '@lostgradient/operative';
 import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { CompletableEventTarget } from 'lifecycle';
 
 import { type AuditRecord, createAuditTrail } from './audit-trail';
-import { ActionEvent } from './events';
+import { ActionEvent, type BureauEventMap } from './events';
 import type { Bureau } from './types';
 
 // ── Minimal Bureau stub ──────────────────────────────────────────────
 
-type ActionListener = (event: ActionEvent) => void;
-
 /**
- * A minimal bureau stub that only supports the action-event subscription the
- * audit trail requires. No runs, no sessions, no persistence machinery.
+ * A minimal bureau stub that only supports the event subscriptions the
+ * audit trail requires (`'action'` plus, as of AB-228, the bureau-level
+ * `schedule.*` lifecycle events, which never traverse `'action'` — see
+ * `audit-trail.ts`'s own doc comment). Backed by a real, typed
+ * `CompletableEventTarget<BureauEventMap>` (the same base class
+ * `create-bureau.ts`'s own `emitter` uses) so `emit` routes by the
+ * dispatched event's own `type`, exactly like a real bureau — a single
+ * shared listener bag that ignored `type` would hand a `SchedulePausedEvent`
+ * to the `'action'` listener too, which destructures `event.action` and
+ * throws. No runs, no sessions, no persistence machinery.
  */
-function createStubBureau(): { bureau: Bureau; emit: (event: ActionEvent) => void } {
-  const listeners = new Set<ActionListener>();
+function createStubBureau(): { bureau: Bureau; emit: (event: Event) => void } {
+  const target = new CompletableEventTarget<BureauEventMap>();
 
   const bureau = {
-    addEventListener(_type: string, listener: ActionListener) {
-      listeners.add(listener);
-    },
-    removeEventListener(_type: string, listener: ActionListener) {
-      listeners.delete(listener);
-    },
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
   } as unknown as Bureau;
 
-  const emit = (event: ActionEvent) => {
-    for (const listener of listeners) {
-      listener(event);
-    }
+  const emit = (event: Event) => {
+    target.dispatchEvent(event);
   };
 
   return { bureau, emit };
@@ -804,6 +811,196 @@ describe('createAuditTrail', () => {
 
       const records = await trail.query({ runId: 'run-before-abort' });
       expect(records).toHaveLength(1);
+    });
+  });
+
+  /**
+   * AB-228 — closes `AUDIT_EVENT_TYPES` parity gaps AB-87's matrix named.
+   * Each of these confirms the type reaches `AuditTrail`'s durable write
+   * from its OWN emission point, not merely that the string sits in the
+   * allowlist array.
+   */
+  describe('AB-228 parity gaps', () => {
+    it('sinks session.deleted action events (already on the action stream, previously missing from the allowlist)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const action: Action = {
+        type: 'session.deleted',
+        timestamp: 9000,
+        sequence: 1,
+        runId: 'run-session-deleted',
+        detail: { sessionId: 'session-1' },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'session.deleted' });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.detail).toEqual({ sessionId: 'session-1' });
+      trail.dispose();
+    });
+
+    it('sinks budget.exceeded action events (no production emitter — AB-231, merged, chose a different terminal path — but the type stays harmlessly listed for allowlist completeness)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const action: Action = {
+        type: 'budget.exceeded',
+        timestamp: 9100,
+        sequence: 1,
+        runId: 'run-budget-exceeded',
+        detail: { currentCost: 6, budget: 5 },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'budget.exceeded' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('sinks toolbox.loop-warning action events under the toolbox-forwarded wire string, not the bare armorer name', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      // The armorer event's own `.type` is the bare `loop-warning`
+      // (`ToolboxLoopWarningEvent.type`), but `forwardEvents` re-dispatches
+      // every toolbox event onto the run's emitter as `toolbox.<type>`
+      // before the operative store turns it into an `Action` — so this is
+      // the string that actually reaches this trail's `'action'` listener.
+      const action: Action = {
+        type: 'toolbox.loop-warning',
+        timestamp: 9200,
+        sequence: 1,
+        runId: 'run-loop-warning',
+        detail: { detector: 'sliding-window', count: 3, message: 'repeated calls detected' },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'toolbox.loop-warning' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('sinks toolbox.loop-blocked action events under the toolbox-forwarded wire string', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const action: Action = {
+        type: 'toolbox.loop-blocked',
+        timestamp: 9300,
+        sequence: 1,
+        runId: 'run-loop-blocked',
+        detail: { detector: 'sliding-window', count: 5, message: 'blocked repeated calls' },
+      };
+      emit(new ActionEvent(action));
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ type: 'toolbox.loop-blocked' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('does not sink the bare, un-prefixed loop-warning/loop-blocked type strings', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(
+        new ActionEvent({
+          type: 'loop-warning',
+          timestamp: 9400,
+          sequence: 1,
+          runId: 'run-bare-loop-warning',
+          detail: null,
+        }),
+      );
+      await yieldToPortableEventLoop();
+
+      expect(await trail.query({ type: 'loop-warning' })).toHaveLength(0);
+      trail.dispose();
+    });
+
+    it('sinks schedule.created bureau-level events under a synthetic schedule:<id> owner, which never traverse the action stream', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(
+        new AgentScheduledEvent({
+          scheduleId: 'schedule-created-1',
+          agentName: 'researcher',
+          spec: { every: '1h' },
+          sessionId: 'session-1',
+        }),
+      );
+      await yieldToPortableEventLoop();
+
+      const createdRecords = await trail.query({ runId: 'schedule:schedule-created-1' });
+      expect(createdRecords).toHaveLength(1);
+      expect(createdRecords[0]?.type).toBe('schedule.created');
+      expect(createdRecords[0]?.detail).toEqual({
+        scheduleId: 'schedule-created-1',
+        agentName: 'researcher',
+        spec: { every: '1h' },
+        sessionId: 'session-1',
+      });
+
+      trail.dispose();
+    });
+
+    it('sinks schedule.paused/resumed/cancelled bureau-level events, which never traverse the action stream', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(new SchedulePausedEvent('schedule-1'));
+      emit(new ScheduleResumedEvent('schedule-1'));
+      emit(new ScheduleCancelledEvent('schedule-2'));
+      await yieldToPortableEventLoop();
+
+      const pausedRecords = await trail.query({ type: 'schedule.paused' });
+      expect(pausedRecords).toHaveLength(1);
+      expect(pausedRecords[0]?.detail).toEqual({ scheduleId: 'schedule-1' });
+
+      const resumedRecords = await trail.query({ type: 'schedule.resumed' });
+      expect(resumedRecords).toHaveLength(1);
+      expect(resumedRecords[0]?.detail).toEqual({ scheduleId: 'schedule-1' });
+
+      const cancelledRecords = await trail.query({ type: 'schedule.cancelled' });
+      expect(cancelledRecords).toHaveLength(1);
+      expect(cancelledRecords[0]?.detail).toEqual({ scheduleId: 'schedule-2' });
+
+      trail.dispose();
+    });
+
+    it('does not write a schedule.* record when no kv store is configured', async () => {
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, undefined);
+
+      emit(new SchedulePausedEvent('schedule-ephemeral'));
+      await yieldToPortableEventLoop();
+
+      expect(await trail.query()).toEqual([]);
+      trail.dispose();
+    });
+
+    it('stops writing schedule.* records after dispose() removes its listeners', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+      await trail.dispose();
+
+      emit(new SchedulePausedEvent('schedule-after-dispose'));
+      await yieldToPortableEventLoop();
+
+      expect(await trail.query({ type: 'schedule.paused' })).toEqual([]);
     });
   });
 });

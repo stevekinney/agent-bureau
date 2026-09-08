@@ -10266,6 +10266,7 @@ describe('createBureau review lifecycle event family (AB-224)', () => {
       ]),
       toolbox: createNeedsApprovalToolbox('event-revoked-secret', charges),
       stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
     });
     try {
       const revoked: unknown[] = [];
@@ -10291,6 +10292,20 @@ describe('createBureau review lifecycle event family (AB-224)', () => {
         kind: 'tool-approval',
       });
       expect(canceled).toEqual([]);
+
+      // AB-228 — the LIVE `review.revoked` dispatch asserted above has a
+      // durable counterpart (`recordReviewStatusTransition`'s `record()`
+      // call, same as every other `ReviewStatus` transition) that this
+      // suite had never independently queried for. Every other status
+      // (approved/denied/rejected/expired/canceled/superseded) already has
+      // this same durable-query assertion elsewhere in this file; this
+      // closes the one gap AB-228 found.
+      const revokedRecords = await bureau.auditTrail!.query({ runId: run.id });
+      const revokedRecord = revokedRecords.find(
+        (record) => record.type === 'review.tool-approval.revoked',
+      );
+      expect(revokedRecord).toBeDefined();
+      expect(revokedRecord!.principal).toBe('system:run-deletion');
     } finally {
       bureau.dispose();
     }
@@ -13337,6 +13352,153 @@ describe('Bureau.issueGrant / revokeGrant / listGrants (AB-46, AB-346)', () => {
           delegationBehavior: 'does-not-propagate',
         }),
       ).rejects.toThrow('approvalSecret is required');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-detection and schedule-definition lifecycle)', () => {
+  it('durably records a real toolbox loop-warning/loop-blocked through the SAME production wiring a run uses, under the toolbox-prefixed type', async () => {
+    // Mirrors `packages/operative/test/event-forwarding.test.ts`'s own
+    // loop-detection scenario (identical thresholds, identical repeated
+    // no-argument tool call) — but exercised through a REAL `createBureau`
+    // with persistence configured, so this proves the full production path
+    // (armorer's toolbox -> `forwardEvents`'s `toolbox.` prefix -> the
+    // operative store's Action log -> the bureau's `'action'` stream ->
+    // `createAuditTrail`'s listener) actually reaches
+    // `bureau.auditTrail.query()`, not just a unit-level stub dispatch.
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => 'ok',
+    });
+    const toolbox = createToolbox([nextTool], {
+      loopDetection: { warningThreshold: 2, blockThreshold: 4, maxWindowSize: 30 },
+    });
+
+    const LOOPING_STEPS = 6;
+    const bureau = await createBureau({
+      agents: {},
+      // Step-counting, not a canned response list (matches the pattern this
+      // file already uses for tool-driving generate functions) — calls the
+      // same no-argument `next` tool repeatedly, tripping the loop detector's
+      // warning threshold (2) and then its block threshold (4), before
+      // finishing with a plain text response.
+      generate: async ({ step }: { step: number }) =>
+        step < LOOPING_STEPS
+          ? { content: '', toolCalls: [{ name: 'next', arguments: {} }] }
+          : { content: 'Done.', toolCalls: [] },
+      toolbox,
+      stopWhen: stopWhen.noToolCalls(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Loop the tool' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const warningRecords = await bureau.auditTrail!.query({
+        runId: run.id,
+        type: 'toolbox.loop-warning',
+      });
+      expect(warningRecords.length).toBeGreaterThan(0);
+      // Pins the store's `originalEvent` flattening (`store.ts`'s
+      // `register()`): a nested Event's own OBJECT properties (`tool`,
+      // `call` — the full `Tool`/`ToolCall`, potentially carrying tool
+      // arguments) are dropped, only its primitive properties survive. This
+      // is the exact mechanism AB-228's own rollback trigger names ("a
+      // newly durable event type is found to write unredacted privileged
+      // content") — if a future change to that flattening ever let `tool`/
+      // `call` through, this assertion is what catches it.
+      const warningDetail = warningRecords[0]?.detail as {
+        originalEvent?: Record<string, unknown>;
+      };
+      expect(warningDetail.originalEvent).toMatchObject({
+        type: 'loop-warning',
+        detector: 'simple-repeat',
+        count: expect.any(Number),
+        message: expect.any(String),
+      });
+      expect(warningDetail.originalEvent).not.toHaveProperty('tool');
+      expect(warningDetail.originalEvent).not.toHaveProperty('call');
+
+      const blockedRecords = await bureau.auditTrail!.query({
+        runId: run.id,
+        type: 'toolbox.loop-blocked',
+      });
+      expect(blockedRecords.length).toBeGreaterThan(0);
+      const blockedDetail = blockedRecords[0]?.detail as {
+        originalEvent?: Record<string, unknown>;
+      };
+      expect(blockedDetail.originalEvent).toMatchObject({
+        type: 'loop-blocked',
+        detector: 'simple-repeat',
+        count: expect.any(Number),
+        message: expect.any(String),
+      });
+      expect(blockedDetail.originalEvent).not.toHaveProperty('tool');
+      expect(blockedDetail.originalEvent).not.toHaveProperty('call');
+
+      // Confirm the bare, un-prefixed armorer name never appears — proves
+      // the trail is keyed on the ACTUAL wire string, not the name AB-87's
+      // prose used.
+      expect(await bureau.auditTrail!.query({ runId: run.id, type: 'loop-warning' })).toEqual([]);
+      expect(await bureau.auditTrail!.query({ runId: run.id, type: 'loop-blocked' })).toEqual([]);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('durably records schedule.created/paused/resumed/cancelled through a real bureau, under a schedule-scoped owner id', async () => {
+    // Mirrors `schedule-fire.test.ts`'s own
+    // "dispatches SchedulePausedEvent/ScheduleResumedEvent/ScheduleCancelledEvent"
+    // setup (same `storage`/`durableExecution` config, same
+    // `createSchedule`/`pauseSchedule`/`resumeSchedule`/`cancelSchedule`
+    // calls) — proving the durable audit write and the live event this
+    // suite already covers come from the identical production call sites.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      const summary = await bureau.createSchedule({
+        agentName: 'researcher',
+        input: 'paused forever',
+        spec: '1h',
+      });
+      expect(summary).toBeDefined();
+
+      await bureau.pauseSchedule(summary!.id);
+      await bureau.resumeSchedule(summary!.id);
+      await bureau.cancelSchedule(summary!.id);
+
+      const owner = `schedule:${summary!.id}`;
+      const createdRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.created',
+      });
+      expect(createdRecords).toHaveLength(1);
+      const pausedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.paused',
+      });
+      expect(pausedRecords).toHaveLength(1);
+      const resumedRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.resumed',
+      });
+      expect(resumedRecords).toHaveLength(1);
+      const cancelledRecords = await bureau.auditTrail!.query({
+        runId: owner,
+        type: 'schedule.cancelled',
+      });
+      expect(cancelledRecords).toHaveLength(1);
     } finally {
       await bureau.dispose();
     }

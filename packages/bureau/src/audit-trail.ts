@@ -12,6 +12,12 @@
  * Layer A (live) is the operative/store; Layer B is this trail. Together they
  * form the glass-box audit surface for the gateway.
  */
+import type {
+  AgentScheduledEvent,
+  ScheduleCancelledEvent,
+  SchedulePausedEvent,
+  ScheduleResumedEvent,
+} from '@lostgradient/operative';
 import type { TextValueStore } from '@lostgradient/weft/storage';
 import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
@@ -21,7 +27,89 @@ import type { Bureau, DiagnosticSink } from './types';
 
 // ── Public surface ──────────────────────────────────────────────────
 
-/** Event types that are sunk into the durable audit trail. */
+/**
+ * Event types that are sunk into the durable audit trail.
+ *
+ * AB-228 closed the parity gaps AB-87's durability matrix named against the
+ * original eight-entry list (`tool.started`/`settled`/`error`,
+ * `run.completed`/`error`/`aborted`/`tripwire`, `step.completed`). Three of
+ * the new entries below reach this trail through the SAME `'action'`-stream
+ * listener the original eight do; two reach it through dedicated
+ * bureau-level listeners this file also had to add, because their source
+ * events never traverse `'action'` at all:
+ *
+ * - `session.deleted` — already an `action.type` on the bureau's `'action'`
+ *   stream (see `SESSION_DURABLE_ACTION_TYPES` in
+ *   `durable-event-history.ts`); this array was simply missing it.
+ * - `budget.exceeded` — `BudgetExceededEvent`
+ *   (`packages/operative/src/events.ts`) is a real `OperativeEventMap`
+ *   member and, if ever dispatched, would reach `'action'` the same way.
+ *   Verified (`grep -rn "new BudgetExceededEvent" packages`, non-test files
+ *   only): NOTHING dispatches it in production, and this is now SETTLED
+ *   behavior, not a pending gap — AB-231 (merged, `bbfe5178`) considered
+ *   this exact question and chose a different path: it reclassifies a
+ *   toolbox-level budget rejection to `BudgetExceededError` inside
+ *   `run-step.ts`, upstream of `run.completed`'s `finishReason`
+ *   classification, specifically so the run terminates with
+ *   `finishReason: 'budget-exceeded'` — never by dispatching
+ *   `BudgetExceededEvent`. That terminal `run.completed` record is already
+ *   durably audited (it was one of the original eight entries). This entry
+ *   is listed for allowlist completeness against AB-87's matrix and costs
+ *   nothing (there is nothing to filter in), but `BudgetExceededEvent`
+ *   itself is orphaned production code post-AB-231 — flagged as a
+ *   follow-up (dispatch it for real, since it's still exported public
+ *   surface of `@lostgradient/operative`, `packages/operative/src/index.ts`
+ *   — removing it would be a breaking change, not a same-PR cleanup)
+ *   rather than fixed here, which is out of this child's
+ *   `packages/bureau`-only boundary.
+ * - `toolbox.loop-warning` / `toolbox.loop-blocked` — AB-87's prose names
+ *   these `loop-warning`/`loop-blocked`, the bare type strings
+ *   `ToolboxLoopWarningEvent`/`ToolboxLoopBlockedEvent`
+ *   (`packages/armorer/src/events.ts`) carry at the armorer layer. But
+ *   EVERY toolbox event is re-dispatched onto the run's own emitter with a
+ *   `toolbox.` prefix (`forwardEvents`,
+ *   `packages/operative/src/toolbox-event-forwarding.ts`) before the
+ *   operative store turns it into an `Action` — so the string that
+ *   actually reaches this trail's `'action'` listener is
+ *   `toolbox.loop-warning`/`toolbox.loop-blocked`. The bare, un-prefixed
+ *   names would never match a real `action.type` and were deliberately NOT
+ *   used here.
+ * - `schedule.created` / `schedule.paused` / `schedule.resumed` /
+ *   `schedule.cancelled` — the four schedule-DEFINITION lifecycle events
+ *   AB-223/`ab90-03` actually built (verified:
+ *   `grep -rn "'schedule.deleted'\|ScheduleDeletedEvent" packages` — zero
+ *   matches; a `schedule.deleted` event, which AB-87's own summary sentence
+ *   never names either ("schedule pause/resume/cancel", three, not four),
+ *   does not exist anywhere in the codebase and was NOT invented for this
+ *   allowlist). All four are dispatched directly on the bureau-level
+ *   emitter (`create-bureau.ts`'s `createSchedule`/`pauseSchedule`/
+ *   `resumeSchedule`/`cancelSchedule`) and never traverse `'action'` at
+ *   all — see this file's own schedule listeners below, added specifically
+ *   to reach them. `schedule.created` is durable via a SECOND mechanism
+ *   too (AB-91/AB-320's `FleetEventFeed`-backed `durable-event-history.ts`
+ *   already records it under the same `{ kind: 'schedule', id }` owner
+ *   shape this file's synthetic `schedule:<id>` runId mirrors) — that does
+ *   not make it redundant here: this trail and that one are independent
+ *   durable layers with independent retention/query surfaces, and a
+ *   schedule's own postmortem page in THIS trail would otherwise carry
+ *   pause/resume/cancel with no creation marker.
+ *
+ * `review.*` (AB-87's "review decisions taken through the live path") is
+ * NOT represented here at all, on purpose: every one of the seven
+ * `ReviewStatus` outcomes (`approved`/`denied`/`rejected`/`expired`/
+ * `revoked`/`canceled`/`superseded`) already reaches this trail's durable
+ * write today, via `create-bureau.ts`'s `recordReviewDecision`/
+ * `recordReviewStatusTransition` calling `AuditTrail.record()` directly
+ * (the SAME out-of-band path `resolveReview`'s approve/deny always used) —
+ * this bypasses `AUDIT_EVENT_TYPES` entirely, by design (see
+ * {@link AuditTrail.record}'s own doc comment). Those durable writes use
+ * `review.<kind>.<status>` (kind-namespaced) type strings, never the bare
+ * `review.<status>` AB-87's prose uses for the LIVE event family
+ * (`ReviewApprovedEvent` et al., AB-224) — so no bare `review.*` string
+ * belongs in this array; it would never match a record this trail ever
+ * writes. Confirmed durably queryable today for all seven statuses in
+ * `create-bureau.test.ts`.
+ */
 export const AUDIT_EVENT_TYPES = [
   // Tool lifecycle
   'tool.started',
@@ -34,6 +122,19 @@ export const AUDIT_EVENT_TYPES = [
   'run.tripwire',
   // Step lifecycle
   'step.completed',
+  // AB-228 — session lifecycle beyond creation.
+  'session.deleted',
+  // AB-228 — budget accounting (no production emitter; see doc comment).
+  'budget.exceeded',
+  // AB-228 — toolbox-level safety events, under their forwarded wire strings.
+  'toolbox.loop-warning',
+  'toolbox.loop-blocked',
+  // AB-228 — schedule-definition lifecycle (dispatched via dedicated
+  // listeners below, never through 'action').
+  'schedule.created',
+  'schedule.paused',
+  'schedule.resumed',
+  'schedule.cancelled',
 ] as const;
 
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
@@ -57,7 +158,12 @@ export interface AuditRecord {
    * `api-key:<id>` or `static-token`). Only present on records written via
    * {@link AuditTrail.record} — out-of-band human decisions (AB-20 review
    * queue approve/deny). Bureau-action-stream records (`tool.*`, `run.*`,
-   * `step.completed`) have no principal; they are attributed to the run.
+   * `step.completed`, `session.deleted`, `budget.exceeded`,
+   * `toolbox.loop-warning`/`loop-blocked`) have no principal; they are
+   * attributed to the run. The AB-228 `schedule.*` listeners below also
+   * write through the out-of-band path but likewise carry no principal —
+   * a schedule pause/resume/cancel has no authenticated caller to
+   * attribute today.
    */
   principal?: string;
 }
@@ -264,6 +370,111 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
   bureau.addEventListener('action', listener);
 
+  // Shared write path behind both the public out-of-band `record()` below
+  // and the schedule-definition listeners further down (AB-228) — the same
+  // manual-sequence-numbered, out-of-band key encoding, since neither has an
+  // operative-store `Action` to draw a `sequence`/`timestamp` from. Returns
+  // the write promise (already tracked in `activeWrites`) so both callers
+  // can await it.
+  function writeOutOfBandRecord(entry: {
+    runId: string;
+    type: string;
+    detail: unknown;
+    principal?: string;
+  }): Promise<void> {
+    if (!kv) return Promise.resolve();
+    if (signal?.aborted) return Promise.resolve();
+
+    const timestampMs = runtime.clock.now();
+    const sequence = manualSequence++;
+
+    const record: AuditRecord = {
+      timestamp: new Date(timestampMs).toISOString(),
+      timestampMs,
+      sequence,
+      runId: entry.runId,
+      type: entry.type,
+      detail: entry.detail,
+      ...(entry.principal !== undefined ? { principal: entry.principal } : {}),
+    };
+
+    const key = encodeKey(timestampMs, sequence, entry.runId);
+    const writePromise = kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
+      // Best-effort, matching the action-stream listener above: a write
+      // failure must never fail the caller (an approve/deny decision, or a
+      // schedule pause/resume/cancel).
+      diagnose({
+        level: 'error',
+        scope: 'audit-trail',
+        message: `[audit-trail] Failed to persist audit record for key "${key}":`,
+        cause: error,
+      });
+    });
+    // Tracked (AB-207) in addition to being returned: a caller that does not
+    // await the result must not strand this write past `dispose()`.
+    trackWrite(writePromise);
+    return writePromise;
+  }
+
+  // AB-228 — schedule-DEFINITION lifecycle listeners. `pauseSchedule`/
+  // `resumeSchedule`/`cancelSchedule` (`create-bureau.ts`) dispatch these
+  // directly on the bureau-level emitter; they never traverse the `'action'`
+  // stream the listener above subscribes through (same reason `schedule.*`
+  // needs its own listeners in `durable-event-history.ts`'s producer), so
+  // without a dedicated subscription here they would never reach this
+  // trail no matter what `AUDIT_EVENT_TYPES` lists. Each is still gated on
+  // `auditEventSet` so the array stays the single source of truth for what
+  // this trail durably records. There is no run for a schedule DEFINITION
+  // event to attribute to, so the schedule id is encoded into `runId` as
+  // `schedule:<scheduleId>` — `AuditRecord.runId` and `encodeKey` require a
+  // string but never validate that it names a real run; `query({ runId:
+  // \`schedule:${id}\` })` is how a caller retrieves one schedule's own
+  // durable definition history.
+  function scheduleOwnerId(scheduleId: string): string {
+    return `schedule:${scheduleId}`;
+  }
+  const scheduleCreatedListener = (event: AgentScheduledEvent): void => {
+    if (!auditEventSet.has('schedule.created')) return;
+    void writeOutOfBandRecord({
+      runId: scheduleOwnerId(event.scheduleId),
+      type: 'schedule.created',
+      detail: {
+        scheduleId: event.scheduleId,
+        agentName: event.agentName,
+        spec: event.spec,
+        ...(event.sessionId !== undefined ? { sessionId: event.sessionId } : {}),
+      },
+    });
+  };
+  const schedulePausedListener = (event: SchedulePausedEvent): void => {
+    if (!auditEventSet.has('schedule.paused')) return;
+    void writeOutOfBandRecord({
+      runId: scheduleOwnerId(event.scheduleId),
+      type: 'schedule.paused',
+      detail: { scheduleId: event.scheduleId },
+    });
+  };
+  const scheduleResumedListener = (event: ScheduleResumedEvent): void => {
+    if (!auditEventSet.has('schedule.resumed')) return;
+    void writeOutOfBandRecord({
+      runId: scheduleOwnerId(event.scheduleId),
+      type: 'schedule.resumed',
+      detail: { scheduleId: event.scheduleId },
+    });
+  };
+  const scheduleCancelledListener = (event: ScheduleCancelledEvent): void => {
+    if (!auditEventSet.has('schedule.cancelled')) return;
+    void writeOutOfBandRecord({
+      runId: scheduleOwnerId(event.scheduleId),
+      type: 'schedule.cancelled',
+      detail: { scheduleId: event.scheduleId },
+    });
+  };
+  bureau.addEventListener('schedule.created', scheduleCreatedListener);
+  bureau.addEventListener('schedule.paused', schedulePausedListener);
+  bureau.addEventListener('schedule.resumed', scheduleResumedListener);
+  bureau.addEventListener('schedule.cancelled', scheduleCancelledListener);
+
   return {
     async record(entry: {
       runId: string;
@@ -271,37 +482,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       detail: unknown;
       principal?: string;
     }): Promise<void> {
-      if (!kv) return;
-      if (signal?.aborted) return;
-
-      const timestampMs = runtime.clock.now();
-      const sequence = manualSequence++;
-
-      const record: AuditRecord = {
-        timestamp: new Date(timestampMs).toISOString(),
-        timestampMs,
-        sequence,
-        runId: entry.runId,
-        type: entry.type,
-        detail: entry.detail,
-        ...(entry.principal !== undefined ? { principal: entry.principal } : {}),
-      };
-
-      const key = encodeKey(timestampMs, sequence, entry.runId);
-      const writePromise = kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
-        // Best-effort, matching the listener above: a write failure must
-        // never fail the caller's approve/deny decision.
-        diagnose({
-          level: 'error',
-          scope: 'audit-trail',
-          message: `[audit-trail] Failed to persist audit record for key "${key}":`,
-          cause: error,
-        });
-      });
-      // Tracked (AB-207) in addition to being returned: a caller that does
-      // not await `record()` must not strand this write past `dispose()`.
-      trackWrite(writePromise);
-      await writePromise;
+      await writeOutOfBandRecord(entry);
     },
 
     async query(options: AuditQueryOptions = {}): Promise<AuditRecord[]> {
@@ -344,6 +525,10 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', listener);
+      bureau.removeEventListener('schedule.created', scheduleCreatedListener);
+      bureau.removeEventListener('schedule.paused', schedulePausedListener);
+      bureau.removeEventListener('schedule.resumed', scheduleResumedListener);
+      bureau.removeEventListener('schedule.cancelled', scheduleCancelledListener);
       // Await every write already in flight (AB-207) — `kv.set` has no
       // cancellation hook, so there is nothing for the owner-issued `signal`
       // to bound here beyond refusing new writes (above); a write already
