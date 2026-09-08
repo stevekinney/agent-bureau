@@ -81,6 +81,7 @@ import {
   recordedSessionAuthorityPrincipalId,
   recoveredRequestContextFromMetadata,
   resolveCancelDurableRun,
+  resolvePersistedRunOwningPrincipal,
   ScheduleLocatorUnavailableError,
   wireFlowControlSchedulerEvents,
   wireStreamEventTargetFrames,
@@ -5837,6 +5838,45 @@ describe('recordedSessionAuthorityPrincipalId / isSessionAuthorityAuthorized (AB
     // this is defense against authorizing a run this map says nothing
     // about, not a general bypass of the uncorrelated-map rule.
     expect(isSessionAuthorityAuthorized(metadata, 'alice', 'run-c')).toBe(false);
+  });
+});
+
+describe('resolvePersistedRunOwningPrincipal (AB-359)', () => {
+  it('returns undefined when the map is entirely absent — the exact shape an older, pre-AB-359 record decodes as', () => {
+    expect(resolvePersistedRunOwningPrincipal({}, 'run-1')).toBeUndefined();
+  });
+
+  it('returns undefined when the map does not carry an entry for this runId', () => {
+    expect(
+      resolvePersistedRunOwningPrincipal(
+        { lastRunOwningPrincipals: { 'run-other': 'alice' } },
+        'run-1',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined when the map itself is malformed (not a plain object)', () => {
+    expect(
+      resolvePersistedRunOwningPrincipal({ lastRunOwningPrincipals: ['not-a-map'] }, 'run-1'),
+    ).toBeUndefined();
+    expect(
+      resolvePersistedRunOwningPrincipal({ lastRunOwningPrincipals: 'not-a-map' }, 'run-1'),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined when the entry for this runId is present but not a string', () => {
+    expect(
+      resolvePersistedRunOwningPrincipal({ lastRunOwningPrincipals: { 'run-1': 42 } }, 'run-1'),
+    ).toBeUndefined();
+  });
+
+  it('returns the persisted principal for a well-formed entry', () => {
+    expect(
+      resolvePersistedRunOwningPrincipal(
+        { lastRunOwningPrincipals: { 'run-1': 'alice', 'run-2': 'bob' } },
+        'run-1',
+      ),
+    ).toBe('alice');
   });
 });
 
@@ -12214,6 +12254,252 @@ describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () 
       // page), never "the live record is merely absent."
       const freshOutcome = await bureau.eventHistory({ kind: 'session', id: 'never-existed' });
       expect(freshOutcome).toEqual({ events: [], hasMore: false });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
+describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
+  // The LMDB variant of this recovery scenario lives in its own file
+  // (`event-history-run-ownership-recovery-lmdb.test.ts`) — it needs a real
+  // per-iteration poll delay (LMDB completion-callback starvation, the same
+  // root cause `src/test/harness-lmdb-isolation.test.ts` documents at
+  // length), which a zero-delay-macrotask-only file like this one cannot
+  // carry without pulling in a determinism-manifest exemption for the
+  // whole file. Splitting it out scopes that exemption to only the one
+  // real wait it needs, exactly as AB-332 already did for the identical
+  // LMDB starvation symptom.
+
+  /**
+   * The cross-process proof, adapted from "recovers an in-flight durable
+   * run across a process restart" above: bureau A dispatches a run WITH a
+   * principal and crashes mid-run (never disposed — a genuinely
+   * non-terminal Weft workflow is what `recoverAll()` needs to surface for
+   * `reattachRecoveredRun` to run at all); bureau B reopens over the SAME
+   * SQLite file, recovers and resumes the run to completion, and its
+   * `eventHistory` must then be readable by the original principal and
+   * denied to a stranger — proving `runAttribution` was rehydrated from the
+   * session's persisted `lastRunOwningPrincipals`, not merely surviving in
+   * memory (bureau A's own map is gone; it is a different `createBureau`
+   * instance entirely).
+   */
+  it('a run dispatched with a principal, recovered over SQLite in a fresh process, is readable by that principal and denied to another', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-owner-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    let bureauAReachedStep1 = false;
+    const bureauA = await createBureau({
+      agents: {},
+      generate: async ({ step }) => {
+        if (step === 0) {
+          return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+        }
+        bureauAReachedStep1 = true; // step 0's saveCursor has committed
+        return new Promise<never>(() => {}); // the "process" dies here
+      },
+      toolbox: createToolbox([createNextTool()]),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      const run = await bureauA.createRun({
+        message: 'Attribute me to alice across a restart',
+        principal: 'alice',
+      });
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+      // AB-207: deliberately not disposing bureauA — see the sibling
+      // recovery test's own comment for why this simulates a real crash.
+
+      const bureauB = await createBureau({
+        agents: {},
+        generate: async ({ step }) => ({ content: `B recovered step ${step}`, toolCalls: [] }),
+        toolbox: createToolbox([createNextTool()]),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        await waitForRunCompletion(bureauB, run.id);
+
+        // The persistence layer itself, not just the end-to-end read: the
+        // session's durable envelope carries the owning principal keyed by
+        // this run's id.
+        const recoveredSession = await bureauB.getSession(run.sessionId);
+        expect(recoveredSession?.metadata['lastRunOwningPrincipals']).toEqual({
+          [run.id]: 'alice',
+        });
+
+        const asOwner = await bureauB.eventHistory(
+          { kind: 'run', id: run.id },
+          { principal: 'alice' },
+        );
+        if ('outcome' in asOwner) {
+          throw new Error(
+            `expected a page for the owning principal, got ${JSON.stringify(asOwner)}`,
+          );
+        }
+        expect(asOwner.events.map((event) => event.kind)).toContain('run.completed');
+
+        const asStranger = await bureauB.eventHistory(
+          { kind: 'run', id: run.id },
+          { principal: 'mallory' },
+        );
+        expect(asStranger).toEqual({ outcome: 'not-found' });
+
+        // A trusted caller that omits `principal` entirely still bypasses
+        // the check, exactly as it does for a never-restarted run.
+        const trusted = await bureauB.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in trusted) {
+          throw new Error(`expected a page for a trusted caller, got ${JSON.stringify(trusted)}`);
+        }
+        expect(trusted.events.map((event) => event.kind)).toContain('run.completed');
+      } finally {
+        bureauB.dispose();
+      }
+      await bureauA.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('a run dispatched WITHOUT a principal stays denied to any principal after recovery, and readable to a trusted caller that omits one', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-owner-recovery-open-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    let bureauAReachedStep1 = false;
+    const bureauA = await createBureau({
+      agents: {},
+      generate: async ({ step }) => {
+        if (step === 0) {
+          return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+        }
+        bureauAReachedStep1 = true;
+        return new Promise<never>(() => {});
+      },
+      toolbox: createToolbox([createNextTool()]),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    try {
+      // No `principal` — matches AB-313's "genuinely unattributed" case.
+      const run = await bureauA.createRun({ message: 'No principal, then restart' });
+      await pollUntil(() => bureauAReachedStep1);
+      expect(bureauAReachedStep1).toBe(true);
+
+      const bureauB = await createBureau({
+        agents: {},
+        generate: async ({ step }) => ({ content: `B recovered step ${step}`, toolCalls: [] }),
+        toolbox: createToolbox([createNextTool()]),
+        storage: { type: 'sqlite', path: databasePath },
+        durableExecution: true,
+        stopWhen: stopWhen.noToolCalls(),
+      });
+
+      try {
+        await waitForRunCompletion(bureauB, run.id);
+
+        // No entry is written at all for an unattributed run — never a
+        // present-but-empty/undefined value — matching `runAttribution.set`'s
+        // own conditional-write behavior at dispatch time.
+        const recoveredSession = await bureauB.getSession(run.sessionId);
+        expect(recoveredSession?.metadata['lastRunOwningPrincipals']).toBeUndefined();
+
+        const withPrincipal = await bureauB.eventHistory(
+          { kind: 'run', id: run.id },
+          { principal: 'anyone' },
+        );
+        expect(withPrincipal).toEqual({ outcome: 'not-found' });
+
+        const trusted = await bureauB.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in trusted) {
+          throw new Error(`expected a page for a trusted caller, got ${JSON.stringify(trusted)}`);
+        }
+        expect(trusted.events.map((event) => event.kind)).toContain('run.completed');
+      } finally {
+        bureauB.dispose();
+      }
+      await bureauA.dispose();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('records TWO concurrent runs on the same session as separate entries, keyed by their own runId, without either clobbering the other (AB-285-style union-merge)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-owner-recovery-union-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      const sessionId = 'shared-session';
+      const runOne = await bureau.createRun({
+        message: 'First, as alice',
+        sessionId,
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureau, runOne.id);
+
+      const runTwo = await bureau.createRun({
+        message: 'Second, as bob',
+        sessionId,
+        principal: 'bob',
+      });
+      await waitForRunCompletion(bureau, runTwo.id);
+
+      const session = await bureau.getSession(sessionId);
+      expect(session?.metadata['lastRunOwningPrincipals']).toEqual({
+        [runOne.id]: 'alice',
+        [runTwo.id]: 'bob',
+      });
+
+      const asAliceOnRunOne = await bureau.eventHistory(
+        { kind: 'run', id: runOne.id },
+        { principal: 'alice' },
+      );
+      if ('outcome' in asAliceOnRunOne) throw new Error('expected a page for alice on run one');
+      const asBobOnRunTwo = await bureau.eventHistory(
+        { kind: 'run', id: runTwo.id },
+        { principal: 'bob' },
+      );
+      if ('outcome' in asBobOnRunTwo) throw new Error('expected a page for bob on run two');
+
+      // Neither principal is authorized against the OTHER run.
+      const asAliceOnRunTwo = await bureau.eventHistory(
+        { kind: 'run', id: runTwo.id },
+        { principal: 'alice' },
+      );
+      expect(asAliceOnRunTwo).toEqual({ outcome: 'not-found' });
+      const asBobOnRunOne = await bureau.eventHistory(
+        { kind: 'run', id: runOne.id },
+        { principal: 'bob' },
+      );
+      expect(asBobOnRunOne).toEqual({ outcome: 'not-found' });
 
       await bureau.shutdown();
     } finally {

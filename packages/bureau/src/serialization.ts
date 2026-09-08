@@ -284,8 +284,13 @@ export function findRunAgentName(runState: {
 /**
  * Run attribution resolved outside the operative store (AB-54 usage
  * analytics grouping): the agent and authenticated principal captured at
- * `createRun` time. Both are `undefined` when unresolved (e.g. a durably
- * recovered run whose in-memory attribution was lost to a process restart).
+ * `createRun` time. Both are `undefined` when unresolved. `agentName` stays
+ * unresolved for a durably recovered run whose in-memory attribution was
+ * lost to a process restart (`findRunAgentName`'s action-log heuristic is
+ * the fallback). `principal` is rehydrated on recovery from the session's
+ * persisted `lastRunOwningPrincipals` map when the run was dispatched with
+ * one (AB-359); it stays `undefined` only when the run was never dispatched
+ * with a principal in the first place, matching AB-313's fail-closed rule.
  */
 export interface RunAttribution {
   agentName?: string;
