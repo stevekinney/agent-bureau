@@ -67,6 +67,7 @@ import {
   classifyRecoveredRunDetailed,
   createBureau,
   createDefaultSessionPersistenceSleep,
+  dedupeRecoveryPerRunFailures,
   detachBestEffortPromise,
   emptyRecoveredStepMetadata,
   hasRecoverableTransportAuthority,
@@ -8155,6 +8156,417 @@ describe('createBureau review queue (AB-20)', () => {
     } finally {
       recoverAllSpy.mockRestore();
     }
+  });
+
+  describe('waitForRecovery() resolves a typed BureauRecoveryReport (AB-349)', () => {
+    it('resolves outcome: "clean" with an empty perRunFailures on a clean boot', async () => {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      try {
+        // createBureau() resolving at all (rather than rejecting) is itself
+        // part of what this proves — recovery failure is always diagnostic.
+        const report = await bureau.waitForRecovery?.();
+        expect(report).toEqual({ outcome: 'clean', perRunFailures: [] });
+      } finally {
+        await bureau.dispose();
+      }
+    });
+
+    it('resolves outcome: "partial" with the corrupted run listed while its sibling recovers', async () => {
+      const databasePath = join(
+        tmpdir(),
+        `bureau-recovery-partial-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+      );
+      try {
+        // A genuine crashed run (same cross-process proof as the recovery
+        // test above), so this test proves the corrupted sibling does not
+        // disturb the sibling that legitimately recovers.
+        let bureauAReachedStep1 = false;
+        const bureauA = await createBureau({
+          agents: {},
+          generate: async ({ step }) => {
+            if (step === 0) {
+              return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+            }
+            bureauAReachedStep1 = true;
+            return new Promise<never>(() => {});
+          },
+          toolbox: createToolbox([createNextTool()]),
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution: true,
+          stopWhen: stopWhen.noToolCalls(),
+        });
+        const run = await bureauA.createRun({ message: 'Recover me' });
+        await pollUntil(() => bureauAReachedStep1);
+        expect(bureauAReachedStep1).toBe(true);
+        // bureauA is deliberately left un-disposed to simulate a crash — see
+        // the recovery test above for the full rationale.
+
+        const probe = await createRuntimeComposition({
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution: true,
+        });
+        const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+          recoverAll: (options: unknown) => Promise<unknown[]>;
+        };
+        const originalRecoverAll = enginePrototype.recoverAll;
+        probe.durable!.engine[Symbol.dispose]?.();
+        probe.disposeStorage?.();
+
+        // Call through to the REAL recoverAll (so bureauA's genuine crashed
+        // run still reattaches), then inject one corrupted handle alongside
+        // it — an undefined-metadata handle classifies 'cancel'/'foreign-input'
+        // regardless of any real recovered handle.
+        const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockImplementation(
+          async function (this: unknown, options: unknown) {
+            const handles = await originalRecoverAll.call(this, options);
+            return [
+              ...handles,
+              { id: 'corrupted-sibling', getLaunchMetadata: async () => undefined },
+            ];
+          },
+        );
+
+        const bSteps: number[] = [];
+        const bureauB = await createBureau({
+          agents: {},
+          generate: async ({ step }) => {
+            bSteps.push(step);
+            return { content: `B recovered step ${step}`, toolCalls: [] };
+          },
+          toolbox: createToolbox([createNextTool()]),
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution: true,
+          stopWhen: stopWhen.noToolCalls(),
+        });
+
+        try {
+          const report = await bureauB.waitForRecovery?.();
+          expect(report?.outcome).toBe('partial');
+          expect(report?.perRunFailures).toEqual([
+            { runId: 'corrupted-sibling', reason: 'foreign-input' },
+          ]);
+          expect(report?.sweepFailure).toBeUndefined();
+          expect(report?.batchFailure).toBeUndefined();
+
+          // The genuinely crashed sibling still recovers to completion.
+          await pollUntil(() => bSteps.includes(1));
+          expect(bSteps).toEqual([1]);
+          expect(bureauB.getRun(run.id)).toBeDefined();
+        } finally {
+          recoverAllSpy.mockRestore();
+          await bureauB.dispose();
+          await bureauA.dispose();
+        }
+      } finally {
+        await rm(databasePath, { force: true });
+        await rm(`${databasePath}-wal`, { force: true });
+        await rm(`${databasePath}-shm`, { force: true });
+      }
+    });
+
+    it('resolves outcome: "failed" with batchFailure.message when recoverAll() itself throws', async () => {
+      const probe = await createRuntimeComposition({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+        recoverAll: () => Promise<unknown[]>;
+      };
+      probe.durable!.engine[Symbol.dispose]?.();
+      probe.disposeStorage?.();
+      const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockRejectedValue(
+        new Error('boot recovery unavailable'),
+      );
+
+      try {
+        // createBureau() itself resolving (never rejecting) even though the
+        // whole recovery BATCH failed is exactly what this test proves.
+        const bureau = await createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'memory' },
+          durableExecution: true,
+        });
+        try {
+          const report = await bureau.waitForRecovery?.();
+          expect(report?.outcome).toBe('failed');
+          expect(report?.batchFailure?.message).toContain('boot recovery unavailable');
+          expect(report?.perRunFailures).toEqual([]);
+          expect(report?.sweepFailure).toBeUndefined();
+        } finally {
+          await bureau.dispose();
+        }
+      } finally {
+        recoverAllSpy.mockRestore();
+      }
+    });
+
+    it('does not drop a sweep failure that happened just before recoverAll() itself throws (code-review regression fixture)', async () => {
+      const probe = await createRuntimeComposition({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+        list: (filter: unknown) => Promise<unknown>;
+        recoverAll: () => Promise<unknown[]>;
+      };
+      probe.durable!.engine[Symbol.dispose]?.();
+      probe.disposeStorage?.();
+      const listSpy = spyOn(enginePrototype, 'list').mockRejectedValue(
+        new Error('scheduler-residue sweep unavailable'),
+      );
+      const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockRejectedValue(
+        new Error('boot recovery unavailable'),
+      );
+
+      try {
+        const bureau = await createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'memory' },
+          durableExecution: true,
+        });
+        try {
+          const report = await bureau.waitForRecovery?.();
+          expect(report?.outcome).toBe('failed');
+          expect(report?.batchFailure?.message).toContain('boot recovery unavailable');
+          // The sweep failure that happened BEFORE recoverAll() threw must
+          // still surface on the resolved report, not be silently dropped
+          // by the batch-failure path.
+          expect(report?.sweepFailure?.message).toContain('scheduler-residue sweep unavailable');
+          expect(report?.perRunFailures).toEqual([]);
+        } finally {
+          await bureau.dispose();
+        }
+      } finally {
+        recoverAllSpy.mockRestore();
+        listSpy.mockRestore();
+      }
+    });
+
+    it('resolves outcome: "partial" with sweepFailure set and empty perRunFailures when every handle reattaches', async () => {
+      const databasePath = join(
+        tmpdir(),
+        `bureau-recovery-sweep-failure-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+      );
+      try {
+        let bureauAReachedStep1 = false;
+        const bureauA = await createBureau({
+          agents: {},
+          generate: async ({ step }) => {
+            if (step === 0) {
+              return { content: 'A step 0', toolCalls: [{ name: 'next', arguments: {} }] };
+            }
+            bureauAReachedStep1 = true;
+            return new Promise<never>(() => {});
+          },
+          toolbox: createToolbox([createNextTool()]),
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution: true,
+          stopWhen: stopWhen.noToolCalls(),
+        });
+        const run = await bureauA.createRun({ message: 'Recover me' });
+        await pollUntil(() => bureauAReachedStep1);
+        expect(bureauAReachedStep1).toBe(true);
+
+        const probe = await createRuntimeComposition({
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution: true,
+        });
+        const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+          list: (filter: unknown) => Promise<unknown>;
+        };
+        probe.durable!.engine[Symbol.dispose]?.();
+        probe.disposeStorage?.();
+
+        // Fails the unconditional scheduler-residue sweep (`engine.list`)
+        // without touching `recoverAll`, so the genuinely crashed run still
+        // reattaches normally.
+        const listSpy = spyOn(enginePrototype, 'list').mockRejectedValue(
+          new Error('scheduler-residue sweep unavailable'),
+        );
+
+        const bSteps: number[] = [];
+        const bureauB = await createBureau({
+          agents: {},
+          generate: async ({ step }) => {
+            bSteps.push(step);
+            return { content: `B recovered step ${step}`, toolCalls: [] };
+          },
+          toolbox: createToolbox([createNextTool()]),
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution: true,
+          stopWhen: stopWhen.noToolCalls(),
+        });
+
+        try {
+          const report = await bureauB.waitForRecovery?.();
+          expect(report?.outcome).toBe('partial');
+          expect(report?.sweepFailure?.message).toContain('scheduler-residue sweep unavailable');
+          expect(report?.perRunFailures).toEqual([]);
+          expect(report?.batchFailure).toBeUndefined();
+
+          await pollUntil(() => bSteps.includes(1));
+          expect(bSteps).toEqual([1]);
+          expect(bureauB.getRun(run.id)).toBeDefined();
+        } finally {
+          listSpy.mockRestore();
+          await bureauB.dispose();
+          await bureauA.dispose();
+        }
+      } finally {
+        await rm(databasePath, { force: true });
+        await rm(`${databasePath}-wal`, { force: true });
+        await rm(`${databasePath}-shm`, { force: true });
+      }
+    });
+
+    it('deduplicates a handle classified "cancel" by both the awaited recovery hook and the post-recoverAll() pass (code-review regression fixture)', async () => {
+      const probe = await createRuntimeComposition({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+        recoverAll: (options: {
+          onRecoveredWorkflow: (info: unknown) => Promise<void>;
+        }) => Promise<unknown[]>;
+      };
+      probe.durable!.engine[Symbol.dispose]?.();
+      probe.disposeStorage?.();
+
+      // A bureau-owned agentRun input whose session is absent: the awaited
+      // hook (onRecoveredWorkflow) classifies it 'cancel'/'session-absent'
+      // but — because 'cancel' never registers an ActiveRun — the SAME
+      // handle is also present in recoverAll()'s returned array, so the
+      // post-recoverAll() pass classifies it a second time with an
+      // identical verdict.
+      const duplicateInput = {
+        runId: 'dup-run',
+        sessionId: 'missing-session',
+        agentName: 'bureau',
+      };
+      const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockImplementation(
+        async ({ onRecoveredWorkflow }) => {
+          await onRecoveredWorkflow({ workflowId: 'dup-run', input: duplicateInput });
+          return [{ id: 'dup-run', getLaunchMetadata: async () => ({ input: duplicateInput }) }];
+        },
+      );
+
+      try {
+        const bureau = await createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'memory' },
+          durableExecution: true,
+        });
+        try {
+          const report = await bureau.waitForRecovery?.();
+          expect(report?.outcome).toBe('partial');
+          // Exactly ONE entry, not two, even though both classification
+          // passes independently agree on 'cancel'/'session-absent'.
+          expect(report?.perRunFailures).toEqual([{ runId: 'dup-run', reason: 'session-absent' }]);
+        } finally {
+          await bureau.dispose();
+        }
+      } finally {
+        recoverAllSpy.mockRestore();
+      }
+    });
+
+    it('reports outcome: "partial" via sweepFailure when a suspended scheduler run cannot be cancelled, even though the sweep itself never throws (code-review regression fixture)', async () => {
+      const probe = await createRuntimeComposition({
+        generate: createMockGenerate(),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+        list: (filter: unknown) => Promise<{ items: { id: string }[]; total: number }>;
+        cancel: (runId: string) => Promise<void>;
+        recoverAll: () => Promise<unknown[]>;
+      };
+      probe.durable!.engine[Symbol.dispose]?.();
+      probe.disposeStorage?.();
+
+      const listSpy = spyOn(enginePrototype, 'list').mockResolvedValue({
+        items: [{ id: 'scheduler-run-stuck-1' }],
+        total: 1,
+      });
+      const cancelSpy = spyOn(enginePrototype, 'cancel').mockRejectedValue(
+        new Error('cancel unavailable'),
+      );
+      const recoverAllSpy = spyOn(enginePrototype, 'recoverAll').mockResolvedValue([]);
+
+      try {
+        const bureau = await createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'memory' },
+          durableExecution: true,
+        });
+        try {
+          const report = await bureau.waitForRecovery?.();
+          expect(report?.outcome).toBe('partial');
+          expect(report?.sweepFailure?.message).toContain(
+            '1 suspended scheduler run(s) could not be cancelled',
+          );
+          expect(report?.perRunFailures).toEqual([]);
+          expect(report?.batchFailure).toBeUndefined();
+        } finally {
+          await bureau.dispose();
+        }
+      } finally {
+        recoverAllSpy.mockRestore();
+        cancelSpy.mockRestore();
+        listSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('dedupeRecoveryPerRunFailures (AB-349)', () => {
+    it('returns an empty array for an empty input', () => {
+      expect(dedupeRecoveryPerRunFailures([])).toEqual([]);
+    });
+
+    it('keeps every entry when runIds are distinct', () => {
+      const input = [
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-b', reason: 'session-absent' },
+      ];
+      expect(dedupeRecoveryPerRunFailures(input)).toEqual(input);
+    });
+
+    it('keeps only the FIRST entry for a repeated runId', () => {
+      const input = [
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-b', reason: 'session-absent' },
+      ];
+      expect(dedupeRecoveryPerRunFailures(input)).toEqual([
+        { runId: 'run-a', reason: 'foreign-input' },
+        { runId: 'run-b', reason: 'session-absent' },
+      ]);
+    });
   });
 
   it('durably prunes approvals and request authority when approval restoration is permanently invalid', async () => {

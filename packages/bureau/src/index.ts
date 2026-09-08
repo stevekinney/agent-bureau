@@ -142,6 +142,7 @@ export type {
   Bureau,
   BureauEventType,
   BureauOptions,
+  BureauRecoveryReport,
   BureauRunOptions,
   BureauShutdownOptions,
   BureauShutdownOwnerReport,

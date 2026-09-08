@@ -1,5 +1,5 @@
 import type { ToolRequestContext } from 'armorer';
-import type { Bureau } from 'bureau';
+import type { Bureau, BureauRecoveryReport } from 'bureau';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { RuntimeServices } from 'lifecycle';
@@ -132,7 +132,7 @@ export async function raceDrainTimeout(
 type RequestAuthorityValidator = (context: ToolRequestContext) => boolean | Promise<boolean>;
 type BureauRequestAuthorityValidatorAccess = {
   readonly getRequestAuthorityValidator?: () => RequestAuthorityValidator | undefined;
-  readonly waitForRecovery?: () => Promise<void>;
+  readonly waitForRecovery?: () => Promise<BureauRecoveryReport>;
 };
 
 const gatewayValidatorState = new WeakMap<
