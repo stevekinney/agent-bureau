@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, type Dirent } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -544,14 +544,81 @@ export const determinismManifest = parseDeterminismManifest(rawDeterminismManife
  * their single `tsconfig.json` already lists `test` in its own `include`, so falling back to it
  * is correct rather than a compromise.
  *
- * `packageRoot` is the directory an individual package's `eslint.config.js` runs from
- * (`process.cwd()` at call time — `eslint .` is invoked per package, see `eslint.config.base.ts`
- * usage in any `packages/*\/eslint.config.js`), not `REPO_ROOT`.
+ * `packageRoot` is a single package's own directory (e.g. `packages/armorer`), not `REPO_ROOT`.
+ * `buildPerPackageTestTypeCheckedBlocks` (AB-383) calls this once per workspace package,
+ * enumerated from `REPO_ROOT`, rather than once with `process.cwd()` — the latter only happened
+ * to equal the right package root when `eslint` was invoked from inside that package.
  */
 export function resolveTestTsconfigProject(packageRoot: string): string {
   return existsSync(join(packageRoot, 'tsconfig.test.json'))
     ? './tsconfig.test.json'
     : './tsconfig.json';
+}
+
+/**
+ * Every workspace package directory under `packages/*`, identified by having its own
+ * `package.json` (excludes anything else that might land under `packages/`, though today
+ * everything there is a real package). Used at config-load time (AB-383) to generate one
+ * type-checked `test/**` block per package instead of relying on `process.cwd()`. Sorted so the
+ * generated config array (and therefore lint behavior) is deterministic regardless of the
+ * filesystem's own directory-iteration order, which varies by platform.
+ */
+export function listWorkspacePackageDirectories(repoRoot: string): string[] {
+  const packagesRoot = join(repoRoot, 'packages');
+  return readdirSync(packagesRoot, { withFileTypes: true })
+    .filter((entry: Dirent) => entry.isDirectory())
+    .map((entry: Dirent) => join(packagesRoot, entry.name))
+    .filter((packageDirectory: string) => existsSync(join(packageDirectory, 'package.json')))
+    .sort();
+}
+
+/**
+ * Builds one type-checked `test/**` config block per workspace package (AB-383), each scoped by
+ * an explicit absolute `basePath` (an ESLint flat-config field, resolved independently of both the
+ * process's cwd and the location of the config file doing the importing — see
+ * `@eslint/config-array`'s `basePath` handling) so the package-relative `files: ['test/**\/*.{ts,tsx}']`
+ * pattern only ever matches files under that one package's `test/**`, never another package's, no
+ * matter which directory `eslint` was invoked from. `parserOptions.project` (plus a matching
+ * `tsconfigRootDir`) points at that same package's resolved test tsconfig
+ * (`resolveTestTsconfigProject`, called with the package's own root rather than `process.cwd()` —
+ * the AB-383 fix). This makes a root invocation naming several packages
+ * (`bunx eslint packages/armorer packages/operative`) behave identically to linting each package
+ * on its own: every package gets its own isolated block, and `eslint .` from inside a single
+ * package still matches only that package's own blocks (every other package's block has a
+ * `basePath` under a different, non-matching directory).
+ *
+ * Fails loudly (throws at config-load time, which fails the whole `eslint` invocation rather than
+ * silently skipping files) if a workspace package has neither `tsconfig.test.json` nor
+ * `tsconfig.json` — `resolveTestTsconfigProject` alone would otherwise fall back to a
+ * `./tsconfig.json` path that typescript-eslint would then also fail to load, but only once it
+ * got around to linting that package's test files, which is a worse failure mode than refusing to
+ * build the config at all.
+ */
+export function buildPerPackageTestTypeCheckedBlocks(repoRoot: string): Linter.Config[] {
+  return listWorkspacePackageDirectories(repoRoot).flatMap((packageDirectory) => {
+    const project = resolveTestTsconfigProject(packageDirectory);
+    if (!existsSync(join(packageDirectory, project))) {
+      throw new Error(
+        `eslint.config.base.ts: ${packageDirectory} has neither tsconfig.test.json nor ` +
+          'tsconfig.json; every workspace package needs at least one for the test/** ' +
+          'type-checked lint block to resolve against (AB-383).',
+      );
+    }
+
+    return tseslint.configs.recommendedTypeChecked.map((configuration) => ({
+      ...configuration,
+      basePath: packageDirectory,
+      files: ['test/**/*.{ts,tsx}'],
+      languageOptions: {
+        ...(configuration.languageOptions ?? {}),
+        parserOptions: { project: [project], tsconfigRootDir: packageDirectory },
+      },
+      rules: {
+        ...(configuration.rules ?? {}),
+        ...typeCheckedOverrideRules,
+      },
+    }));
+  });
 }
 
 /**
@@ -660,22 +727,26 @@ export const baseConfig = [
   // `tsconfig.json` itself `include`s `test/`, so a package-root `test/**` directory such as
   // `packages/integration/test/**` is invisible to it and gets none of the type-aware rules
   // below, `no-deprecated` included). This block covers that gap with the classic
-  // `parserOptions.project` form instead of `projectService`, pointed explicitly at each
-  // package's own test tsconfig via `resolveTestTsconfigProject` (`process.cwd()` at load time
-  // is the linting package's root — see that function's doc comment). `testOverrides` below
-  // still applies its relaxations on top of this block for the same `test/**` files.
-  ...tseslint.configs.recommendedTypeChecked.map((configuration) => ({
-    ...configuration,
-    files: ['test/**/*.{ts,tsx}'],
-    languageOptions: {
-      ...(configuration.languageOptions ?? {}),
-      parserOptions: { project: [resolveTestTsconfigProject(process.cwd())] },
-    },
-    rules: {
-      ...(configuration.rules ?? {}),
-      ...typeCheckedOverrideRules,
-    },
-  })),
+  // `parserOptions.project` form instead of `projectService`.
+  //
+  // AB-383: the original version of this block resolved its one shared `parserOptions.project`
+  // via `resolveTestTsconfigProject(process.cwd())` at config-load time. That is correct only
+  // when `eslint` is invoked per package (`cwd` is the package root — every package's own `lint`
+  // script and `turbo run lint` both invoke it this way), and wrong for a root invocation naming
+  // several packages (`bunx eslint packages/armorer packages/operative`): the repository root has
+  // no `tsconfig.json`, so every `test/**` file across every named package failed to parse
+  // (`TS5012`) instead of being type-checked — the run did fail (a parser error is reported as an
+  // ESLint error), but every type-aware rule this block exists to run, `no-deprecated` included,
+  // silently produced zero findings on `test/**` rather than the real count, which is the
+  // dangerous half of the bug: a coordinator reading a clean or low warning count from a
+  // root-invoked lint has no signal that `test/**` was never actually checked.
+  // `buildPerPackageTestTypeCheckedBlocks` fixes this by generating one block per workspace
+  // package instead of one block shared across all of them, each pinned to that package's own
+  // absolute `basePath` and its own resolved test tsconfig — so which project a `test/**` file
+  // type-checks against depends on which package directory the file is actually under, never on
+  // the invoking process's cwd. `testOverrides` below still applies its relaxations on top of
+  // these blocks for the same `test/**` files.
+  ...buildPerPackageTestTypeCheckedBlocks(REPO_ROOT),
 
   // `REPO_ROOT` (computed above via `fileURLToPath`/`dirname`), not `import.meta.dir` (Bun-only)
   // or `import.meta.dirname` (unsupported on this repo's declared Node 18 floor): `eslint .` runs
