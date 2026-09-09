@@ -1886,6 +1886,119 @@ describe('createAuditTrail', () => {
     });
   });
 
+  describe('AB-393 — prune() protectRunId re-checked immediately before delete (Codex review, PR #600)', () => {
+    it('passes "listing" for the candidate-collection check and "delete" for the immediately-before-delete re-check, and survives a record protectRunId only approves on the second call', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-a' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const phasesSeen: Array<'listing' | 'delete'> = [];
+      let deleteCallsForRunA = 0;
+      const result = await trail.prune(5000, {
+        protectRunId: (runId, phase) => {
+          phasesSeen.push(phase);
+          if (runId !== 'run-a') return false;
+          if (phase === 'delete') {
+            deleteCallsForRunA += 1;
+            // Approved only once the delete-phase re-check itself runs —
+            // a listing-phase "not protected" answer must never be the
+            // last word.
+            return true;
+          }
+          return false;
+        },
+      });
+
+      expect(phasesSeen).toEqual(['listing', 'delete']);
+      expect(deleteCallsForRunA).toBe(1);
+      expect(result?.prunedCount).toBe(0);
+
+      const records = await trail.query({ runId: 'run-a' });
+      expect(records).toHaveLength(1);
+
+      trail.dispose();
+    });
+
+    it('never calls protectRunId with phase "listing" for a candidate protectRunId already approved from the cached snapshot, and never refreshes for a "listing" call (Codex review, PR #600, "Avoid replaying the feed for every unprotected audit record")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-unretained' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const calls: Array<{ runId: string; phase: 'listing' | 'delete' }> = [];
+      const result = await trail.prune(5000, {
+        protectRunId: (runId, phase) => {
+          calls.push({ runId, phase });
+          return false;
+        },
+      });
+
+      // Exactly two calls total for the one candidate: one at listing,
+      // one immediately before its delete — never more, so a predicate
+      // that refreshes only on `'delete'` (this option's documented
+      // contract) is asked to refresh at most once per candidate here,
+      // not once per phase-agnostic call site.
+      expect(calls).toEqual([
+        { runId: 'run-unretained', phase: 'listing' },
+        { runId: 'run-unretained', phase: 'delete' },
+      ]);
+      expect(result?.prunedCount).toBe(1);
+
+      trail.dispose();
+    });
+
+    it('renews the prune lease based on candidates PROCESSED (including ones skipped by a delete-time protectRunId approval), not only candidates actually deleted (Codex review, PR #600, "Renew the lease while skipping protected candidates")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const CANDIDATE_COUNT = 205; // > the 200-per-renewal batch size
+      for (let i = 0; i < CANDIDATE_COUNT; i++) {
+        await seedRecord(kv, makeRecord(i, { timestampMs: 1000, runId: `run-${i}` }));
+      }
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, {
+        initialSequence: CANDIDATE_COUNT,
+      });
+
+      // Corrupts the lease from WITHIN the delete loop itself — well
+      // after listing (and the single renewal check that runs once,
+      // before the delete loop even starts) have both already
+      // succeeded against the real lease — so the delete loop's own
+      // PERIODIC renewal (every 200 candidates) is what must catch
+      // this. Every candidate here is approved (skipped, never deleted)
+      // at delete time, so `prunedCount` stays 0 for the whole pass — if
+      // that periodic renewal were still keyed off `prunedCount` rather
+      // than every candidate PROCESSED, it would never fire at all, and
+      // this corrupted lease would go undetected: the pass would report
+      // success with every one of its 205 candidates silently skipped
+      // instead of aborting once it reaches candidate 200.
+      let deleteTimeCalls = 0;
+      const result = trail.prune(5000, {
+        protectRunId: async (_runId, phase) => {
+          if (phase !== 'delete') return false;
+          deleteTimeCalls += 1;
+          if (deleteTimeCalls === 10) {
+            await kv.set('audit-retention:v1:prune-lease', '{not json');
+          }
+          return true;
+        },
+      });
+
+      await expect(result).rejects.toThrow('lost the prune lease mid-delete');
+      expect(deleteTimeCalls).toBeGreaterThanOrEqual(200);
+
+      // Nothing was deleted (every candidate was protected at delete
+      // time) — the abort is evidence the renewal check itself fired
+      // despite that, not evidence of an unrelated failure.
+      const records = await trail.query();
+      expect(records).toHaveLength(CANDIDATE_COUNT);
+
+      trail.dispose();
+    });
+  });
+
   describe('AB-388 — record successful deletions when a later delete fails (Codex review, PR #597)', () => {
     it('writes a partial audit.pruned summary naming only the deletions that committed, then rethrows the delete failure', async () => {
       const base = textValueStore(new MemoryStorage());

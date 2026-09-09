@@ -413,12 +413,29 @@ export interface DurableEventHistory {
    *
    * Instead, this resumes `feed.replay()` from `snapshot.cursor` — the
    * position the previous call (either `retainedRunOwnerIds` or this same
-   * function) stopped at — so it only reads records appended since then.
-   * In the common case (nothing new happened between two calls in the
-   * same pass) that is zero storage reads. It reads the SAME shared feed
-   * every other write goes through, so it also observes a write committed
-   * by another Bureau instance in the interim, not only this process's
-   * own in-flight writes.
+   * function) stopped at — so it only ever walks records appended since
+   * then, never the retained window from the start. It reads the SAME
+   * shared feed every other write goes through, so it also observes a
+   * write committed by another Bureau instance in the interim, not only
+   * this process's own in-flight writes.
+   *
+   * AB-393 (Codex review, PR #600, "Avoid replaying the feed for every
+   * unprotected audit record"): "no new records to walk" is NOT the same
+   * as "zero storage reads" — `FleetEventFeed.replay()` still issues one
+   * consistency-checked page load (a small, constant number of storage
+   * reads: the retention floor, then a scan for anything past the
+   * cursor) per call even when that scan comes back empty, to confirm
+   * there genuinely is nothing new rather than merely assuming it. Each
+   * call therefore costs real, if small and bounded, backend I/O
+   * regardless of new activity — bounded per call (never the full
+   * retained window this function exists to avoid replaying), but not
+   * free. A caller invoking this once per CANDIDATE across a large
+   * backlog (rather than once per SURVIVING candidate, or coarser) pays
+   * that bounded-but-nonzero cost that many times over — see
+   * `AuditTrail.prune`'s `protectRunId` option (`audit-trail.ts`) and
+   * `pruneAuditTrail`'s own predicate (`create-bureau.ts`) for how that
+   * consumer bounds call frequency to stay proportional to surviving
+   * candidates, not to every candidate examined.
    *
    * The floor is monotonically non-decreasing once it has left 0 (nothing
    * un-retires a record), so a snapshot obtained while the floor was

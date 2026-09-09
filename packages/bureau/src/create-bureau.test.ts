@@ -16132,9 +16132,12 @@ describe('Bureau durable audit trail retention (AB-388)', () => {
         let sawUnprotectedAtListing = false;
         auditTrail.prune = (cutoffMs, pruneOptions) => {
           const originalProtect = pruneOptions?.protectRunId;
-          const racingProtect = async (runId: string): Promise<boolean> => {
-            const protectedNow = (await originalProtect?.(runId)) ?? false;
-            if (runId === runA.id && !injected) {
+          const racingProtect = async (
+            runId: string,
+            phase: 'listing' | 'delete',
+          ): Promise<boolean> => {
+            const protectedNow = (await originalProtect?.(runId, phase)) ?? false;
+            if (runId === runA.id && phase === 'listing' && !injected) {
               injected = true;
               sawUnprotectedAtListing = !protectedNow;
               await bureau.deleteRun(runA.id);
