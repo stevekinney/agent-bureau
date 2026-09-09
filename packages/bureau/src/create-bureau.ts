@@ -6864,18 +6864,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const page = await history.page(owner, options);
     if ('outcome' in page) return page; // a DurableEventGap
 
-    const liveSession =
-      owner.kind === 'session' && runtime.sessionStore
-        ? await runtime.sessionStore.load(owner.id)
-        : undefined;
-    if (
-      liveSession &&
-      principal !== undefined &&
-      !isSessionAuthorityAuthorized(liveSession.metadata, principal)
-    ) {
-      return { outcome: 'not-found' };
-    }
-
     const deletionMarkerKind =
       owner.kind === 'session'
         ? 'session.deleted'
@@ -6885,6 +6873,28 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const hasDeletionMarker =
       deletionMarkerKind !== undefined &&
       page.events.some((event) => event.kind === deletionMarkerKind);
+
+    // Only load the live session record post-page when it can actually
+    // change the outcome: either a `principal` needs reauthorizing against
+    // it (the recreation race described above), or a deletion marker on
+    // this page needs a liveness check to know whether it is current or
+    // stale (below). Neither applies when there's no marker AND no
+    // principal to reauthorize — an internal/trusted caller reading an
+    // ordinary page gains nothing from this extra `sessionStore.load`, so
+    // skip it rather than pay for a lookup no branch below will use.
+    const liveSession =
+      owner.kind === 'session' &&
+      runtime.sessionStore &&
+      (principal !== undefined || hasDeletionMarker)
+        ? await runtime.sessionStore.load(owner.id)
+        : undefined;
+    if (
+      liveSession &&
+      principal !== undefined &&
+      !isSessionAuthorityAuthorized(liveSession.metadata, principal)
+    ) {
+      return { outcome: 'not-found' };
+    }
 
     // A currently-live session record is authoritative over a stale
     // deletion marker from a PRIOR incarnation of a recreated id — this
