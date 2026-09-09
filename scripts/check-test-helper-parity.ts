@@ -190,11 +190,21 @@ export function isSubpathReachable(exportsField: unknown, subpath: string): bool
 
   if (subpath in record) return resolvesToSomething(record[subpath]);
 
-  let bestMatch: { key: string; value: unknown } | undefined;
+  let bestMatch: { key: string; prefixLength: number; value: unknown } | undefined;
   for (const key of keys) {
     if (!key.includes('*')) continue;
-    if (matchesWildcardPattern(key, subpath) && (!bestMatch || key.length > bestMatch.key.length)) {
-      bestMatch = { key, value: record[key] };
+    if (!matchesWildcardPattern(key, subpath)) continue;
+    // Node's own precedence: the longest PREFIX (the substring before `*`) wins; total key
+    // length is only the tie-break when two patterns share a prefix length (e.g. `./foo/*` vs
+    // `./foo/*-suffix`). Comparing by total key length alone (the earlier draft here) can pick a
+    // less-specific pattern over a more-specific one whose suffix happens to be shorter.
+    const prefixLength = key.indexOf('*');
+    if (
+      !bestMatch ||
+      prefixLength > bestMatch.prefixLength ||
+      (prefixLength === bestMatch.prefixLength && key.length > bestMatch.key.length)
+    ) {
+      bestMatch = { key, prefixLength, value: record[key] };
     }
   }
   return bestMatch !== undefined && resolvesToSomething(bestMatch.value);

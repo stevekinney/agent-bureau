@@ -373,9 +373,11 @@ function hasConditionalEarlyReturn(callback: FunctionLikeDeclaration): boolean {
  * Walks one already-parsed source file, returning every skip-like finding, every
  * `describe`/`it`/`test` identifier seen (skip-like or not, `allTestIdentifiers`) — used to detect
  * a manifest entry that names no real test — and the subset of those identifiers that name an
- * actual `it`/`test` CASE rather than a `describe` SUITE (`leafTestIdentifiers`) — used by callers
- * (`scripts/check-test-helper-parity.ts`) that must reject a manifest entry naming only a suite,
- * which asserts nothing on its own.
+ * actual `it`/`test` CASE that actually runs (`leafTestIdentifiers`): never a `describe` SUITE
+ * identifier (asserts nothing on its own) and never an `.skip`/`.todo` case (never executes at
+ * all). An `.only` case and a conditional-early-return DO still run, so both remain leaf
+ * identifiers. Used by callers (`scripts/check-test-helper-parity.ts`) that must reject a manifest
+ * entry naming a test that can never actually prove anything.
  */
 export function findSkipFindings(
   filePath: string,
@@ -395,7 +397,18 @@ export function findSkipFindings(
         const fullChain = [...describeChain, title];
         const testIdentifier = `${filePath} > ${fullChain.join(' > ')}`;
         allTestIdentifiers.add(testIdentifier);
-        if (callInfo.rootName === 'it' || callInfo.rootName === 'test') {
+        // '.skip'/'.todo' never execute at all, so they can never serve as a real black-box
+        // proof; '.only' and a conditional-early-return DO still run (the latter only bails
+        // early under a runtime condition), so both remain leaf identifiers. Known limitation,
+        // matching this gate's own documented scope (see the module doc's ".skipIf"/".todoIf"
+        // paragraph): a dynamic '.skipIf(condition)'/'.todoIf(condition)' is not analyzed here
+        // either, for the same reason the skip gate itself does not classify it — the condition
+        // is a runtime value this static AST walk cannot evaluate.
+        if (
+          (callInfo.rootName === 'it' || callInfo.rootName === 'test') &&
+          callInfo.skipKind !== 'skip' &&
+          callInfo.skipKind !== 'todo'
+        ) {
           leafTestIdentifiers.add(testIdentifier);
         }
 

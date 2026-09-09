@@ -61,6 +61,18 @@ describe('isSubpathReachable', () => {
     expect(isSubpathReachable(exportsField, './public/x')).toBe(true);
   });
 
+  it("breaks a wildcard tie by the pattern's PREFIX length, not the key's total length (Node's own precedence)", () => {
+    // Node: './foo/bar/*' (prefix './foo/bar/', 10 chars) is MORE specific than
+    // './foo/*-longsuffix' (prefix './foo/', 6 chars) even though the second key is the LONGER
+    // string overall — a total-key-length comparison picks the wrong one and would incorrectly
+    // report this subpath reachable.
+    const exportsField = {
+      './foo/*-longsuffix': './dist/*.js',
+      './foo/bar/*': null,
+    };
+    expect(isSubpathReachable(exportsField, './foo/bar/x-longsuffix')).toBe(false);
+  });
+
   it('never matches a key with more than one "*" — an invalid pattern is not silently matched on its first wildcard alone', () => {
     // '.\/a\*b\*c' has two '*'s: Node rejects multi-wildcard exports keys outright, so this must
     // never be treated as a match even though a naive first-'*'-only split would report one.

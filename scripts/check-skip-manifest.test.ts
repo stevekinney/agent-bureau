@@ -99,6 +99,30 @@ describe('findSkipFindingsInSource', () => {
     ]);
   });
 
+  it('leafTestIdentifiers excludes an it.skip/it.todo case — it never actually runs, so it can never serve as a black-box proof', () => {
+    const filePath = 'skipped-cases.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      it.skip('never runs', () => {});
+      it.todo('never runs either');
+      it('runs for real', () => {});
+    `;
+    const { leafTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect([...leafTestIdentifiers]).toEqual([`${filePath} > runs for real`]);
+  });
+
+  it('leafTestIdentifiers still includes an it.only case — it does actually execute', () => {
+    const filePath = 'only-case.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      it.only('the only case that runs', () => {});
+    `;
+    const { leafTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect([...leafTestIdentifiers]).toEqual([`${filePath} > the only case that runs`]);
+  });
+
   it('does not treat a conditional return nested past the first statement as a skip', () => {
     const filePath = 'inline.ts';
     const sourceText = `
