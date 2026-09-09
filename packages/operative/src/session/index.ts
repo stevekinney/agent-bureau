@@ -22,6 +22,7 @@ export type {
   SessionCleanupOptions,
   SessionListOptions,
   SessionOutboxClaim,
+  SessionOutboxClaimAttempt,
   SessionOutboxEntry,
   SessionStore,
   SessionSummary,

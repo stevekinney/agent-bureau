@@ -11,6 +11,7 @@ import type {
   SessionCleanupOptions,
   SessionListOptions,
   SessionOutboxClaim,
+  SessionOutboxClaimAttempt,
   SessionOutboxEntry,
   SessionStore,
   SessionSummary,
@@ -1197,7 +1198,10 @@ export function createSessionStore(
         entries.sort((a, b) => a.ordinal - b.ordinal);
         return entries;
       },
-      async claim(ordinal: number, lease: { owner: string; until: number }): Promise<boolean> {
+      async claim(
+        ordinal: number,
+        lease: { owner: string; until: number },
+      ): Promise<SessionOutboxClaimAttempt> {
         // Codex P2 review finding, PR #599, "Validate the lease before
         // persisting it": `lease.until` is typed `number`, but `NaN` and
         // either `Infinity` are all valid TypeScript numbers a caller could
@@ -1219,76 +1223,117 @@ export function createSessionStore(
         // claim on a timer while an earlier renewal is still in flight)
         // can both read the same current value and both find themselves
         // `claimable`, but only one `conditionalBatch` wins the CAS — the
-        // other must not report `false` (implying a genuine conflict) when
-        // the entry is still held by this SAME owner and simply needs a
-        // fresh read-and-retry. Bounded exactly like this file's other CAS
-        // retry loops (see `MAXIMUM_SAVE_ATTEMPTS`); a DIFFERENT owner
-        // holding the entry is detected by the `claimable` check itself on
-        // the very next iteration and returns `false` immediately, without
-        // burning the remaining attempts.
+        // other must not report a conflict when the entry is still held by
+        // this SAME owner and simply needs a fresh read-and-retry. Bounded
+        // exactly like this file's other CAS retry loops (see
+        // `MAXIMUM_SAVE_ATTEMPTS`); a DIFFERENT owner holding the entry is
+        // detected by the `claimable` check itself on the very next
+        // iteration and returns immediately, without burning the
+        // remaining attempts.
         for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt++) {
           const raw = await store.get(key);
           const entry = parseOutboxEntry(raw);
           // Nothing left to claim — already acknowledged (by this drainer
           // or a peer). Not a conflict, but not a successful claim either:
-          // there is no entry for the caller to go replay.
-          if (!entry) return false;
+          // there is no entry, and no lease, for the caller to go replay.
+          if (!entry) return { claimed: false };
           const now = runtime.clock.now();
           const currentClaim = entry.claim;
+          const sameOwner = currentClaim?.owner === lease.owner;
           const claimable =
             currentClaim === undefined ||
             currentClaim.until <= now ||
             // Same-owner reentry always succeeds — see this method's own
             // doc comment on why renewal must not be refused.
-            currentClaim.owner === lease.owner;
-          if (!claimable) return false;
-          const claimed: SessionOutboxEntry = { ...entry, claim: lease };
+            sameOwner;
+          // Codex P1 review finding, PR #599, "Re-read the winning claim
+          // before deciding not to retry": a `false` result used to carry
+          // no evidence of WHO holds the blocking claim, forcing a caller
+          // to fall back on its own pre-CAS `pending()` snapshot — which a
+          // peer's `claim()` landing in between could have already made
+          // stale, leaving a caller with no live lease to schedule a retry
+          // against. Returning the CURRENT winning claim here, read in
+          // this same call, is always fresh.
+          if (!claimable) return { claimed: false, lease: currentClaim };
+          // Codex P1 review finding, PR #599, "Prevent stale renewals from
+          // shortening the active lease": two overlapping same-owner
+          // renewal calls (this drainer's own periodic lease-extension
+          // timer, see `create-bureau.ts`) can interleave so the call
+          // computed with the EARLIER `now` wins its retry AFTER a call
+          // computed with a LATER `now` has already persisted a longer
+          // `until` — without this, the earlier call's smaller `until`
+          // would overwrite the longer one already on record, potentially
+          // even resurrecting an already-expired deadline. A same-owner
+          // write may only ever extend the stored deadline, never shorten
+          // it; a genuinely new claim (no prior same-owner lease) is
+          // unaffected by the `Math.max` since there is nothing to compare
+          // against.
+          const nextUntil =
+            sameOwner && currentClaim ? Math.max(currentClaim.until, lease.until) : lease.until;
+          const claimed: SessionOutboxEntry = {
+            ...entry,
+            claim: { owner: lease.owner, until: nextUntil },
+          };
           const committed = await store.conditionalBatch(
             [{ key, expectedValue: raw }],
             [{ type: 'set', key, value: JSON.stringify(claimed) }],
           );
-          if (committed) return true;
+          if (committed) return { claimed: true };
         }
-        return false;
+        // Retries exhausted against persistent contention — one more read
+        // reports the CURRENT winning claim (which may by now be this same
+        // owner's own successful renewal from a concurrent call, or a
+        // different owner's) rather than leaving the caller with nothing
+        // but a bare `false`.
+        const finalRaw = await store.get(key);
+        const finalEntry = parseOutboxEntry(finalRaw);
+        return { claimed: false, lease: finalEntry?.claim };
       },
       async acknowledge(ordinal: number, owner: string): Promise<boolean> {
         const key = outboxEntryKey(ordinal);
-        const raw = await store.get(key);
-        // Already gone — a concurrent drain (this process or a peer sharing
-        // this store) already acknowledged it. Acknowledging is idempotent,
-        // not a conflict: nothing left to remove is success, not an error.
-        if (raw === null) return true;
-        const entry = parseOutboxEntry(raw);
-        if (entry?.claim?.owner !== owner) {
-          // A different owner reclaimed this entry (this owner's own lease
-          // lapsed) — never delete an entry this owner no longer has any
-          // right to retire. The CAS below would refuse this anyway once
-          // the stored value differs, but checking the parsed owner first
-          // lets the caller tell "lost the claim" apart from "storage
-          // anomaly" without inspecting raw JSON itself.
-          return false;
+        // A CAS retry loop, not a single read-then-delete: the periodic
+        // same-owner lease-renewal timer (`create-bureau.ts`) can win a
+        // race between this call's read and its own delete CAS, in which
+        // case the delete is correctly refused (the stored value no longer
+        // matches what was read) even though `owner` still legitimately
+        // holds the claim (Codex P1 review finding, PR #599, "Retry
+        // acknowledge after a same-owner renewal wins the CAS") — retrying
+        // against the fresh value, rather than reporting a false conflict,
+        // lets this ordinary same-owner race resolve on its own instead of
+        // stranding the entry pending until a future drain retries it.
+        // Bounded like this file's other CAS retry loops.
+        for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt++) {
+          const raw = await store.get(key);
+          // Already gone — a concurrent drain (this process's own renewal
+          // race, or a peer sharing this store) already acknowledged it.
+          // Acknowledging is idempotent, not a conflict: nothing left to
+          // remove is success, not an error. This also covers the
+          // Copilot review finding, PR #599, "acknowledge() should return
+          // true when a peer reclaimed-and-acknowledged the entry": that
+          // peer's own claim-and-acknowledge landing between an earlier
+          // attempt's read and its own delete CAS is indistinguishable,
+          // from this owner's perspective, from any other reason the
+          // entry is simply gone.
+          if (raw === null) return true;
+          const entry = parseOutboxEntry(raw);
+          if (entry?.claim?.owner !== owner) {
+            // A different owner reclaimed this entry (this owner's own
+            // lease lapsed) — never delete an entry this owner no longer
+            // has any right to retire.
+            return false;
+          }
+          // A CAS, not a bare delete: if the value has changed since the
+          // read above (a peer reclaimed it, or this owner's own renewal
+          // timer updated it, in between this read and this write), the
+          // delete is simply skipped rather than forced — the next
+          // iteration re-reads and decides afresh.
+          const committed = await store.conditionalBatch(
+            [{ key, expectedValue: raw }],
+            [{ type: 'delete', key }],
+          );
+          if (committed) return true;
         }
-        // A CAS, not a bare delete: if the value has changed since the read
-        // above (a peer reclaimed it in between this read and this write),
-        // the delete is simply skipped rather than forced.
-        const committed = await store.conditionalBatch(
-          [{ key, expectedValue: raw }],
-          [{ type: 'delete', key }],
-        );
-        if (committed) return true;
-        // Copilot review finding, PR #599, "acknowledge() should return
-        // true when a peer reclaimed-and-acknowledged the entry": the CAS
-        // above can lose the race not because a peer merely RECLAIMED the
-        // claim (a live conflict this owner should hear about as `false`),
-        // but because that peer's OWN drain already replayed and
-        // acknowledged the entry in between this call's read and its own
-        // delete attempt — in which case the entry is gone, exactly the
-        // outcome this method's own doc comment defines as `true`,
-        // regardless of who retired it. One more read distinguishes the
-        // two: gone now means `true`; a DIFFERENT owner's claim still
-        // sitting there means `false`, unchanged from before.
-        const recheck = await store.get(key);
-        return recheck === null;
+        return false;
       },
     },
   };

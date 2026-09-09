@@ -81,6 +81,23 @@ export interface SessionOutboxClaim {
   readonly until: number;
 }
 
+/**
+ * The result of one `SessionStore.outbox.claim()` call (AB-390). `claimed:
+ * true` means the caller now exclusively holds the entry. `claimed: false`
+ * means it does not — `lease` names the CURRENT winning claim when one is
+ * known (a different owner's unexpired lease, or this same owner's own
+ * claim as observed by a concurrent renewal call that lost its own CAS),
+ * or is absent when the entry no longer exists at all (already
+ * acknowledged) — there is no lease for the caller to schedule a retry
+ * against in that case. Returning the lease directly, rather than leaving
+ * a caller to fall back on an earlier `pending()` snapshot that a peer's
+ * intervening `claim()` may have already made stale, is what lets a caller
+ * schedule a retry against fresh evidence (Codex P1 review finding, PR
+ * #599, "Re-read the winning claim before deciding not to retry").
+ */
+export type SessionOutboxClaimAttempt =
+  { readonly claimed: true } | { readonly claimed: false; readonly lease?: SessionOutboxClaim };
+
 export type SessionOutboxEntry =
   | {
       readonly ordinal: number;
@@ -250,17 +267,27 @@ export interface SessionStore {
      * until the absolute timestamp `until` (AB-390), by compare-and-swap on
      * the entry's own `claim` field — never a separate lock record, so a
      * claim can never drift out of sync with the entry it protects. Resolves
-     * `true` when the entry was unclaimed, its prior claim's `until` has
-     * already passed (by this store's own `RuntimeServices.clock.now()`), or
-     * `owner` already held it (renewing a claim is always allowed — the
-     * ruling's exclusivity concern is cross-owner, not same-owner reentry,
-     * and refusing renewal would let a slow-but-alive drainer's own retry
-     * lock itself out before its lease naturally lapses). Resolves `false`
-     * when a DIFFERENT owner holds an unexpired claim, or the entry no
-     * longer exists (already acknowledged) — a caller must treat `false` as
-     * "do not replay this entry right now", never as an error.
+     * `{ claimed: true }` when the entry was unclaimed, its prior claim's
+     * `until` has already passed (by this store's own
+     * `RuntimeServices.clock.now()`), or `owner` already held it (renewing a
+     * claim is always allowed — the ruling's exclusivity concern is
+     * cross-owner, not same-owner reentry, and refusing renewal would let a
+     * slow-but-alive drainer's own retry lock itself out before its lease
+     * naturally lapses; a same-owner renewal can only ever EXTEND the
+     * stored `until`, never shorten it, so two overlapping renewal calls
+     * can never resurrect an already-expired deadline). Resolves
+     * `{ claimed: false, lease }` when a DIFFERENT owner holds an unexpired
+     * claim (`lease` names it) or a concurrent same-owner call already won
+     * (`lease` names that fresher claim); resolves `{ claimed: false }`
+     * with no `lease` when the entry no longer exists at all (already
+     * acknowledged). A caller must treat `claimed: false` as "do not replay
+     * this entry right now", never as an error, and may use `lease.until`
+     * to schedule a retry.
      */
-    claim(ordinal: number, lease: { owner: string; until: number }): Promise<boolean>;
+    claim(
+      ordinal: number,
+      lease: { owner: string; until: number },
+    ): Promise<SessionOutboxClaimAttempt>;
     /**
      * Removes the entry at `ordinal`, once its replay's downstream durable
      * write has settled, but ONLY if `owner` still holds the claim on it

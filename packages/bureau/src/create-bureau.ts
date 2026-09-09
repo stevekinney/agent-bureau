@@ -5447,18 +5447,22 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // `session.created` for the same lineage. A later trigger — this
         // process's own next tick, or the peer finishing its own drain —
         // picks up where this pass stopped.
-        const claimed = await outboxSessionStore.outbox.claim(entry.ordinal, {
+        const attempt = await outboxSessionStore.outbox.claim(entry.ordinal, {
           owner: sessionOutboxDrainOwner,
           until: runtimeServices.clock.now() + SESSION_OUTBOX_CLAIM_LEASE_MS,
         });
-        if (!claimed) {
+        if (!attempt.claimed) {
           // Codex P1 review finding, PR #599, "Schedule a retry when a
-          // live claim blocks recovery": `entry.claim` (from THIS pass's
-          // own `pending()` snapshot, taken just above) names the
-          // blocking holder's own lease — wake this bureau's drain right
-          // when that lease is due to expire, rather than depending on
-          // whichever unrelated trigger happens to fire next.
-          if (entry.claim) scheduleSessionOutboxRetry(entry.claim.until);
+          // live claim blocks recovery": `attempt.lease` — the CURRENT
+          // winning claim as `claim()` itself just observed it, never this
+          // pass's earlier `pending()` snapshot, which a peer's own
+          // intervening `claim()` call could already have made stale (Codex
+          // P1 review finding, PR #599, "Re-read the winning claim before
+          // deciding not to retry") — names the blocking holder's own
+          // lease. Wake this bureau's drain right when that lease is due
+          // to expire, rather than depending on whichever unrelated
+          // trigger happens to fire next.
+          if (attempt.lease) scheduleSessionOutboxRetry(attempt.lease.until);
           return;
         }
         const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
@@ -7514,6 +7518,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       if (sessionOutboxRetryTimerArmedForMs !== undefined) {
         runtimeServices.timers.clearTimeout(sessionOutboxRetryTimerHandle);
         sessionOutboxRetryTimerArmedForMs = undefined;
+      }
+      // Codex P2 review finding, PR #599, "Await retry drains that have
+      // already fired during shutdown": `clearTimeout` above only prevents
+      // a NOT-YET-FIRED retry timer from firing — it cannot un-fire one
+      // whose callback already started (armed, then fired, in the window
+      // before this shutdown sequence reached this line) and is still
+      // running its own `drainSessionOutbox()` call. Without this await,
+      // shutdown would proceed to abort producers and dispose durable
+      // event history storage while that drain is still dispatching
+      // events or reading/writing storage concurrently with teardown.
+      if (sessionOutboxDrainInFlight) {
+        await sessionOutboxDrainInFlight;
       }
       if (automaticRunOwnershipPruneCurrentPass) {
         await automaticRunOwnershipPruneCurrentPass;

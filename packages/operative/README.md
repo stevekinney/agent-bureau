@@ -624,19 +624,43 @@ call repeatedly and concurrently from multiple processes sharing one
 backend, but two processes both draining the SAME still-unacknowledged entry
 would both replay it without a claim. `outbox.claim(ordinal, { owner, until })`
 is a compare-and-swap on the entry's own `claim` field (never a separate lock
-record): it succeeds when the entry is unclaimed, its prior claim's `until`
-has already passed by this store's own `RuntimeServices.clock.now()`, or
-`owner` already held it (claim renewal always succeeds — this is same-owner
-reentry, not the cross-owner exclusivity the lease protects). It fails when a
-DIFFERENT owner holds an unexpired claim, or the entry no longer exists
+record) that resolves a `SessionOutboxClaimAttempt`: `{ claimed: true }` when
+the entry was unclaimed, its prior claim's `until` has already passed by this
+store's own `RuntimeServices.clock.now()`, or `owner` already held it (claim
+renewal always succeeds — this is same-owner reentry, not the cross-owner
+exclusivity the lease protects, and a same-owner renewal can only ever EXTEND
+the stored `until`, never shorten it, so two overlapping renewal calls can
+never resurrect an already-expired deadline); `{ claimed: false, lease }`
+when a DIFFERENT owner holds an unexpired claim or a concurrent same-owner
+call already won (`lease` names the current winning claim either way, so a
+caller always has fresh evidence to schedule a retry against — never a stale
+`pending()` snapshot a peer's own `claim()` may have since invalidated); or
+`{ claimed: false }` with no `lease` when the entry no longer exists at all
 (already acknowledged). `outbox.acknowledge(ordinal, owner)` now additionally
 requires `owner` to still hold the entry's claim — verified by the same
-compare-and-swap discipline `claim()` uses — so an owner whose lease lapsed
-and was reclaimed by a peer can never retire an entry it no longer owns. A
-drainer that crashes between winning a claim and acknowledging leaves the
-entry claimed but undelivered only until its own lease's `until` passes; a
-later drain (this same process's next tick, or a peer's) reclaims and
-completes it exactly once.
+compare-and-swap discipline `claim()` uses, retrying against a fresh read
+when the CAS loses to this same owner's own concurrent renewal — so an owner
+whose lease lapsed and was reclaimed by a peer can never retire an entry it
+no longer owns. A drainer that crashes between winning a claim and
+acknowledging leaves the entry claimed but undelivered only until its own
+lease's `until` passes; a later drain (this same process's next tick, or a
+peer's) reclaims and completes it — **at least once, not exactly once**: a
+crash after `dispatch()` has already run a listener's side effect (or after
+a durable write has persisted) but before `acknowledge()` leaves the entry
+pending, and the next drain necessarily replays it again once the lease
+expires, because a lease prevents two owners from replaying an entry
+CONCURRENTLY but cannot tell whether a crashed owner's own replay completed
+first. Every consumer of these events (a durable event history producer, the
+audit trail, a direct `bureau.addEventListener` subscriber) must be
+idempotent on its own dedupe key (this outbox's `ordinal`) if redelivery
+after a crash would otherwise double an effect.
+This assumes every process draining one shared backend has a runtime clock
+within the lease's own tolerance of the others' — `claim()` compares
+`lease.until` against ITS OWN `RuntimeServices.clock.now()`, so a drainer
+whose clock runs meaningfully ahead of a peer's can treat that peer's live
+claim as already expired and reclaim it early; operate drainers sharing a
+backend with synchronized clocks (NTP or equivalent) within a small fraction
+of the lease duration.
 
 `save()`/`update()` reject with `StaleSessionIncarnationError` when a
 candidate names a specific, nonempty `incarnation` that no longer matches
@@ -648,22 +672,49 @@ this way.
 ```ts
 const sessions = createSessionStore(kvStore);
 const drainerId = 'my-drainer-instance';
-sessions.events.addEventListener('session.outbox-appended', async () => {
-  // Ordinals define store-wide replay order — stop at the first entry
-  // this drainer cannot own, rather than skipping ahead to a later one,
-  // or a `session.saved`/`session.deleted` could replay before an
-  // earlier `session.created` a peer still holds.
-  for (const entry of await sessions.outbox.pending()) {
-    const claimed = await sessions.outbox.claim(entry.ordinal, {
-      owner: drainerId,
-      until: Date.now() + 30_000,
-    });
-    if (!claimed) break; // a peer already holds this entry's lease
-    console.log(`outbox entry ${entry.ordinal}: ${entry.kind} for ${entry.sessionId}`);
-    // Replay `entry` as the real event, await its own durable write, THEN:
-    const acknowledged = await sessions.outbox.acknowledge(entry.ordinal, drainerId);
-    if (!acknowledged) break; // lost the claim before acknowledging
+
+// Single-flighted, the same way Bureau's own `drainSessionOutbox` is: two
+// `session.outbox-appended` events firing before the first callback below
+// finishes must join ONE drain rather than run two overlapping ones — two
+// concurrent callbacks sharing `drainerId` would each look like a valid
+// same-owner claim renewal to the OTHER, letting both replay the same
+// entry.
+let drainInFlight: Promise<void> | undefined;
+let rerunRequested = false;
+async function drain(): Promise<void> {
+  if (drainInFlight) {
+    rerunRequested = true;
+    return drainInFlight;
   }
+  drainInFlight = (async () => {
+    try {
+      do {
+        rerunRequested = false;
+        // Ordinals define store-wide replay order — stop at the first
+        // entry this drainer cannot own, rather than skipping ahead to a
+        // later one, or a `session.saved`/`session.deleted` could replay
+        // before an earlier `session.created` a peer still holds.
+        for (const entry of await sessions.outbox.pending()) {
+          const attempt = await sessions.outbox.claim(entry.ordinal, {
+            owner: drainerId,
+            until: Date.now() + 30_000,
+          });
+          if (!attempt.claimed) return; // a peer already holds this entry's lease
+          console.log(`outbox entry ${entry.ordinal}: ${entry.kind} for ${entry.sessionId}`);
+          // Replay `entry` as the real event, await its own durable write, THEN:
+          const acknowledged = await sessions.outbox.acknowledge(entry.ordinal, drainerId);
+          if (!acknowledged) return; // lost the claim before acknowledging
+        }
+      } while (rerunRequested);
+    } finally {
+      drainInFlight = undefined;
+    }
+  })();
+  await drainInFlight;
+}
+
+sessions.events.addEventListener('session.outbox-appended', () => {
+  drain().catch((error: unknown) => console.error('outbox drain failed:', error));
 });
 ```
 

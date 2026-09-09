@@ -17781,12 +17781,11 @@ describe('AB-389 — session commit outbox', () => {
 
     // AB-390 — `acknowledge()` now requires holding the entry's claim.
     const ordinal = pendingAfterRestart[0]!.ordinal;
-    expect(
-      await secondInstance.outbox.claim(ordinal, {
-        owner: 'second-instance',
-        until: runtime.clock.now() + 1_000,
-      }),
-    ).toBe(true);
+    const claimAttempt = await secondInstance.outbox.claim(ordinal, {
+      owner: 'second-instance',
+      until: runtime.clock.now() + 1_000,
+    });
+    expect(claimAttempt.claimed).toBe(true);
     await secondInstance.outbox.acknowledge(ordinal, 'second-instance');
     expect(await secondInstance.outbox.pending()).toHaveLength(0);
   });
@@ -18435,12 +18434,11 @@ describe('AB-390 — outbox claim lease', () => {
       // A "crashed drainer" claims the entry with a short lease and never
       // acknowledges it.
       const LEASE_MS = 5_000;
-      expect(
-        await sessionStore.outbox.claim(entry.ordinal, {
-          owner: 'crashed-drainer',
-          until: runtime.clock.now() + LEASE_MS,
-        }),
-      ).toBe(true);
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
 
       // This bureau's own maintenance drain, run WHILE the crashed
       // drainer's lease is still live, must not dispatch the entry — its
@@ -18532,12 +18530,11 @@ describe('AB-390 — outbox claim lease', () => {
 
       // A peer's claim attempt must still be refused: the lease has been
       // renewed past this point, not merely left to lapse.
-      expect(
-        await sessionStore.outbox.claim(claimedEntry.ordinal, {
-          owner: 'peer-drainer',
-          until: runtime.clock.now() + 30_000,
-        }),
-      ).toBe(false);
+      const peerClaimAttempt = await sessionStore.outbox.claim(claimedEntry.ordinal, {
+        owner: 'peer-drainer',
+        until: runtime.clock.now() + 30_000,
+      });
+      expect(peerClaimAttempt.claimed).toBe(false);
 
       releaseAuditWrite?.();
       await deletionPromise;
@@ -18685,12 +18682,11 @@ describe('AB-390 — outbox claim lease', () => {
       if (!entry) throw new Error('expected a pending outbox entry');
 
       const LEASE_MS = 5_000;
-      expect(
-        await sessionStore.outbox.claim(entry.ordinal, {
-          owner: 'crashed-drainer',
-          until: runtime.clock.now() + LEASE_MS,
-        }),
-      ).toBe(true);
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
 
       // A fresh commit through this bureau's OWN session store fires its
       // post-commit drain trigger, which observes the live claim on the
@@ -18763,12 +18759,11 @@ describe('AB-390 — outbox claim lease', () => {
       // A "crashed drainer" claims the entry with a short lease and never
       // acknowledges it.
       const LEASE_MS = 5_000;
-      expect(
-        await sessionStore.outbox.claim(entry.ordinal, {
-          owner: 'crashed-drainer',
-          until: runtime.clock.now() + LEASE_MS,
-        }),
-      ).toBe(true);
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
 
       // This bureau's own maintenance drain observes the live claim and
       // must not dispatch — but per the finding under test, it must also
@@ -18876,6 +18871,92 @@ describe('AB-390 — outbox claim lease', () => {
     } finally {
       await bureauA.dispose();
       await bureauB.dispose();
+    }
+  });
+
+  it('shutdown awaits a retry drain that already started before the retry timer was cleared (Codex P2 review finding, PR #599, "Await retry drains that have already fired during shutdown")', async () => {
+    // The retry timer's callback can start running (calling
+    // `drainSessionOutbox()`, which sets `sessionOutboxDrainInFlight`
+    // synchronously) before `dispose()` reaches the point where it clears
+    // that timer — `clearTimeout` cannot un-fire a callback that already
+    // started. Without also awaiting the in-flight drain, `dispose()` would
+    // proceed to abort the durable event producer's signal and tear down
+    // storage while that drain is still dispatching the event and writing
+    // through it.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-shutdown-awaits-retry-drain-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    let sessionCreatedSeen = 0;
+    bureau.addEventListener('session.created', () => {
+      sessionCreatedSeen += 1;
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime },
+      );
+      await standaloneSessionStore.save(
+        createAgentSession({
+          id: 'ab-390-shutdown-awaits-retry-drain',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({
+            id: 'ab-390-shutdown-awaits-retry-drain',
+          }),
+        }),
+      );
+      standaloneStorage[Symbol.dispose]();
+      const [entry] = await sessionStore.outbox.pending();
+      if (!entry) throw new Error('expected a pending outbox entry');
+
+      // A "crashed drainer" claims the entry with a short lease and never
+      // acknowledges it, forcing this bureau to arm a retry timer.
+      const LEASE_MS = 5_000;
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
+      await bureau.runDurableMaintenance();
+      expect(sessionCreatedSeen).toBe(0);
+
+      // Advancing the clock fires the armed retry timer's callback
+      // SYNCHRONOUSLY within this call (per `ManualRuntimeServices.advance`'s
+      // own contract) — `sessionOutboxDrainInFlight` is set before this
+      // `await` resolves, but the drain itself (several of its own awaited
+      // storage calls) is not yet complete.
+      await runtime.advance(LEASE_MS + 1);
+
+      // Dispose immediately, with no further await letting the drain
+      // finish on its own first. If shutdown does not await the in-flight
+      // drain, `waitForActiveWrites`/`wasRecorded` race the producer's
+      // signal being aborted and the entry's durable write is diagnosed as
+      // not recorded — even though the event WAS already dispatched
+      // synchronously before that race, which is why `sessionCreatedSeen`
+      // alone cannot distinguish the fix from its absence.
+      await bureau.dispose();
+
+      expect(sessionCreatedSeen).toBe(1);
+      expect(diagnostics).not.toContainEqual(expect.stringContaining('was not durably recorded'));
+    } finally {
+      await bureau.dispose();
     }
   });
 });

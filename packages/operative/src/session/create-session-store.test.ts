@@ -24,11 +24,11 @@ const BODY_PREFIX = 'agent-session-v2:body:';
 // without each one re-deriving the claim-then-acknowledge sequence.
 const TEST_OUTBOX_OWNER = 'test-drainer';
 async function claimAndAcknowledge(store: SessionStore, ordinal: number): Promise<void> {
-  const claimed = await store.outbox.claim(ordinal, {
+  const attempt = await store.outbox.claim(ordinal, {
     owner: TEST_OUTBOX_OWNER,
     until: Number.MAX_SAFE_INTEGER,
   });
-  if (!claimed) {
+  if (!attempt.claimed) {
     throw new Error(`expected to claim outbox entry ${ordinal} for test setup`);
   }
   const acknowledged = await store.outbox.acknowledge(ordinal, TEST_OUTBOX_OWNER);
@@ -1828,19 +1828,17 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     const [entry] = await store.outbox.pending();
     const ordinal = entry!.ordinal;
 
-    expect(
-      await store.outbox.claim(ordinal, {
-        owner: 'drainer-a',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(true);
+    const firstClaim = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(firstClaim.claimed).toBe(true);
     // A different owner is refused while drainer-a's lease has not expired.
-    expect(
-      await store.outbox.claim(ordinal, {
-        owner: 'drainer-b',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(false);
+    const secondClaim = await store.outbox.claim(ordinal, {
+      owner: 'drainer-b',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(secondClaim.claimed).toBe(false);
   });
 
   it('allows the same owner to renew its own claim without waiting for expiry', async () => {
@@ -1850,17 +1848,18 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     const [entry] = await store.outbox.pending();
     const ordinal = entry!.ordinal;
 
-    expect(
-      await store.outbox.claim(ordinal, { owner: 'drainer-a', until: runtime.clock.now() + 1_000 }),
-    ).toBe(true);
+    const initialClaim = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 1_000,
+    });
+    expect(initialClaim.claimed).toBe(true);
     // Re-claiming as the SAME owner succeeds even though the prior lease
     // has not expired — renewal, not a conflict.
-    expect(
-      await store.outbox.claim(ordinal, {
-        owner: 'drainer-a',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(true);
+    const renewedClaim = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(renewedClaim.claimed).toBe(true);
   });
 
   it("lets a different owner reclaim once the prior claim has expired by the store's own clock", async () => {
@@ -1875,12 +1874,11 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
       until: runtime.clock.now() + 1_000,
     });
     await runtime.advance(1_001);
-    expect(
-      await store.outbox.claim(ordinal, {
-        owner: 'new-drainer',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(true);
+    const reclaim = await store.outbox.claim(ordinal, {
+      owner: 'new-drainer',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(reclaim.claimed).toBe(true);
   });
 
   it('returns false for claim() on an ordinal with no pending entry (already acknowledged)', async () => {
@@ -1889,12 +1887,11 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     await store.save(makeSession({ id: 'claim-gone' }));
     const [entry] = await store.outbox.pending();
     await claimAndAcknowledge(store, entry!.ordinal);
-    expect(
-      await store.outbox.claim(entry!.ordinal, {
-        owner: 'late-drainer',
-        until: runtime.clock.now() + 1_000,
-      }),
-    ).toBe(false);
+    const lateClaim = await store.outbox.claim(entry!.ordinal, {
+      owner: 'late-drainer',
+      until: runtime.clock.now() + 1_000,
+    });
+    expect(lateClaim.claimed).toBe(false);
   });
 
   it('acknowledge() refuses to remove an entry whose claim was reclaimed by a different owner', async () => {
@@ -1909,12 +1906,11 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
       until: runtime.clock.now() + 1_000,
     });
     await runtime.advance(1_001);
-    expect(
-      await store.outbox.claim(ordinal, {
-        owner: 'reclaiming-drainer',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(true);
+    const reclaim = await store.outbox.claim(ordinal, {
+      owner: 'reclaiming-drainer',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(reclaim.claimed).toBe(true);
 
     // The original (now-lapsed) owner's own acknowledge must not retire an
     // entry a different owner has since reclaimed.
@@ -1946,12 +1942,11 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
       // Rejected before any store mutation — the entry is still pending
       // and unclaimed, not wedged behind a corrupted `claim` field.
       expect(await store.outbox.pending()).toHaveLength(1);
-      expect(
-        await store.outbox.claim(entry!.ordinal, {
-          owner: 'drainer-a',
-          until: 1_000,
-        }),
-      ).toBe(true);
+      const claimAttempt = await store.outbox.claim(entry!.ordinal, {
+        owner: 'drainer-a',
+        until: 1_000,
+      });
+      expect(claimAttempt.claimed).toBe(true);
     },
   );
 
@@ -1985,12 +1980,11 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     // count toward the retry assertion.
     contentionArmed = true;
 
-    expect(
-      await store.outbox.claim(entry!.ordinal, {
-        owner: 'drainer-a',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(true);
+    const claimAttempt = await store.outbox.claim(entry!.ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(claimAttempt.claimed).toBe(true);
     expect(conditionalBatchCalls).toBe(2);
   });
 
@@ -2001,18 +1995,16 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     const [entry] = await store.outbox.pending();
     const ordinal = entry!.ordinal;
 
-    expect(
-      await store.outbox.claim(ordinal, {
-        owner: 'drainer-a',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(true);
-    expect(
-      await store.outbox.claim(ordinal, {
-        owner: 'drainer-b',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(false);
+    const firstClaim = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(firstClaim.claimed).toBe(true);
+    const secondClaim = await store.outbox.claim(ordinal, {
+      owner: 'drainer-b',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(secondClaim.claimed).toBe(false);
   });
 
   it("acknowledge() reports true, not a false conflict, when a peer's own claim-and-acknowledge already retired the entry between this call's read and its CAS (Copilot review finding, PR #599)", async () => {
@@ -2052,13 +2044,136 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     );
     await store.save(makeSession({ id: 'ack-peer-retired-race' }));
     const [entry] = await store.outbox.pending();
-    expect(
-      await store.outbox.claim(entry!.ordinal, {
-        owner: 'drainer-a',
-        until: runtime.clock.now() + 30_000,
-      }),
-    ).toBe(true);
+    const claimAttempt = await store.outbox.claim(entry!.ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(claimAttempt.claimed).toBe(true);
 
+    expect(await store.outbox.acknowledge(entry!.ordinal, 'drainer-a')).toBe(true);
+    expect(await store.outbox.pending()).toHaveLength(0);
+  });
+
+  it('claim() never lets a same-owner renewal shorten an already-persisted longer lease (Codex P1 review finding, PR #599, "Prevent stale renewals from shortening the active lease")', async () => {
+    const runtime = createManualRuntimeServices();
+    const base = textValueStore(new MemoryStorage());
+    const store = createSessionStore(base, { runtime });
+    await store.save(makeSession({ id: 'claim-monotonic-renewal' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+
+    const initialClaim = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 1_000,
+    });
+    expect(initialClaim.claimed).toBe(true);
+
+    // Simulates a LATER renewal call (a fresh `now`, so a longer `until`)
+    // already having persisted its own write — as if it won a race against
+    // an earlier-computed renewal call that is only now (below) about to
+    // run its own CAS.
+    const laterRenewalUntil = runtime.clock.now() + 30_000;
+    const laterRenewal = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: laterRenewalUntil,
+    });
+    expect(laterRenewal.claimed).toBe(true);
+
+    // An EARLIER-computed renewal call (a smaller `until`, as if it had been
+    // delayed and is only landing now) must not shorten the deadline the
+    // later call already persisted — same-owner writes may only ever
+    // EXTEND the stored lease.
+    const earlierComputedUntil = runtime.clock.now() + 3_000;
+    const earlierRenewal = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: earlierComputedUntil,
+    });
+    expect(earlierRenewal.claimed).toBe(true);
+
+    const [afterBoth] = await store.outbox.pending();
+    expect(afterBoth!.claim?.until).toBe(laterRenewalUntil);
+  });
+
+  it('claim() reports the current winning lease as fresh evidence when a different owner already holds it, not a bare false (Codex P1 review finding, PR #599, "Re-read the winning claim before deciding not to retry")', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'claim-fresh-evidence' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+    const holderUntil = runtime.clock.now() + 12_345;
+
+    const holderClaim = await store.outbox.claim(ordinal, { owner: 'holder', until: holderUntil });
+    expect(holderClaim.claimed).toBe(true);
+
+    const attempt = await store.outbox.claim(ordinal, {
+      owner: 'challenger',
+      until: runtime.clock.now() + 30_000,
+    });
+    if (attempt.claimed) throw new Error('expected the challenger to be refused the claim');
+    expect(attempt.lease).toEqual({ owner: 'holder', until: holderUntil });
+  });
+
+  it('claim() reports no lease when the entry no longer exists, distinguishing "gone" from "held by someone else"', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(makeSession({ id: 'claim-fresh-evidence-gone' }));
+    const [entry] = await store.outbox.pending();
+    await claimAndAcknowledge(store, entry!.ordinal);
+
+    const attempt = await store.outbox.claim(entry!.ordinal, {
+      owner: 'late-drainer',
+      until: 1_000,
+    });
+    if (attempt.claimed) throw new Error('expected no entry left to claim');
+    expect(attempt.lease).toBeUndefined();
+  });
+
+  it('acknowledge() retries the delete after losing its CAS to this SAME owner\'s own concurrent claim renewal (Codex P1 review finding, PR #599, "Retry acknowledge after a same-owner renewal wins the CAS")', async () => {
+    const runtime = createManualRuntimeServices();
+    const base = textValueStore(new MemoryStorage());
+    let renewalWonRace = false;
+    const store = createSessionStore(
+      {
+        ...base,
+        async conditionalBatch(
+          conditions: Parameters<typeof base.conditionalBatch>[0],
+          operations: Parameters<typeof base.conditionalBatch>[1],
+        ) {
+          const deleteOperation = operations.find(
+            (operation): operation is { type: 'delete'; key: string } =>
+              operation.type === 'delete',
+          );
+          if (deleteOperation && !renewalWonRace) {
+            renewalWonRace = true;
+            // Simulates this SAME owner's periodic lease-renewal timer
+            // (`create-bureau.ts`) winning a race between acknowledge()'s
+            // read and its own delete CAS: the stored value changes (a
+            // fresh claim write, still owned by "drainer-a"), so THIS
+            // delete CAS legitimately loses even though the owner never
+            // actually lost the claim.
+            const raw = await base.get(deleteOperation.key);
+            if (raw !== null) {
+              const renewed = JSON.parse(raw) as Record<string, unknown>;
+              renewed['claim'] = { owner: 'drainer-a', until: runtime.clock.now() + 60_000 };
+              await base.set(deleteOperation.key, JSON.stringify(renewed));
+            }
+            return false;
+          }
+          return base.conditionalBatch(conditions, operations);
+        },
+      },
+      { runtime },
+    );
+    await store.save(makeSession({ id: 'ack-retry-same-owner-renewal' }));
+    const [entry] = await store.outbox.pending();
+    const claimAttempt = await store.outbox.claim(entry!.ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(claimAttempt.claimed).toBe(true);
+
+    // The delete's first CAS attempt loses to the simulated renewal above,
+    // but the entry is still owned by "drainer-a" — acknowledge() must
+    // retry rather than reporting a false conflict.
     expect(await store.outbox.acknowledge(entry!.ordinal, 'drainer-a')).toBe(true);
     expect(await store.outbox.pending()).toHaveLength(0);
   });
