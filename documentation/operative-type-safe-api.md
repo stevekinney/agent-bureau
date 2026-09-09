@@ -799,7 +799,13 @@ Weft 0.23.1's `FleetEventFeed` (`@lostgradient/weft/server/handler`),
 sharing `runtime.durable.engine.storage` — no second durable log —
 `packages/bureau/src/durable-event-history.ts` exports
 `createDurableEventHistory(storage, runtime): DurableEventHistory`, with
-`record(owner, kind, payload)` and `page(owner, options?)`. `Bureau`
+`record(owner, kind, payload, options?)` (AB-389 adds `options.dedupeKey`,
+making a write idempotent via an atomic storage compare-and-swap, and
+`options.emittedAtMs`, overriding the envelope's timestamp for a caller
+replaying a fact that committed earlier than the moment this call runs),
+`wasRecorded(owner, kind, dedupeKey)` (an O(1) check of whether a given
+`dedupeKey` was already committed — the session outbox drain's own
+retry-safety gate), and `page(owner, options?)`. `Bureau`
 composes ONE instance whenever a genuinely persistent storage backend is
 configured (`capabilities().persistence !== 'ephemeral'` — not merely
 "`runtime.durable` exists," since `durableExecution: true` can be forced

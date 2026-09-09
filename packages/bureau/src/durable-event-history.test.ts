@@ -229,6 +229,137 @@ describe('createDurableEventHistory', () => {
 
       await history.dispose();
     });
+
+    it('an emittedAtMs option overrides the clock-derived timestamp (AB-389, "Persist the commit time with each outbox entry")', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      runtime.setTime(Date.parse('2026-09-05T00:00:00.000Z'));
+      const envelope = await history.record(
+        { kind: 'session', id: 'sess-1' },
+        'session.saved',
+        { sessionId: 'sess-1' },
+        { emittedAtMs: Date.parse('2026-09-01T00:00:00.000Z') },
+      );
+
+      expect(envelope.emittedAtMs).toBe(Date.parse('2026-09-01T00:00:00.000Z'));
+
+      await history.dispose();
+    });
+  });
+
+  describe('record() with a dedupeKey and wasRecorded() (AB-389)', () => {
+    it('wasRecorded() is false before the write and true after it', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'session' as const, id: 'sess-1' };
+
+      expect(await history.wasRecorded(owner, 'session.created', '1')).toBe(false);
+      await history.record(owner, 'session.created', { sessionId: 'sess-1' }, { dedupeKey: '1' });
+      expect(await history.wasRecorded(owner, 'session.created', '1')).toBe(true);
+
+      await history.dispose();
+    });
+
+    it('a second record() call with the same dedupeKey is a no-op read of the first write, not a second append (redelivery of the same outbox entry)', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'session' as const, id: 'sess-1' };
+
+      const first = await history.record(
+        owner,
+        'session.created',
+        { sessionId: 'sess-1' },
+        { dedupeKey: '1' },
+      );
+      const second = await history.record(
+        owner,
+        'session.created',
+        { sessionId: 'sess-1' },
+        { dedupeKey: '1' },
+      );
+
+      expect(second).toEqual(first);
+      const page = await history.page(owner);
+      if ('outcome' in page) throw new Error('expected a page, got a gap');
+      expect(page.events).toHaveLength(1);
+
+      await history.dispose();
+    });
+
+    it('two concurrent record() calls racing the SAME dedupeKey — simulating two Bureau processes draining the same outbox entry — produce exactly one durable record (Codex P1 review finding, PR #598, "Make cross-process outbox deduplication atomic")', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'session' as const, id: 'sess-race' };
+
+      // Two calls issued back-to-back with no await between them race the
+      // SAME atomic compare-and-swap on the SAME dedupe marker key — the
+      // exact race a read-before-write scan (the design this replaced)
+      // cannot close, since both would observe "not found" before either
+      // wrote anything.
+      const [first, second] = await Promise.all([
+        history.record(owner, 'session.created', { sessionId: 'sess-race' }, { dedupeKey: '1' }),
+        history.record(owner, 'session.created', { sessionId: 'sess-race' }, { dedupeKey: '1' }),
+      ]);
+
+      expect(second).toEqual(first);
+      const page = await history.page(owner);
+      if ('outcome' in page) throw new Error('expected a page, got a gap');
+      expect(page.events).toHaveLength(1);
+
+      await history.dispose();
+    });
+
+    it('the dedupeKey never appears in the recorded payload — an application payload with its own same-named field is unaffected (Codex P2 review finding, PR #598, "Keep deduplication metadata out of application payloads")', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'session' as const, id: 'sess-1' };
+
+      const envelope = await history.record(
+        owner,
+        'session.created',
+        { sessionId: 'sess-1', dedupeKey: 'this-is-the-caller-own-field' },
+        { dedupeKey: '1' },
+      );
+
+      // The caller's OWN `dedupeKey`-named payload field survives untouched
+      // — this module's own dedupe marker is a separate, reserved storage
+      // key, never mixed into the payload.
+      expect(envelope.payload).toEqual({
+        sessionId: 'sess-1',
+        dedupeKey: 'this-is-the-caller-own-field',
+      });
+
+      const page = await history.page(owner);
+      if ('outcome' in page) throw new Error('expected a page, got a gap');
+      expect(page.events[0]?.payload).toEqual({
+        sessionId: 'sess-1',
+        dedupeKey: 'this-is-the-caller-own-field',
+      });
+
+      await history.dispose();
+    });
+
+    it('a different dedupeKey for the same owner/kind records a second, independent event', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'session' as const, id: 'sess-1' };
+
+      await history.record(owner, 'session.saved', { n: 1 }, { dedupeKey: '1' });
+      await history.record(owner, 'session.saved', { n: 2 }, { dedupeKey: '2' });
+
+      const page = await history.page(owner);
+      if ('outcome' in page) throw new Error('expected a page, got a gap');
+      expect(page.events.map((event) => event.payload)).toEqual([{ n: 1 }, { n: 2 }]);
+
+      await history.dispose();
+    });
   });
 
   describe('page() ordering and owner filtering', () => {
@@ -1593,6 +1724,9 @@ function createRecordingHistory(
     latestDeletionMarker() {
       throw new Error('unused by createDurableEventProducer');
     },
+    wasRecorded() {
+      throw new Error('unused by createDurableEventProducer');
+    },
     dispose: async () => {},
   };
   return { history, calls };
@@ -2167,13 +2301,16 @@ describe('createDurableEventProducer()', () => {
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
     const producer = createDurableEventProducer(bureau, history, runtime);
 
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
     await runtime.deferred.drain();
 
     const page = await history.page({ kind: 'session', id: 'sess-1' });
     if ('outcome' in page) throw new Error('expected a page, got a gap');
     expect(page.events.map((event) => event.kind)).toEqual(['session.deleted']);
-    expect(page.events[0]?.payload).toEqual({ sessionId: 'sess-1', incarnation: 'incarnation-a' });
+    expect(page.events[0]?.payload).toEqual({
+      sessionId: 'sess-1',
+      incarnation: 'incarnation-a',
+    });
 
     await producer.dispose();
     await history.dispose();
@@ -2196,11 +2333,11 @@ describe('createDurableEventProducer()', () => {
     });
     const producer = createDurableEventProducer(bureau, history, runtime);
 
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
     // A second dispatch arrives while the first write is still pending —
     // checked and dropped SYNCHRONOUSLY, before the first write's `record()`
     // has even resolved.
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
 
     releaseWrite();
     await runtime.deferred.drain();
@@ -2230,7 +2367,7 @@ describe('createDurableEventProducer()', () => {
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
     const producer = createDurableEventProducer(bureau, history, runtime);
 
-    const event = new SessionDeletedEvent('sess-1', 'incarnation-a');
+    const event = new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0);
     dispatchSessionDeleted(event);
     await runtime.deferred.drain();
     // The first write has fully settled; this is the literal SAME object,
@@ -2261,11 +2398,15 @@ describe('createDurableEventProducer()', () => {
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
     const producer = createDurableEventProducer(bureau, history, runtime);
 
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
     await runtime.deferred.drain();
     // The first write has fully settled — this is a genuinely LATER,
-    // separate dispatch, not a concurrent duplicate of the same one.
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-b'));
+    // separate dispatch, not a concurrent duplicate of the same one. A
+    // DIFFERENT ordinal too (AB-389's `record()`-level dedupe keys on
+    // `(owner, kind, dedupeKey)`; reusing ordinal 1 here would make this
+    // second, genuinely distinct deletion look like a redelivery of the
+    // first and silently skip its own durable write).
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-b', 2, 0));
     await runtime.deferred.drain();
 
     const page = await history.page({ kind: 'session', id: 'sess-1' });
@@ -2303,10 +2444,10 @@ describe('createDurableEventProducer()', () => {
 
     // Incarnation A's deletion — its own `record()` call is gated and does
     // not resolve yet.
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
     // Incarnation B's deletion, overlapping A's still-pending write. A
     // DIFFERENT incarnation of the same session id, never a duplicate of A.
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-b'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-b', 2, 0));
 
     releaseFirstWrite();
     await runtime.deferred.drain();
@@ -2341,8 +2482,8 @@ describe('createDurableEventProducer()', () => {
 
     // Overlapping writes for two GENUINELY DIFFERENT session/incarnation
     // pairs whose naive `id:incarnation` concatenation would be identical.
-    dispatchSessionDeleted(new SessionDeletedEvent('x:y', 'z'));
-    dispatchSessionDeleted(new SessionDeletedEvent('x', 'y:z'));
+    dispatchSessionDeleted(new SessionDeletedEvent('x:y', 'z', 1, 0));
+    dispatchSessionDeleted(new SessionDeletedEvent('x', 'y:z', 2, 0));
 
     releaseFirstWrite();
     await runtime.deferred.drain();
@@ -2372,16 +2513,26 @@ describe('createDurableEventProducer()', () => {
     const { bureau, dispatchSessionCreated, dispatchSessionSaved } = createFakeBureauEventSurface();
     const producer = createDurableEventProducer(bureau, history, runtime);
 
-    dispatchSessionCreated(new SessionCreatedEvent('sess-created', 'triage', 'incarnation-a'));
-    dispatchSessionSaved(new SessionSavedEvent('sess-created', 'triage', 'incarnation-a'));
+    dispatchSessionCreated(
+      new SessionCreatedEvent('sess-created', 'triage', 'incarnation-a', 1, 0),
+    );
+    dispatchSessionSaved(new SessionSavedEvent('sess-created', 'triage', 'incarnation-a', 2, 0));
     await runtime.deferred.drain();
 
     const page = await history.page({ kind: 'session', id: 'sess-created' });
     if ('outcome' in page) throw new Error('expected a page, got a gap');
     expect(page.events.map((event) => event.kind)).toEqual(['session.created', 'session.saved']);
     expect(page.events.map((event) => event.payload)).toEqual([
-      { sessionId: 'sess-created', agentName: 'triage', incarnation: 'incarnation-a' },
-      { sessionId: 'sess-created', agentName: 'triage', incarnation: 'incarnation-a' },
+      {
+        sessionId: 'sess-created',
+        agentName: 'triage',
+        incarnation: 'incarnation-a',
+      },
+      {
+        sessionId: 'sess-created',
+        agentName: 'triage',
+        incarnation: 'incarnation-a',
+      },
     ]);
 
     await producer.dispose();
@@ -2403,7 +2554,7 @@ describe('createDurableEventProducer()', () => {
 
     expect(producer.hasActiveWrite(owner)).toBe(false);
 
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
 
     // The listener increments the owner's active-write count SYNCHRONOUSLY
     // when it fires, before `record()`'s gated promise ever resolves.
@@ -2428,7 +2579,7 @@ describe('createDurableEventProducer()', () => {
       diagnostics.push(diagnostic),
     );
 
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
     await runtime.deferred.drain();
 
     expect(
@@ -2459,7 +2610,7 @@ describe('createDurableEventProducer()', () => {
       diagnostics.push(diagnostic),
     );
 
-    const event = new SessionDeletedEvent('sess-1', 'incarnation-a');
+    const event = new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0);
     dispatchSessionDeleted(event);
     await runtime.deferred.drain();
 
@@ -2489,7 +2640,7 @@ describe('createDurableEventProducer()', () => {
     });
 
     controller.abort();
-    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 0));
     await runtime.deferred.drain();
 
     expect(calls).toEqual([]);

@@ -4344,7 +4344,15 @@ describe('createBureau', () => {
     failNextDeletionPersistence = true;
     await bureau.deleteRun(run.id);
     expect(revocations).toBe(1);
-    expect(deletionPersistenceAttempts).toBe(4);
+    // AB-389 — this counter counts every `conditionalBatch` call against the
+    // shared persistence store once the first (injected) failure has
+    // occurred, not merely retries of the `agent-session:` write itself.
+    // The session-store commit outbox adds its own `conditionalBatch` calls
+    // to that same store (the outbox-ordinal/entry write inside the retried
+    // commit, and the drain's own `outbox.acknowledge()` once the commit
+    // succeeds), so this total is legitimately higher than it was before
+    // the outbox existed — was 4, now 6.
+    expect(deletionPersistenceAttempts).toBe(6);
     const persistedSession = await bureau.getSession(run.sessionId);
     expect(persistedSession?.metadata['pendingApprovalOverrides']).toEqual({});
     expect(persistedSession?.metadata['approvalResolutionStartedIds']).toEqual([]);
@@ -16961,6 +16969,580 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       await waitForRunCompletion(bureau, run.id);
     } finally {
       await bureau.dispose();
+    }
+  });
+});
+
+describe('AB-389 — session commit outbox', () => {
+  it('boot recovery drains a session outbox entry left pending by a crash, recording the durable session.created fact exactly once (SQLite)', async () => {
+    // Simulates a crash between a commit and any drain: the session is
+    // saved through a STANDALONE `SessionStore` built directly over the
+    // storage, with no `Bureau` (and so no drain trigger listener, and no
+    // durable maintenance pass) alive to drain the outbox entry it
+    // appends. The entry is left durably pending, exactly as it would be
+    // if the real process had crashed right after this commit.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-crash-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const storage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const runtime = createManualRuntimeServices();
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+
+    const standaloneSessionStore = createSessionStore(kv, { runtime });
+    const session = createAgentSession({
+      id: 'ab-389-crash-recovery-session',
+      agentName: 'triage',
+      conversationHistory: createConversationHistory({ id: 'ab-389-crash-recovery-session' }),
+    });
+    await standaloneSessionStore.save(session);
+
+    const pendingBeforeRestart = await standaloneSessionStore.outbox.pending();
+    expect(pendingBeforeRestart).toHaveLength(1);
+    expect(pendingBeforeRestart[0]?.kind).toBe('session.created');
+
+    // "Restart": a fresh Bureau over the SAME storage (never disposed —
+    // it never existed before this point, exactly like a process starting
+    // for the first time against a durable backend a PRIOR process wrote
+    // to). Boot recovery (`recoverDurableRuns`) drains the outbox before
+    // `waitForRecovery()` resolves.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage,
+      runtime,
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+
+      const page = await bureau.eventHistory({ kind: 'session', id: session.id });
+      if ('outcome' in page) throw new Error(`expected a page, got outcome "${page.outcome}"`);
+      expect(page.events.map((event) => event.kind)).toEqual(['session.created']);
+
+      // The entry was acknowledged (removed) once its durable write settled.
+      const recoveredSessionStore = bureau.sessionStore;
+      if (!recoveredSessionStore) throw new Error('expected a configured session store');
+      expect(await recoveredSessionStore.outbox.pending()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('the underlying commit outbox itself (in-memory ConditionalTextValueStore, no Bureau involved) survives a "crash" — an entry left pending by one SessionStore instance is visible, unaltered, to a second instance over the same backend', async () => {
+    // The bureau-level "boot recovery drains before serving reads" tests
+    // above use SQLite specifically because `Bureau.eventHistory()` is
+    // unsupported over an ephemeral (in-memory) backend — there is no
+    // durable history for a real crash to have preserved. This test proves
+    // the layer BELOW that gate instead: the outbox entry itself is
+    // ordinary committed data in the `ConditionalTextValueStore`, so it
+    // durably survives past the `SessionStore` instance that created it,
+    // exactly as a session body or the summary index would — an in-memory
+    // backend included, since "in-memory" here means "no OS-level
+    // durability," not "not shared across instances."
+    const storage = new MemoryStorage();
+    const runtime = createManualRuntimeServices();
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+
+    const firstInstance = createSessionStore(kv, { runtime });
+    const session = createAgentSession({
+      id: 'ab-389-crash-recovery-session-memory',
+      agentName: 'triage',
+      conversationHistory: createConversationHistory({
+        id: 'ab-389-crash-recovery-session-memory',
+      }),
+    });
+    await firstInstance.save(session);
+    expect(await firstInstance.outbox.pending()).toHaveLength(1);
+
+    // A second, independent `SessionStore` instance over the SAME backend
+    // — standing in for "the process restarted" — finds the entry exactly
+    // as the first instance left it, and can drain it the same way
+    // `Bureau`'s own drain loop does.
+    const secondInstance = createSessionStore(kv, { runtime });
+    const pendingAfterRestart = await secondInstance.outbox.pending();
+    expect(pendingAfterRestart).toEqual(await firstInstance.outbox.pending());
+    expect(pendingAfterRestart[0]?.kind).toBe('session.created');
+    expect(pendingAfterRestart[0]?.sessionId).toBe(session.id);
+
+    await secondInstance.outbox.acknowledge(pendingAfterRestart[0]!.ordinal);
+    expect(await secondInstance.outbox.pending()).toHaveLength(0);
+  });
+
+  it('two Bureau instances over one shared backend produce session.created before session.saved in durable history, by ordinal, for one session lineage', async () => {
+    // Two SEPARATE `Bureau` instances, sharing one persistent backend, each
+    // draining their own local dispatch of the SAME durably-ordered outbox
+    // — the "two Bureau instances over one backend" scenario the
+    // coordinator ruling's acceptance criteria name. Both are constructed
+    // over the SAME underlying storage, but never write concurrently to
+    // the SAME session id here — the ordering guarantee under test is that
+    // the STORE's own commit ordinal (not either instance's own wall-clock
+    // dispatch timing) is what durable history sorts by. SQLite, not
+    // memory: `bureau.eventHistory()` is unsupported over an ephemeral
+    // backend.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-two-instance-ordering-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const storage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const runtime = createManualRuntimeServices();
+
+    const bureauA = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage,
+      runtime,
+    });
+
+    try {
+      await bureauA.waitForRecovery?.();
+      const sessionStoreA = bureauA.sessionStore;
+      if (!sessionStoreA) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-389-two-instance-ordering',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-389-two-instance-ordering' }),
+      });
+      // The FIRST commit (creation) — its own outbox entry gets ordinal 1.
+      await sessionStoreA.save(session);
+      await runtime.deferred.drain();
+
+      // The SECOND commit (a save of the already-live body) — ordinal 2,
+      // dispatched through bureauA's own drain.
+      const reloaded = await sessionStoreA.load(session.id);
+      await sessionStoreA.save({ ...reloaded!, updatedAt: reloaded!.updatedAt });
+      await runtime.deferred.drain();
+
+      const page = await bureauA.eventHistory({ kind: 'session', id: session.id });
+      if ('outcome' in page) throw new Error(`expected a page, got outcome "${page.outcome}"`);
+      expect(page.events.map((event) => event.kind)).toEqual(['session.created', 'session.saved']);
+      // Ordinal order, not merely dispatch order: the durable record's own
+      // sequence strictly increases across the two.
+      expect(page.events[1]!.sequence).toBeGreaterThan(page.events[0]!.sequence);
+    } finally {
+      await bureauA.dispose();
+    }
+  });
+
+  it('drains a session outbox entry exactly once when the durable maintenance pass and the post-commit trigger overlap', async () => {
+    // The coordinator ruling's own "no event is recorded twice when the
+    // drain loop and the post-commit drain overlap" acceptance criterion.
+    // `drainSessionOutbox` is single-flighted — this test fires both
+    // triggers for the SAME commit and asserts exactly one durable record
+    // results, not two. SQLite, not memory: `bureau.eventHistory()` is
+    // unsupported over an ephemeral backend.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-overlap-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const storage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const runtime = createManualRuntimeServices();
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage,
+      runtime,
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-389-overlap-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-389-overlap-session' }),
+      });
+      // `save()` dispatches the best-effort drain trigger itself
+      // (asynchronously); racing an explicit `runDurableMaintenance()`
+      // call against it — both attempting to drain the SAME just-appended
+      // entry — must still settle on exactly one durable record.
+      await Promise.all([sessionStore.save(session), bureau.runDurableMaintenance()]);
+      await runtime.deferred.drain();
+
+      const page = await bureau.eventHistory({ kind: 'session', id: session.id });
+      if ('outcome' in page) throw new Error(`expected a page, got outcome "${page.outcome}"`);
+      expect(page.events.map((event) => event.kind)).toEqual(['session.created']);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('diagnoses (never throws) when the post-commit session-outbox drain trigger fails', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failOutboxList = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      async list(prefix) {
+        if (failOutboxList && prefix.startsWith('agent-session-outbox:')) {
+          throw new Error('outbox list unavailable');
+        }
+        return backingStore.list(prefix);
+      },
+    });
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      failOutboxList = true;
+      await sessionStore.save(
+        createAgentSession({
+          id: 'ab-389-trigger-failure',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({ id: 'ab-389-trigger-failure' }),
+        }),
+      );
+
+      await waitForCondition(
+        () =>
+          diagnostics.some((message) =>
+            message.includes('Session outbox drain (post-commit trigger) failed'),
+          ),
+        'expected a diagnostic for the failed post-commit session-outbox drain trigger',
+      );
+    } finally {
+      failOutboxList = false;
+      await bureau.dispose();
+    }
+  });
+
+  it('diagnoses (never throws) when the automatic maintenance pass session-outbox drain fails', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-automatic-drain-failure-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const pendingSpy = spyOn(sessionStore.outbox, 'pending').mockImplementationOnce(() => {
+        throw new Error('injected outbox.pending failure');
+      });
+
+      await runtime.advance(300_000);
+      await waitForCondition(
+        () =>
+          diagnostics.some((message) =>
+            message.includes('Automatic session-outbox drain pass failed'),
+          ),
+        'expected a diagnostic for the failed automatic session-outbox drain pass',
+      );
+      pendingSpy.mockRestore();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('retains a pending outbox entry, rather than acknowledging it, when its durable write fails (Codex P1 review finding, PR #598)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-retain-on-write-failure-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const realStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    let failNextFleetEventWrite = false;
+    const gatedStorage = new Proxy(realStorage, {
+      get(target, property, receiver) {
+        // `FleetEventFeed.append` commits through `storage.conditionalBatch`
+        // (`storageConditionalBatch`, `weft/src/storage/interface.ts`), not
+        // `storage.batch` — gate both so this works regardless of which
+        // path a caller's write takes.
+        if (property === 'batch' || property === 'conditionalBatch') {
+          const real = (target as unknown as Record<string, unknown>)[property] as (
+            ...args: unknown[]
+          ) => Promise<unknown>;
+          return async (...args: unknown[]) => {
+            const operations = (property === 'conditionalBatch' ? args[1] : args[0]) as {
+              key: string;
+            }[];
+            // Fail only the durable-event-history write (a `fleet-event:`
+            // key), never the session store's own commit — the session
+            // save itself must succeed so its outbox entry exists to be
+            // (not) acknowledged.
+            const isFleetEventWrite = operations.some((operation) =>
+              operation.key.startsWith('fleet-event:'),
+            );
+            if (isFleetEventWrite && failNextFleetEventWrite) {
+              failNextFleetEventWrite = false;
+              throw new Error('injected durable-write failure');
+            }
+            return real.apply(target, args);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: gatedStorage,
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-389-retain-on-write-failure',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({
+          id: 'ab-389-retain-on-write-failure',
+        }),
+      });
+      failNextFleetEventWrite = true;
+      await sessionStore.save(session);
+      await waitForCondition(
+        () => diagnostics.some((message) => message.includes('was not durably recorded')),
+        'expected a diagnostic reporting the outbox entry was not durably recorded',
+      );
+
+      // The durable write failed — the entry must NOT have been
+      // acknowledged (removed), so a later drain can retry it.
+      expect(await sessionStore.outbox.pending()).toHaveLength(1);
+
+      // A later drain, once storage has recovered, DOES succeed and
+      // acknowledges the entry.
+      await bureau.runDurableMaintenance();
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+      const page = await bureau.eventHistory({ kind: 'session', id: session.id });
+      if ('outcome' in page) throw new Error(`expected a page, got outcome "${page.outcome}"`);
+      expect(page.events.map((event) => event.kind)).toEqual(['session.created']);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('retains a pending session.deleted outbox entry, rather than acknowledging it, when the audit-trail write fails (Codex P1 review finding, PR #598, "Verify deletion audit persistence before acknowledging")', async () => {
+    // A KV-only bureau (no `storage`/durable engine — `persistence` alone)
+    // is exactly the case the finding calls out: `eventHistoryInstance` is
+    // absent, so the existing `wasRecorded` gate above never runs at all,
+    // and the audit trail's own out-of-band `session.deleted` record is
+    // the ONLY durable trace of this deletion.
+    const backingStore = textValueStore(new MemoryStorage());
+    let failAuditWrites = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      set: async (key, value) => {
+        if (failAuditWrites && key.startsWith('audit:v1:')) {
+          throw new Error('injected audit-trail write failure');
+        }
+        return backingStore.set(key, value);
+      },
+    });
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence,
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-389-audit-retain-on-write-failure',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({
+          id: 'ab-389-audit-retain-on-write-failure',
+        }),
+      });
+      await sessionStore.save(session);
+      await runtime.deferred.drain();
+      // The creation drains and acknowledges normally — nothing gates it
+      // in a KV-only bureau (no durable event history to verify against).
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+
+      failAuditWrites = true;
+      await bureau.deleteSession(session.id);
+      await waitForCondition(
+        () =>
+          diagnostics.some((message) =>
+            message.includes('was not durably recorded in the audit trail'),
+          ),
+        'expected a diagnostic reporting the audit write failed',
+      );
+
+      // The delete's outbox entry must NOT have been acknowledged — the
+      // audit write failed, so there is no durable trace of the deletion
+      // anywhere yet.
+      expect(await sessionStore.outbox.pending()).toHaveLength(1);
+      expect(
+        await bureau.auditTrail!.query({
+          runId: `session:${session.id}`,
+          type: 'session.deleted',
+        }),
+      ).toHaveLength(0);
+
+      // Once the audit backend recovers, an unrelated commit's post-commit
+      // trigger drains the outbox — including the earlier stuck entry —
+      // and this time the audit write succeeds, so it is acknowledged.
+      failAuditWrites = false;
+      await sessionStore.save(
+        createAgentSession({
+          id: 'ab-389-audit-retain-on-write-failure-unrelated',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({
+            id: 'ab-389-audit-retain-on-write-failure-unrelated',
+          }),
+        }),
+      );
+      await runtime.deferred.drain();
+
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+      const records = await bureau.auditTrail!.query({
+        runId: `session:${session.id}`,
+        type: 'session.deleted',
+      });
+      expect(records).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('drains a session outbox entry left pending across a restart even when boot defers durable run reattachment for a missing request-authority validator (Codex P1 review finding, PR #598, "Drain the outbox before deferring authority recovery")', async () => {
+    // A session carrying a NON-bureau-internal `authorizationRevision`
+    // (`hasRecoverableTransportAuthority`'s own test — anything other than
+    // `'bureau:1'`/`'bureau:scheduler:1'`) while still `lastRunStatus:
+    // 'running'` makes boot classify this as gateway-owned authority that
+    // needs a validator before durable run recovery may safely reattach
+    // it — exactly the `hasDeferredGatewayAuthority` branch the finding
+    // names. bureauA is deliberately never disposed, simulating a crash
+    // with that run still "in flight".
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-drain-before-defer-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const bureauA = await createBureau({
+      agents: {},
+      // Hangs forever from step 0 — the run never reaches a terminal
+      // state, so its session's `lastRunStatus` stays 'running' when
+      // bureauA is (deliberately) never disposed below.
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+      // bureauA itself validates the transport-issued authority so the run
+      // can be created at all — the restart below (bureauB) is the one
+      // that deliberately omits a validator, exercising the deferred path.
+      requestAuthorityValidator: () => true,
+    });
+    const run = await bureauA.createRun({
+      message: 'Persist a gateway authority that requires a validator',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:gateway-caller',
+          tenantId: 'bureau',
+          ownerId: 'bureau',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:gateway-caller',
+        },
+      },
+    });
+    await pollUntil(async () => {
+      const session = await bureauA.getSession(run.sessionId);
+      return session?.metadata['lastRunStatus'] === 'running';
+    });
+    const sessionBeforeRestart = await bureauA.getSession(run.sessionId);
+    expect(sessionBeforeRestart?.metadata['lastRunStatus']).toBe('running');
+    expect(sessionBeforeRestart?.metadata['lastRequestAuthorities']).toMatchObject({
+      [run.id]: expect.objectContaining({
+        authorizationRevision: 'gateway:api-key:gateway-caller',
+      }),
+    });
+    // Deliberately not disposed — see the doc comment above.
+
+    // A SECOND, unrelated session's outbox entry, committed through a
+    // standalone `SessionStore` over the SAME backend with nothing alive
+    // to drain it — the crash-recovery scenario the earlier test in this
+    // file already covers, combined here with the deferred-authority
+    // session above so both conditions hold simultaneously at the next
+    // boot.
+    const storageForOutboxCommit = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const standaloneSessionStore = createSessionStore(
+      textValueStore(storageForOutboxCommit, { disposeUnderlyingStorage: false }),
+    );
+    const outboxSession = createAgentSession({
+      id: 'ab-389-drain-before-defer-outbox-session',
+      agentName: 'triage',
+      conversationHistory: createConversationHistory({
+        id: 'ab-389-drain-before-defer-outbox-session',
+      }),
+    });
+    await standaloneSessionStore.save(outboxSession);
+    expect(await standaloneSessionStore.outbox.pending()).toHaveLength(1);
+    storageForOutboxCommit[Symbol.dispose]();
+
+    // "Restart": a fresh bureau over the SAME storage with no
+    // `requestAuthorityValidator` attached at construction time.
+    const bureauB = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+    });
+
+    try {
+      // Proves durable run recovery genuinely deferred (not merely slow):
+      // the crashed run stays unrecovered until a validator is attached —
+      // if boot had run `recoverDurableRuns()` normally instead of
+      // deferring it, this run would already be reattached and visible.
+      expect(bureauB.getRun(run.id)).toBeUndefined();
+
+      // The unrelated outbox entry drains anyway — authority-independent
+      // draining runs before the defer decision, not gated behind it.
+      const recoveredSessionStore = bureauB.sessionStore;
+      if (!recoveredSessionStore) throw new Error('expected a configured session store');
+      await waitForCondition(async () => {
+        const pending = await recoveredSessionStore.outbox.pending();
+        return pending.length === 0;
+      }, 'expected the unrelated outbox entry to drain even though durable run recovery is deferred');
+      const page = await bureauB.eventHistory({ kind: 'session', id: outboxSession.id });
+      if ('outcome' in page) throw new Error(`expected a page, got outcome "${page.outcome}"`);
+      expect(page.events.map((event) => event.kind)).toEqual(['session.created']);
+
+      // Attaching a validator now lets the deferred recovery proceed.
+      bureauB.setRequestAuthorityValidator(() => true);
+      await pollUntil(() => bureauB.getRun(run.id) !== undefined);
+    } finally {
+      await bureauA.dispose();
+      await bureauB.dispose();
     }
   });
 });

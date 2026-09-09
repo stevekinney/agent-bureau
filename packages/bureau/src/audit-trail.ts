@@ -480,6 +480,21 @@ export function encodeKey(timestampMs: number, sequence: number, runId: string):
   return `${PREFIX}${ts}:${seq}:${runId}`;
 }
 
+/**
+ * The synthetic `runId` a session deletion's out-of-band audit record is
+ * filed under — there is no run to attribute a session deletion to, so the
+ * session id is encoded the same way a schedule's own definition events
+ * are (`schedule:<id>`). `query({ runId: auditTrailSessionOwnerId(id) })`
+ * retrieves one session's own durable deletion record — exported so
+ * `create-bureau.ts`'s outbox drain (AB-389) can verify a `session.deleted`
+ * replay's audit write actually persisted before acknowledging the outbox
+ * entry, using the SAME encoding this module's own listener writes under,
+ * rather than a second, drifting literal.
+ */
+export function auditTrailSessionOwnerId(sessionId: string): string {
+  return `session:${sessionId}`;
+}
+
 // ── Audit trail factory ─────────────────────────────────────────────
 
 /**
@@ -742,12 +757,10 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   // silently no-ops for any runId not currently in `store.runs`), so this
   // needs the same dedicated-listener treatment as the schedule-definition
   // events above. There is no run to attribute a session deletion to
-  // either, so the session id is encoded into `runId` the same way the
-  // schedule owner is: `session:<sessionId>` — `query({ runId:
-  // `session:${id}` })` retrieves one session's own durable deletion record.
-  function sessionOwnerId(sessionId: string): string {
-    return `session:${sessionId}`;
-  }
+  // either, so the session id is encoded into `runId` via the module-level
+  // `auditTrailSessionOwnerId` — `query({ runId: auditTrailSessionOwnerId(id) })`
+  // retrieves one session's own durable deletion record.
+  const sessionOwnerId = auditTrailSessionOwnerId;
   const sessionDeletedListener = (event: SessionDeletedEvent): void => {
     if (!auditEventSet.has('session.deleted')) return;
     void writeOutOfBandRecord({
