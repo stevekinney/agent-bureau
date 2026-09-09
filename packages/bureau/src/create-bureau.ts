@@ -2386,9 +2386,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     reviewId: string,
     removePendingApproval: boolean,
     runId: string,
-    // AB-391: see `persistPendingApprovalOverride`'s own doc comment on this
-    // parameter — same coupling, for the decision (approve/deny/reject) path
-    // instead of the tool-approval re-gate path.
+    // AB-391: the decision's audit payload, appended as a `session.attachment`
+    // outbox entry in the SAME `conditionalBatch` as this function's own
+    // `sessionStore.update()` commit below — see `reviewAuditOutboxAttachment`.
+    // Unlike this function, `persistPendingApprovalOverride` (the
+    // tool-approval re-gate path) takes no such parameter: its commit writes
+    // the REPLACEMENT approval, and coupling the superseded review's own
+    // audit payload — which embeds its now-revoked ORIGINAL approval token —
+    // into that same batch would put both tokens in one commit, a real
+    // behavioral difference (see `recordReviewStatusTransition`'s own doc
+    // comment on the `superseded` branch).
     auditAttachment?: ReviewAuditAttachment,
   ): Promise<void> {
     if (!runtime.sessionStore) return;
