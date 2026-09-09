@@ -1426,16 +1426,29 @@ describe('createDurableEventProducer()', () => {
       const { history } = createRecordingHistory(async () => {
         const index = callIndex;
         callIndex += 1;
+        // The FIRST write (index 0) resolves immediately, establishing a
+        // real "nothing in flight" baseline BEFORE the snapshot below is
+        // taken — the SECOND write (index 1, gated) is the one this test
+        // is actually about (Codex review finding, PR #580, "Gate the
+        // write this snapshot test actually dispatches" — an earlier round
+        // of this test dispatched only one write, so its own gate was
+        // never reached and the assertion passed on coincidental microtask
+        // ordering rather than proving snapshot semantics).
         if (index === 1) await secondGate;
       });
       const producer = createDurableEventProducer(bureau, history, runtime);
       const owner = { kind: 'run' as const, id: 'run-1' };
 
-      // No write in flight yet — the snapshot below is empty.
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+      await runtime.deferred.drain();
+      expect(producer.hasActiveWrite(owner)).toBe(false);
+
+      // No write in flight yet — the snapshot below is genuinely empty.
       const waited = producer.waitForActiveWrites(owner);
 
-      // A write starts for the SAME owner right after the snapshot.
-      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+      // A SECOND write starts for the SAME owner right after the snapshot,
+      // and is deliberately left pending (gated).
+      dispatchAction(createAction({ type: 'run.tripwire', runId: 'run-1' }));
 
       await waited;
       // The second write (still gated) is unaffected — this call never
