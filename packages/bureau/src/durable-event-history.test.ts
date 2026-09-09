@@ -17,6 +17,7 @@ import {
   ScheduleFailedEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionDeletedEvent,
 } from '@lostgradient/operative';
 import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
 import type { Subscription } from '@lostgradient/operative/liveness';
@@ -1331,6 +1332,7 @@ function createFakeBureauEventSurface(): {
   dispatchReviewRevoked(event: ReviewRevokedEvent): void;
   dispatchReviewCanceled(event: ReviewCanceledEvent): void;
   dispatchReviewSuperseded(event: ReviewSupersededEvent): void;
+  dispatchSessionDeleted(event: SessionDeletedEvent): void;
 } {
   const target = new CompletableEventTarget<BureauEventMap>();
   const bureau = {
@@ -1380,6 +1382,9 @@ function createFakeBureauEventSurface(): {
       target.dispatch(event);
     },
     dispatchReviewSuperseded: (event) => {
+      target.dispatch(event);
+    },
+    dispatchSessionDeleted: (event) => {
       target.dispatch(event);
     },
   };
@@ -1536,6 +1541,122 @@ describe('createDurableEventProducer()', () => {
       gates[1]?.();
       await runtime.deferred.drain();
       expect(producer.hasActiveWrite(owner)).toBe(false);
+
+      await producer.dispose();
+    });
+  });
+
+  describe('waitForActiveWrites() (AB-372)', () => {
+    it('resolves immediately for an owner with no write in flight', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau } = createFakeBureauEventSurface();
+      const { history } = createRecordingHistory();
+      const producer = createDurableEventProducer(bureau, history, runtime);
+
+      await producer.waitForActiveWrites({ kind: 'run', id: 'never-dispatched' });
+
+      await producer.dispose();
+    });
+
+    it('awaits a write already in flight for the owner, and resolves once it settles', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      let releaseWrite!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      const { history } = createRecordingHistory(async () => {
+        await gate;
+      });
+      const producer = createDurableEventProducer(bureau, history, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+
+      let resolved = false;
+      const waited = producer.waitForActiveWrites(owner).then(() => {
+        resolved = true;
+      });
+
+      await Promise.resolve();
+      expect(resolved).toBe(false);
+
+      releaseWrite();
+      await waited;
+      expect(resolved).toBe(true);
+
+      await producer.dispose();
+    });
+
+    it('never waits on a write that starts AFTER the call — a snapshot, not an open-ended subscription', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      let releaseSecondWrite!: () => void;
+      const secondGate = new Promise<void>((resolve) => {
+        releaseSecondWrite = resolve;
+      });
+      let callIndex = 0;
+      const { history } = createRecordingHistory(async () => {
+        const index = callIndex;
+        callIndex += 1;
+        // The FIRST write (index 0) resolves immediately, establishing a
+        // real "nothing in flight" baseline BEFORE the snapshot below is
+        // taken — the SECOND write (index 1, gated) is the one this test
+        // is actually about (Codex review finding, PR #580, "Gate the
+        // write this snapshot test actually dispatches" — an earlier round
+        // of this test dispatched only one write, so its own gate was
+        // never reached and the assertion passed on coincidental microtask
+        // ordering rather than proving snapshot semantics).
+        if (index === 1) await secondGate;
+      });
+      const producer = createDurableEventProducer(bureau, history, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+      await runtime.deferred.drain();
+      expect(producer.hasActiveWrite(owner)).toBe(false);
+
+      // No write in flight yet — the snapshot below is genuinely empty.
+      const waited = producer.waitForActiveWrites(owner);
+
+      // A SECOND write starts for the SAME owner right after the snapshot,
+      // and is deliberately left pending (gated).
+      dispatchAction(createAction({ type: 'run.tripwire', runId: 'run-1' }));
+
+      await waited;
+      // The second write (still gated) is unaffected — this call never
+      // promised to wait for it.
+      expect(producer.hasActiveWrite(owner)).toBe(true);
+
+      releaseSecondWrite();
+      await runtime.deferred.drain();
+      await producer.dispose();
+    });
+
+    it('never rejects even when the awaited write itself fails', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchAction } = createFakeBureauEventSurface();
+      let releaseWrite!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      const { history } = createRecordingHistory(async () => {
+        await gate;
+        throw new Error('storage boom');
+      });
+      const diagnostics: BureauDiagnostic[] = [];
+      const producer = createDurableEventProducer(bureau, history, runtime, (diagnostic) =>
+        diagnostics.push(diagnostic),
+      );
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      dispatchAction(createAction({ type: 'run.completed', runId: 'run-1' }));
+      const waited = producer.waitForActiveWrites(owner);
+
+      releaseWrite();
+      const result = await waited;
+      expect(result).toBeUndefined();
+      await runtime.deferred.drain();
 
       await producer.dispose();
     });
@@ -1877,6 +1998,273 @@ describe('createDurableEventProducer()', () => {
         },
       },
     ]);
+
+    await producer.dispose();
+  });
+
+  it('records session.deleted under the session owner from a directly-dispatched SessionDeletedEvent (AB-372)', async () => {
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    const page = await history.page({ kind: 'session', id: 'sess-1' });
+    if ('outcome' in page) throw new Error('expected a page, got a gap');
+    expect(page.events.map((event) => event.kind)).toEqual(['session.deleted']);
+    expect(page.events[0]?.payload).toEqual({ sessionId: 'sess-1' });
+
+    await producer.dispose();
+    await history.dispose();
+  });
+
+  it('dispatching the same SessionDeletedEvent twice while the first write is still in flight produces exactly one durable record (AB-372)', async () => {
+    // The realistic case this issue's own acceptance criterion targets: a
+    // genuinely CONCURRENT duplicate dispatch of the SAME underlying
+    // deletion (e.g. the documented cross-process race), not a later,
+    // separate deletion — see the sibling "session id legitimately reused"
+    // test below for why those two cases must be told apart.
+    const runtime = createManualRuntimeServices();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory(async () => {
+      await writeGate;
+    });
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    // A second dispatch arrives while the first write is still pending —
+    // checked and dropped SYNCHRONOUSLY, before the first write's `record()`
+    // has even resolved.
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+
+    releaseWrite();
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([
+      {
+        owner: { kind: 'session', id: 'sess-1' },
+        kind: 'session.deleted',
+        payload: { sessionId: 'sess-1' },
+      },
+    ]);
+
+    await producer.dispose();
+  });
+
+  it('dispatching the literal SAME SessionDeletedEvent object twice, AFTER the first write has settled, still produces exactly one durable record (Codex P2 review findings, PR #580, "Remember/Deduplicate a SessionDeletedEvent after its write settles")', async () => {
+    // The in-flight-by-owner map alone only protects a duplicate dispatch
+    // arriving WHILE the first write is pending — its entry is gone once
+    // that write settles. A literal replay of the SAME event object after
+    // settlement must still be dropped; the sibling "session id legitimately
+    // reused" test below proves the opposite case — two DIFFERENT event
+    // objects for the same id — still produces two records, which is why
+    // this dedup is keyed on object identity, not owner.
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    const event = new SessionDeletedEvent('sess-1');
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+    // The first write has fully settled; this is the literal SAME object,
+    // not a new incarnation's deletion.
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+
+    const page = await history.page({ kind: 'session', id: 'sess-1' });
+    if ('outcome' in page) throw new Error('expected a page, got a gap');
+    expect(page.events.map((pageEvent) => pageEvent.kind)).toEqual(['session.deleted']);
+
+    await producer.dispose();
+    await history.dispose();
+  });
+
+  it('a session id legitimately reused after deletion gets its own session.deleted record when it is deleted again (Codex P1 review finding, PR #580)', async () => {
+    // Before this fix, idempotency was a read-then-write check against the
+    // owner's OWN durable history: a session recreated with the same id
+    // after its first incarnation was deleted (a real, supported scenario
+    // — see `create-bureau.test.ts`'s "does not coalesce a deleteSession
+    // call for a session RECREATED with the same id") would find its
+    // predecessor's `'session.deleted'` marker already in the page and
+    // silently skip recording its OWN, separate deletion — permanently
+    // losing that durable fact for the second incarnation.
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+    // The first write has fully settled — this is a genuinely LATER,
+    // separate dispatch, not a concurrent duplicate of the same one.
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    const page = await history.page({ kind: 'session', id: 'sess-1' });
+    if ('outcome' in page) throw new Error('expected a page, got a gap');
+    expect(page.events.map((event) => event.kind)).toEqual(['session.deleted', 'session.deleted']);
+
+    await producer.dispose();
+    await history.dispose();
+  });
+
+  it("documents a known, accepted limitation: a second incarnation deleted WHILE the first incarnation's own write is still pending is dropped (Codex review findings, PR #580)", async () => {
+    // A plain in-flight-by-owner map cannot tell these two cases apart:
+    // (a) a genuine duplicate dispatch of the SAME incarnation's own
+    // deletion, and (b) a DIFFERENT, later incarnation (the id reused and
+    // deleted again) whose deletion merely happens to overlap the first
+    // incarnation's still-pending write. An earlier round of this change
+    // attempted to close this via an `action.type === 'session.created'`
+    // clearing hook, but that action type is never dispatched in
+    // production (see `sessionDeletedListener`'s own doc comment) — this
+    // test instead documents the CURRENT, honest behavior: the narrow
+    // overlap is not closed. `resolveEventHistory` (`create-bureau.ts`)
+    // separately guards against the WORSE failure mode this could cause
+    // (a live, recreated session misreported as deleted) by checking the
+    // session's live record before trusting a historical marker.
+    const runtime = createManualRuntimeServices();
+    let releaseFirstWrite!: () => void;
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let writeCount = 0;
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory(async () => {
+      writeCount += 1;
+      if (writeCount === 1) await firstWriteGate;
+    });
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    // Incarnation A's deletion — its own `record()` call is gated and does
+    // not resolve yet.
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    // Incarnation B's deletion, overlapping A's still-pending write.
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+
+    releaseFirstWrite();
+    await runtime.deferred.drain();
+
+    const deletionCalls = calls.filter((call) => call.kind === 'session.deleted');
+    expect(deletionCalls).toHaveLength(1);
+
+    await producer.dispose();
+  });
+
+  it("hasActiveWrite() reports true for a session owner for the write's full duration (AB-372, Copilot review finding, PR #580)", async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const owner = { kind: 'session' as const, id: 'sess-1' };
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const { history } = createRecordingHistory(async () => {
+      await writeGate;
+    });
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    expect(producer.hasActiveWrite(owner)).toBe(false);
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+
+    // The listener increments the owner's active-write count SYNCHRONOUSLY
+    // when it fires, before `record()`'s gated promise ever resolves.
+    expect(producer.hasActiveWrite(owner)).toBe(true);
+
+    releaseWrite();
+    await runtime.deferred.drain();
+
+    expect(producer.hasActiveWrite(owner)).toBe(false);
+
+    await producer.dispose();
+  });
+
+  it('diagnoses (never throws) when a session.deleted record() write rejects', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history } = createRecordingHistory(async () => {
+      throw new Error('storage boom');
+    });
+    const diagnostics: BureauDiagnostic[] = [];
+    const producer = createDurableEventProducer(bureau, history, runtime, (diagnostic) =>
+      diagnostics.push(diagnostic),
+    );
+
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    expect(
+      diagnostics.some(
+        (diagnostic) =>
+          diagnostic.scope === 'durable-event-history' &&
+          diagnostic.message.includes('Failed to record durable event "session.deleted"'),
+      ),
+    ).toBe(true);
+
+    await producer.dispose();
+  });
+
+  it('redispatching the SAME SessionDeletedEvent after a failed write retries and succeeds, rather than being dropped forever (Codex P2 review finding, PR #580, "Allow retries after a failed deletion write")', async () => {
+    // Marking an event as handled BEFORE its write even started would
+    // permanently block a legitimate retry of the same object once a
+    // transient storage failure recovers. The event must only be
+    // remembered on SUCCESS.
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    let attempt = 0;
+    const { history, calls } = createRecordingHistory(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('storage boom (transient)');
+    });
+    const diagnostics: BureauDiagnostic[] = [];
+    const producer = createDurableEventProducer(bureau, history, runtime, (diagnostic) =>
+      diagnostics.push(diagnostic),
+    );
+
+    const event = new SessionDeletedEvent('sess-1');
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+
+    expect(
+      diagnostics.some((diagnostic) =>
+        diagnostic.message.includes('Failed to record durable event "session.deleted"'),
+      ),
+    ).toBe(true);
+
+    // The SAME event object, redispatched after the failed write settled —
+    // storage has since recovered.
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+
+    expect(calls.filter((call) => call.kind === 'session.deleted')).toHaveLength(2);
+
+    await producer.dispose();
+  });
+
+  it('refuses to start a new session.deleted record once the owner-issued signal aborts', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const controller = new AbortController();
+    const producer = createDurableEventProducer(bureau, history, runtime, undefined, {
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    dispatchSessionDeleted(new SessionDeletedEvent('sess-1'));
+    await runtime.deferred.drain();
+
+    expect(calls).toEqual([]);
 
     await producer.dispose();
   });

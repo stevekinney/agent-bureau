@@ -6889,8 +6889,43 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * would be a false positive; a genuinely fresh, never-recorded id must
    * still read back as an ordinary empty page.
    *
+   * A SESSION owner adds one more override on top of that evidence (AB-372,
+   * Codex review finding, PR #580, "Ignore prior deletion markers while a
+   * reused session is live"): a session id is explicitly supported to be
+   * RECREATED after deletion (`create-bureau.test.ts`'s "does not coalesce
+   * a deleteSession call for a session RECREATED with the same id"), and
+   * `createDurableEventProducer`'s own session.deleted listener does not
+   * (and, absent a real per-incarnation identity on `SessionDeletedEvent`,
+   * cannot) prune a prior incarnation's marker from the durable history a
+   * recreated session shares with its predecessor. Evidence of a deletion
+   * that once happened is therefore not sufficient on its own once a
+   * session id has been reused — this function ALSO checks whether
+   * `owner.id` currently names a LIVE session record before reporting
+   * `deleted-aggregate`: a live record wins, and the ordinary page is
+   * returned instead (still carrying that historical marker among its
+   * events — nothing is hidden, only the deleted-aggregate OUTCOME is
+   * suppressed). A run owner has no equivalent override: run ids are freshly
+   * minted, never reused, so `run.removed` evidence is never stale in the
+   * same way.
+   *
    * Schedule owners have no ownership/authorization or deletion concept in
    * this codebase today, so they pass straight through to `page()`.
+   *
+   * KNOWN LIMITATION, not closed here (Codex review finding, PR #580,
+   * "Detect deletion markers beyond the requested page"): this function
+   * examines only the ONE page `history.page()` returns under `options`'
+   * own limit (100 by default) — a session or run with more durable events
+   * than that limit could carry its own deletion marker on a LATER page
+   * this function never inspects, reporting an ordinary page instead of
+   * `deleted-aggregate` for a genuinely deleted owner. This is a
+   * structural limitation of every `resolveEventHistory` caller (not
+   * unique to this issue's session.deleted change — it existed the moment
+   * AB-313 shipped deleted-aggregate detection over a single bounded
+   * page), and closing it needs either an unbounded page-following loop
+   * here or a dedicated "has this owner ever been deleted" query on
+   * `DurableEventHistory` itself — a bigger design change than this
+   * function's own narrow evidence-plus-liveness check, left as a
+   * follow-up rather than solved ad hoc.
    */
   async function resolveEventHistory(
     history: DurableEventHistory,
@@ -6903,13 +6938,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     | EventHistoryDeletedAggregateOutcome
   > {
     const principal = options?.principal;
-
-    if (owner.kind === 'session' && principal !== undefined) {
-      const session = runtime.sessionStore ? await runtime.sessionStore.load(owner.id) : undefined;
-      if (session && !isSessionAuthorityAuthorized(session.metadata, principal)) {
-        return { outcome: 'not-found' };
-      }
-    }
 
     if (owner.kind === 'run' && principal !== undefined) {
       // AB-313 — fail CLOSED whenever this run's ownership cannot be
@@ -6937,8 +6965,100 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
 
+    // AB-372 (Codex review findings, PR #580 — see the running history in
+    // this comment for why each earlier shape of this check was
+    // insufficient) — session authorization is checked TWICE, deliberately,
+    // never once: a PRE-page check (immediately below, BEFORE this function
+    // does any other work) and a POST-page check (after `history.page()`
+    // resolves, before this function decides what to return). Both are
+    // necessary, and neither subsumes the other:
+    //
+    // - The PRE-page check exists ONLY to protect the `DurableEventGap`
+    //   outcome — `page()` can return a gap instead of an ordinary page
+    //   (retention has advanced past `since`), and that outcome is returned
+    //   immediately, before any post-page check would ever run. Without
+    //   this, an unauthorized caller whose `since` lands before the
+    //   retention floor would get the gap's own retention metadata instead
+    //   of the documented not-found-shaped denial ("Authorize sessions
+    //   before returning history gaps"). Gated on `principal !== undefined`
+    //   — an internal/trusted caller has nothing to authorize, and skipping
+    //   the load entirely for that case avoids an unnecessary durable-store
+    //   round trip and a spurious rejection if the session store happens to
+    //   be unavailable ("Skip the authorization load when no principal is
+    //   supplied"). Deliberately placed BEFORE `waitForActiveWrites` below
+    //   ("Authorize sessions before waiting on producer writes") — an
+    //   unauthorized caller must get the documented not-found denial
+    //   immediately, never delayed behind (or have its response latency
+    //   reveal) an unrelated owner-write wait it was never entitled to see
+    //   the result of anyway.
+    // - The POST-page check re-loads the session record FRESH, unconditionally
+    //   for every session owner (not gated on whether a deletion marker
+    //   happens to appear on the page), and re-authorizes against THAT
+    //   record before this function returns anything past this point. A
+    //   session id can be recreated, under a DIFFERENT authority, at any
+    //   point between the pre-page read and `page()` resolving — the
+    //   pre-page check alone would still let that later state slip through:
+    //   nested only under "the page contains a `session.deleted` marker"
+    //   left every ordinary-page return unchecked whenever a `since` cursor
+    //   or limit paged around that marker, or when the session was
+    //   genuinely never deleted at all before being recreated with new
+    //   ownership mid-read ("Reauthorize sessions after every history
+    //   read"). This SAME freshly-loaded record is also what the
+    //   deletion-marker branch below uses for its "is this owner still
+    //   live" check — one load serves both concerns, since by construction
+    //   it is the freshest state either one could ever act on.
+    //
+    // Omitting `principal` entirely always skips authorization (an
+    // internal/trusted caller), matching every other owner kind's
+    // convention; a session with no recorded authority is still open,
+    // matching `isSessionAuthorityAuthorized`'s own documented rule.
+    if (owner.kind === 'session' && principal !== undefined && runtime.sessionStore) {
+      const preSession = await runtime.sessionStore.load(owner.id);
+      if (preSession && !isSessionAuthorityAuthorized(preSession.metadata, principal)) {
+        return { outcome: 'not-found' };
+      }
+    }
+
+    // AB-372 (Codex review finding, PR #580, "Wait for the deletion
+    // projection before serving history"): every write into `history` from
+    // `createDurableEventProducer` is fire-and-forget from its own
+    // dispatching caller's perspective (`deleteSession`/`deleteRun` return
+    // as soon as the synchronous event dispatch completes, not once the
+    // durable write actually commits) — so a caller that awaits
+    // `deleteSession(id)` and immediately calls `eventHistory` for the same
+    // owner could otherwise read an ordinary page a heartbeat before the
+    // deletion's own durable write lands. Awaiting this owner's in-flight
+    // writes first (a snapshot, never an open-ended wait — see
+    // `waitForActiveWrites`'s own doc comment) closes that race, mirroring
+    // `AuditTrail.query()`'s identical `activeWritesByRunId`-based fix
+    // (AB-228, PR #566). A caller with no `durableEventProducerInstance`
+    // (no persistent storage backend) never reaches this function at all —
+    // `Bureau.eventHistory` short-circuits to `'unsupported-capability'`
+    // first — so this is always defined whenever `history` is.
+    await durableEventProducerInstance?.waitForActiveWrites(owner);
+
     const page = await history.page(owner, options);
-    if ('outcome' in page) return page; // a DurableEventGap
+    if ('outcome' in page) {
+      // AB-372 (Codex review finding, PR #580, "Reauthorize the session
+      // before returning a post-wait gap"): the pre-page check above ran
+      // BEFORE `waitForActiveWrites`, so it authorized a snapshot that is
+      // now stale by exactly the span of that wait — a session recreated
+      // for a different, unauthorized principal during the wait would
+      // otherwise ride the ALREADY-PASSED pre-page check straight through
+      // to a raw `DurableEventGap`, leaking retention metadata to a caller
+      // who should see nothing but `not-found`. Reauthorize against a
+      // fresh load, right here, before this gap ever reaches the caller —
+      // this is a second, independent check from the pre-page one above
+      // and from the post-page one below (which never runs on this
+      // branch, since a gap returns before reaching it).
+      if (owner.kind === 'session' && principal !== undefined && runtime.sessionStore) {
+        const gapSession = await runtime.sessionStore.load(owner.id);
+        if (gapSession && !isSessionAuthorityAuthorized(gapSession.metadata, principal)) {
+          return { outcome: 'not-found' };
+        }
+      }
+      return page; // a DurableEventGap
+    }
 
     const deletionMarkerKind =
       owner.kind === 'session'
@@ -6946,7 +7066,44 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         : owner.kind === 'run'
           ? 'run.removed'
           : undefined;
-    if (deletionMarkerKind && page.events.some((event) => event.kind === deletionMarkerKind)) {
+    const hasDeletionMarker =
+      deletionMarkerKind !== undefined &&
+      page.events.some((event) => event.kind === deletionMarkerKind);
+
+    // Only load the live session record post-page when it can actually
+    // change the outcome: either a `principal` needs reauthorizing against
+    // it (the recreation race described above), or a deletion marker on
+    // this page needs a liveness check to know whether it is current or
+    // stale (below). Neither applies when there's no marker AND no
+    // principal to reauthorize — an internal/trusted caller reading an
+    // ordinary page gains nothing from this extra `sessionStore.load`, so
+    // skip it rather than pay for a lookup no branch below will use.
+    const liveSession =
+      owner.kind === 'session' &&
+      runtime.sessionStore &&
+      (principal !== undefined || hasDeletionMarker)
+        ? await runtime.sessionStore.load(owner.id)
+        : undefined;
+    if (
+      liveSession &&
+      principal !== undefined &&
+      !isSessionAuthorityAuthorized(liveSession.metadata, principal)
+    ) {
+      return { outcome: 'not-found' };
+    }
+
+    // A currently-live session record is authoritative over a stale
+    // deletion marker from a PRIOR incarnation of a recreated id — this
+    // owner presently exists, so it is not deleted right now, regardless of
+    // what its durable history contains (its historical events, including
+    // that marker, are still returned in the page; only the outcome
+    // classification is suppressed). `liveSession` is already authorized
+    // above (or the caller is internal/trusted) by the time this runs.
+    if (owner.kind === 'session' && hasDeletionMarker && liveSession) {
+      return page;
+    }
+
+    if (hasDeletionMarker) {
       return { outcome: 'deleted-aggregate', owner, ...page };
     }
     return page;

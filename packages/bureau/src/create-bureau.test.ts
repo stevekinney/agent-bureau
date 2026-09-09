@@ -13401,6 +13401,531 @@ describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () 
   });
 });
 
+describe('bureau.eventHistory deleted-aggregate through a real session deletion (AB-372)', () => {
+  it('returns deleted-aggregate for a session deleted through a real bureau.deleteSession call, with no synthetic record injected', async () => {
+    // AB-313's own "returns deleted-aggregate for a session.deleted owner"
+    // test above synthesizes the deletion marker via `bureau.store.recordAction`
+    // because nothing wired a real `SessionDeletedEvent` dispatch into THIS
+    // durable store — `durable-event-history.ts`'s `createDurableEventProducer`
+    // had no listener for it (the audit trail, a separate durable layer, did).
+    // AB-372 closes that gap; this proves the real production call site
+    // (`Bureau.deleteSession`) reaches `bureau.eventHistory`'s deleted-aggregate
+    // detection with no test-only synthesis anywhere in this test.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-real-session-deletion-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'A session about to be really deleted' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(run.sessionId);
+      await runtime.deferred.drain();
+
+      const outcome = await bureau.eventHistory({ kind: 'session', id: run.sessionId });
+      if (!('outcome' in outcome) || outcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(outcome)}`);
+      }
+      expect(outcome.owner).toEqual({ kind: 'session', id: run.sessionId });
+      expect(outcome.events.map((event) => event.kind)).toContain('session.deleted');
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it("coalesces two concurrent bureau.deleteSession calls on the same session into exactly one durable session.deleted record (mirrors the audit trail's own coalescing proof)", async () => {
+    // `deleteSession`'s own single-process coalescing (`create-bureau.ts`)
+    // means two concurrent calls for the same id dispatch `SessionDeletedEvent`
+    // exactly once already (proved against the audit trail at
+    // "dispatches session.deleted exactly once for two concurrent
+    // deleteSession(id) calls" above) — this proves the SAME real call
+    // pattern also reaches this durable store as exactly one record, not
+    // merely the audit trail. The producer's own idempotency guard (proved
+    // directly, with a genuinely duplicated dispatch, in
+    // `durable-event-history.test.ts`) is a second, independent line of
+    // defense for the documented cross-process race that coalescing cannot
+    // cover.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-real-session-deletion-dup-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'A session deleted concurrently' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      await Promise.all([
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+        bureau.deleteSession(run.sessionId),
+      ]);
+      await runtime.deferred.drain();
+
+      const outcome = await bureau.eventHistory({ kind: 'session', id: run.sessionId });
+      if (!('outcome' in outcome) || outcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(outcome)}`);
+      }
+      expect(outcome.events.filter((event) => event.kind === 'session.deleted')).toHaveLength(1);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('a session id recreated after deletion reads back as an ordinary page, not deleted-aggregate, while it is live again (Codex P1 review finding, PR #580, "Ignore prior deletion markers while a reused session is live")', async () => {
+    // The durable history a recreated session shares with its deleted
+    // predecessor still carries the predecessor's own `'session.deleted'`
+    // marker (this producer does not, and cannot without a per-incarnation
+    // identity on `SessionDeletedEvent`, prune it) — `resolveEventHistory`
+    // must not let that stale marker outrank the session's CURRENT live
+    // record.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-live-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Confirm the marker is really there before recreating — otherwise
+      // this test would trivially pass for the wrong reason.
+      const deletedOutcome = await bureau.eventHistory({ kind: 'session', id: sessionId });
+      if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(deletedOutcome)}`);
+      }
+
+      // Recreate the SAME id and complete a run against it.
+      const recreatedRun = await bureau.createRun({ message: 'the second incarnation', sessionId });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+      expect(await bureau.getSession(sessionId)).toBeDefined();
+
+      const liveOutcome = await bureau.eventHistory({ kind: 'session', id: sessionId });
+      expect('outcome' in liveOutcome).toBe(false);
+      if ('outcome' in liveOutcome) throw new Error('unreachable');
+      // The historical marker is still visible in the page — nothing is
+      // erased, only the deleted-aggregate OUTCOME is suppressed.
+      expect(liveOutcome.events.map((event) => event.kind)).toContain('session.deleted');
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('reauthorizes a recreated, live session against ITS OWN authority before returning its page — a principal unauthorized for the new incarnation is denied (Codex P1 review finding, PR #580, "Reauthorize the live session before returning its page")', async () => {
+    // The up-front authorization check runs against whatever session record
+    // existed BEFORE this function's owner-write wait and history replay —
+    // for an id that was deleted (no live record at that point), it is a
+    // no-op by the "no recorded authority is open" convention, which is
+    // only correct for an id that STAYS deleted. If the id is recreated in
+    // that window with a DIFFERENT recorded authority, the live-session
+    // override this issue adds must reauthorize against THAT record before
+    // returning its page — never fall through to treating the id as still
+    // open just because it once had no live record.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-reauth-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Recreate the SAME id, this time owned by a specific principal.
+      const recreatedRun = await bureau.createRun({
+        message: 'the second incarnation',
+        sessionId,
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+      expect(await bureau.getSession(sessionId)).toBeDefined();
+
+      // A principal never authorized for either incarnation must be denied
+      // the SAME not-found-shaped outcome every other unauthorized read
+      // gets — not the recreated session's live history.
+      const deniedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'mallory' },
+      );
+      expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+
+      // The actual owner still reads the live page.
+      const allowedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'alice' },
+      );
+      expect('outcome' in allowedOutcome).toBe(false);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('reauthorizes the POST-page session snapshot too, not just the up-front one (Codex P1 follow-up review finding, PR #580, "Reauthorize the post-page session snapshot")', async () => {
+    // The up-front `liveSession` check runs BEFORE `history.page()`. This
+    // simulates the exact race that motivates the post-page recheck: the
+    // FIRST `sessionStore.load` call (the up-front check) observes no live
+    // session — as it genuinely would for an id deleted, or recreated,
+    // strictly AFTER that read but before `page()` resolves — while every
+    // SUBSEQUENT call (the post-page recheck) sees the REAL, already-
+    // recreated, unauthorized session. Mocking only the FIRST call
+    // reproduces this deterministically, without depending on real
+    // concurrency timing.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-post-page-reauth-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Recreate the SAME id under a principal `mallory` is not authorized
+      // for.
+      const recreatedRun = await bureau.createRun({
+        message: 'the second incarnation',
+        sessionId,
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const loadSpy = spyOn(sessionStore, 'load').mockImplementationOnce(async () => undefined);
+
+      try {
+        const deniedOutcome = await bureau.eventHistory(
+          { kind: 'session', id: sessionId },
+          { principal: 'mallory' },
+        );
+        expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+      } finally {
+        loadSpy.mockRestore();
+      }
+
+      // The actual owner still reads the live page (a fresh call this
+      // time, with no mocked read).
+      const allowedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'alice' },
+      );
+      expect('outcome' in allowedOutcome).toBe(false);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('reauthorizes a recreated session even when the REQUESTED page omits its deletion marker entirely (Codex P1 follow-up review finding, PR #580, "Reauthorize when the requested page omits the marker")', async () => {
+    // Authorization must not be nested inside "the requested page happens
+    // to contain a session.deleted marker" — a `since` cursor positioned
+    // after that marker (or a limit that pages around it) would otherwise
+    // let an unauthorized caller read a recreated session's page simply by
+    // asking for a page that doesn't include the historical marker.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-no-marker-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Find the deletion marker's own cursor so the next read can be
+      // positioned strictly AFTER it.
+      const deletedOutcome = await bureau.eventHistory({ kind: 'session', id: sessionId });
+      if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(deletedOutcome)}`);
+      }
+      const markerCursor = deletedOutcome.events.find(
+        (event) => event.kind === 'session.deleted',
+      )?.cursor;
+      if (markerCursor === undefined) throw new Error('expected a session.deleted cursor');
+
+      const recreatedRun = await bureau.createRun({
+        message: 'the second incarnation',
+        sessionId,
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+
+      // A page starting strictly AFTER the marker's own cursor never
+      // includes it.
+      const deniedNoMarker = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'mallory', since: markerCursor },
+      );
+      expect(deniedNoMarker).toEqual({ outcome: 'not-found' });
+
+      const allowedNoMarker = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'alice', since: markerCursor },
+      );
+      expect('outcome' in allowedNoMarker).toBe(false);
+      if ('outcome' in allowedNoMarker) throw new Error('unreachable');
+      expect(allowedNoMarker.events.map((event) => event.kind)).not.toContain('session.deleted');
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('denies an unauthorized principal with not-found even when the durable read would otherwise report a retention gap (Codex P2 review finding, PR #580, "Authorize sessions before returning history gaps")', async () => {
+    // Authorization must run BEFORE `history.page()` is even called, not
+    // merely before its ORDINARY-page outcome is returned — otherwise an
+    // unauthorized caller whose `since` cursor lands before the retention
+    // floor gets back a `DurableEventGap` (with its own retention metadata)
+    // instead of the documented not-found-shaped denial every other
+    // authorization failure uses.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-session-authz-gap-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'alice owns this', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      // A LIVE session accrues no durable event of its own from an
+      // ordinary run today (`session.created`/`session.saved` are never
+      // dispatched in production — see `durable-event-history.ts`'s own
+      // doc comment) — synthesize one directly the same supported way
+      // AB-313's own tests do, so this owner has at least one durable
+      // event for the retention floor below to advance past.
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId: run.sessionId });
+      await runtime.deferred.drain();
+
+      const beforeGap = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      if ('outcome' in beforeGap)
+        throw new Error(`expected a page, got ${JSON.stringify(beforeGap)}`);
+      const lastEvent = beforeGap.events.at(-1);
+      if (!lastEvent) throw new Error('expected at least one durable event for this session');
+
+      // Advance the retention floor past every one of this session's
+      // durable events, via a second admin storage handle over the SAME
+      // sqlite file (the identical pattern the AB-359 recovery tests use).
+      const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const adminFeed = createFleetEventFeed(adminStorage);
+      await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+      adminFeed.dispose();
+      adminStorage[Symbol.dispose]();
+
+      // An unauthorized principal is denied — never the gap.
+      const deniedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'mallory' },
+      );
+      expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+
+      // The actual owner still sees the real gap outcome.
+      const ownerOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      expect(ownerOutcome).toMatchObject({ outcome: 'gap' });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('reauthorizes a fresh session snapshot before returning a post-wait gap too, not just the pre-page one (Codex P2 review finding, PR #580, "Reauthorize the session before returning a post-wait gap")', async () => {
+    // The pre-page check above now runs BEFORE `waitForActiveWrites`, so its
+    // read is stale by exactly the span of that wait — a session recreated
+    // for a different, unauthorized principal DURING the wait would
+    // otherwise ride the already-passed pre-page check straight through to
+    // a raw `DurableEventGap`. Mocking only the FIRST `sessionStore.load`
+    // call (the pre-page check) to see nothing reproduces that staleness
+    // deterministically: every subsequent, unmocked call — including the
+    // new gap-branch recheck this test targets — observes the REAL,
+    // already-recreated, unauthorized session.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-session-authz-post-wait-gap-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'alice owns this', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId: run.sessionId });
+      await runtime.deferred.drain();
+
+      const beforeGap = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      if ('outcome' in beforeGap)
+        throw new Error(`expected a page, got ${JSON.stringify(beforeGap)}`);
+      const lastEvent = beforeGap.events.at(-1);
+      if (!lastEvent) throw new Error('expected at least one durable event for this session');
+
+      const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const adminFeed = createFleetEventFeed(adminStorage);
+      await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+      adminFeed.dispose();
+      adminStorage[Symbol.dispose]();
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const loadSpy = spyOn(sessionStore, 'load').mockImplementationOnce(async () => undefined);
+
+      try {
+        // An unauthorized caller must be denied — never the gap — even
+        // though the STALE pre-page snapshot (mocked away here) saw
+        // nothing to deny against.
+        const deniedOutcome = await bureau.eventHistory(
+          { kind: 'session', id: run.sessionId },
+          { principal: 'mallory' },
+        );
+        expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+      } finally {
+        loadSpy.mockRestore();
+      }
+
+      // The actual owner still sees the real gap outcome (a fresh call
+      // this time, with no mocked read).
+      const ownerOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      expect(ownerOutcome).toMatchObject({ outcome: 'gap' });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
   // The LMDB variant of this recovery scenario lives in its own file
   // (`event-history-run-ownership-recovery-lmdb.test.ts`) — it needs a real
