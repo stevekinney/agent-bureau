@@ -899,6 +899,36 @@ describe('createAuditTrail', () => {
       await trail.dispose();
     });
 
+    it('a dedupeKey-guarded record() REJECTS (rather than silently no-op resolving) once the owner-issued signal aborts', async () => {
+      // AB-391: unlike the default best-effort path above, a caller that
+      // supplied `dedupeKey` opted into knowing whether its write actually
+      // happened — a silent resolve here would be indistinguishable from
+      // "already recorded" to `create-bureau.ts`'s `drainOutboxAttachmentEntry`,
+      // which would then acknowledge (permanently remove) an outbox entry
+      // whose fact was never durably written, reintroducing the exact
+      // record loss this issue exists to close (via a shutdown race
+      // instead of a crash, since a late `SessionOutboxAppendedEvent`
+      // trigger has no admission check of its own).
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const controller = new AbortController();
+      const trail = createAuditTrail(bureau, kv, undefined, { signal: controller.signal });
+
+      controller.abort();
+      await expect(
+        trail.record({
+          runId: 'run-dedupe-after-abort',
+          type: 'review.tool-approval.approved',
+          detail: null,
+          dedupeKey: 'session.attachment:session-after-abort:1',
+        }),
+      ).rejects.toThrow(/shutdown signal is already aborted/);
+
+      const records = await trail.query({ runId: 'run-dedupe-after-abort' });
+      expect(records).toHaveLength(0);
+      await trail.dispose();
+    });
+
     it('still starts a write when the owner-issued signal has not aborted', async () => {
       const kv = textValueStore(new MemoryStorage());
       const { bureau, emit } = createStubBureau();

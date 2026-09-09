@@ -331,7 +331,14 @@ export interface AuditTrail {
      * rejects) — the caller is expected to leave its own outer unit of
      * work (an outbox entry) unacknowledged and retry on that rejection,
      * exactly the "leave it pending" contract the read-before/verify-after
-     * pattern this replaces used to provide, just without the race.
+     * pattern this replaces used to provide, just without the race. This
+     * REJECTS on an already-aborted shutdown signal too, rather than
+     * silently resolving the way every other out-of-band write does post-
+     * shutdown — a silent no-op here would be indistinguishable from
+     * "already recorded" to a caller like `drainOutboxAttachmentEntry`,
+     * which would then acknowledge an entry whose fact was never actually
+     * written, reintroducing the exact durable-record loss this issue
+     * exists to close (just at shutdown instead of a crash).
      */
     dedupeKey?: string;
   }): Promise<void>;
@@ -1004,7 +1011,30 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     },
   ): Promise<void> {
     if (!kv) return Promise.resolve();
-    if (!writeOptions?.bypassAbortCheck && signal?.aborted) return Promise.resolve();
+    if (!writeOptions?.bypassAbortCheck && signal?.aborted) {
+      // AB-391: a `dedupeKey` caller opted into this call's promise
+      // REJECTING on a genuine failure (see `dedupeKey`'s own doc
+      // comment) so it can leave its own outer unit of work — an outbox
+      // entry — unacknowledged and retry later. Resolving silently here,
+      // the way every OTHER out-of-band write does post-shutdown, would
+      // let `drainOutboxAttachmentEntry` acknowledge an entry whose audit
+      // write never actually happened: a late `SessionOutboxAppendedEvent`
+      // trigger (that listener carries no admission check of its own) can
+      // still reach this function after `shutdown()` aborts `signal`,
+      // and a silent no-write-no-error resolve here is indistinguishable
+      // from "already recorded, nothing to do" to that caller — exactly
+      // the durable-record loss this issue exists to close, just moved to
+      // a shutdown race instead of a crash. Every other caller (no
+      // `dedupeKey`) keeps the original silent-resolve behavior.
+      if (writeOptions?.dedupeKey !== undefined) {
+        return Promise.reject(
+          new Error(
+            `[audit-trail] Refusing dedupeKey-guarded write for "${writeOptions.dedupeKey}": the audit trail's shutdown signal is already aborted.`,
+          ),
+        );
+      }
+      return Promise.resolve();
+    }
 
     // AB-388: `writeOptions.timestampMs` lets the schedule-definition and
     // session-deletion listeners below stamp with the shared
