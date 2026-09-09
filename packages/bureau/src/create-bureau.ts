@@ -6789,30 +6789,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
 
-    // AB-372 (Codex review finding, PR #580, "Wait for the deletion
-    // projection before serving history"): every write into `history` from
-    // `createDurableEventProducer` is fire-and-forget from its own
-    // dispatching caller's perspective (`deleteSession`/`deleteRun` return
-    // as soon as the synchronous event dispatch completes, not once the
-    // durable write actually commits) — so a caller that awaits
-    // `deleteSession(id)` and immediately calls `eventHistory` for the same
-    // owner could otherwise read an ordinary page a heartbeat before the
-    // deletion's own durable write lands. Awaiting this owner's in-flight
-    // writes first (a snapshot, never an open-ended wait — see
-    // `waitForActiveWrites`'s own doc comment) closes that race, mirroring
-    // `AuditTrail.query()`'s identical `activeWritesByRunId`-based fix
-    // (AB-228, PR #566). A caller with no `durableEventProducerInstance`
-    // (no persistent storage backend) never reaches this function at all —
-    // `Bureau.eventHistory` short-circuits to `'unsupported-capability'`
-    // first — so this is always defined whenever `history` is.
-    await durableEventProducerInstance?.waitForActiveWrites(owner);
-
     // AB-372 (Codex review findings, PR #580 — see the running history in
     // this comment for why each earlier shape of this check was
     // insufficient) — session authorization is checked TWICE, deliberately,
-    // never once: a PRE-page check (immediately below) and a POST-page
-    // check (after `history.page()` resolves, before this function decides
-    // what to return). Both are necessary, and neither subsumes the other:
+    // never once: a PRE-page check (immediately below, BEFORE this function
+    // does any other work) and a POST-page check (after `history.page()`
+    // resolves, before this function decides what to return). Both are
+    // necessary, and neither subsumes the other:
     //
     // - The PRE-page check exists ONLY to protect the `DurableEventGap`
     //   outcome — `page()` can return a gap instead of an ordinary page
@@ -6826,7 +6809,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     //   the load entirely for that case avoids an unnecessary durable-store
     //   round trip and a spurious rejection if the session store happens to
     //   be unavailable ("Skip the authorization load when no principal is
-    //   supplied").
+    //   supplied"). Deliberately placed BEFORE `waitForActiveWrites` below
+    //   ("Authorize sessions before waiting on producer writes") — an
+    //   unauthorized caller must get the documented not-found denial
+    //   immediately, never delayed behind (or have its response latency
+    //   reveal) an unrelated owner-write wait it was never entitled to see
+    //   the result of anyway.
     // - The POST-page check re-loads the session record FRESH, unconditionally
     //   for every session owner (not gated on whether a deletion marker
     //   happens to appear on the page), and re-authorizes against THAT
@@ -6854,6 +6842,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         return { outcome: 'not-found' };
       }
     }
+
+    // AB-372 (Codex review finding, PR #580, "Wait for the deletion
+    // projection before serving history"): every write into `history` from
+    // `createDurableEventProducer` is fire-and-forget from its own
+    // dispatching caller's perspective (`deleteSession`/`deleteRun` return
+    // as soon as the synchronous event dispatch completes, not once the
+    // durable write actually commits) — so a caller that awaits
+    // `deleteSession(id)` and immediately calls `eventHistory` for the same
+    // owner could otherwise read an ordinary page a heartbeat before the
+    // deletion's own durable write lands. Awaiting this owner's in-flight
+    // writes first (a snapshot, never an open-ended wait — see
+    // `waitForActiveWrites`'s own doc comment) closes that race, mirroring
+    // `AuditTrail.query()`'s identical `activeWritesByRunId`-based fix
+    // (AB-228, PR #566). A caller with no `durableEventProducerInstance`
+    // (no persistent storage backend) never reaches this function at all —
+    // `Bureau.eventHistory` short-circuits to `'unsupported-capability'`
+    // first — so this is always defined whenever `history` is.
+    await durableEventProducerInstance?.waitForActiveWrites(owner);
 
     const page = await history.page(owner, options);
     if ('outcome' in page) return page; // a DurableEventGap
