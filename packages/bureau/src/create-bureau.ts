@@ -5254,22 +5254,37 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // second time is safe even though the durable write itself is skipped as
   // an already-recorded duplicate.
   //
-  // ACCEPTED RESIDUAL, filed as a follow-up: `pending()`/`acknowledge()`
-  // claim nothing exclusively across PROCESSES sharing one persistent
-  // backend. The direct post-commit drain above is gated on this process
-  // having actually won the commit (see `performDeleteSession`'s own
-  // comment), so it never races a peer for an entry it did not produce.
-  // The maintenance-timer and boot-recovery drains, however, are NOT so
-  // gated — they drain whatever is pending regardless of which process
-  // committed it — so two bureau processes whose maintenance ticks (or
-  // simultaneous boot recoveries) both observe the SAME still-unacknowledged
-  // entry before either acknowledges it can both dispatch it. Durable event
-  // history is unaffected (this module's `record()` dedupes by the entry's
-  // own ordinal), but `audit-trail.ts`'s `session.deleted` listener and any
-  // direct `bureau.addEventListener('session.deleted', ...)` consumer are
-  // not ordinal-deduped and would each see it twice. Closing this fully
-  // needs a claimed-entry lease with stale-claim reclaim for a drainer that
-  // crashes mid-claim — genuine lease semantics, out of scope here.
+  // AB-390 — closes the residual AB-389 left open: `pending()` alone still
+  // claims nothing (see its own doc comment), but every entry this drain
+  // replays is now claimed first via `outbox.claim()`, a compare-and-swap
+  // on the entry's own `claim` field keyed by THIS bureau instance's own
+  // `sessionOutboxDrainOwner` id and `runtimeServices.clock.now()`. Two
+  // bureau processes whose maintenance ticks (or simultaneous boot
+  // recoveries) both observe the same still-unacknowledged entry can no
+  // longer both dispatch it: only the one whose `claim()` call wins the CAS
+  // proceeds, and `acknowledge()` itself re-verifies that claim is still
+  // held before removing the entry. A drainer that crashes between winning
+  // a claim and acknowledging leaves the entry claimed but undelivered
+  // until its own `claim.until` lease lapses — `drainSessionOutboxPass`
+  // stops at the first entry it fails to claim (never skips ahead to a
+  // later ordinal) so a live peer's in-order replay is never reordered by a
+  // stalled one, and a later drain (this same process's own next tick, or a
+  // peer's) reclaims and completes it once `until` passes.
+  //
+  // `sessionOutboxDrainOwner` is minted once per bureau instance (not per
+  // drain pass) so a renewed claim from a LATER pass in this same process
+  // is recognized as "the owner I already am", never treated as a foreign
+  // claim — see `SessionStore.outbox.claim()`'s own doc comment on why
+  // same-owner renewal must always succeed.
+  const sessionOutboxDrainOwner = runtimeServices.identifiers.next('session-outbox-drainer');
+  // How long a claim protects an entry from being reclaimed by a different
+  // drainer. Long enough to comfortably cover one pass's durable-write wait
+  // (`waitForActiveWrites`) under ordinary load; short enough that a
+  // crashed drainer's claim does not strand an entry for long. Not a
+  // `BureauOptions` knob for the same reason `AUTOMATIC_RUN_OWNERSHIP_PRUNE_INTERVAL_MS`
+  // above is not one — the issue's acceptance criteria name no configurable
+  // lease duration.
+  const SESSION_OUTBOX_CLAIM_LEASE_MS = 30_000;
   let sessionOutboxDrainInFlight: Promise<void> | undefined;
   // AB-389 (Codex P2 review finding, PR #598, "Re-run the drain when a
   // commit joins its completion edge"): a commit's trigger can arrive
@@ -5355,6 +5370,22 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       const pending: readonly SessionOutboxEntry[] = await outboxSessionStore.outbox.pending();
       if (pending.length === 0) return;
       for (const entry of pending) {
+        // AB-390 — claim before replaying. A peer (this process's own
+        // overlapping pass is impossible: `drainSessionOutbox` is
+        // single-flighted above; "peer" here means a DIFFERENT bureau
+        // process sharing this backend) may already hold an unexpired
+        // claim on this exact entry. Stopping the WHOLE pass here, rather
+        // than continuing to a LATER ordinal, preserves AB-389's ordering
+        // guarantee: replaying ordinal 2 while a peer still owns ordinal 1
+        // would let `session.saved` reach durable history before
+        // `session.created` for the same lineage. A later trigger — this
+        // process's own next tick, or the peer finishing its own drain —
+        // picks up where this pass stopped.
+        const claimed = await outboxSessionStore.outbox.claim(entry.ordinal, {
+          owner: sessionOutboxDrainOwner,
+          until: runtimeServices.clock.now() + SESSION_OUTBOX_CLAIM_LEASE_MS,
+        });
+        if (!claimed) return;
         const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
         // AB-389 (Codex P2 review finding, PR #598, "Isolate subscriber
         // exceptions while draining the outbox"): `emitter.dispatch()`
@@ -5498,7 +5529,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             return;
           }
         }
-        await outboxSessionStore.outbox.acknowledge(entry.ordinal);
+        const acknowledged = await outboxSessionStore.outbox.acknowledge(
+          entry.ordinal,
+          sessionOutboxDrainOwner,
+        );
+        // AB-390 — a `false` here means a different owner reclaimed this
+        // entry between this pass's `claim()` above and this point (this
+        // owner's own lease must have lapsed under an unusually slow
+        // durable write). The dispatch above already ran, so the current
+        // claimant's own acknowledge (or a future one) retires the entry;
+        // continuing this pass past a lost claim risks the same reordering
+        // hazard the claim-before-replay check above exists to prevent.
+        if (!acknowledged) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Lost the claim on session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}") before acknowledging it; a different drainer reclaimed and will retire it.`,
+          });
+          return;
+        }
       }
     }
   }

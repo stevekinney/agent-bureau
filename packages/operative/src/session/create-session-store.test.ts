@@ -10,10 +10,32 @@ import {
   SessionConflictError,
   StaleSessionIncarnationError,
 } from './create-session-store';
-import type { SessionOutboxEntry } from './types';
+import type { SessionOutboxEntry, SessionStore } from './types';
 
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
 const BODY_PREFIX = 'agent-session-v2:body:';
+
+// AB-390 — `acknowledge()` now requires the caller to hold the entry's
+// claim. Every pre-existing outbox test in this file exercised
+// `acknowledge()` directly, with no claim workflow of its own to model —
+// this helper claims (as a single fixed test owner, which every test here
+// is free to treat as "this test's only drainer") immediately before
+// acknowledging, so those tests keep verifying what they always verified
+// without each one re-deriving the claim-then-acknowledge sequence.
+const TEST_OUTBOX_OWNER = 'test-drainer';
+async function claimAndAcknowledge(store: SessionStore, ordinal: number): Promise<void> {
+  const claimed = await store.outbox.claim(ordinal, {
+    owner: TEST_OUTBOX_OWNER,
+    until: Number.MAX_SAFE_INTEGER,
+  });
+  if (!claimed) {
+    throw new Error(`expected to claim outbox entry ${ordinal} for test setup`);
+  }
+  const acknowledged = await store.outbox.acknowledge(ordinal, TEST_OUTBOX_OWNER);
+  if (!acknowledged) {
+    throw new Error(`expected to acknowledge outbox entry ${ordinal} after claiming it`);
+  }
+}
 
 function makeSession(overrides: {
   agentName?: string;
@@ -1628,7 +1650,7 @@ describe('SessionStore commit outbox (AB-389)', () => {
     // The best-effort drain trigger fires once per appended entry, naming
     // that entry's own ordinal.
     expect(triggers.map((event) => event.ordinal)).toEqual([1]);
-    await store.outbox.acknowledge(pending[0]!.ordinal);
+    await claimAndAcknowledge(store, pending[0]!.ordinal);
 
     const firstIncarnation = pending[0]!.incarnation;
     const reloaded = await store.load(session.id);
@@ -1652,7 +1674,7 @@ describe('SessionStore commit outbox (AB-389)', () => {
     expect(pending).toHaveLength(1);
     expect(pending[0]?.kind).toBe('session.created');
     const firstIncarnation = pending[0]!.incarnation;
-    await store.outbox.acknowledge(pending[0]!.ordinal);
+    await claimAndAcknowledge(store, pending[0]!.ordinal);
 
     await store.update('events-update', (existing) => existing);
     pending = await store.outbox.pending();
@@ -1669,14 +1691,14 @@ describe('SessionStore commit outbox (AB-389)', () => {
     let pending = await store.outbox.pending();
     expect(pending).toHaveLength(1);
     const firstIncarnation = pending[0]!.incarnation;
-    await store.outbox.acknowledge(pending[0]!.ordinal);
+    await claimAndAcknowledge(store, pending[0]!.ordinal);
 
     expect(await store.delete(session.id)).toBe(true);
     pending = await store.outbox.pending();
     expect(pending).toHaveLength(1);
     expect(pending[0]?.kind).toBe('session.deleted');
     expect(pending[0]?.incarnation).toBe(firstIncarnation);
-    await store.outbox.acknowledge(pending[0]!.ordinal);
+    await claimAndAcknowledge(store, pending[0]!.ordinal);
 
     await store.save(makeSession({ id: session.id }));
     pending = await store.outbox.pending();
@@ -1711,14 +1733,16 @@ describe('SessionStore commit outbox (AB-389)', () => {
     expect(pending.map((entry) => entry.ordinal)).toEqual([1, 2, 3]);
   });
 
-  it('acknowledge() is idempotent — acknowledging an already-removed entry is a silent no-op', async () => {
+  it('acknowledge() is idempotent — acknowledging an already-removed entry is a silent no-op that resolves true', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     await store.save(makeSession({ id: 'ack-twice' }));
     const [entry] = await store.outbox.pending();
-    await store.outbox.acknowledge(entry!.ordinal);
+    await claimAndAcknowledge(store, entry!.ordinal);
     expect(await store.outbox.pending()).toHaveLength(0);
-    // Second acknowledge of the same, now-gone ordinal must not throw.
-    await store.outbox.acknowledge(entry!.ordinal);
+    // Second acknowledge of the same, now-gone ordinal must not throw, and
+    // must resolve `true` — the entry is gone either way, exactly what a
+    // caller checking "is this retired now" wants to see.
+    expect(await store.outbox.acknowledge(entry!.ordinal, TEST_OUTBOX_OWNER)).toBe(true);
     expect(await store.outbox.pending()).toHaveLength(0);
   });
 
@@ -1727,7 +1751,7 @@ describe('SessionStore commit outbox (AB-389)', () => {
     const store = createSessionStore(rawStore);
     await store.save(makeSession({ id: 'corrupted-ordinal-seed' }));
     const [seedEntry] = await store.outbox.pending();
-    await store.outbox.acknowledge(seedEntry!.ordinal);
+    await claimAndAcknowledge(store, seedEntry!.ordinal);
 
     // Corrupt the counter directly — not a value any commit here ever writes.
     await rawStore.set('agent-session-outbox:v1:ordinal', 'not-a-number');
@@ -1793,5 +1817,120 @@ describe('SessionStore commit outbox (AB-389)', () => {
     const [entry] = await store.outbox.pending();
     expect(entry?.committedAtMs).toBe(commitTime);
     expect(entry?.committedAtMs).not.toBe(runtime.clock.now());
+  });
+});
+
+describe('SessionStore outbox claim lease (AB-390)', () => {
+  it('claims an unclaimed entry and refuses the same claim to a different owner while the lease is live', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'claim-exclusive' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+
+    expect(
+      await store.outbox.claim(ordinal, {
+        owner: 'drainer-a',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(true);
+    // A different owner is refused while drainer-a's lease has not expired.
+    expect(
+      await store.outbox.claim(ordinal, {
+        owner: 'drainer-b',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(false);
+  });
+
+  it('allows the same owner to renew its own claim without waiting for expiry', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'claim-renew' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+
+    expect(
+      await store.outbox.claim(ordinal, { owner: 'drainer-a', until: runtime.clock.now() + 1_000 }),
+    ).toBe(true);
+    // Re-claiming as the SAME owner succeeds even though the prior lease
+    // has not expired — renewal, not a conflict.
+    expect(
+      await store.outbox.claim(ordinal, {
+        owner: 'drainer-a',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(true);
+  });
+
+  it("lets a different owner reclaim once the prior claim has expired by the store's own clock", async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'claim-expired-reclaim' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+
+    await store.outbox.claim(ordinal, {
+      owner: 'crashed-drainer',
+      until: runtime.clock.now() + 1_000,
+    });
+    await runtime.advance(1_001);
+    expect(
+      await store.outbox.claim(ordinal, {
+        owner: 'new-drainer',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(true);
+  });
+
+  it('returns false for claim() on an ordinal with no pending entry (already acknowledged)', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'claim-gone' }));
+    const [entry] = await store.outbox.pending();
+    await claimAndAcknowledge(store, entry!.ordinal);
+    expect(
+      await store.outbox.claim(entry!.ordinal, {
+        owner: 'late-drainer',
+        until: runtime.clock.now() + 1_000,
+      }),
+    ).toBe(false);
+  });
+
+  it('acknowledge() refuses to remove an entry whose claim was reclaimed by a different owner', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'ack-lost-claim' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+
+    await store.outbox.claim(ordinal, {
+      owner: 'crashed-drainer',
+      until: runtime.clock.now() + 1_000,
+    });
+    await runtime.advance(1_001);
+    expect(
+      await store.outbox.claim(ordinal, {
+        owner: 'reclaiming-drainer',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(true);
+
+    // The original (now-lapsed) owner's own acknowledge must not retire an
+    // entry a different owner has since reclaimed.
+    expect(await store.outbox.acknowledge(ordinal, 'crashed-drainer')).toBe(false);
+    expect(await store.outbox.pending()).toHaveLength(1);
+
+    // The current claimant's acknowledge succeeds.
+    expect(await store.outbox.acknowledge(ordinal, 'reclaiming-drainer')).toBe(true);
+    expect(await store.outbox.pending()).toHaveLength(0);
+  });
+
+  it('acknowledge() refuses an entry that was never claimed by the calling owner', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(makeSession({ id: 'ack-without-claim' }));
+    const [entry] = await store.outbox.pending();
+    expect(await store.outbox.acknowledge(entry!.ordinal, 'never-claimed-this')).toBe(false);
+    expect(await store.outbox.pending()).toHaveLength(1);
   });
 });

@@ -10,6 +10,7 @@ import { SessionOutboxAppendedEvent } from '../events';
 import type {
   SessionCleanupOptions,
   SessionListOptions,
+  SessionOutboxClaim,
   SessionOutboxEntry,
   SessionStore,
   SessionSummary,
@@ -374,6 +375,33 @@ function outboxEntryKey(ordinal: number): string {
  * missing one, corrupting drain order. Mirrors `parseOutboxOrdinal`'s own
  * fail-loudly-on-corruption precedent in this same file.
  */
+/**
+ * Parses a stored entry's optional `claim` field (AB-390). `undefined`
+ * means unclaimed — a legitimate, common state, not an error. Anything
+ * else that fails to parse as `{ owner: string; until: number }` is a
+ * storage-integrity failure, fails loudly for the same reason
+ * `parseOutboxEntry` does: a corrupted claim silently read as "unclaimed"
+ * would let a second drainer claim an entry the first one still legitimately
+ * holds.
+ */
+function parseOutboxClaim(
+  raw: unknown,
+  fail: (reason: string) => never,
+): SessionOutboxClaim | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return fail(`expected "claim" to be an object, got ${JSON.stringify(raw)}`);
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record['owner'] !== 'string') {
+    return fail(`expected a string "claim.owner", got ${JSON.stringify(record['owner'])}`);
+  }
+  if (!Number.isFinite(record['until'])) {
+    return fail(`expected a finite number "claim.until", got ${JSON.stringify(record['until'])}`);
+  }
+  return { owner: record['owner'], until: record['until'] as number };
+}
+
 function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
   if (raw === null) return undefined;
   const fail = (reason: string): never => {
@@ -403,6 +431,7 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
       `expected a finite number "committedAtMs", got ${JSON.stringify(record['committedAtMs'])}`,
     );
   }
+  const claim = parseOutboxClaim(record['claim'], fail);
   const ordinal = record['ordinal'];
   const sessionId = record['sessionId'];
   const incarnation = record['incarnation'];
@@ -422,9 +451,17 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
         agentName: record['agentName'],
         incarnation,
         committedAtMs,
+        ...(claim ? { claim } : {}),
       };
     case 'session.deleted':
-      return { ordinal, kind: 'session.deleted', sessionId, incarnation, committedAtMs };
+      return {
+        ordinal,
+        kind: 'session.deleted',
+        sessionId,
+        incarnation,
+        committedAtMs,
+        ...(claim ? { claim } : {}),
+      };
     default:
       return fail(`unrecognized "kind" ${JSON.stringify(record['kind'])}`);
   }
@@ -1160,18 +1197,50 @@ export function createSessionStore(
         entries.sort((a, b) => a.ordinal - b.ordinal);
         return entries;
       },
-      async acknowledge(ordinal: number): Promise<void> {
+      async claim(ordinal: number, lease: { owner: string; until: number }): Promise<boolean> {
+        const key = outboxEntryKey(ordinal);
+        const raw = await store.get(key);
+        const entry = parseOutboxEntry(raw);
+        // Nothing left to claim — already acknowledged (by this drainer or
+        // a peer). Not a conflict, but not a successful claim either:
+        // there is no entry for the caller to go replay.
+        if (!entry) return false;
+        const now = runtime.clock.now();
+        const currentClaim = entry.claim;
+        const claimable =
+          currentClaim === undefined ||
+          currentClaim.until <= now ||
+          // Same-owner reentry always succeeds — see this method's own doc
+          // comment on why renewal must not be refused.
+          currentClaim.owner === lease.owner;
+        if (!claimable) return false;
+        const claimed: SessionOutboxEntry = { ...entry, claim: lease };
+        return store.conditionalBatch(
+          [{ key, expectedValue: raw }],
+          [{ type: 'set', key, value: JSON.stringify(claimed) }],
+        );
+      },
+      async acknowledge(ordinal: number, owner: string): Promise<boolean> {
         const key = outboxEntryKey(ordinal);
         const raw = await store.get(key);
         // Already gone — a concurrent drain (this process or a peer sharing
         // this store) already acknowledged it. Acknowledging is idempotent,
         // not a conflict: nothing left to remove is success, not an error.
-        if (raw === null) return;
+        if (raw === null) return true;
+        const entry = parseOutboxEntry(raw);
+        if (entry?.claim?.owner !== owner) {
+          // A different owner reclaimed this entry (this owner's own lease
+          // lapsed) — never delete an entry this owner no longer has any
+          // right to retire. The CAS below would refuse this anyway once
+          // the stored value differs, but checking the parsed owner first
+          // lets the caller tell "lost the claim" apart from "storage
+          // anomaly" without inspecting raw JSON itself.
+          return false;
+        }
         // A CAS, not a bare delete: if the value has changed since the read
-        // above (should not happen — outbox entries are write-once — but a
-        // storage anomaly must not delete a DIFFERENT entry than the one
-        // just read), the delete is simply skipped rather than forced.
-        await store.conditionalBatch([{ key, expectedValue: raw }], [{ type: 'delete', key }]);
+        // above (a peer reclaimed it in between this read and this write),
+        // the delete is simply skipped rather than forced.
+        return store.conditionalBatch([{ key, expectedValue: raw }], [{ type: 'delete', key }]);
       },
     },
   };

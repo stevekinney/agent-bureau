@@ -21,6 +21,7 @@ export { resumeSession } from './session-resume';
 export type {
   SessionCleanupOptions,
   SessionListOptions,
+  SessionOutboxClaim,
   SessionOutboxEntry,
   SessionStore,
   SessionSummary,

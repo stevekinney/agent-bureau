@@ -559,7 +559,7 @@ const result = await activeRun.result;
 | `updateMetadata(id, metadata)`            | Merge metadata without rewriting the conversation.                                                                                                                                                                                                                                                                                                                             |
 | `cleanup(options)`                        | Delete sessions older than `options.olderThan` ms.                                                                                                                                                                                                                                                                                                                             |
 | `events`                                  | `TypedEventTarget<OperativeEventMap>` (AB-384, re-scoped by AB-389) the store dispatches its commit-outbox drain trigger onto — see below.                                                                                                                                                                                                                                     |
-| `outbox`                                  | The commit outbox (AB-389): `outbox.pending()` lists undrained `SessionOutboxEntry` records in ordinal order; `outbox.acknowledge(ordinal)` removes one once its replay has durably settled — see below.                                                                                                                                                                       |
+| `outbox`                                  | The commit outbox (AB-389/AB-390): `outbox.pending()` lists undrained `SessionOutboxEntry` records in ordinal order; `outbox.claim(ordinal, { owner, until })` takes exclusive replay rights on one entry until the lease expires; `outbox.acknowledge(ordinal, owner)` removes one once its replay has durably settled, only if `owner` still holds its claim — see below.    |
 
 Sessions include a persisted `revision` number. New `AgentSession` objects start
 at revision `0`; successful `SessionStore` writes increment the stored revision.
@@ -612,12 +612,31 @@ backend could record events out of true commit order. `save()`/`update()`/
 `delete()` now dispatch only `SessionOutboxAppendedEvent` on `SessionStore.events`
 — a best-effort drain trigger naming the appended entry's ordinal, never the
 event itself. A caller that needs the actual `session.created`/`session.saved`/
-`session.deleted` facts must drain `outbox.pending()` and replay each entry as
-the matching event, acknowledging it (`outbox.acknowledge(ordinal)`) only once
-that replay's own durable write has settled — Bureau's own drain loop
+`session.deleted` facts must drain `outbox.pending()`, `claim()` each entry it
+intends to replay, replay it as the matching event, and acknowledge it only
+once that replay's own durable write has settled — Bureau's own drain loop
 (`drainSessionOutbox` in `create-bureau.ts`) does exactly this, run on the
 runtime clock inside the durable maintenance pass, right after each commit,
 and during boot recovery before serving reads.
+
+**Claim lease (AB-390):** `pending()` alone claims nothing — it is safe to
+call repeatedly and concurrently from multiple processes sharing one
+backend, but two processes both draining the SAME still-unacknowledged entry
+would both replay it without a claim. `outbox.claim(ordinal, { owner, until })`
+is a compare-and-swap on the entry's own `claim` field (never a separate lock
+record): it succeeds when the entry is unclaimed, its prior claim's `until`
+has already passed by this store's own `RuntimeServices.clock.now()`, or
+`owner` already held it (claim renewal always succeeds — this is same-owner
+reentry, not the cross-owner exclusivity the lease protects). It fails when a
+DIFFERENT owner holds an unexpired claim, or the entry no longer exists
+(already acknowledged). `outbox.acknowledge(ordinal, owner)` now additionally
+requires `owner` to still hold the entry's claim — verified by the same
+compare-and-swap discipline `claim()` uses — so an owner whose lease lapsed
+and was reclaimed by a peer can never retire an entry it no longer owns. A
+drainer that crashes between winning a claim and acknowledging leaves the
+entry claimed but undelivered only until its own lease's `until` passes; a
+later drain (this same process's next tick, or a peer's) reclaims and
+completes it exactly once.
 
 `save()`/`update()` reject with `StaleSessionIncarnationError` when a
 candidate names a specific, nonempty `incarnation` that no longer matches
@@ -628,11 +647,17 @@ this way.
 
 ```ts
 const sessions = createSessionStore(kvStore);
+const drainerId = 'my-drainer-instance';
 sessions.events.addEventListener('session.outbox-appended', async () => {
   for (const entry of await sessions.outbox.pending()) {
+    const claimed = await sessions.outbox.claim(entry.ordinal, {
+      owner: drainerId,
+      until: Date.now() + 30_000,
+    });
+    if (!claimed) continue; // a peer already holds this entry's lease
     console.log(`outbox entry ${entry.ordinal}: ${entry.kind} for ${entry.sessionId}`);
     // Replay `entry` as the real event, await its own durable write, THEN:
-    await sessions.outbox.acknowledge(entry.ordinal);
+    await sessions.outbox.acknowledge(entry.ordinal, drainerId);
   }
 });
 ```
