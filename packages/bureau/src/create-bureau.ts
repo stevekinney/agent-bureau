@@ -6763,13 +6763,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   > {
     const principal = options?.principal;
 
-    if (owner.kind === 'session' && principal !== undefined) {
-      const session = runtime.sessionStore ? await runtime.sessionStore.load(owner.id) : undefined;
-      if (session && !isSessionAuthorityAuthorized(session.metadata, principal)) {
-        return { outcome: 'not-found' };
-      }
-    }
-
     if (owner.kind === 'run' && principal !== undefined) {
       // AB-313 — fail CLOSED whenever this run's ownership cannot be
       // verified against `runAttribution` (`request.principal`, AB-54's
@@ -6817,51 +6810,62 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const page = await history.page(owner, options);
     if ('outcome' in page) return page; // a DurableEventGap
 
+    // AB-372 (Codex review findings, PR #580, "Reauthorize the live session
+    // before returning its page" and its follow-up "Reauthorize when the
+    // requested page omits the marker") — session authorization is done
+    // exactly ONCE, HERE, against whatever session record exists RIGHT NOW
+    // (after the owner-write wait and the history replay above have both
+    // completed), rather than a record loaded earlier. Two earlier rounds
+    // of this fix checked authorization up front, before that async work,
+    // then separately re-checked it only inside the branch that happened to
+    // find a `'session.deleted'` marker on the ONE requested page — both
+    // left a window where a session id deleted (or never live) at the
+    // up-front check, then recreated under a DIFFERENT authority while the
+    // async work was pending, could read back as open: the up-front check
+    // saw nothing to deny, and the later re-check either ran only when the
+    // requested page happened to contain the stale marker (never guaranteed
+    // — a `since` cursor past it, or a limit that pages around it, both
+    // skip that branch entirely) or didn't exist yet. Loading and
+    // authorizing the CURRENT live record unconditionally, after all async
+    // work, removes the window: whichever record exists at the moment this
+    // function is about to decide what to return is the ONLY one that ever
+    // gets checked or matters. Omitting `principal` entirely still skips
+    // this (an internal/trusted caller), matching every other owner kind's
+    // convention; a session with no recorded authority is still open,
+    // matching `isSessionAuthorityAuthorized`'s own documented rule.
+    const liveSession =
+      owner.kind === 'session' && runtime.sessionStore
+        ? await runtime.sessionStore.load(owner.id)
+        : undefined;
+    if (
+      liveSession &&
+      principal !== undefined &&
+      !isSessionAuthorityAuthorized(liveSession.metadata, principal)
+    ) {
+      return { outcome: 'not-found' };
+    }
+
     const deletionMarkerKind =
       owner.kind === 'session'
         ? 'session.deleted'
         : owner.kind === 'run'
           ? 'run.removed'
           : undefined;
-    if (deletionMarkerKind && page.events.some((event) => event.kind === deletionMarkerKind)) {
-      // AB-372 (Codex review finding, PR #580) — a session id can be
-      // legitimately recreated after deletion, and its durable history
-      // (shared with its predecessor incarnation) still carries the
-      // predecessor's own `'session.deleted'` marker. A currently-live
-      // session record is authoritative over that stale marker: this
-      // owner is a session, and it presently exists, so it is NOT deleted
-      // right now, regardless of what its durable history contains. Run
-      // owners have no equivalent check — run ids are never reused, so
-      // this branch is session-only.
-      if (owner.kind === 'session' && runtime.sessionStore) {
-        const liveSession = await runtime.sessionStore.load(owner.id);
-        if (liveSession) {
-          // AB-372 (Codex review finding, PR #580, "Reauthorize the live
-          // session before returning its page") — the authorization check
-          // above ran against whatever session record existed BEFORE the
-          // owner-write wait and the global history replay this function
-          // just performed; if this id was deleted at that point (or never
-          // existed), that check was a no-op (an owner with no live record
-          // at authorization time is open by the SAME "no recorded
-          // authority" convention every other session verb follows — see
-          // this function's own doc comment), which is only correct for an
-          // id that STAYS deleted. If the id was recreated in that window,
-          // `liveSession` here is a DIFFERENT record than what authorization
-          // saw (or didn't see) — it must be checked on ITS OWN authority
-          // metadata before its history is returned, exactly as the
-          // up-front check would have done had it observed this record in
-          // the first place. Omitting `principal` entirely still skips this
-          // (an internal/trusted caller), matching the up-front check's own
-          // convention.
-          if (
-            principal !== undefined &&
-            !isSessionAuthorityAuthorized(liveSession.metadata, principal)
-          ) {
-            return { outcome: 'not-found' };
-          }
-          return page;
-        }
-      }
+    const hasDeletionMarker =
+      deletionMarkerKind !== undefined &&
+      page.events.some((event) => event.kind === deletionMarkerKind);
+
+    // A currently-live session record is authoritative over a stale
+    // deletion marker from a PRIOR incarnation of a recreated id — this
+    // owner presently exists, so it is not deleted right now, regardless of
+    // what its durable history contains (its historical events, including
+    // that marker, are still returned in the page; only the outcome
+    // classification is suppressed).
+    if (owner.kind === 'session' && hasDeletionMarker && liveSession) {
+      return page;
+    }
+
+    if (hasDeletionMarker) {
       return { outcome: 'deleted-aggregate', owner, ...page };
     }
     return page;

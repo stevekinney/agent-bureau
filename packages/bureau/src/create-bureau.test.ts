@@ -13489,6 +13489,78 @@ describe('bureau.eventHistory deleted-aggregate through a real session deletion 
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('reauthorizes a recreated session even when the REQUESTED page omits its deletion marker entirely (Codex P1 follow-up review finding, PR #580, "Reauthorize when the requested page omits the marker")', async () => {
+    // Authorization must not be nested inside "the requested page happens
+    // to contain a session.deleted marker" — a `since` cursor positioned
+    // after that marker (or a limit that pages around it) would otherwise
+    // let an unauthorized caller read a recreated session's page simply by
+    // asking for a page that doesn't include the historical marker.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-no-marker-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Find the deletion marker's own cursor so the next read can be
+      // positioned strictly AFTER it.
+      const deletedOutcome = await bureau.eventHistory({ kind: 'session', id: sessionId });
+      if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(deletedOutcome)}`);
+      }
+      const markerCursor = deletedOutcome.events.find(
+        (event) => event.kind === 'session.deleted',
+      )?.cursor;
+      if (markerCursor === undefined) throw new Error('expected a session.deleted cursor');
+
+      const recreatedRun = await bureau.createRun({
+        message: 'the second incarnation',
+        sessionId,
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+
+      // A page starting strictly AFTER the marker's own cursor never
+      // includes it.
+      const deniedNoMarker = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'mallory', since: markerCursor },
+      );
+      expect(deniedNoMarker).toEqual({ outcome: 'not-found' });
+
+      const allowedNoMarker = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'alice', since: markerCursor },
+      );
+      expect('outcome' in allowedNoMarker).toBe(false);
+      if ('outcome' in allowedNoMarker) throw new Error('unreachable');
+      expect(allowedNoMarker.events.map((event) => event.kind)).not.toContain('session.deleted');
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
