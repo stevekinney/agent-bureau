@@ -465,6 +465,97 @@ export function createSessionStore(
     return committed ? next : undefined;
   }
 
+  // AB-384 (Codex/Copilot review finding on PR #592, "SessionDeletedEvent
+  // carries the wrong incarnation across a cross-process race"): a caller
+  // that reads `sessionStore.load(id)` BEFORE calling `delete(id)` to learn
+  // which incarnation it is about to remove has a real race window — a
+  // concurrent process can delete-and-recreate that id between the two
+  // calls, so the `boolean`-returning `delete()` alone gives no atomic way
+  // to know which incarnation its own successful deletion actually removed.
+  // Overloaded (not a new method) so `delete(id): Promise<boolean>` — the
+  // AB-371 contract every existing caller and test already relies on —
+  // stays byte-for-byte unchanged; `delete(id, { returnIncarnation: true })`
+  // is the SAME atomic CAS attempt, just also returning the `incarnation`
+  // parsed from the exact `currentRaw`/`legacyRaw` value that CAS verified
+  // was still current when it committed (never a second, separately-racing
+  // read). `create-bureau.ts`'s `deleteSession` uses this overload instead
+  // of a `load()` beforehand.
+  function deleteSession(id: string): Promise<boolean>;
+  function deleteSession(
+    id: string,
+    options: { returnIncarnation: true },
+  ): Promise<{ removed: boolean; incarnation: string | undefined }>;
+  function deleteSession(
+    id: string,
+    options?: { returnIncarnation?: boolean },
+  ): Promise<boolean | { removed: boolean; incarnation: string | undefined }> {
+    return runMutation(async () => {
+      await readBody('summary-index');
+      await readBody(id);
+      let deleteConflicts = 0;
+      let previousBodyValues: string | undefined;
+      for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
+        const currentKey = keyFor(id);
+        const legacyKey = legacyKeyFor(id);
+        const [currentRaw, legacyRaw, summaryRaw] = await Promise.all([
+          store.get(currentKey),
+          legacyKey === SUMMARY_INDEX_KEY ? Promise.resolve(null) : store.get(legacyKey),
+          store.get(SUMMARY_INDEX_KEY),
+        ]);
+        const nextSummaries = await summariesForMutation(summaryRaw);
+        nextSummaries.delete(id);
+        const operations =
+          nextSummaries.size > 0
+            ? [
+                {
+                  type: 'set' as const,
+                  key: SUMMARY_INDEX_KEY,
+                  value: serializeSummaryIndex(nextSummaries),
+                },
+              ]
+            : [{ type: 'delete' as const, key: SUMMARY_INDEX_KEY }];
+        const deleted = await store.conditionalBatch(
+          [
+            { key: currentKey, expectedValue: currentRaw },
+            ...(legacyKey === SUMMARY_INDEX_KEY
+              ? []
+              : [{ key: legacyKey, expectedValue: legacyRaw }]),
+            { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
+          ],
+          [
+            { type: 'delete', key: currentKey },
+            ...(legacyKey === SUMMARY_INDEX_KEY
+              ? []
+              : [{ type: 'delete' as const, key: legacyKey }]),
+            ...operations,
+          ],
+        );
+        // The `removed` boolean is derived from the exact `currentRaw`/
+        // `legacyRaw` values the CAS just verified were still current when
+        // it committed — one atomic delete-and-count, never a separate
+        // existence check followed by a delete (AB-371). `incarnation` is
+        // parsed from those SAME two values, so it is exactly as atomic.
+        if (deleted) {
+          const removed = currentRaw !== null || legacyRaw !== null;
+          if (!options?.returnIncarnation) return removed;
+          const incarnation =
+            (currentRaw !== null ? parseSession(currentRaw)?.incarnation : undefined) ??
+            (legacyRaw !== null ? parseSession(legacyRaw)?.incarnation : undefined);
+          return { removed, incarnation };
+        }
+        const bodyValues = JSON.stringify([currentRaw, legacyRaw]);
+        if (previousBodyValues !== undefined && previousBodyValues !== bodyValues) {
+          deleteConflicts += 1;
+        }
+        previousBodyValues = bodyValues;
+        if (deleteConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
+          throw new SessionConflictError(id, 'deleted');
+        }
+      }
+      throw new SessionConflictError(id, 'deleted');
+    });
+  }
+
   const sessionStore: SessionStore = {
     async save(session: AgentSession): Promise<void> {
       // AB-384 — the created-vs-saved dispatch happens AFTER `runMutation`
@@ -573,65 +664,7 @@ export function createSessionStore(
       return parseSession(raw);
     },
 
-    async delete(id: string): Promise<boolean> {
-      return runMutation(async () => {
-        await readBody('summary-index');
-        await readBody(id);
-        let deleteConflicts = 0;
-        let previousBodyValues: string | undefined;
-        for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-          const currentKey = keyFor(id);
-          const legacyKey = legacyKeyFor(id);
-          const [currentRaw, legacyRaw, summaryRaw] = await Promise.all([
-            store.get(currentKey),
-            legacyKey === SUMMARY_INDEX_KEY ? Promise.resolve(null) : store.get(legacyKey),
-            store.get(SUMMARY_INDEX_KEY),
-          ]);
-          const nextSummaries = await summariesForMutation(summaryRaw);
-          nextSummaries.delete(id);
-          const operations =
-            nextSummaries.size > 0
-              ? [
-                  {
-                    type: 'set' as const,
-                    key: SUMMARY_INDEX_KEY,
-                    value: serializeSummaryIndex(nextSummaries),
-                  },
-                ]
-              : [{ type: 'delete' as const, key: SUMMARY_INDEX_KEY }];
-          const deleted = await store.conditionalBatch(
-            [
-              { key: currentKey, expectedValue: currentRaw },
-              ...(legacyKey === SUMMARY_INDEX_KEY
-                ? []
-                : [{ key: legacyKey, expectedValue: legacyRaw }]),
-              { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
-            ],
-            [
-              { type: 'delete', key: currentKey },
-              ...(legacyKey === SUMMARY_INDEX_KEY
-                ? []
-                : [{ type: 'delete' as const, key: legacyKey }]),
-              ...operations,
-            ],
-          );
-          // The `boolean` return is derived from the exact `currentRaw`/
-          // `legacyRaw` values the CAS just verified were still current when
-          // it committed — one atomic delete-and-count, never a separate
-          // existence check followed by a delete (AB-371).
-          if (deleted) return currentRaw !== null || legacyRaw !== null;
-          const bodyValues = JSON.stringify([currentRaw, legacyRaw]);
-          if (previousBodyValues !== undefined && previousBodyValues !== bodyValues) {
-            deleteConflicts += 1;
-          }
-          previousBodyValues = bodyValues;
-          if (deleteConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
-            throw new SessionConflictError(id, 'deleted');
-          }
-        }
-        throw new SessionConflictError(id, 'deleted');
-      });
-    },
+    delete: deleteSession,
 
     async list(options?: SessionListOptions): Promise<SessionSummary[]> {
       return runMutation(async () => {

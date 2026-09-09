@@ -606,6 +606,44 @@ describe('createSessionStore', () => {
     expect(await store.delete('nonexistent')).toBe(false);
   });
 
+  it('delete(id, { returnIncarnation: true }) reports removed and the incarnation of the exact body it removed (AB-384)', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'delete-incarnation' });
+
+    await store.save(session);
+    const incarnation = (await store.load(session.id))!.incarnation;
+    expect(incarnation).not.toBe('');
+
+    const result = await store.delete(session.id, { returnIncarnation: true });
+    expect(result).toEqual({ removed: true, incarnation });
+    expect(await store.load(session.id)).toBeUndefined();
+  });
+
+  it('delete(id, { returnIncarnation: true }) reports removed: false and incarnation: undefined for a nonexistent session', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    expect(await store.delete('nonexistent', { returnIncarnation: true })).toEqual({
+      removed: false,
+      incarnation: undefined,
+    });
+  });
+
+  it('delete(id, { returnIncarnation: true }) never races a load() beforehand: a delete-then-recreate between load and delete cannot happen since there is no load', async () => {
+    // The correctness this overload buys over "load(id) then delete(id)":
+    // the incarnation reported is derived from the SAME CAS attempt that
+    // performed the delete, never a separately-timed read.
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'delete-incarnation-recreate' });
+    await store.save(session);
+    const firstIncarnation = (await store.load(session.id))!.incarnation;
+    await store.delete(session.id);
+    await store.save(makeSession({ id: session.id }));
+    const secondIncarnation = (await store.load(session.id))!.incarnation;
+    expect(secondIncarnation).not.toBe(firstIncarnation);
+
+    const result = await store.delete(session.id, { returnIncarnation: true });
+    expect(result).toEqual({ removed: true, incarnation: secondIncarnation });
+  });
+
   it('delete resolves false for a session already removed by a prior call', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);

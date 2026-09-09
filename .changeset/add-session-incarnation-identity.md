@@ -8,4 +8,6 @@ Adds `AgentSession.incarnation` and dispatches `SessionCreatedEvent`/`SessionSav
 
 `SessionStore.save()`/`update()` now dispatch `SessionCreatedEvent` (first successful commit of a live body) or `SessionSavedEvent` (every later commit) on a new `SessionStore.events: TypedEventTarget<OperativeEventMap>` — both classes' constructors gain a required third `incarnation` argument. `SessionDeletedEvent`'s constructor gains a required second `incarnation` argument, carrying the deleted record's own value at the moment of deletion. `events` is a required (non-optional) member of the `SessionStore` interface: a caller supplying its own `SessionStore` implementation, rather than `createSessionStore()`'s, must add it.
 
+`SessionStore.delete()` gains an overload, `delete(id, { returnIncarnation: true }): Promise<{ removed: boolean; incarnation: string | undefined }>`, alongside the existing `delete(id): Promise<boolean>` (unchanged, still the AB-371 contract). The new overload reports the incarnation of the exact body the delete atomically removed, closing a real race a caller reading `load(id)` before calling `delete(id)` would otherwise have (another process can delete-and-recreate the id between those two calls).
+
 Nothing else is renamed, reshaped, or removed.

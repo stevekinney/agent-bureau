@@ -5379,7 +5379,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         if (!isPaused) abortRun(runId);
       }
 
-      const removedLiveRecord = await sessionStore.delete(id);
+      // AB-384 (Codex/Copilot review finding, PR #592, "SessionDeletedEvent
+      // carries the wrong incarnation across a cross-process race"): uses
+      // the `{ returnIncarnation: true }` overload rather than the `session`
+      // snapshot loaded above — that snapshot's `incarnation` has a real
+      // race window (another process can delete-and-recreate this id
+      // between that earlier `load()` and this `delete()`), where this
+      // overload has none: it reports the incarnation of the exact body
+      // this SAME atomic delete-and-count removed.
+      const { removed: removedLiveRecord, incarnation: removedIncarnation } =
+        await sessionStore.delete(id, { returnIncarnation: true });
       onStoreDeletionCommitted();
 
       // AB-228 (Codex P1 + follow-up review findings, PR #566): the durable
@@ -5436,17 +5445,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // `run.error` — gets the lower `sequence` and sorts first, with no
       // dependency on wall-clock granularity or real elapsed time between
       // the two. See `create-bureau.test.ts`'s AB-370 regression coverage.
-      // AB-384: `session.incarnation` is the pre-load `session` snapshot's
-      // own value — there is a load→delete window in which another process
-      // could recreate the id with a fresh incarnation before this delete
-      // commits; a genuinely later recreation racing this narrowly would
-      // carry the OLD incarnation on this event even though `sessionStore`
-      // itself already holds the new one. Not closed here, the same way
-      // AB-371's own known cross-process limitation above is not closed:
-      // `sessionDeletedListener`'s in-flight dedupe keys on this value, so
-      // the residual risk is the same narrow in-flight-write conflation
-      // that listener's own doc comment already documents, not a new one.
-      if (removedLiveRecord) emitter.dispatch(new SessionDeletedEvent(id, session.incarnation));
+      // AB-384: `removedIncarnation` comes from the SAME atomic delete
+      // above, not a separately-timed `load()` — no load→delete race window
+      // to document here (see that call's own comment). `?? session.incarnation`
+      // is a defensive fallback only, never expected to differ: the pre-load
+      // `session` snapshot's own value, used only if the store somehow
+      // reports `removed: true` with `incarnation: undefined` (a legacy
+      // body that was never re-saved after this field existed carries `''`,
+      // never `undefined`, so this fallback is not expected to trigger in
+      // production).
+      if (removedLiveRecord) {
+        emitter.dispatch(new SessionDeletedEvent(id, removedIncarnation ?? session.incarnation));
+      }
 
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,
