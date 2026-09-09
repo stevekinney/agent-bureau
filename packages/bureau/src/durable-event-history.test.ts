@@ -448,6 +448,146 @@ describe('createDurableEventHistory', () => {
     });
   });
 
+  describe('latestDeletionMarker() (AB-385)', () => {
+    it('finds a session.deleted marker regardless of a small limit or a since cursor that would exclude it from page()', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'session' as const, id: 'session-1' };
+
+      await history.record(owner, 'session.created', {});
+      const marker = await history.record(owner, 'session.deleted', {});
+      await history.record(owner, 'session.saved', {});
+      await history.record(owner, 'session.saved', {});
+
+      // A page limited to the first event, or one starting strictly after
+      // the marker's own cursor, never contains it — proving this read is
+      // genuinely independent of `page()`'s own window.
+      const truncatedPage = await history.page(owner, { limit: 1 });
+      if ('outcome' in truncatedPage) throw new Error('expected a page, got a gap');
+      expect(truncatedPage.events.map((event) => event.kind)).not.toContain('session.deleted');
+
+      const afterMarkerPage = await history.page(owner, { since: marker.cursor });
+      if ('outcome' in afterMarkerPage) throw new Error('expected a page, got a gap');
+      expect(afterMarkerPage.events.map((event) => event.kind)).not.toContain('session.deleted');
+
+      const found = await history.latestDeletionMarker(owner);
+      expect(found).toEqual(marker);
+
+      await history.dispose();
+    });
+
+    it('finds a run.removed marker regardless of a small limit or a since cursor that would exclude it from page()', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      await history.record(owner, 'run.completed', {});
+      const marker = await history.record(owner, 'run.removed', {});
+
+      const truncatedPage = await history.page(owner, { limit: 1 });
+      if ('outcome' in truncatedPage) throw new Error('expected a page, got a gap');
+      expect(truncatedPage.events.map((event) => event.kind)).not.toContain('run.removed');
+
+      const found = await history.latestDeletionMarker(owner);
+      expect(found).toEqual(marker);
+
+      await history.dispose();
+    });
+
+    it('returns the highest-sequence marker when more than one is retained (a recreated id deleted twice)', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'session' as const, id: 'session-1' };
+
+      await history.record(owner, 'session.deleted', {});
+      await history.record(owner, 'session.created', {});
+      const secondMarker = await history.record(owner, 'session.deleted', {});
+
+      const found = await history.latestDeletionMarker(owner);
+      expect(found).toEqual(secondMarker);
+
+      await history.dispose();
+    });
+
+    it('returns undefined when the owner has never recorded a deletion marker', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      await history.record(owner, 'run.completed', {});
+
+      const found = await history.latestDeletionMarker(owner);
+      expect(found).toBeUndefined();
+
+      await history.dispose();
+    });
+
+    it('never scans the feed for a schedule owner, which has no deletion-marker concept', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      // Would be found for a `run`/`session` owner (same kind string,
+      // different owner kind) — proving this returns `undefined` from the
+      // owner-kind check itself, not merely because no matching record
+      // exists.
+      await history.record({ kind: 'run', id: 'schedule-1' }, 'run.removed', {});
+
+      const found = await history.latestDeletionMarker({ kind: 'schedule', id: 'schedule-1' });
+      expect(found).toBeUndefined();
+
+      await history.dispose();
+    });
+
+    it("ignores another owner's deletion marker of the same kind", async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'run-a' }, 'run.removed', {});
+
+      const found = await history.latestDeletionMarker({ kind: 'run', id: 'run-b' });
+      expect(found).toBeUndefined();
+
+      await history.dispose();
+    });
+
+    it('skips a corrupt marker record, diagnosing rather than throwing, and still finds an earlier valid one', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const diagnostics: BureauDiagnostic[] = [];
+      const history = createDurableEventHistory(storage, runtime, (diagnostic) => {
+        diagnostics.push(diagnostic);
+      });
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      const marker = await history.record(owner, 'run.removed', {});
+
+      const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await rawFeed.append({
+        kind: 'run.removed',
+        workflowId: 'run:run-1',
+        emittedAtMs: 0,
+        payload: 'not-a-wrapper',
+      });
+      rawFeed.dispose();
+
+      const found = await history.latestDeletionMarker(owner);
+      expect(found).toEqual(marker);
+      expect(
+        diagnostics.some((diagnostic) =>
+          diagnostic.message.includes('Skipped corrupt deletion marker'),
+        ),
+      ).toBe(true);
+
+      await history.dispose();
+    });
+  });
+
   describe('retainedRunOwnerIds() (AB-363)', () => {
     it('returns undefined when the retention floor is still 0 — nothing has been retired yet', async () => {
       const storage = await createMemoryStorage();
@@ -1433,6 +1573,9 @@ function createRecordingHistory(
       throw new Error('unused by createDurableEventProducer');
     },
     refreshRetainedRunOwnerIds() {
+      throw new Error('unused by createDurableEventProducer');
+    },
+    latestDeletionMarker() {
       throw new Error('unused by createDurableEventProducer');
     },
     dispose: async () => {},

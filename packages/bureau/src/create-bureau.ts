@@ -6908,21 +6908,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * Schedule owners have no ownership/authorization or deletion concept in
    * this codebase today, so they pass straight through to `page()`.
    *
-   * KNOWN LIMITATION, not closed here (Codex review finding, PR #580,
-   * "Detect deletion markers beyond the requested page"): this function
-   * examines only the ONE page `history.page()` returns under `options`'
-   * own limit (100 by default) — a session or run with more durable events
-   * than that limit could carry its own deletion marker on a LATER page
-   * this function never inspects, reporting an ordinary page instead of
-   * `deleted-aggregate` for a genuinely deleted owner. This is a
-   * structural limitation of every `resolveEventHistory` caller (not
-   * unique to this issue's session.deleted change — it existed the moment
-   * AB-313 shipped deleted-aggregate detection over a single bounded
-   * page), and closing it needs either an unbounded page-following loop
-   * here or a dedicated "has this owner ever been deleted" query on
-   * `DurableEventHistory` itself — a bigger design change than this
-   * function's own narrow evidence-plus-liveness check, left as a
-   * follow-up rather than solved ad hoc.
+   * AB-385 (coordinator ruling, 2026-09-08, closing the KNOWN LIMITATION
+   * this comment used to document — Codex review finding, PR #580, "Detect
+   * deletion markers beyond the requested page"): evidence of a deletion no
+   * longer comes from scanning the ONE page `history.page()` returns under
+   * `options`' own limit (100 by default) — a session or run with more
+   * durable events than that limit could carry its own deletion marker on a
+   * LATER page this function never inspected, reporting an ordinary page
+   * instead of `deleted-aggregate` for a genuinely deleted owner. Evidence
+   * now comes from `history.latestDeletionMarker(owner)`, a dedicated read
+   * over the ENTIRE retained feed, independent of `since`/`limit` — the
+   * classification below no longer depends on the caller's own pagination
+   * parameters. The requested page's own `events`/`hasMore` are still
+   * returned verbatim on the `deleted-aggregate` outcome; only the OUTCOME
+   * classification uses the independent read, matching both marker kinds.
    */
   async function resolveEventHistory(
     history: DurableEventHistory,
@@ -7057,15 +7056,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return page; // a DurableEventGap
     }
 
-    const deletionMarkerKind =
-      owner.kind === 'session'
-        ? 'session.deleted'
-        : owner.kind === 'run'
-          ? 'run.removed'
-          : undefined;
-    const hasDeletionMarker =
-      deletionMarkerKind !== undefined &&
-      page.events.some((event) => event.kind === deletionMarkerKind);
+    // AB-385 — independent of `options.since`/`options.limit`: a scan over
+    // the ENTIRE retained feed for this owner's own deletion marker, not
+    // merely the one page just fetched above. See `latestDeletionMarker`'s
+    // own doc comment (`durable-event-history.ts`) for why the requested
+    // page's events are still returned verbatim below; only this
+    // classification changes.
+    const hasDeletionMarker = (await history.latestDeletionMarker(owner)) !== undefined;
 
     // Only load the live session record post-page when it can actually
     // change the outcome: either a `principal` needs reauthorizing against

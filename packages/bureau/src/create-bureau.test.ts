@@ -13401,6 +13401,163 @@ describe('bureau.eventHistory authorization and deleted-aggregate (AB-313)', () 
   });
 });
 
+describe('bureau.eventHistory deleted-aggregate detection is independent of the requested window (AB-385)', () => {
+  it('returns deleted-aggregate for a run whose deletion marker falls OUTSIDE a small-limit page', async () => {
+    // AB-385 (coordinator ruling, 2026-09-08): `resolveEventHistory` used to
+    // detect a deletion marker only by scanning the ONE page it was about
+    // to return — a caller whose `limit` truncated the page before reaching
+    // the marker was told the run was live. This writes several events,
+    // THEN the `run.removed` marker (`bureau.store.recordAction` cannot
+    // record anything more for a run id once `deleteRun` has removed it
+    // from the in-memory store, so — unlike the session case below — the
+    // marker here is necessarily the LAST event, and the window that
+    // excludes it is a small `limit` rather than a `since` past it), and
+    // queries with a `limit` small enough that the returned page never
+    // contains the marker — the outcome must still classify as
+    // `deleted-aggregate`.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-run-marker-out-of-window-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Delete me after a longer history' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      // More events BEFORE the marker, recorded while the run is still
+      // registered in the store (`Store.recordAction` no-ops once
+      // `deleteRun` removes it).
+      bureau.store.recordAction(run.id, 'run.completed', { finishReason: 'stop' });
+      bureau.store.recordAction(run.id, 'run.completed', { finishReason: 'stop' });
+      await runtime.deferred.drain();
+
+      await bureau.deleteRun(run.id);
+      await runtime.deferred.drain();
+
+      // Read the full history once (no window) to confirm the marker's
+      // position, exactly the way the sibling AB-372 "reauthorizes ... even
+      // when the requested page omits its deletion marker" test does.
+      const fullOutcome = await bureau.eventHistory({ kind: 'run', id: run.id });
+      if (!('outcome' in fullOutcome) || fullOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(fullOutcome)}`);
+      }
+      expect(fullOutcome.events.map((event) => event.kind)).toEqual([
+        'run.completed',
+        'run.completed',
+        'run.completed',
+        'run.removed',
+      ]);
+
+      // A page limited to the first two events never reaches the marker —
+      // the pre-AB-385 detection would have reported an ordinary page here.
+      const outOfWindowOutcome = await bureau.eventHistory(
+        { kind: 'run', id: run.id },
+        { limit: 2 },
+      );
+      if (
+        !('outcome' in outOfWindowOutcome) ||
+        outOfWindowOutcome.outcome !== 'deleted-aggregate'
+      ) {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(outOfWindowOutcome)}`);
+      }
+      expect(outOfWindowOutcome.owner).toEqual({ kind: 'run', id: run.id });
+      expect(outOfWindowOutcome.events.map((event) => event.kind)).toEqual([
+        'run.completed',
+        'run.completed',
+      ]);
+      expect(outOfWindowOutcome.events.map((event) => event.kind)).not.toContain('run.removed');
+      expect(outOfWindowOutcome.hasMore).toBe(true);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('returns deleted-aggregate for a session whose deletion marker falls OUTSIDE the requested since/limit window', async () => {
+    // Same fix, the other marker kind (`session.deleted`), synthesized the
+    // same supported way the sibling AB-313 session test does
+    // (`bureau.store.recordAction`), since nothing durably records
+    // `session.deleted` for an id no live session was ever saved under.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-session-marker-out-of-window-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const sessionId = 'sess-out-of-window';
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Carry a session lifecycle' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId });
+      bureau.store.recordAction(run.id, 'session.deleted', { sessionId });
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId });
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId });
+      await runtime.deferred.drain();
+
+      const fullOutcome = await bureau.eventHistory({ kind: 'session', id: sessionId });
+      if (!('outcome' in fullOutcome) || fullOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(fullOutcome)}`);
+      }
+      expect(fullOutcome.events.map((event) => event.kind)).toEqual([
+        'session.saved',
+        'session.deleted',
+        'session.saved',
+        'session.saved',
+      ]);
+      const markerCursor = fullOutcome.events.find(
+        (event) => event.kind === 'session.deleted',
+      )?.cursor;
+      if (markerCursor === undefined) throw new Error('expected a session.deleted cursor');
+
+      const outOfWindowOutcome = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { since: markerCursor },
+      );
+      if (
+        !('outcome' in outOfWindowOutcome) ||
+        outOfWindowOutcome.outcome !== 'deleted-aggregate'
+      ) {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(outOfWindowOutcome)}`);
+      }
+      expect(outOfWindowOutcome.owner).toEqual({ kind: 'session', id: sessionId });
+      expect(outOfWindowOutcome.events.map((event) => event.kind)).toEqual([
+        'session.saved',
+        'session.saved',
+      ]);
+      expect(outOfWindowOutcome.events.map((event) => event.kind)).not.toContain('session.deleted');
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
 describe('bureau.eventHistory deleted-aggregate through a real session deletion (AB-372)', () => {
   it('returns deleted-aggregate for a session deleted through a real bureau.deleteSession call, with no synthetic record injected', async () => {
     // AB-313's own "returns deleted-aggregate for a session.deleted owner"
