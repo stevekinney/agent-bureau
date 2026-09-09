@@ -2186,6 +2186,52 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
+    it('never emits a duplicate recovered summary when the intent changes between being read and the atomic write that reconciles it (Codex review, PR #597, "Make prune-summary recovery idempotent")', async () => {
+      const base = textValueStore(new MemoryStorage());
+      await base.set(
+        'audit-retention:v1:prune-intent',
+        JSON.stringify({ count: 3, cutoffMs: 4000 }),
+      );
+      await seedRecord(base, makeRecord(0, { timestampMs: 1000, runId: 'run-new' }));
+
+      let racedOnce = false;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        async conditionalBatch(conditions, operations) {
+          const targetsIntent = conditions.some(
+            (condition) => condition.key === 'audit-retention:v1:prune-intent',
+          );
+          if (targetsIntent && !racedOnce) {
+            racedOnce = true;
+            // Simulates a concurrent writer changing the intent's stored
+            // value between THIS call's own earlier `kv.get` and its
+            // `conditionalBatch` here — the CAS precondition below no
+            // longer matches the current value, so the real
+            // `conditionalBatch` call must fail and reconcile nothing.
+            await base.set(
+              'audit-retention:v1:prune-intent',
+              JSON.stringify({ count: 3, cutoffMs: 4000, racedBy: 'someone-else' }),
+            );
+          }
+          return base.conditionalBatch(conditions, operations);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
+
+      const result = await trail.prune(9000);
+      expect(result?.prunedCount).toBe(1);
+
+      // The reconciliation's own CAS lost the race, so it emitted NOTHING
+      // for the stale intent — only this pass's own normal summary exists.
+      const prunedRecords = await trail.query({ type: 'audit.pruned' });
+      expect(prunedRecords).toHaveLength(1);
+      expect(prunedRecords[0]?.detail).toEqual({ count: 1, cutoffMs: 9000 });
+
+      trail.dispose();
+    });
+
     it('discards a leftover intent record that is valid JSON but the wrong shape, rather than blocking every future pass forever', async () => {
       const kv = textValueStore(new MemoryStorage());
       // Valid JSON, but missing `count`/`cutoffMs` — not a

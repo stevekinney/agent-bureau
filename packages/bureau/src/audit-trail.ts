@@ -1340,6 +1340,27 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
    * BEFORE that pass does any new listing or deleting of its own, so a
    * missed summary is reconciled at the first opportunity rather than
    * waiting for some unrelated future trigger.
+   *
+   * AB-388 (Codex review, PR #597, "Make prune-summary recovery
+   * idempotent"): the summary write and the intent clear commit through
+   * ONE `kv.conditionalBatch` call, CAS-guarded on the intent's own raw
+   * value — never two separate calls. Without this, a crash (or a
+   * rejected delete) between a successful summary write and the
+   * following `kv.delete(PRUNE_INTENT_KEY)` would leave the intent
+   * behind even though its summary is already durable, and the NEXT
+   * pass's own call to this function would emit a SECOND, duplicate
+   * `audit.pruned` record for the same already-accounted-for deletions —
+   * inflating any consumer aggregating `detail.count`. The CAS
+   * precondition also makes two instances racing this same reconciliation
+   * safe: only the first commits, and it doesn't matter WHICH one — the
+   * loser's own conditionalBatch simply reports `false` and this function
+   * returns without emitting anything, exactly as if nothing needed
+   * reconciling. Deliberately bypasses `writeOutOfBandRecord` (and its
+   * `activeWrites` bookkeeping) for this one write — this call is always
+   * awaited as the first step of `runPrunePassLocked`, itself awaited the
+   * whole way up through `prune()`, so it is already covered by that
+   * chain's own tracking; see `writeOutOfBandRecord`'s own doc comment for
+   * what that bookkeeping is for.
    */
   async function reconcileOrphanedPruneIntent(): Promise<void> {
     if (!kv) return;
@@ -1358,15 +1379,30 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       await kv.delete(PRUNE_INTENT_KEY);
       return;
     }
-    await writeOutOfBandRecord(
-      {
-        runId: 'bureau:audit-retention',
-        type: 'audit.pruned',
-        detail: { count: intent.count, cutoffMs: intent.cutoffMs, recovered: true },
-      },
-      { strict: true, bypassAbortCheck: true },
+
+    const timestampMs = runtime.clock.now();
+    const sequence = allocateSequence();
+    const record: AuditRecord = {
+      timestamp: new Date(timestampMs).toISOString(),
+      timestampMs,
+      sequence,
+      runId: 'bureau:audit-retention',
+      type: 'audit.pruned',
+      detail: { count: intent.count, cutoffMs: intent.cutoffMs, recovered: true },
+    };
+    const summaryKey = encodeKey(timestampMs, sequence, 'bureau:audit-retention');
+
+    // A `false` result means the intent no longer matches what was just
+    // read — another instance already reconciled it (or a fresh pass
+    // already overwrote it with a new intent of its own) — either way,
+    // there is nothing left for THIS call to do.
+    await kv.conditionalBatch(
+      [{ key: PRUNE_INTENT_KEY, expectedValue: raw }],
+      [
+        { type: 'set', key: summaryKey, value: JSON.stringify(record) },
+        { type: 'delete', key: PRUNE_INTENT_KEY },
+      ],
     );
-    await kv.delete(PRUNE_INTENT_KEY);
   }
 
   async function runPrunePassLocked(
@@ -1627,6 +1663,28 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // failure above throws out of this function before reaching here,
     // deliberately leaving the intent in place for the NEXT pass's
     // `reconcileOrphanedPruneIntent` to recover.
+    //
+    // ACCEPTED RESIDUAL (Codex review, PR #597, "Make prune-summary
+    // recovery idempotent"): unlike `reconcileOrphanedPruneIntent`'s own
+    // summary-write-plus-clear (made atomic via `conditionalBatch` for
+    // exactly this reason), this `kv.delete()` is a SEPARATE call from the
+    // `writeOutOfBandRecord` above it — a crash (or a rejected delete)
+    // between the two would leave this intent behind even though its
+    // summary already landed, and the next pass's own reconciliation
+    // would then emit ONE duplicate `audit.pruned` record for it. Left
+    // as-is rather than rewritten onto the same raw `conditionalBatch`
+    // primitive: that write's `strict`/`bypassAbortCheck` behavior and its
+    // `activeWrites` tracking are exercised by several existing tests
+    // (this pass's shutdown-race and summary-failure-propagation
+    // coverage), and this window is narrower than the recovery path's own
+    // — no listing/decoding/deleting happens between this summary write
+    // succeeding and this line, unlike the gap between a crash mid-delete-
+    // loop and a LATER pass's reconciliation. A future fix that also
+    // closes this specific window should extend the SAME idempotency
+    // guarantee here, not silently duplicate the accepted-residual pattern
+    // without documenting it, consistent with this file's existing
+    // residuals (see `pruneAuditTrail`'s own cross-process write-race
+    // doc comment in `create-bureau.ts`).
     await kv.delete(PRUNE_INTENT_KEY);
 
     // Surfaced only AFTER the partial summary above has been durably

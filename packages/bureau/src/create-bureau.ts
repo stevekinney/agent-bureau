@@ -5565,6 +5565,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * cross-process race (multiple maintenance ticks observing the same
    * unacknowledged outbox entry before either acknowledges it) — closing
    * it fully is out of scope here and left as a follow-up.
+   *
+   * ACCEPTED RESIDUAL (Codex review, PR #597, "Revalidate retained owners
+   * before deleting audit records"): `retainedRunOwnerIdsForAuditRetention()`
+   * below takes ONE snapshot, used for the ENTIRE `auditTrailInstance.prune()`
+   * call that follows — including its own candidate-listing phase, which
+   * can take real time for a large trail. A durable event that starts
+   * AFTER this snapshot but lands before `prune()` reaches that
+   * candidate's key (e.g. a concurrent `deleteRun()` appending `run.removed`
+   * for a run whose earlier feed events had already aged out) makes that
+   * run newly retained without this snapshot ever seeing it, so its
+   * earlier `tool.*`/`step.completed` audit records can still be deleted
+   * this pass. `pruneStaleRunOwnership()` closes the identical class of
+   * staleness for ITS OWN owner-set consumption by revalidating via
+   * `refreshRetainedRunOwnerIds()` immediately before every write (see
+   * that function's own doc comment) — doing the same here would require
+   * `AuditTrail.prune()`'s `protectRunId` to become an ASYNC predicate,
+   * re-checked per candidate during both the listing AND deletion phases,
+   * a substantially larger change to a function this same round of fixes
+   * already hardened for lease coordination, atomic summary/intent
+   * commits, and non-finite-cutoff validation. Left as a follow-up rather
+   * than rushed alongside those; the window this leaves open is narrower
+   * than it looks in practice — `protectRunId` is evaluated once per
+   * candidate during listing, not re-checked at delete time, so exposure
+   * is bounded by how long that listing scan takes, not by the (often
+   * slower) delete loop after it.
    */
   async function pruneAuditTrail(): Promise<void> {
     if (!auditTrailInstance) return;
