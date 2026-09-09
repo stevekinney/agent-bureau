@@ -1082,8 +1082,8 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // module's top-of-file doc comment and `sessionDeletedListener`'s own
   // below — by giving `SessionDeletedEvent` a real per-incarnation
   // identity instead of resurrecting this clearing branch.
-  // AB-384 — keyed by `${encodeOwner(owner)}:${incarnation}`, not owner
-  // alone; see `sessionDeletedListener`'s own doc comment below.
+  // AB-384 — keyed by `JSON.stringify([encodeOwner(owner), incarnation])`,
+  // not owner alone; see `sessionDeletedListener`'s own doc comment below.
   const pendingSessionDeletionWrites = new Map<string, Promise<void>>();
 
   // AB-372 (Codex review findings, PR #580, "Remember handled deletion
@@ -1302,8 +1302,16 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
     // AB-384 — keyed by `(id, incarnation)`, not `ownerKey` alone (see this
     // listener's own doc comment above): two different incarnations of the
     // same session id are two independent deletions, never duplicates of
-    // each other, even when their writes overlap.
-    const dedupeKey = `${ownerKey}:${event.incarnation}`;
+    // each other, even when their writes overlap. `JSON.stringify` of the
+    // two-element tuple, not template-string concatenation (Codex P2 review
+    // finding, PR #592, "Encode deletion dedupe keys without delimiter
+    // collisions"): a plain `${ownerKey}:${incarnation}` is not a unique
+    // encoding once an injected `RuntimeIdentifiers.next` policy can emit a
+    // colon — `('x:y', 'z')` and `('x', 'y:z')` would both concatenate to
+    // the same string. `JSON.stringify` escapes each element's own
+    // delimiter-like characters, so distinct tuples always serialize to
+    // distinct strings.
+    const dedupeKey = JSON.stringify([ownerKey, event.incarnation]);
     if (pendingSessionDeletionWrites.has(dedupeKey)) return;
     trackWrite(ownerKey, () => {
       const write = history

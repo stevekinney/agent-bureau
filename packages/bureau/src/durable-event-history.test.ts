@@ -2321,6 +2321,42 @@ describe('createDurableEventProducer()', () => {
     await producer.dispose();
   });
 
+  it('does not conflate two DIFFERENT (sessionId, incarnation) pairs whose delimiter-joined forms would collide (Codex P2 review finding, PR #592, "Encode deletion dedupe keys without delimiter collisions")', async () => {
+    // A plain `${ownerKey}:${incarnation}` template-string key is not a
+    // unique encoding once an injected identifier policy can emit a colon:
+    // `('x:y', 'z')` and `('x', 'y:z')` both concatenate to the identical
+    // string. The dedupe key must be collision-free even in that case.
+    const runtime = createManualRuntimeServices();
+    let releaseFirstWrite!: () => void;
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let writeCount = 0;
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory(async () => {
+      writeCount += 1;
+      if (writeCount === 1) await firstWriteGate;
+    });
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    // Overlapping writes for two GENUINELY DIFFERENT session/incarnation
+    // pairs whose naive `id:incarnation` concatenation would be identical.
+    dispatchSessionDeleted(new SessionDeletedEvent('x:y', 'z'));
+    dispatchSessionDeleted(new SessionDeletedEvent('x', 'y:z'));
+
+    releaseFirstWrite();
+    await runtime.deferred.drain();
+
+    const deletionCalls = calls.filter((call) => call.kind === 'session.deleted');
+    expect(deletionCalls).toHaveLength(2);
+    expect(deletionCalls.map((call) => call.owner)).toEqual([
+      { kind: 'session', id: 'x:y' },
+      { kind: 'session', id: 'x' },
+    ]);
+
+    await producer.dispose();
+  });
+
   it('records session.created and session.saved under the session owner from directly-dispatched events (AB-384)', async () => {
     // `SESSION_DURABLE_ACTION_TYPES` has listed `'session.created'`/
     // `'session.saved'` since AB-91, but — same gap `session.deleted` had

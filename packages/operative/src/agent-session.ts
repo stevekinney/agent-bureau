@@ -108,12 +108,23 @@ export function createAgentSession(options: {
 
 /**
  * Saves an agent session through the conflict-aware SessionStore path.
+ *
+ * `options.runtime` (AB-384, Codex P2 review finding, PR #592, "Pass the
+ * runtime through standalone session saves") is forwarded to
+ * `createSessionStore()` so a first-time save mints `AgentSession.incarnation`
+ * from the SAME injected `RuntimeServices.identifiers` seam the caller's own
+ * `createAgentSession({ runtime })` used for `id`/timestamps, rather than a
+ * second, internally-constructed default instance reading real
+ * `crypto.randomUUID()` — the identical class of bug `createRuntimeComposition`
+ * had for the Bureau-composed store. Defaults to the real globals when
+ * omitted, unchanged from before this option existed.
  */
 export async function saveAgentSession(
   store: ConditionalTextValueStore,
   session: AgentSession,
+  options: { runtime?: RuntimeServices } = {},
 ): Promise<void> {
-  await createSessionStore(store).save(session);
+  await createSessionStore(store, { runtime: options.runtime }).save(session);
 }
 
 /**

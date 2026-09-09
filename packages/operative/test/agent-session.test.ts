@@ -112,6 +112,22 @@ describe('saveAgentSession', () => {
     expect(parsed['createdAt']).toBe(session.createdAt);
     expect(typeof parsed['updatedAt']).toBe('string');
   });
+
+  it('mints AgentSession.incarnation from the injected runtime, not a second default one (AB-384, Codex P2 review finding, PR #592)', async () => {
+    const store = createMockKeyValueStore();
+    const runtime = createManualRuntimeServices();
+    const session = createAgentSession({
+      agentName: 'test-agent',
+      conversationHistory: createConversationHistory(),
+      id: 'runtime-forwarded',
+      runtime,
+    });
+
+    await saveAgentSession(store, session, { runtime });
+
+    const loaded = await loadAgentSession(store, 'runtime-forwarded');
+    expect(loaded?.incarnation).toBe(`${runtime.identifierPrefix}-session-incarnation-1`);
+  });
 });
 
 describe('loadAgentSession', () => {
