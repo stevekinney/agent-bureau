@@ -1480,6 +1480,25 @@ describe('createSessionStore', () => {
 });
 
 describe('AgentSession.incarnation (AB-384)', () => {
+  it('rejects (throws) rather than persisting an empty incarnation minted by a misbehaving RuntimeIdentifiers implementation (Codex P2 review finding, PR #592, "Reject empty incarnation IDs")', async () => {
+    // `RuntimeIdentifiers.next`'s own contract permits any string,
+    // including ''. Nothing enforces "nonempty" upstream, so the store
+    // itself must fail loudly rather than silently persist the exact
+    // sentinel `AgentSession.incarnation` reserves for "never minted".
+    const runtime = createManualRuntimeServices();
+    const faultyRuntime = {
+      ...runtime,
+      identifiers: { next: () => '' },
+    };
+    const store = createSessionStore(textValueStore(new MemoryStorage()), {
+      runtime: faultyRuntime,
+    });
+
+    expect(store.save(makeSession({ id: 'empty-incarnation' }))).rejects.toThrow(
+      /must never return ''/,
+    );
+  });
+
   it('mints an incarnation on the first save and keeps it stable across later save() and update() calls', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({ id: 'incarnation-stability' });

@@ -533,7 +533,26 @@ export function createSessionStore(
     // legacy record on its next write rather than persisting `''` forever.
     // Otherwise the live body's own incarnation carries forward unchanged,
     // stable across every `save()`/`update()` while that body stays live.
-    const incarnation = current?.incarnation || runtime.identifiers.next('session-incarnation');
+    const mintedIncarnation =
+      current?.incarnation || runtime.identifiers.next('session-incarnation');
+    // AB-384 (Codex P2 review finding, PR #592, "Reject empty incarnation
+    // IDs"): `RuntimeIdentifiers.next`'s own contract permits any string,
+    // including `''` — the exact sentinel `AgentSession.incarnation`
+    // reserves for "unminted" (a fresh `createAgentSession()`) and "legacy"
+    // (a pre-AB-384 record, defaulted by `parseSession`). An injected
+    // implementation that ever minted `''` here would silently disable
+    // every guarantee this field exists to provide: the NEXT write would
+    // treat this body as still needing a mint (re-minting on every commit,
+    // never stabilizing), and `assertMatchingIncarnation`'s stale-write
+    // fencing would treat it as `''` and skip the check entirely. Fail
+    // loudly instead of persisting a value indistinguishable from "never
+    // minted".
+    if (mintedIncarnation === '') {
+      throw new TypeError(
+        "SessionStore: the injected RuntimeIdentifiers implementation minted an empty string for kind 'session-incarnation' — AgentSession.incarnation reserves '' for an unminted or legacy session, so RuntimeIdentifiers.next() must never return '' for any kind this store mints.",
+      );
+    }
+    const incarnation = mintedIncarnation;
     const next: AgentSession = {
       ...session,
       incarnation,

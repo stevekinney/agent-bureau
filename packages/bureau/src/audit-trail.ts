@@ -753,7 +753,13 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     void writeOutOfBandRecord({
       runId: sessionOwnerId(event.sessionId),
       type: 'session.deleted',
-      detail: { sessionId: event.sessionId },
+      // AB-384 (Codex P2 review finding, PR #592, "Preserve the incarnation
+      // in deletion audit records"): `SessionDeletedEvent` now carries the
+      // deleted record's own `incarnation` — omitting it here would leave a
+      // consumer of `bureau.auditTrail` unable to tell WHICH live body a
+      // deletion removed when a session id was deleted, recreated, and
+      // deleted again, even though that identity is available.
+      detail: { sessionId: event.sessionId, incarnation: event.incarnation },
     });
   };
   bureau.addEventListener('session.deleted', sessionDeletedListener);

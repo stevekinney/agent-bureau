@@ -16267,6 +16267,7 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       await waitForRunCompletion(bureau, run.id);
       const session = await bureau.getSession(run.sessionId);
       expect(session).toBeDefined();
+      const incarnation = session!.incarnation;
 
       await bureau.deleteSession(run.sessionId);
 
@@ -16276,7 +16277,7 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
         type: 'session.deleted',
       });
       expect(deletedRecords).toHaveLength(1);
-      expect(deletedRecords[0]?.detail).toEqual({ sessionId: run.sessionId });
+      expect(deletedRecords[0]?.detail).toEqual({ sessionId: run.sessionId, incarnation });
 
       // Deleting an id that was never a live session dispatches nothing —
       // there is no genuine deletion fact to record.

@@ -14,4 +14,6 @@ Adds `AgentSession.incarnation` and dispatches `SessionCreatedEvent`/`SessionSav
 
 `saveAgentSession()` gains an optional third `options.runtime` argument, forwarded to `createSessionStore()` so a caller using `createAgentSession({ runtime })` mints `incarnation` from that same injected runtime rather than a second default one.
 
+A `SessionStore` commit rejects (throws `TypeError`) rather than persisting an empty string minted by a misbehaving `RuntimeIdentifiers` implementation for `'session-incarnation'` — `''` is the sentinel reserved for "never minted".
+
 Nothing else is renamed, reshaped, or removed.
