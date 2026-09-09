@@ -1580,6 +1580,36 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // for why `count` here is an upper bound, not a guarantee, for the
     // one case this recovers: a process that terminates mid-delete-loop
     // with no code left to run to record what actually committed.
+    //
+    // ACCEPTED RESIDUAL (Codex review, PR #600, "Update prune intent when
+    // delete-time protection skips records"): AB-393's own `'delete'`
+    // -phase `protectRunId` re-check below can also make `prunedCount`
+    // fall short of `candidates.length` for a reason OTHER than a crash
+    // or a delete failure — a candidate newly protected between listing
+    // and its own delete is deliberately, correctly SKIPPED, not deleted.
+    // If this pass then crashes (or its strict summary write rejects)
+    // before reaching its own summary write, the NEXT pass's
+    // `reconcileOrphanedPruneIntent()` recovers `candidates.length` —
+    // which now overstates the true `prunedCount` by however many
+    // candidates were skipped for protection, not only by however many
+    // were still pending when the crash landed. This is the SAME class
+    // of imprecision `reconcileOrphanedPruneIntent`'s own doc comment
+    // already names and accepts (the intent is deliberately an upper
+    // bound, "not a guarantee," because a crash mid-loop leaves no
+    // evidence of what actually committed) — AB-393 adds a second,
+    // non-crash reason the same upper bound can be inexact, rather than
+    // introducing a new failure mode. Recomputing the intent's `count`
+    // to reflect ONLY candidates not yet known to be protected would
+    // require re-running every remaining candidate's `'delete'`-phase
+    // check BEFORE writing the intent — reopening the exact
+    // listing-vs-delete staleness window this issue exists to close for
+    // whichever candidates are checked early, and adding a second
+    // `protectRunId` call for every one of them. `detail.count` on the
+    // recovered `audit.pruned` record remains an upper bound on records
+    // REMOVED, never a claim that a still-present, still-protected
+    // record was deleted — no audit record is ever incorrectly deleted
+    // by this residual, only the recovered SUMMARY's own count can read
+    // high.
     // Cleared once THIS pass's own summary write below lands, whether
     // that summary reports a full or partial `prunedCount`.
     await kv.set(PRUNE_INTENT_KEY, JSON.stringify({ count: candidates.length, cutoffMs }));

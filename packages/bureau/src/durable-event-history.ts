@@ -225,16 +225,48 @@ export interface RetainedRunOwnerSnapshot {
   /**
    * AB-393 (Codex review, PR #600, "Batch retained-owner refreshes instead
    * of replaying per record"): the `sequence` of the last envelope this
-   * snapshot walked (including a `fleet:gap` marker, same as `cursor`) —
-   * `undefined` only when the feed was empty at scan time. Lets
-   * {@link DurableEventHistory.refreshRetainedRunOwnerIds} cheaply rule
-   * out "nothing new" with a single `FleetEventFeed.snapshotTailSequence()`
-   * read (the same tail record `FleetEventFeed.append()` always advances
-   * IN THE SAME storage batch as the event it appends — see that
-   * function's own doc comment) instead of unconditionally paying for a
-   * full `feed.replay()` page load on every call, most of which return
-   * nothing new. Opaque like `cursor` — never compare it to anything but
-   * another `snapshotTailSequence()` reading.
+   * snapshot walked (including a `fleet:gap` marker, same as `cursor`).
+   * Lets {@link DurableEventHistory.refreshRetainedRunOwnerIds} cheaply
+   * rule out "nothing new" with a single
+   * `FleetEventFeed.snapshotTailSequence()` read (the same tail record
+   * `FleetEventFeed.append()` always advances IN THE SAME storage batch
+   * as the event it appends — see that function's own doc comment)
+   * instead of unconditionally paying for a full `feed.replay()` page
+   * load on every call, most of which return nothing new. Opaque like
+   * `cursor` — never compare it to anything but another
+   * `snapshotTailSequence()` reading.
+   *
+   * AB-393 (Codex review, PR #600, "Fast-path refreshes for an initially
+   * empty feed"): never `undefined` in practice — a snapshot whose scan
+   * walked no `run` owner (nothing retained yet, or every envelope
+   * walked named a non-`run` owner — schedules, sessions, reviews) still
+   * gets a real, comparable value here via
+   * `FleetEventFeed.snapshotTailSequence()`, so a later refresh against
+   * an owner set that STAYS empty can still short-circuit instead of
+   * falling through to a full scan every single call. `undefined` is
+   * retained in the type only for a caller constructing a snapshot from
+   * scratch outside this module, which this module's own factories never
+   * do.
+   *
+   * ACCEPTED RESIDUAL (Codex review, PR #600, "Fast-path refreshes for an
+   * initially empty feed", round 2): this does NOT make every refresh
+   * against a feed cheap — a feed that has NEVER had a single event
+   * appended (no `KEYS.fleetEventTail()` record has ever been written)
+   * makes `FleetEventFeed.snapshotTailSequence()` ITSELF fall back to its
+   * own `storage.scan()` (see that function's own implementation in
+   * `fleet-event-feed.ts`), since there is no tail record yet to read
+   * cheaply. Every call against a genuinely virgin feed therefore still
+   * costs a scan, no cheaper than `feed.replay()`'s own scan would have
+   * — this module has no primitive available to distinguish "virgin,
+   * never appended" from "empty right now" any more cheaply than
+   * `FleetEventFeed` itself can. The moment ANY event is ever appended
+   * (by any run, schedule, or session action), the tail record exists
+   * permanently from then on and every later refresh becomes the cheap,
+   * single-`get` path described above — so this residual is bounded to
+   * the window before the very first durable event a bureau ever
+   * records. See this issue's own `upstreamDefects` for the weft-side
+   * enhancement (a cheap "has anything ever been appended" read, or an
+   * eagerly-written tail sentinel) that would close it fully.
    */
   readonly tailSequence: number | undefined;
 }
@@ -458,10 +490,15 @@ export interface DurableEventHistory {
    * `create-bureau.ts`) now pays that single-read cost per candidate, not
    * a page-load per candidate.
    *
-   * `snapshot.tailSequence === undefined` only when the feed was entirely
-   * empty at the time of the snapshot this call extends — falls through
-   * to the full scan unconditionally in that case, since there is no
-   * prior tail reading to compare against.
+   * `snapshot.tailSequence` is never `undefined` in practice — see that
+   * field's own doc comment on {@link RetainedRunOwnerSnapshot} for why
+   * even a snapshot taken against a genuinely empty feed still carries a
+   * real, comparable value (`FleetEventFeed.snapshotTailSequence()`'s own
+   * `-1` "nothing appended yet" sentinel), so THIS pre-check still
+   * short-circuits correctly for a feed that stays empty across
+   * repeated refreshes, rather than falling through to a full scan every
+   * single time (Codex review, PR #600, "Fast-path refreshes for an
+   * initially empty feed").
    *
    * The floor is monotonically non-decreasing once it has left 0 (nothing
    * un-retires a record), so a snapshot obtained while the floor was
@@ -1018,6 +1055,22 @@ export function createDurableEventHistory(
       const ownerKind = workflowId.slice(0, separator);
       if (ownerKind !== 'run') continue;
       owners.add(workflowId.slice(separator + 1));
+    }
+
+    // AB-393 (Codex review, PR #600, "Fast-path refreshes for an
+    // initially empty feed"): `tailSequence` only advances from an
+    // envelope `feed.replay()` actually yields above — a scan that walks
+    // nothing (a genuinely virgin feed) OR walks only non-`run` owners
+    // (see `RetainedRunOwnerSnapshot.tailSequence`'s own doc comment for
+    // that distinction and its accepted residual) leaves `tailSequence`
+    // at whatever `fromTailSequence` already was — `undefined` for a
+    // fresh scan. Confirming a real reading with one
+    // `feed.snapshotTailSequence()` call gives `tailSequence` a value a
+    // LATER refresh can trust and compare against, rather than being
+    // stuck re-deciding "unknown" forever. Only runs when nothing was
+    // walked above, so it costs nothing on every OTHER call.
+    if (tailSequence === undefined) {
+      tailSequence = await feed.snapshotTailSequence();
     }
     return { ownerIds: owners, cursor, tailSequence };
   }
