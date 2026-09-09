@@ -155,7 +155,13 @@ export function selectAuditWriteFaultTarget(
     'audit-write',
     `audit entry key "${auditEntryKey}"`,
     records,
-    (record) => encodeKey(record.timestampMs, record.sequence, record.runId) === auditEntryKey,
+    (record) =>
+      // AB-370: `sequence` is optional on `AuditRecord` (absent only on a
+      // record written before the field existed), but every record THIS
+      // trail's own write paths produce today always sets it — a genuine
+      // fault-plan target is always a freshly-written record, never a
+      // legacy one, so `?? 0` is a safe, honest fallback rather than a cast.
+      encodeKey(record.timestampMs, record.sequence ?? 0, record.runId) === auditEntryKey,
   );
 }
 

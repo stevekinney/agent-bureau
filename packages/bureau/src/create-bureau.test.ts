@@ -16336,7 +16336,7 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
-  it('dispatches session.deleted immediately, so it durably sorts BEFORE a released run own later terminal action rather than after it (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
+  it('dispatches session.deleted immediately, so it durably sorts BEFORE a released run\'s own later terminal action rather than after it (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
     // A prior round dispatched `session.deleted` only after every run this
     // deletion released or aborted had actually settled, specifically so a
     // released-paused-run's own terminal action — landing in the same
@@ -16415,6 +16415,243 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       expect(runTerminalIndex).toBeGreaterThanOrEqual(0);
       expect(sessionDeletedIndex).toBeGreaterThanOrEqual(0);
       expect(sessionDeletedIndex).toBeLessThan(runTerminalIndex);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it("AB-370: orders session.deleted before a released run's own later terminal action by sequence when both land in the exact same manual-clock millisecond", async () => {
+    // The test just above proves timestamp ordering when the two records
+    // genuinely land in different milliseconds (real elapsed wall-clock
+    // time between the dispatch and the released run's eventual terminal
+    // action). This test forces the SAME-millisecond collision the prior
+    // AB-228 comment in `create-bureau.ts` named as a residual, deliberately
+    // accepted risk: a manual clock never advances on its own, so every
+    // `Action.timestamp` (the operative store draws it from this same
+    // injected `runtime.clock.now()`) and every out-of-band audit write
+    // (`writeOutOfBandRecord` draws `timestampMs` from the identical clock)
+    // share the exact same value for the whole test, with no real elapsed
+    // time to fall back on.
+    //
+    // Before AB-370, `writeOutOfBandRecord`'s `manualSequence` started near
+    // `Number.MAX_SAFE_INTEGER` — always larger than any real
+    // `action.sequence` — so `session.deleted` was FORCED to sort AFTER the
+    // run's terminal action in exactly this collision, regardless of which
+    // one was actually dispatched first. That was a fixed bias, not a
+    // measurement: `create-bureau.ts` dispatches `SessionDeletedEvent`
+    // immediately after `sessionStore.delete()` commits, then releases this
+    // paused run via `settleForDeletion()`, and only THEN does the released
+    // run resume its step loop toward its own `run.completed` — so the
+    // deletion is genuinely dispatched first. AB-370's shared, per-bureau
+    // `sequence` counter (allocated at each write's dispatch time, before
+    // either write's asynchronous `kv.set` even starts) now reflects that
+    // true call order instead of the old fixed bias.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const runtime = createManualRuntimeServices();
+    // `createBureau`'s own `createStore()` call (`create-bureau.ts`) always
+    // builds the operative store with ITS OWN default (real) runtime unless
+    // a pre-built store is supplied — the bureau-level `runtime` option
+    // alone does not reach `Action.timestamp`. Passing `store` here,
+    // pre-built against the SAME manual `runtime`, is what makes the run's
+    // own action timestamps deterministic and pinned alongside the audit
+    // trail's out-of-band writes below.
+    const store = createStore({ runtime });
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+      runtime,
+      store,
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = run.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      // Deliberately never call `runtime.advance(...)` — the clock the
+      // operative store and the audit trail both read stays pinned at the
+      // exact same value from `createRun` through the released run's own
+      // eventual terminal action.
+      await bureau.deleteSession(sessionId);
+      await waitForRunCompletion(bureau, run.id);
+
+      const allRecords = await bureau.auditTrail!.query({ limit: 1000 });
+      const runTerminal = allRecords.find(
+        (record) => record.runId === run.id && record.type === 'run.completed',
+      );
+      const sessionDeleted = allRecords.find(
+        (record) => record.runId === `session:${sessionId}` && record.type === 'session.deleted',
+      );
+      if (!runTerminal || !sessionDeleted) {
+        throw new Error('expected both a run.completed and a session.deleted audit record');
+      }
+      // Both records genuinely share a timestamp — otherwise this test
+      // isn't exercising the same-millisecond collision at all, and the
+      // primary-timestamp sort (unaffected by this fix) would decide it.
+      expect(sessionDeleted.timestampMs).toBe(runTerminal.timestampMs);
+      expect(sessionDeleted.sequence).toBeDefined();
+      expect(runTerminal.sequence).toBeDefined();
+      // True call order: the deletion was dispatched before the released
+      // run resumed and reached its own terminal action.
+      expect(sessionDeleted.sequence!).toBeLessThan(runTerminal.sequence!);
+
+      const allIndexes = await bureau.auditTrail!.query({ limit: 1000 });
+      const sessionDeletedIndex = allIndexes.findIndex(
+        (record) => record.runId === `session:${sessionId}` && record.type === 'session.deleted',
+      );
+      const runTerminalIndex = allIndexes.findIndex(
+        (record) => record.runId === run.id && record.type === 'run.completed',
+      );
+      // `query()`'s own sort must reflect the same call order, not just the
+      // raw `sequence` field values compared directly above.
+      expect(sessionDeletedIndex).toBeLessThan(runTerminalIndex);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('AB-370: boots normally and resumes the sequence counter above prior history when a one-shot boot-scan failure recovers on retry', async () => {
+    // `computeInitialAuditSequence` retries a transient `kv.list` failure
+    // up to three times before this even reaches `createBureau` — this
+    // proves the RETRY, not a fallback, is what makes boot see the correct
+    // floor: a prior process already persisted sequence 9 for this run's
+    // owner, and the very first write after this (flaky) boot must land at
+    // 10, never re-issuing (or falling back below) anything already
+    // persisted.
+    const runtime = createManualRuntimeServices();
+    const baseKv = textValueStore(new MemoryStorage());
+    await baseKv.set(
+      'audit:v1:0000000000001000:000000000009:run-prior',
+      JSON.stringify({
+        timestamp: new Date(1000).toISOString(),
+        timestampMs: 1000,
+        sequence: 9,
+        runId: 'run-prior',
+        type: 'run.completed',
+        detail: null,
+      }),
+    );
+    let failListOnce = true;
+    const flakyKv: ReturnType<typeof textValueStore> = {
+      ...baseKv,
+      async list(prefix: string) {
+        if (prefix === 'audit:v1:' && failListOnce) {
+          failListOnce = false;
+          throw new Error('storage temporarily unavailable');
+        }
+        return baseKv.list(prefix);
+      },
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: flakyKv,
+      runtime,
+    });
+
+    try {
+      expect(bureau.ready).toBe(true);
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [record] = await bureau.auditTrail!.query({ runId: run.id, type: 'run.completed' });
+      // At or above 10 — the run may write several other audited events
+      // (tool.*, step.completed) before its own terminal action, each
+      // consuming one more value from the same shared counter; the exact
+      // count is an implementation detail, the FLOOR is what this test
+      // guards.
+      expect(record?.sequence).toBeGreaterThanOrEqual(10);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('AB-370: still boots successfully, diagnosing loudly and starting the sequence counter at 0, when the boot floor scan fails on every retry', async () => {
+    // Exhausting every retry must degrade — same as every other boot-time
+    // KV failure in `create-bureau.ts` — rather than failing bureau
+    // construction outright over one subsystem (Codex review, PR #594: an
+    // earlier round tried a clock-based "emergency floor" here instead,
+    // which turned out to be no safer than 0 against a deployment that
+    // already holds pre-existing, much-larger legacy sequences — see
+    // `computeInitialAuditSequence`'s own doc comment).
+    const runtime = createManualRuntimeServices();
+    const received: unknown[] = [];
+    const baseKv = textValueStore(new MemoryStorage());
+    // Only the audit trail's own `audit:v1:` prefix scan fails, and only
+    // for the boot scan's own three attempts — a bare "every `list()` call
+    // throws forever" stub would also break the session store's OWN
+    // unrelated `list()` usage AND every later `query()` this test itself
+    // calls afterward, for reasons this test isn't targeting.
+    let auditListFailuresRemaining = 3;
+    const failingKv: ReturnType<typeof textValueStore> = {
+      ...baseKv,
+      list: async (prefix: string) => {
+        if (prefix === 'audit:v1:' && auditListFailuresRemaining > 0) {
+          auditListFailuresRemaining -= 1;
+          throw new Error('storage unavailable');
+        }
+        return baseKv.list(prefix);
+      },
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: failingKv,
+      runtime,
+      onDiagnostic: (diagnostic) => received.push(diagnostic),
+    });
+
+    try {
+      expect(bureau.ready).toBe(true);
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      // The counter started at 0 (not a clock reading, not left unset) —
+      // some record from this run landed at exactly 0, proving the
+      // fallback floor rather than merely that SOME sequence exists.
+      const allRecords = await bureau.auditTrail!.query({ runId: run.id, limit: 1000 });
+      expect(allRecords.some((r) => r.sequence === 0)).toBe(true);
+      expect(
+        received.some(
+          (d) =>
+            typeof d === 'object' &&
+            d !== null &&
+            'message' in d &&
+            typeof d.message === 'string' &&
+            d.message.includes('starting the shared counter from 0'),
+        ),
+      ).toBe(true);
     } finally {
       await bureau.dispose();
     }

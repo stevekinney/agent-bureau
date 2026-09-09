@@ -17,7 +17,7 @@ import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { CompletableEventTarget } from 'lifecycle';
 
-import { type AuditRecord, createAuditTrail } from './audit-trail';
+import { type AuditRecord, computeInitialAuditSequence, createAuditTrail } from './audit-trail';
 import { ActionEvent, type BureauEventMap } from './events';
 import type { Bureau } from './types';
 
@@ -76,7 +76,10 @@ async function seedRecord(
   record: AuditRecord,
 ): Promise<void> {
   const ts = record.timestampMs.toString().padStart(16, '0');
-  const seq = record.sequence.toString().padStart(12, '0');
+  // `makeRecord`'s callers always pass a real `sequence`; `?? 0` only
+  // satisfies the type (optional since AB-370, for a legacy record written
+  // before the field existed) without changing any real call site's key.
+  const seq = (record.sequence ?? 0).toString().padStart(12, '0');
   // Keep in sync with `encodeKey` in audit-trail.ts: audit:v1:<ts>:<seq>:<runId>
   await kv.set(`audit:v1:${ts}:${seq}:${record.runId}`, JSON.stringify(record));
 }
@@ -294,7 +297,13 @@ describe('createAuditTrail', () => {
 
     const records = await trail.query({ runId: 'run-sink' });
     expect(records).toHaveLength(1);
-    expect(records[0]?.sequence).toBe(42);
+    // AB-370: `record.sequence` is drawn from the trail's own shared,
+    // per-bureau counter (starting at 0 on a fresh trail with no
+    // `initialSequence`) — it is deliberately NOT a copy of the action's
+    // own `action.sequence` (42) any more. `actionSequence` is where that
+    // original value is preserved, for the gateway's live+durable dedup.
+    expect(records[0]?.sequence).toBe(0);
+    expect(records[0]?.actionSequence).toBe(42);
     expect(records[0]?.runId).toBe('run-sink');
     trail.dispose();
   });
@@ -475,9 +484,11 @@ describe('createAuditTrail', () => {
     const trail = createAuditTrail(bureau, kv);
 
     // A live action-stream record and an out-of-band record for the SAME run,
-    // landing in the same millisecond, must both survive — proving the
-    // manual-record sequence counter (AB-20) never collides with a real
-    // action's sequence.
+    // landing in the same millisecond, must both survive. AB-370: both draw
+    // `sequence` from the SAME shared, monotonic per-bureau counter now
+    // (never two disjoint ranges), so uniqueness holds by construction —
+    // this proves that still holds through the real listener/`record()`
+    // wiring, not just at the counter's own unit level.
     const now = 1_700_000_000_000;
     emit(
       new ActionEvent({
@@ -674,7 +685,11 @@ describe('createAuditTrail', () => {
       expect(records[0]!.timestampMs).toBe(records[1]!.timestampMs);
       // Ascending sequence (the tiebreak `query()`/`/api/v1/audit` sort by)
       // must put the FIRST call before the SECOND — chronological order.
-      expect(records[0]!.sequence).toBeLessThan(records[1]!.sequence);
+      // Both come from this trail's own writes, so `sequence` is always
+      // defined here — the assertions below prove that instead of casting.
+      expect(records[0]!.sequence).toBeDefined();
+      expect(records[1]!.sequence).toBeDefined();
+      expect(records[0]!.sequence!).toBeLessThan(records[1]!.sequence!);
       expect((records[0]!.detail as { order: string }).order).toBe('first');
       expect((records[1]!.detail as { order: string }).order).toBe('second');
 
@@ -1083,6 +1098,230 @@ describe('createAuditTrail', () => {
       await yieldToPortableEventLoop();
 
       expect(await trail.query({ type: 'schedule.paused' })).toEqual([]);
+    });
+  });
+
+  // AB-370: one shared, monotonic `sequence` counter for every write path —
+  // see `AuditRecord.sequence`'s own doc comment for what this replaced.
+  describe('AB-370 — shared sequence counter', () => {
+    it('assigns sequence from one shared counter across the action-stream listener and record()', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      emit(
+        new ActionEvent({
+          type: 'tool.started',
+          timestamp: 1000,
+          sequence: 999, // deliberately far from the trail's own counter
+          runId: 'run-shared-seq',
+          detail: null,
+        }),
+      );
+      await yieldToPortableEventLoop();
+      await trail.record({
+        runId: 'run-shared-seq',
+        type: 'review.tool-approval.approved',
+        detail: {},
+      });
+
+      const records = await trail.query({ runId: 'run-shared-seq' });
+      expect(records).toHaveLength(2);
+      // The action-stream record got sequence 0 (the counter's first value,
+      // NOT the action's own sequence 999 — that is preserved separately as
+      // `actionSequence`), and the out-of-band `record()` call — which
+      // happened strictly after, in real call order — got sequence 1.
+      const toolRecord = records.find((r) => r.type === 'tool.started');
+      const reviewRecord = records.find((r) => r.type === 'review.tool-approval.approved');
+      expect(toolRecord?.sequence).toBe(0);
+      expect(toolRecord?.actionSequence).toBe(999);
+      expect(reviewRecord?.sequence).toBe(1);
+      expect(reviewRecord?.actionSequence).toBeUndefined();
+
+      trail.dispose();
+    });
+
+    it('resumes the counter above the highest sequence a prior process lifetime persisted', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+
+      // Simulate records a PRIOR bureau process already persisted, at
+      // sequences 5 and 12 — the highest of the two.
+      await seedRecord(kv, makeRecord(5, { timestampMs: 1000, runId: 'run-prior' }));
+      await seedRecord(kv, makeRecord(12, { timestampMs: 2000, runId: 'run-prior' }));
+
+      const initialSequence = await computeInitialAuditSequence(kv);
+      expect(initialSequence).toBe(13);
+
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence });
+      await trail.record({ runId: 'run-boot', type: 'review.tool-approval.approved', detail: {} });
+
+      const [record] = await trail.query({ runId: 'run-boot' });
+      // The new process's first write must land ABOVE the prior lifetime's
+      // highest persisted sequence, never re-issuing (or colliding with) 12.
+      expect(record?.sequence).toBe(13);
+
+      trail.dispose();
+    });
+
+    it('query() sorts a sequence-less legacy record before every real sequence sharing its millisecond, using a transitive comparator (Codex P2 review finding, PR #594)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // Written out of final order; `query()`'s own `keys.sort()` (a
+      // separate, lexicographic KEY sort used only for bounding the scan
+      // — see its own doc comment) reorders the raw scan to
+      // [seq 1, seq 2, legacy] first (digits sort before the letter 'l'),
+      // which is STILL not the desired [legacy, seq 1, seq 2] final
+      // order — so the explicit `sequence`-tiebreak comparator below is
+      // what a `0`-for-either-side comparator would have left unchanged
+      // from that intermediate order, proving this is a genuine sort.
+      await seedRecord(kv, makeRecord(2, { timestampMs: 5000, runId: 'run-X' }));
+      await kv.set(
+        'audit:v1:0000000000005000:legacy:run-X',
+        JSON.stringify({
+          timestamp: new Date(5000).toISOString(),
+          timestampMs: 5000,
+          runId: 'run-X',
+          type: 'tool.started',
+          detail: { marker: 'legacy' },
+        }),
+      );
+      await seedRecord(kv, makeRecord(1, { timestampMs: 5000, runId: 'run-X' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+      const records = await trail.query({ runId: 'run-X' });
+
+      expect(records).toHaveLength(3);
+      // Legacy (mapped to -1) first, then ascending real sequence.
+      expect(records[0]?.sequence).toBeUndefined();
+      expect(records[1]?.sequence).toBe(1);
+      expect(records[2]?.sequence).toBe(2);
+
+      trail.dispose();
+    });
+
+    it('computeInitialAuditSequence returns 0 for a store with no persisted records', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      expect(await computeInitialAuditSequence(kv)).toBe(0);
+    });
+
+    it('computeInitialAuditSequence returns 0 when no kv store is configured', async () => {
+      expect(await computeInitialAuditSequence(undefined)).toBe(0);
+    });
+
+    it('computeInitialAuditSequence ignores a legacy record with no sequence field', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // A record written before `sequence` existed — `encodeKey` always
+      // requires a numeric argument, so a genuinely pre-`sequence` key
+      // could never have used TODAY's `<ts>:<seq>:<runId>` shape; this key
+      // stands in for that by using a non-numeric placeholder segment
+      // where `<seq>` would be, which `parseSequenceFromKey`'s fast path
+      // must reject (falling back to reading the record itself) rather
+      // than crash the scan or count as a real sequence to resume above.
+      await kv.set(
+        'audit:v1:0000000000001000:legacy:run-legacy',
+        JSON.stringify({
+          timestamp: new Date(1000).toISOString(),
+          timestampMs: 1000,
+          runId: 'run-legacy',
+          type: 'tool.started',
+          detail: null,
+        }),
+      );
+      expect(await computeInitialAuditSequence(kv)).toBe(0);
+    });
+
+    it('computeInitialAuditSequence falls back to reading a record whose key it cannot fast-path parse, and still counts its real sequence', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // A key `parseSequenceFromKey` cannot fast-path (non-numeric segment
+      // where `<seq>` would be) but whose stored JSON DOES carry a real,
+      // valid `sequence` — the fallback read must still find and count it.
+      await kv.set(
+        'audit:v1:0000000000001000:unparseable:run-fallback',
+        JSON.stringify(makeRecord(9, { timestampMs: 1000, runId: 'run-fallback' })),
+      );
+      expect(await computeInitialAuditSequence(kv)).toBe(10);
+    });
+
+    it('computeInitialAuditSequence skips a record whose stored JSON is malformed instead of throwing', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(3, { timestampMs: 1000, runId: 'run-ok' }));
+      // A non-numeric key segment forces `parseSequenceFromKey`'s fast path
+      // to fall back to `kv.get` + `JSON.parse` for THIS key — which is
+      // exactly the malformed-JSON case this test targets.
+      await kv.set('audit:v1:0000000000002000:corrupt:run-corrupt', '{not valid json');
+
+      // The malformed record must not crash the scan and must not count as
+      // a real sequence — the valid record's sequence (3) still wins.
+      expect(await computeInitialAuditSequence(kv)).toBe(4);
+    });
+
+    it('computeInitialAuditSequence retries a transient scan failure and succeeds on the second attempt', async () => {
+      // AB-370 (Codex review, PR #594, two rounds — see this function's own
+      // doc comment for why NEITHER a bare `0` NOR a clock-based
+      // "emergency floor" is a safe first-failure fallback): a genuinely
+      // transient blip should recover on retry rather than falling back
+      // to anything at all.
+      const base = textValueStore(new MemoryStorage());
+      await seedRecord(base, makeRecord(7, { timestampMs: 1000, runId: 'run-retry' }));
+      let attempts = 0;
+      const flakyKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        list: async (prefix: string) => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('storage temporarily unavailable');
+          return base.list(prefix);
+        },
+      };
+      const received: unknown[] = [];
+      const result = await computeInitialAuditSequence(flakyKv, (diagnostic) =>
+        received.push(diagnostic),
+      );
+      expect(result).toBe(8);
+      expect(attempts).toBe(2);
+      // One diagnostic for the failed first attempt; no "exhausted" diagnostic.
+      expect(received).toHaveLength(1);
+    });
+
+    it('computeInitialAuditSequence falls back to 0 and diagnoses loudly after exhausting every retry', async () => {
+      const failingKv: ReturnType<typeof textValueStore> = {
+        ...textValueStore(new MemoryStorage()),
+        list: async () => {
+          throw new Error('storage unavailable');
+        },
+      };
+      const received: unknown[] = [];
+      const result = await computeInitialAuditSequence(failingKv, (diagnostic) =>
+        received.push(diagnostic),
+      );
+      expect(result).toBe(0);
+      // Three per-attempt diagnostics plus one final "starting from 0" one.
+      expect(received).toHaveLength(4);
+    });
+
+    it('computeInitialAuditSequence rejects an unsafe stored sequence during the fallback scan instead of adopting it as the floor', async () => {
+      // Codex P2 review finding, PR #594: a corrupted record whose stored
+      // `sequence` is astronomically large (e.g. `1e308`) must not poison
+      // `highest` — incrementing a value that large no longer even changes
+      // it, which would collapse every subsequent same-millisecond write
+      // for the same run onto the exact same key.
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(3, { timestampMs: 1000, runId: 'run-ok' }));
+      await kv.set(
+        // A non-numeric key segment forces the slow fallback path.
+        'audit:v1:0000000000002000:unsafe:run-unsafe',
+        JSON.stringify({
+          timestamp: new Date(2000).toISOString(),
+          timestampMs: 2000,
+          runId: 'run-unsafe',
+          type: 'tool.started',
+          sequence: 1e308,
+          detail: null,
+        }),
+      );
+      // The unsafe value must be rejected — the valid record's sequence
+      // (3) still wins, not `1e308 + 1` (a no-op on a float that large).
+      expect(await computeInitialAuditSequence(kv)).toBe(4);
     });
   });
 });

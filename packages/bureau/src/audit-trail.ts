@@ -179,8 +179,45 @@ export interface AuditRecord {
   timestamp: string;
   /** Epoch milliseconds (for range queries). */
   timestampMs: number;
-  /** Monotonically increasing per-process counter from the operative store. */
-  sequence: number;
+  /**
+   * AB-370: one monotonic sequence counter shared by every write path this
+   * trail has — the action-stream listener below AND every out-of-band write
+   * (`record()`, the schedule-definition listeners, `sessionDeletedListener`)
+   * all draw the next value from the SAME per-bureau counter (see
+   * `allocateSequence` in {@link createAuditTrail}), seeded above the highest
+   * sequence already persisted at boot (`computeInitialAuditSequence`, called
+   * by `create-bureau.ts` before this factory runs). Before this change,
+   * action-stream records carried the operative store's own per-process
+   * `action.sequence` while out-of-band records carried a deliberately huge,
+   * disjoint `manualSequence` — two numbering domains that could never be
+   * compared for true relative order, so a `session.deleted` record and a
+   * released run's own terminal action landing in the same millisecond had
+   * no way to record which one genuinely happened first (see AB-228's
+   * `create-bureau.ts` comment this fix replaces). Because every write now
+   * draws from one counter at the moment it is dispatched (before the
+   * fire-and-forget `kv.set` even starts), the persisted value reflects true
+   * call order regardless of which write's `kv.set` promise happens to
+   * settle first.
+   *
+   * Optional because a record written before this field existed at all
+   * carries none — {@link AuditTrail.query} falls back to timestamp-only
+   * ordering for those, exactly as it did before this field was introduced;
+   * see the schema-versioning note in `packages/bureau/README.md`.
+   */
+  sequence?: number;
+  /**
+   * AB-370: the originating operative-store `Action`'s own per-process
+   * `sequence` (`action.sequence`) — present ONLY on records the
+   * action-stream listener below writes, never on an out-of-band record
+   * (there is no `Action` to draw one from). This is a different number
+   * than {@link sequence} above and exists for a different reason: it lets a
+   * consumer correlate a durable record back to the live, in-memory
+   * `Action` it was sunk from — the gateway's `GET /api/v1/audit` route
+   * dedups its merged live+durable view on this field (`packages/gateway/
+   * src/routes/audit.ts`), since the live store's own action log still
+   * exposes `action.sequence`, not this trail's shared `sequence`.
+   */
+  actionSequence?: number;
   /** The originating run id. */
   runId: string;
   /** The event type (one of {@link AuditEventType}). */
@@ -266,6 +303,150 @@ export interface AuditTrailOptions {
    * in flight before the abort.
    */
   signal?: AbortSignal;
+  /**
+   * AB-370: the value the shared `sequence` counter starts from. Pass
+   * {@link computeInitialAuditSequence}'s result (computed by scanning `kv`
+   * for the highest already-persisted `sequence`, plus one) so a fresh
+   * process never re-issues a value a prior process lifetime already used —
+   * the boot test this issue requires. Defaults to `0`, matching a brand
+   * new, never-before-persisted trail.
+   */
+  initialSequence?: number;
+}
+
+/**
+ * AB-370 (Copilot review finding, PR #594): `encodeKey` bakes `sequence` into
+ * the key itself (`audit:v1:<ts16>:<seq>:<runId>`), so
+ * {@link computeInitialAuditSequence} can read it straight off a `kv.list()`
+ * result WITHOUT a `kv.get` round trip per key — the difference between one
+ * network call and `1 + keys.length` on a network-backed `kv` (R2, etc.),
+ * which otherwise makes bureau boot time scale with total audit history
+ * size. Returns `undefined` for any key that doesn't match this exact,
+ * fixed-width shape (wrong prefix, a non-16-digit timestamp segment, or no
+ * numeric segment before the next `:`) — safe fallback for the hypothetical
+ * "record written before `sequence` existed" case {@link AuditRecord.sequence}'s
+ * own doc comment describes, and for anything unrelated an unexpected caller
+ * ever wrote under this prefix.
+ *
+ * `runId` is deliberately NOT parsed by position (it can itself contain
+ * `:`, e.g. the synthetic `schedule:<id>`/`session:<id>` owners this file's
+ * own listeners use) — this only needs the two FIXED-width segments before
+ * it, so runId's own content never matters here.
+ */
+function parseSequenceFromKey(key: string): number | undefined {
+  if (!key.startsWith(PREFIX)) return undefined;
+  const rest = key.slice(PREFIX.length);
+  const TIMESTAMP_WIDTH = 16;
+  if (rest.length <= TIMESTAMP_WIDTH + 1 || rest[TIMESTAMP_WIDTH] !== ':') return undefined;
+  const afterTimestamp = rest.slice(TIMESTAMP_WIDTH + 1);
+  const nextColon = afterTimestamp.indexOf(':');
+  if (nextColon === -1) return undefined;
+  const sequenceSegment = afterTimestamp.slice(0, nextColon);
+  if (!/^\d+$/.test(sequenceSegment)) return undefined;
+  const parsed = Number(sequenceSegment);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
+ * AB-370: scans every record already persisted under this trail's `kv` and
+ * returns the value {@link AuditTrailOptions.initialSequence} should start
+ * from — one past the highest `sequence` any record already carries, or `0`
+ * when there is no `kv` (ephemeral bureau), no record carries a `sequence`
+ * yet, or every scan attempt below fails. `create-bureau.ts` calls this and
+ * passes the result into {@link createAuditTrail} BEFORE the trail starts
+ * admitting new writes, so the shared counter this issue introduces resumes
+ * above anything a prior process lifetime already persisted rather than
+ * colliding with it.
+ *
+ * The fast path ({@link parseSequenceFromKey}) reads every key returned by
+ * one `kv.list()` call with no further I/O; a key it cannot parse falls back
+ * to reading and JSON-parsing that one record (validated the same way —
+ * `Number.isSafeInteger`, non-negative — so a corrupted record whose stored
+ * `sequence` is fractional, negative, or astronomically large, e.g. `1e308`,
+ * cannot poison the floor: incrementing a value that large no longer even
+ * changes it, which would make every write in the same millisecond for the
+ * same run collide on the exact same key, Codex P2 review finding, PR
+ * #594), mirroring {@link AuditTrail.query}'s own tolerance for a malformed
+ * stored record — this is a best-effort scan, not a second source of truth
+ * for data integrity.
+ *
+ * A `kv.get`/`kv.list` failure is retried up to three times (immediate
+ * retry, no artificial delay — a genuinely transient blip resolves quickly,
+ * and this package's determinism rule rules out a real timer here anyway)
+ * before falling back to `0` and diagnosing loudly (Codex review, PR #594,
+ * two rounds): the first round's `0` fallback was flagged as unsafe (a scan
+ * failure against a store that already holds records could silently
+ * reissue a value a prior lifetime used); the fix tried next — seeding from
+ * a caller-supplied clock reading instead of `0` — was ALSO flagged as
+ * unsafe, correctly: a deployment upgraded from this trail's OWN prior
+ * `manualSequence` scheme (seeded near `Number.MAX_SAFE_INTEGER`,
+ * ~9×10^15) can already hold out-of-band sequences far ABOVE any real
+ * epoch-millisecond clock reading (~1.8×10^12 today), so a clock-based
+ * floor is not actually guaranteed to exceed persisted history either —
+ * it just LOOKS safe. There is no floor this function can compute or guess
+ * that is provably correct without a successful scan, so `0` — the
+ * pre-existing, understood fallback every other boot-time KV failure in
+ * `create-bureau.ts` already degrades to (diagnose and continue, never
+ * hard-fail bureau construction over a single subsystem) — is what it
+ * falls back to after retries are exhausted, loudly, rather than a value
+ * that merely appears safer. `0` can only misorder two records that
+ * collide on the SAME millisecond after a clock rewind — the exact
+ * scenario `encodeKey`'s own `runId` segment already guards the append-only
+ * invariant against — and never changes order for two records that do not
+ * share a millisecond, this issue's own rollback trigger.
+ */
+export async function computeInitialAuditSequence(
+  kv: TextValueStore | undefined,
+  onDiagnostic?: DiagnosticSink,
+): Promise<number> {
+  if (!kv) return 0;
+  const diagnose = resolveDiagnosticSink(onDiagnostic);
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const keys = await kv.list(PREFIX);
+      let highest = -1;
+      for (const key of keys) {
+        const fromKey = parseSequenceFromKey(key);
+        if (fromKey !== undefined) {
+          if (fromKey > highest) highest = fromKey;
+          continue;
+        }
+
+        // Fallback for a key this fast path could not parse — read and
+        // decode the record the slow way, same as `query()`.
+        const raw = await kv.get(key);
+        if (!raw) continue;
+        try {
+          const record = JSON.parse(raw) as AuditRecord;
+          if (
+            typeof record.sequence === 'number' &&
+            Number.isSafeInteger(record.sequence) &&
+            record.sequence >= 0 &&
+            record.sequence > highest
+          ) {
+            highest = record.sequence;
+          }
+        } catch {
+          continue;
+        }
+      }
+      return highest + 1;
+    } catch (error: unknown) {
+      diagnose({
+        level: 'error',
+        scope: 'audit-trail',
+        message: `[audit-trail] Boot sequence floor scan failed (attempt ${attempt}/${MAX_ATTEMPTS}):`,
+        cause: error,
+      });
+    }
+  }
+  diagnose({
+    level: 'error',
+    scope: 'audit-trail',
+    message: `[audit-trail] Could not compute the boot sequence floor after ${MAX_ATTEMPTS} attempts; starting the shared counter from 0. This can only misorder two records colliding on the exact same millisecond after a clock rewind — the same residual risk \`encodeKey\`'s own \`runId\` segment already guards the append-only invariant against.`,
+  });
+  return 0;
 }
 
 // ── Key encoding ────────────────────────────────────────────────────
@@ -378,18 +559,22 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     runtime.deferred.track(promise, 'audit-write');
   }
 
-  // Out-of-band records (via `record()`) have no operative store `Action` to
-  // draw a `sequence` from — they happen outside any run's step loop.
-  // `encodeKey` zero-pads `sequence` as an unsigned decimal, so the counter
-  // must stay non-negative for the lexicographic key sort to hold, and
-  // `query()`/`/api/v1/audit` order ties by ASCENDING sequence — so it must
-  // count UP (not down) for later same-millisecond records to sort after
-  // earlier ones. Starting well below `Number.MAX_SAFE_INTEGER` (10 billion
-  // of headroom — far more manual records than any process could plausibly
-  // emit) keeps every value in that same large, real-action-sequence-proof
-  // range (the store's own sequence always starts at 0) while leaving room
-  // to increment without exceeding `MAX_SAFE_INTEGER`.
-  let manualSequence = Number.MAX_SAFE_INTEGER - 10_000_000_000;
+  // AB-370: ONE monotonic counter shared by the action-stream listener below
+  // AND every out-of-band write (`record()`, the schedule-definition
+  // listeners, `sessionDeletedListener`) — see `AuditRecord.sequence`'s own
+  // doc comment for why this replaced two disjoint numbering domains.
+  // Seeded from `auditTrailOptions.initialSequence`
+  // (`computeInitialAuditSequence`, called by `create-bureau.ts` before this
+  // factory runs) so a fresh process resumes above anything a prior process
+  // lifetime already persisted rather than reissuing a value. Each call
+  // returns the next value and advances the counter — called synchronously,
+  // at the moment a write is DISPATCHED (before its `kv.set` starts), so the
+  // assigned value reflects true call order regardless of which write's
+  // fire-and-forget `kv.set` promise happens to settle first.
+  let nextSequence = auditTrailOptions?.initialSequence ?? 0;
+  function allocateSequence(): number {
+    return nextSequence++;
+  }
 
   // Subscribe to the bureau's action stream. The bureau re-emits every
   // operative store action as an ActionEvent, so we don't need to reach into
@@ -408,16 +593,21 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // other non-JSON-safe values so the record is safe to JSON.stringify.
     const serializedDetail = serializeActionDetail(action.type, action.detail);
 
+    const sequence = allocateSequence();
     const record: AuditRecord = {
       timestamp: new Date(action.timestamp).toISOString(),
       timestampMs: action.timestamp,
-      sequence: action.sequence,
+      sequence,
+      // AB-370: the operative store's own per-process sequence, kept
+      // separately from the shared `sequence` above — see
+      // `AuditRecord.actionSequence`'s own doc comment.
+      actionSequence: action.sequence,
       runId: action.runId,
       type: action.type,
       detail: serializedDetail,
     };
 
-    const key = encodeKey(action.timestamp, action.sequence, action.runId);
+    const key = encodeKey(action.timestamp, sequence, action.runId);
     // Fire-and-forget from the run's perspective: a write failure must never
     // crash the run, so nothing here is awaited inline. Tracked in
     // `activeWrites` so `dispose()` can await it (AB-207) instead of racing
@@ -453,7 +643,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     if (signal?.aborted) return Promise.resolve();
 
     const timestampMs = runtime.clock.now();
-    const sequence = manualSequence++;
+    const sequence = allocateSequence();
 
     const record: AuditRecord = {
       timestamp: new Date(timestampMs).toISOString(),
@@ -627,7 +817,29 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // range-prefix trick could narrow further (the timestamp is the first
       // segment after the prefix), but correctness-first: list all, filter in
       // memory. Suitable for per-run/per-session audit volumes.
-      const keys = await kv.list(PREFIX);
+      //
+      // AB-370 (Codex P2 review finding, PR #594, "Sort keys before
+      // stopping at the query limit"): `kv.list()`'s contract only
+      // promises "the underlying storage's natural scan order" — NOT
+      // lexicographic — so the early break below could otherwise select
+      // an arbitrary `limit`-sized subset from a backend that doesn't
+      // happen to return keys pre-sorted, rather than genuinely the
+      // oldest matches. Sorting the keys here is in-memory string
+      // comparison with no I/O (`kv.list` already materialized every key
+      // into this array), and since `encodeKey` embeds
+      // `<timestamp16>:<sequence>` right after the prefix, lexicographic
+      // key order IS chronological order for SELECTION purposes — the
+      // early break below can then safely stop at `limit` matches. The
+      // explicit `sequence`-tiebreak sort further down still runs
+      // afterward, over the (already limit-bounded) collected records, to
+      // handle a same-millisecond tie precisely and a legacy
+      // no-`sequence` record's `-1` mapping — this key sort alone is not
+      // enough for that (a `sequence`'s decimal-digit WIDTH can vary,
+      // e.g. a boot floor inherited from the old, much larger
+      // `manualSequence` scheme, so `<sequence>` segments of different
+      // lengths do not always compare correctly as plain strings).
+      const unsortedKeys = await kv.list(PREFIX);
+      const keys = unsortedKeys.sort();
 
       const records: AuditRecord[] = [];
       for (const key of keys) {
@@ -650,8 +862,50 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         // Apply the limit AFTER filtering so we count only records that match all
         // predicates. Stopping before filtering would cause the loop to break on
         // non-matching records and miss in-range entries later in the key scan.
+        // AB-370 (Copilot review finding, PR #594): keeping this early break —
+        // rather than scanning every matching key before ever truncating —
+        // is what keeps this call's `kv.get`/`JSON.parse` cost bounded by
+        // `limit` instead of by total audit history size, which matters for
+        // the gateway's `GET /api/v1/audit` route calling `query({ limit })`
+        // on every request.
         if (records.length >= limit) break;
       }
+
+      // AB-370: explicit, timestamp-primary sort over the (already
+      // limit-bounded) collected records, rather than trusting the KV
+      // backend's raw key-scan order alone for the same-millisecond
+      // tiebreak. `encodeKey` still embeds `sequence` in the key for
+      // uniqueness (via the trailing `runId` tiebreak) and for backends
+      // whose scan order already happens to be lexicographic, but this
+      // sort is what actually GUARANTEES "sequence breaks a timestamp tie"
+      // for every backend.
+      //
+      // Deliberately timestamp-first, sequence only as the tiebreak — NOT
+      // sequence-first — so a query's order for two records that do NOT
+      // share a millisecond never changes by this fix (this issue's own
+      // rollback trigger). The shared counter only disambiguates a genuine
+      // same-millisecond collision; it is not a replacement for the
+      // timestamp as the primary ordering key.
+      //
+      // A record with no `sequence` (written before this field existed)
+      // maps to `-1` for this comparison — NOT a `0`-returning special
+      // case (Codex P2 review finding, PR #594: a comparator that returns
+      // `0` for any pair involving an undefined `sequence` is not
+      // transitive — A vs legacy and legacy vs B can both compare "equal"
+      // even when A and B themselves compare unequal, and `Array.sort` is
+      // only required to produce the claimed order for a genuinely
+      // transitive comparator; some engines' sort algorithms can leave a
+      // non-transitive comparator's inputs in their original scan order
+      // instead). `-1` sorts a sequence-less record before every real
+      // `sequence` (which is always `>= 0`) within the same millisecond —
+      // a reasonable default (older code wrote it, before this field
+      // existed) — while keeping the comparator a genuine, transitive
+      // total order: two sequence-less records both map to `-1` and
+      // compare equal to each other, exactly as intended.
+      records.sort((a, b) => {
+        if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
+        return (a.sequence ?? -1) - (b.sequence ?? -1);
+      });
 
       return records;
     },

@@ -9,9 +9,16 @@ export type {
   CreateAgentCatalogOptions,
 } from './agent-catalog';
 export { createAgentCatalog } from './agent-catalog';
-export type { AuditEventType, AuditQueryOptions, AuditRecord, AuditTrail } from './audit-trail';
+export type {
+  AuditEventType,
+  AuditQueryOptions,
+  AuditRecord,
+  AuditTrail,
+  AuditTrailOptions,
+} from './audit-trail';
 export {
   AUDIT_EVENT_TYPES,
+  computeInitialAuditSequence,
   createAuditTrail,
   encodeKey as encodeAuditEntryKey,
 } from './audit-trail';
