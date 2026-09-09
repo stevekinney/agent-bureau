@@ -2644,18 +2644,34 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     await runtime.sessionStore.update(sessionId, (session) => {
       if (!session) return session;
       const current = session.metadata['resolvedReviewIds'];
-      if (!Array.isArray(current)) return session;
+      const currentDecisions = session.metadata['resolvedReviewDecisions'];
+      const hasDecisions =
+        typeof currentDecisions === 'object' &&
+        currentDecisions !== null &&
+        !Array.isArray(currentDecisions);
+      if (!Array.isArray(current) && !hasDecisions) return session;
       const remainingReviewIds: string[] = [];
-      for (const id of current) {
-        if (typeof id === 'string' && !id.startsWith(reviewIdPrefix)) {
-          remainingReviewIds.push(id);
+      if (Array.isArray(current)) {
+        for (const id of current) {
+          if (typeof id === 'string' && !id.startsWith(reviewIdPrefix)) {
+            remainingReviewIds.push(id);
+          }
         }
       }
+      // AB-391 (Codex P2 review finding, PR #601, "Prune decision identities
+      // with resolved review IDs"): `resolvedReviewDecisions` is a sibling
+      // map keyed by the same review ids as `resolvedReviewIds` — pruning
+      // one without the other leaves stale decision/principal/reason data
+      // for deleted runs behind forever in a long-lived session.
+      const remainingDecisions = hasDecisions
+        ? omitKeysWithPrefix(currentDecisions as Record<string, JSONValue>, reviewIdPrefix)
+        : currentDecisions;
       return {
         ...session,
         metadata: {
           ...session.metadata,
-          resolvedReviewIds: remainingReviewIds,
+          ...(Array.isArray(current) ? { resolvedReviewIds: remainingReviewIds } : {}),
+          ...(hasDecisions ? { resolvedReviewDecisions: remainingDecisions } : {}),
         },
       };
     });
@@ -5672,35 +5688,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     outboxSessionStore: SessionStore,
     producer: DurableEventProducer | undefined,
   ): Promise<void> {
-    // AB-391: ordinals this SAME pass has already decided to leave pending
-    // under an unrecognized `session.attachment` namespace (see below) —
-    // this pass never claims them, and filters them out of every
-    // subsequent `pending()` read for the REST of this pass, so this loop
-    // still makes progress on later ordinals instead of re-observing the
-    // same entry on every iteration forever. Scoped to one pass (not
-    // persisted across calls): a LATER pass — this bureau's own next
-    // maintenance tick, or a peer's, potentially running an upgraded
-    // version that recognizes the namespace — gets a fresh look at it,
-    // with no claim of ours ever standing in the way.
-    const skippedOrdinalsThisPass = new Set<number>();
     for (;;) {
       const pending: readonly SessionOutboxEntry[] = await outboxSessionStore.outbox.pending();
-      const remaining = pending.filter((entry) => !skippedOrdinalsThisPass.has(entry.ordinal));
-      if (remaining.length === 0) return;
-      for (const entry of remaining) {
-        // AB-391: `SessionStore.update({ outbox })` is explicitly
-        // session-agnostic (see its own doc comment) — a `session.attachment`
+      if (pending.length === 0) return;
+      for (const entry of pending) {
+        // AB-391 (Codex P1 review finding, PR #601, "Stop before later
+        // ordinals when an attachment is unknown"): `SessionStore.outbox`'s
+        // own contract (`packages/operative/src/session/types.ts`) requires
+        // replay "exactly once, in ordinal order" — a STORE-WIDE ordinal,
+        // never a per-session one. An entry under a `session.attachment`
         // namespace THIS bureau version does not recognize may still be
         // meaningful to a different consumer (a future bureau version, or
-        // a peer instance running one) that has not drained it yet.
-        // Checked BEFORE `claim()` below, deliberately (review finding, PR
-        // #601): claiming an entry this bureau is never going to
-        // acknowledge would extend its lease on every maintenance tick (a
-        // same-owner `claim()` renews, per AB-390's own doc comment on
-        // `outbox.claim()`), starving a DIFFERENT consumer that DOES
-        // recognize the namespace for as long as this process keeps
-        // ticking — never claiming it at all means that consumer can take
-        // it immediately, on its own next drain.
+        // a peer instance running one) that has not drained it yet, so it
+        // is left pending rather than dropped — but letting this pass
+        // advance PAST it to a later ordinal (the prior fix's `continue`)
+        // breaks that same ordinal-order contract: a later `session.saved`
+        // or `session.deleted` could reach durable history before an
+        // earlier fact a peer's own consumer has not replayed yet. Stopping
+        // the WHOLE pass here — exactly like the claim-contention branch
+        // below — is the only way to leave an entry pending without also
+        // reordering everything after it. A later trigger (this process's
+        // own next tick, or a peer's) gets a fresh look at it.
         if (
           entry.kind === 'session.attachment' &&
           entry.namespace !== REVIEW_AUDIT_OUTBOX_NAMESPACE
@@ -5708,10 +5716,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           diagnose({
             level: 'error',
             scope: 'durable-maintenance',
-            message: `[bureau] Unrecognized session.attachment outbox entry namespace "${entry.namespace}" (ordinal ${entry.ordinal}); leaving it pending, unclaimed, rather than dropping it, in case a different consumer recognizes it.`,
+            message: `[bureau] Unrecognized session.attachment outbox entry namespace "${entry.namespace}" (ordinal ${entry.ordinal}); stopping this drain pass here, leaving it and every later ordinal pending, rather than dropping it or reordering past it, in case a different consumer recognizes it.`,
           });
-          skippedOrdinalsThisPass.add(entry.ordinal);
-          continue;
+          return;
         }
         // AB-390 — claim before replaying. A peer (this process's own
         // overlapping pass is impossible: `drainOutbox` is
@@ -6094,7 +6101,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * exactly the "leave it pending" behavior a failed write always had.
    *
    * Only ever called for a `REVIEW_AUDIT_OUTBOX_NAMESPACE` entry —
-   * `drainOutboxPass` filters out (and never claims) any other
+   * `drainOutboxPass` stops the whole pass at (and never claims) any other
    * `session.attachment` namespace before reaching this function, so
    * there is no "unrecognized namespace" branch here to duplicate that
    * check.
@@ -7259,6 +7266,64 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       throw new BureauError(`Review with id "${review.id}" is already being resolved`, 'CONFLICT');
     }
     resolvingReviewIds.add(review.id);
+
+    try {
+      // AB-391 (Codex P1 review finding, PR #601, "Fence concurrent
+      // resolutions before performing the action"): everything below this
+      // point — `resumeApproval`, `revokeApproval`, and the
+      // `signalSession` calls that deliver an approve/deny/reject decision
+      // — is an IRREVERSIBLE side effect: a tool can execute, an approval
+      // binding is revoked, or a parked run resumes. `persistReviewResolution`
+      // already detects a DIFFERENT resolver's already-won decision (see
+      // its own doc comment), but it only runs AFTER all of that, once this
+      // call is persisting its OWN decision. Two Bureau instances sharing a
+      // session store, both resolving the same still-pending review with
+      // DIFFERENT decisions, would otherwise let the LOSING call's
+      // irreversible action run before it ever discovers it lost — an
+      // approve could execute a tool even though the durable winner is a
+      // deny. Checked here, before any action, so a losing call fails
+      // before doing anything irreversible. This is a plain read
+      // (`SessionStore.load`), not an atomic claim — a genuinely
+      // simultaneous pair, neither yet committed, can still both pass this
+      // check and both act; closing that residual window needs a durable,
+      // pre-action claim, tracked as a follow-up (see this issue's PR
+      // body). This check only ever fences a DIFFERENT decision — the
+      // same-decision retry case is untouched, exactly as
+      // `persistReviewResolution`'s own `alreadyLanded` handling already
+      // covers it.
+      const existingSession = await runtime.sessionStore?.load(review.sessionId);
+      const existingDecisionsRaw = existingSession?.metadata['resolvedReviewDecisions'];
+      const existingDecisions: Record<string, JSONValue> =
+        typeof existingDecisionsRaw === 'object' &&
+        existingDecisionsRaw !== null &&
+        !Array.isArray(existingDecisionsRaw)
+          ? (existingDecisionsRaw as Record<string, JSONValue>)
+          : {};
+      const priorRaw = existingDecisions[review.id];
+      const prior =
+        typeof priorRaw === 'object' && priorRaw !== null && !Array.isArray(priorRaw)
+          ? (priorRaw as Record<string, JSONValue>)
+          : undefined;
+      if (prior !== undefined) {
+        const priorDecision = typeof prior['decision'] === 'string' ? prior['decision'] : undefined;
+        const priorPrincipal =
+          typeof prior['principal'] === 'string' ? prior['principal'] : undefined;
+        const priorReason = typeof prior['reason'] === 'string' ? prior['reason'] : undefined;
+        const isSameDecision =
+          priorDecision === input.decision &&
+          priorPrincipal === input.principal &&
+          priorReason === input.reason;
+        if (!isSameDecision) {
+          throw new BureauError(
+            `Review "${review.id}" was already resolved as "${priorDecision ?? 'unknown'}" by a different resolver`,
+            'CONFLICT',
+          );
+        }
+      }
+    } catch (error) {
+      resolvingReviewIds.delete(review.id);
+      throw error;
+    }
 
     let result: unknown;
     let keepPending = false;

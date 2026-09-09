@@ -70,6 +70,7 @@ const operations: readonly FaultOperation[] = [
   'storage:set',
   'storage:delete',
   'storage:query',
+  'storage:conditionalBatch',
   'signal',
   'transport',
   'delivery',

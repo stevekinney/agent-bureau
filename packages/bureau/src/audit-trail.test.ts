@@ -108,6 +108,21 @@ function createControllableKv(): {
       await gate;
       await base.set(key, value);
     },
+    // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+    // against deduplicated audit keys"): the out-of-band `record()` path
+    // now commits through `conditionalBatch`'s key-collision fence rather
+    // than a plain `set` — gated identically (and counted on the SAME
+    // counter) so a caller simulating a slow/in-flight write via this kv
+    // still observes it regardless of which write path a given caller
+    // takes.
+    async conditionalBatch(
+      preconditions: Parameters<typeof base.conditionalBatch>[0],
+      operations: Parameters<typeof base.conditionalBatch>[1],
+    ) {
+      setCallCount += 1;
+      await gate;
+      return base.conditionalBatch(preconditions, operations);
+    },
   };
   return { kv, release, setCallCount: () => setCallCount };
 }
@@ -305,6 +320,39 @@ describe('createAuditTrail', () => {
     expect(records[0]?.sequence).toBe(0);
     expect(records[0]?.actionSequence).toBe(42);
     expect(records[0]?.runId).toBe('run-sink');
+    trail.dispose();
+  });
+
+  it('the action-stream listener also retries with a fresh key on collision, rather than silently overwriting an existing record (Codex P1 review finding, PR #601, "Fence ordinary writes against deduplicated audit keys")', async () => {
+    // The action-stream listener is the LAST writer in this file that used
+    // a plain, unconditional `kv.set` — this proves it now shares the same
+    // key-fenced, collision-retry path (`attemptKeyFencedWrite`) as
+    // `record()`'s own ordinary and `dedupeKey` paths above, rather than
+    // being able to silently overwrite a record either of those already
+    // committed at a colliding key.
+    const kv = textValueStore(new MemoryStorage());
+    await seedRecord(kv, makeRecord(0, { timestampMs: 5000, runId: 'run-listener-collide' }));
+
+    const { bureau, emit } = createStubBureau();
+    const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+    const action: Action = {
+      type: 'tool.started',
+      timestamp: 5000,
+      sequence: 1,
+      runId: 'run-listener-collide',
+      detail: null,
+    };
+    emit(new ActionEvent(action));
+    await yieldToPortableEventLoop();
+
+    // The seeded record survives untouched, AND the sunk action landed at
+    // a DIFFERENT key — never overwriting the collision.
+    const records = await trail.query({ runId: 'run-listener-collide' });
+    expect(records).toHaveLength(2);
+    const sunkRecord = records.find((record) => record.actionSequence === 1);
+    expect(sunkRecord?.sequence).not.toBe(0);
+
     trail.dispose();
   });
 
@@ -593,6 +641,77 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
+    it('an ORDINARY (non-dedupeKey) record() also retries with a fresh key on collision, rather than silently overwriting an existing record (Codex P1 review finding, PR #601, "Fence ordinary writes against deduplicated audit keys")', async () => {
+      // The collision fence above only protected a `dedupeKey` write from
+      // ANOTHER `dedupeKey` write racing on the same derived key. An
+      // ordinary write used to go through a plain, unconditional `kv.set`
+      // regardless — so it could still silently overwrite a record a
+      // `dedupeKey` write (or another ordinary write) already committed at
+      // the same key, permanently losing it if that write's dedupe marker
+      // survives (a later replay reads the marker as proof the fact was
+      // already recorded and never rewrites it). Simulated here exactly
+      // like the dedupeKey collision test above: seed a record directly at
+      // the key `initialSequence: 0` would derive, then make an ORDINARY
+      // write collide with it.
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-ordinary-collide' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await trail.record({
+        runId: 'run-ordinary-collide',
+        type: 'review.tool-approval.approved',
+        detail: {},
+        timestampMs: 1000,
+      });
+
+      // The seeded record survives untouched, AND the new record landed at
+      // a DIFFERENT key — never overwriting the collision.
+      const records = await trail.query({ runId: 'run-ordinary-collide' });
+      expect(records).toHaveLength(2);
+      expect(records.map((record) => record.type).sort()).toEqual([
+        'review.tool-approval.approved',
+        'tool.started',
+      ]);
+      const approvedRecord = records.find(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecord?.sequence).not.toBe(0);
+
+      trail.dispose();
+    });
+
+    it('diagnoses and drops an ORDINARY record() once every key-collision retry attempt keeps colliding, rather than rejecting the never-rejects contract', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      for (let sequence = 0; sequence <= 3; sequence += 1) {
+        await seedRecord(
+          kv,
+          makeRecord(sequence, { timestampMs: 1000, runId: 'run-ordinary-exhausted' }),
+        );
+      }
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await expect(
+        trail.record({
+          runId: 'run-ordinary-exhausted',
+          type: 'review.tool-approval.approved',
+          detail: {},
+          timestampMs: 1000,
+        }),
+      ).resolves.toBeUndefined();
+
+      // The 4 seeded records survive untouched; the ordinary write itself
+      // was dropped (diagnosed) after exhausting its retries, never
+      // rejecting its caller.
+      const records = await trail.query({ runId: 'run-ordinary-exhausted' });
+      expect(records).toHaveLength(4);
+
+      trail.dispose();
+    });
+
     it('two DIFFERENT dedupeKeys for the same runId/type both persist their own record', async () => {
       const kv = textValueStore(new MemoryStorage());
       const { bureau } = createStubBureau();
@@ -742,6 +861,14 @@ describe('createAuditTrail', () => {
       return {
         ...kv,
         set: async () => {
+          throw new Error('disk full');
+        },
+        // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+        // against deduplicated audit keys"): the out-of-band `record()`
+        // path below now writes through `conditionalBatch`'s key-collision
+        // fence rather than a plain `kv.set` — failing only `set` no longer
+        // exercises a persistence failure for that path.
+        conditionalBatch: async () => {
           throw new Error('disk full');
         },
       };
@@ -1037,6 +1164,57 @@ describe('createAuditTrail', () => {
       ).rejects.toThrow(/shutdown signal is already aborted/);
 
       const records = await trail.query({ runId: 'run-dedupe-after-abort' });
+      expect(records).toHaveLength(0);
+      await trail.dispose();
+    });
+
+    it('drops a best-effort record() with an invalid timestampMs (diagnose and drop) instead of rejecting the never-rejects contract (Codex P2 review finding, PR #601, "Reject invalid replay timestamps before formatting")', async () => {
+      // `timestampMs` is typed `number`, which permits NaN, Infinity, or a
+      // value outside `Date`'s range — forwarding any of those straight to
+      // `new Date(timestampMs).toISOString()` throws. The default
+      // best-effort `record()` path documents a never-rejects contract, so
+      // an invalid timestamp must diagnose and drop, exactly like any other
+      // malformed-input rejection at this boundary, not silently break that
+      // contract.
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      await expect(
+        trail.record({
+          runId: 'run-invalid-timestamp',
+          type: 'review.tool-approval.approved',
+          detail: null,
+          timestampMs: Number.NaN,
+        }),
+      ).resolves.toBeUndefined();
+
+      const records = await trail.query({ runId: 'run-invalid-timestamp' });
+      expect(records).toHaveLength(0);
+      await trail.dispose();
+    });
+
+    it('rejects a dedupeKey-guarded record() with an invalid timestampMs before any write begins', async () => {
+      // A `dedupeKey` caller (the outbox attachment replay) needs to know
+      // synchronously that its write never happened, so it can leave its
+      // own outbox entry pending for a later retry rather than treating a
+      // silent drop as success and acknowledging (permanently removing) an
+      // entry whose audit fact was never recorded.
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      await expect(
+        trail.record({
+          runId: 'run-invalid-timestamp-dedupe',
+          type: 'review.tool-approval.approved',
+          detail: null,
+          timestampMs: Number.POSITIVE_INFINITY,
+          dedupeKey: 'session.attachment:invalid-timestamp-session:1',
+        }),
+      ).rejects.toThrow(/invalid timestampMs/);
+
+      const records = await trail.query({ runId: 'run-invalid-timestamp-dedupe' });
       expect(records).toHaveLength(0);
       await trail.dispose();
     });
@@ -1953,6 +2131,20 @@ describe('createAuditTrail', () => {
             throw new Error('backend rejected the summary write');
           }
           await base.set(key, value);
+        },
+        // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+        // against deduplicated audit keys"): the summary write below is a
+        // `strict` out-of-band `record()` call, which now commits through
+        // `conditionalBatch`'s key-collision fence rather than a plain
+        // `set` — mirrored here so the isolated failure still reaches it.
+        async conditionalBatch(
+          preconditions: Parameters<typeof base.conditionalBatch>[0],
+          operations: Parameters<typeof base.conditionalBatch>[1],
+        ) {
+          if (operations.some((operation) => operation.key.includes('bureau:audit-retention'))) {
+            throw new Error('backend rejected the summary write');
+          }
+          return base.conditionalBatch(preconditions, operations);
         },
       };
 

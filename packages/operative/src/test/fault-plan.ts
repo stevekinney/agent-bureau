@@ -34,7 +34,11 @@ export type FaultOperation =
   | 'generate'
   | `tool:${string}`
   | `hook:${'before-model' | 'after-model' | 'before-tool' | 'after-tool'}`
-  | `storage:${'get' | 'set' | 'delete' | 'query'}`
+  // AB-92 AC8 fixes this arm's SHAPE (`storage:${verb}`), not a closed set
+  // of verbs — `conditionalBatch` added (AB-391) because a writer this
+  // fault engine needs to reach (the audit trail's key-fenced writes)
+  // started calling it alongside `get`/`set`/`delete`/`query`.
+  | `storage:${'get' | 'set' | 'delete' | 'query' | 'conditionalBatch'}`
   | 'signal'
   | 'transport'
   | 'delivery';

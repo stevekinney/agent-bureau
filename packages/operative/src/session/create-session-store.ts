@@ -980,6 +980,21 @@ export function createSessionStore(
           );
         }
       }
+      // AB-391 (Codex P2 review finding, PR #601, "Snapshot attachments
+      // before invoking the updater"): `attachments` above still references
+      // the caller-owned objects passed in `options.outbox` after this
+      // validation runs. `updater` is caller code — awaited below, possibly
+      // more than once across retry attempts — and can mutate `payload` on
+      // one of those same objects (e.g. to `undefined`) after it passes
+      // validation but before `commit()` serializes it. A JSON round-trip
+      // both freezes the validated values against that later mutation AND
+      // doubles as the exact serializability check already performed above,
+      // so no attachment this store commits can ever diverge from what was
+      // validated.
+      const validatedAttachments: readonly { namespace: string; payload: JSONValue }[] =
+        attachments.length > 0
+          ? (JSON.parse(JSON.stringify(attachments)) as { namespace: string; payload: JSONValue }[])
+          : attachments;
       // The updater is caller code and may itself use this store. Keep it out
       // of the local mutation queue so an asynchronous updater cannot wait on
       // an operation queued behind itself. Conditional commits still provide
@@ -1023,7 +1038,7 @@ export function createSessionStore(
           summaryRaw,
           await summariesForMutation(summaryRaw),
           ordinalRaw,
-          attachments,
+          validatedAttachments,
         );
         if (committed) {
           return committed;

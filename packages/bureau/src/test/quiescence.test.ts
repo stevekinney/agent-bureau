@@ -57,6 +57,47 @@ function blockingGenerate(): GenerateFunction {
 }
 
 /**
+ * AB-391: the audit trail's out-of-band writes (`record()`) now commit
+ * through `ConditionalTextValueStore.conditionalBatch` — the SAME verb the
+ * session store's own `save()`/`update()` commits use on this same shared
+ * KV. A plain `engine.wrapStorage(raw)` would block the FIRST
+ * `conditionalBatch` call this instance ever sees, which is the session
+ * store's own commit, not the audit write a test means to target — exactly
+ * the "wrong call blocked" hazard the sibling `get`-routing helper further
+ * down this file (search "A plain `engine.wrapStorage(raw)` would block the
+ * FIRST `get#N`") already documents for reads. This routes only an
+ * audit-key (`audit:v1:`) `set`/`conditionalBatch` call through the
+ * fault-engine-wrapped path; every other key (session store, anything
+ * else) reaches `raw` untouched.
+ */
+function routeAuditWritesThroughFaultEngine<T extends ReturnType<typeof textValueStore>>(
+  raw: T,
+  engine: ReturnType<typeof createFaultEngine>,
+): T {
+  const faulted = engine.wrapStorage(raw);
+  const isAuditKey = (key: string) => key.startsWith('audit:v1:');
+  return new Proxy(raw, {
+    get(target, property, receiver) {
+      if (property === 'set') {
+        return async (key: string, value: string) =>
+          isAuditKey(key) ? faulted.set(key, value) : target.set(key, value);
+      }
+      if (property === 'conditionalBatch') {
+        return async (
+          conditions: Parameters<T['conditionalBatch']>[0],
+          operations: Parameters<T['conditionalBatch']>[1],
+        ) =>
+          operations.some((operation) => isAuditKey(operation.key))
+            ? faulted.conditionalBatch(conditions, operations)
+            : target.conditionalBatch(conditions, operations);
+      }
+      const value: unknown = Reflect.get(target, property, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
  * A toolbox whose one tool never resolves, plus a `generate` that calls it
  * exactly once. A durable run built on these commits its first STEP (the
  * tool-call step) — persisting real durable state — before hanging inside
@@ -744,8 +785,10 @@ describe('AB-322: fault-forced leftovers populate the corresponding rows', () =>
     // underlying call ever actually settles, and never stays observable
     // past shutdown. `recordScore`'s `auditTrail.record()` write, right
     // after the judge returns, is NOT raced against that signal — blocking
-    // IT (the same `storage:set` mechanism the audit-write test above
-    // uses) keeps the evaluation genuinely, observably in flight.
+    // IT (the same `storage:conditionalBatch` mechanism the audit-write
+    // test below uses — AB-391 moved the audit trail's out-of-band writes
+    // off a plain `set` onto a key-collision-fenced `conditionalBatch`)
+    // keeps the evaluation genuinely, observably in flight.
     const runtime = createManualRuntimeServices();
     let onReachedCalled = false;
     let releaseWrite!: () => void;
@@ -756,7 +799,7 @@ describe('AB-322: fault-forced leftovers populate the corresponding rows', () =>
       {
         id: 'blocked-eval-write',
         boundary: 'before-work',
-        operation: 'storage:set',
+        operation: 'storage:conditionalBatch',
         occurrence: { kind: 'every' },
         effect: {
           kind: 'block',
@@ -770,7 +813,7 @@ describe('AB-322: fault-forced leftovers populate the corresponding rows', () =>
     const engine = createFaultEngine(plan, runtime);
     const rawStorage = new MemoryStorage();
     const kv = textValueStore(rawStorage);
-    const wrappedKv = engine.wrapStorage(kv);
+    const wrappedKv = routeAuditWritesThroughFaultEngine(kv, engine);
 
     const storage = createMemoryStorageFixture();
     const harness = await createBureauTestHarness({
@@ -839,7 +882,13 @@ describe('AB-322: fault-forced leftovers populate the corresponding rows', () =>
       {
         id: 'blocked-audit-write',
         boundary: 'before-work',
-        operation: 'storage:set',
+        // AB-391: the audit trail's out-of-band writes now commit through
+        // `ConditionalTextValueStore.conditionalBatch` (a key-collision
+        // fence), not a plain `set` — `FaultOperation` gained
+        // `storage:conditionalBatch` alongside the original four verbs so
+        // this plan can still reach it (see `wrapStorage`'s own doc
+        // comment in `@lostgradient/operative/test`).
+        operation: 'storage:conditionalBatch',
         occurrence: { kind: 'nth', n: 1 },
         effect: {
           kind: 'block',
@@ -853,7 +902,7 @@ describe('AB-322: fault-forced leftovers populate the corresponding rows', () =>
     const engine = createFaultEngine(plan, runtime);
     const rawStorage = new MemoryStorage();
     const kv = textValueStore(rawStorage);
-    const wrappedKv = engine.wrapStorage(kv);
+    const wrappedKv = routeAuditWritesThroughFaultEngine(kv, engine);
 
     const storage = createMemoryStorageFixture();
     const harness = await createBureauTestHarness({

@@ -890,7 +890,9 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
   // Every write kicked off by the listener or by `record()`, so `dispose()`
   // can await terminal state deterministically (AB-207) rather than leaving
-  // an in-flight `kv.set` unobserved.
+  // an in-flight write (a plain `kv.set`, or the key-fenced
+  // `conditionalBatch` every writer in this file uses as of AB-391)
+  // unobserved.
   const activeWrites = new Set<Promise<void>>();
   // AB-228 (Codex P2 review finding, PR #566, "Avoid blocking every audit
   // query on unrelated writes"): `query()` needs read-your-writes against
@@ -944,12 +946,80 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   // factory runs) so a fresh process resumes above anything a prior process
   // lifetime already persisted rather than reissuing a value. Each call
   // returns the next value and advances the counter — called synchronously,
-  // at the moment a write is DISPATCHED (before its `kv.set` starts), so the
-  // assigned value reflects true call order regardless of which write's
-  // fire-and-forget `kv.set` promise happens to settle first.
+  // at the moment a write is DISPATCHED (before its underlying storage call
+  // starts), so the assigned value reflects true call order regardless of
+  // which write's fire-and-forget promise happens to settle first. Also
+  // called again, mid-flight, by `attemptKeyFencedWrite`'s own retry on a
+  // key collision — each retry mints a genuinely fresh sequence/key rather
+  // than reusing the one that just collided.
   let nextSequence = auditTrailOptions?.initialSequence ?? 0;
   function allocateSequence(): number {
     return nextSequence++;
+  }
+
+  // AB-391 (Codex P1 review findings, PR #601, "Guard the audit record key
+  // against cross-instance collisions" and "Fence ordinary writes against
+  // deduplicated audit keys"): shared by EVERY writer in this file — the
+  // action-stream listener immediately below, and every out-of-band write
+  // in `writeOutOfBandRecord` further down (`record()`, the schedule-
+  // definition listeners, `sessionDeletedListener`). `key` is derived from
+  // `sequence`, a LOCAL per-instance counter seeded from a scan at boot —
+  // two `AuditTrail` instances booting from the same persisted floor,
+  // before either has written anything, can independently allocate the
+  // SAME `sequence` for the SAME `runId`/`timestampMs`, so any two writers
+  // (dedupe-guarded or ordinary, action-stream or out-of-band) can collide
+  // on the same derived key. A plain `kv.set` has no precondition at all
+  // and would silently let the second writer overwrite the first — for a
+  // `dedupeKey` write specifically, that overwrite is permanent and
+  // undetectable, since the surviving marker makes a later replay treat
+  // the record as already durably recorded. Fencing every write (with an
+  // OPTIONAL `markerKey` for the dedupe case) on the key itself turns a
+  // silent overwrite into a detected collision: `committed === false` with
+  // the marker absent (or no marker at all) means the KEY collided with an
+  // unrelated record, so mint a fresh `sequence`/`key` and retry — bounded,
+  // since an unresolvable collision must fail loudly (or, for a
+  // best-effort caller, drop loudly) rather than loop forever. Takes
+  // `store` explicitly (rather than closing over `kv`) so every call site
+  // can narrow `kv` non-null however it needs to before calling in.
+  async function attemptKeyFencedWrite(
+    store: ConditionalTextValueStore,
+    attemptKey: string,
+    attemptRecord: AuditRecord,
+    markerKey: string | undefined,
+    attemptsRemaining: number,
+  ): Promise<void> {
+    const preconditions = markerKey
+      ? [
+          { key: markerKey, expectedValue: null },
+          { key: attemptKey, expectedValue: null },
+        ]
+      : [{ key: attemptKey, expectedValue: null }];
+    const operations = markerKey
+      ? [
+          { type: 'set' as const, key: markerKey, value: attemptKey },
+          { type: 'set' as const, key: attemptKey, value: JSON.stringify(attemptRecord) },
+        ]
+      : [{ type: 'set' as const, key: attemptKey, value: JSON.stringify(attemptRecord) }];
+    const committed = await store.conditionalBatch(preconditions, operations);
+    if (committed) return;
+    // `committed === false` — distinguish WHICH precondition failed: the
+    // marker (benign — this exact fact was already recorded, by this call
+    // or a peer's) or the key (a collision with an UNRELATED record,
+    // needing a fresh key). Writes with no marker have only the key
+    // precondition, so any failure here is always a key collision.
+    if (markerKey && (await store.has(markerKey))) return;
+    if (attemptsRemaining <= 0) {
+      const target = markerKey
+        ? `dedupeKey "${markerKey.slice(DEDUPE_MARKER_PREFIX.length)}"`
+        : `run "${attemptRecord.runId}"`;
+      throw new Error(
+        `[audit-trail] Exhausted retries resolving an audit-record key collision for ${target}.`,
+      );
+    }
+    const nextSequence = allocateSequence();
+    const nextKey = encodeKey(attemptRecord.timestampMs, nextSequence, attemptRecord.runId);
+    const nextRecord: AuditRecord = { ...attemptRecord, sequence: nextSequence };
+    await attemptKeyFencedWrite(store, nextKey, nextRecord, markerKey, attemptsRemaining - 1);
   }
 
   // Subscribe to the bureau's action stream. The bureau re-emits every
@@ -959,6 +1029,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     const { action } = event;
     if (!auditEventSet.has(action.type)) return;
     if (!kv) return;
+    const store = kv;
     // AB-207: once the owner-issued signal aborts (Bureau's shutdown() has
     // begun), refuse new writes — a write already in flight (tracked below)
     // still runs to completion and `dispose()` still awaits it.
@@ -987,9 +1058,12 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // Fire-and-forget from the run's perspective: a write failure must never
     // crash the run, so nothing here is awaited inline. Tracked in
     // `activeWrites` so `dispose()` can await it (AB-207) instead of racing
-    // storage closure against a write still in flight.
+    // storage closure against a write still in flight. AB-391: routed
+    // through the SAME key-fenced, collision-retry path as every other
+    // writer in this file (see `attemptKeyFencedWrite`'s own doc comment) —
+    // this was the last remaining plain `kv.set` write.
     trackWrite(
-      kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
+      attemptKeyFencedWrite(store, key, record, undefined, 3).catch((error: unknown) => {
         diagnose({
           level: 'error',
           scope: 'audit-trail',
@@ -1042,9 +1116,10 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     },
   ): Promise<void> {
     if (!kv) return Promise.resolve();
-    // Narrowed once, right after the guard above, so the nested
-    // `attemptDeduplicatedWrite` closure below keeps `kv` typed non-null
-    // without repeating the check.
+    // Narrowed once, right after the guard above, so every call below
+    // keeps `kv` typed non-null without repeating the check. `attemptKeyFencedWrite`
+    // (defined once, above, shared with the action-stream listener) takes
+    // it explicitly as `store`.
     const store = kv;
     if (!writeOptions?.bypassAbortCheck && signal?.aborted) {
       // AB-391: a `dedupeKey` caller opted into this call's promise
@@ -1079,6 +1154,31 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // directly; `record()` and `prune()`'s summary have no event to share a
     // reading with) keeps the original per-write clock reading.
     const timestampMs = writeOptions?.timestampMs ?? runtime.clock.now();
+    // AB-391 (Codex P2 review finding, PR #601, "Reject invalid replay
+    // timestamps before formatting"): a caller-supplied `timestampMs` (the
+    // public `record()` option, or an `eventTimestamp` resolver reading) is
+    // typed `number`, which permits `NaN`, `Infinity`/`-Infinity`, or a
+    // finite value outside `Date`'s supported range. Forwarding any of
+    // those straight to `new Date(timestampMs).toISOString()` below throws
+    // — for the default best-effort path that breaks the documented
+    // never-rejects contract, and for a `dedupeKey`-guarded replay it fails
+    // identically on every retry, leaving the outbox entry pending forever
+    // with no way to self-heal. Caught here, before any write begins, and
+    // handled the same way every other caller-input validation boundary in
+    // this file does: a `strict`/`dedupeKey` write rejects with a clear
+    // error (mirroring the shutdown-abort rejection above); every other
+    // caller gets the default best-effort drop-and-diagnose.
+    if (!Number.isFinite(timestampMs) || Number.isNaN(new Date(timestampMs).getTime())) {
+      // `JSON.stringify` prints `null` for NaN/Infinity, which is exactly
+      // the confusing value this diagnostic exists to surface — `String()`
+      // prints "NaN"/"Infinity"/"-Infinity" as written.
+      const message = `[audit-trail] Refusing to record an audit entry with an invalid timestampMs (${String(timestampMs)}) for run "${entry.runId}".`;
+      if (writeOptions?.strict || writeOptions?.dedupeKey !== undefined) {
+        return Promise.reject(new Error(message));
+      }
+      diagnose({ level: 'error', scope: 'audit-trail', message });
+      return Promise.resolve();
+    }
     const sequence = allocateSequence();
 
     const record: AuditRecord = {
@@ -1117,57 +1217,10 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // fire-and-forget schedule/session out-of-band write does.
     if (writeOptions?.dedupeKey !== undefined) {
       const markerKey = `${DEDUPE_MARKER_PREFIX}${writeOptions.dedupeKey}`;
-      // AB-391 (Codex P1 review finding, PR #601, "Guard the audit record
-      // key against cross-instance collisions"): `key` is derived from
-      // `sequence`, a LOCAL per-instance counter seeded from a scan at
-      // boot (`computeInitialAuditSequence`) — two `AuditTrail` instances
-      // booting from the same persisted floor, before either has written
-      // anything, can independently allocate the SAME `sequence` for the
-      // SAME `runId`/`timestampMs` (the exact `dedupeKey` scenario this
-      // mechanism exists to support: two Bureau processes racing to
-      // record different attachments for the same still-pending review).
-      // The original single-attempt batch only fenced on `markerKey`, so
-      // two DIFFERENT dedupeKeys colliding on the SAME derived `key` would
-      // both commit — the second silently overwriting the first's record
-      // at that key, permanently losing it even though both dedupe
-      // markers survive. Fencing on the audit `key` too (a second
-      // precondition) turns that silent overwrite into a detected
-      // collision: `committed === false` with the marker still absent
-      // means the KEY collided, not the dedupeKey, so mint a fresh
-      // `sequence`/`key` and retry — bounded, since an unresolvable
-      // collision must fail loudly rather than loop forever.
-      const attemptDeduplicatedWrite = async (
-        attemptKey: string,
-        attemptRecord: AuditRecord,
-        attemptsRemaining: number,
-      ): Promise<void> => {
-        const committed = await store.conditionalBatch(
-          [
-            { key: markerKey, expectedValue: null },
-            { key: attemptKey, expectedValue: null },
-          ],
-          [
-            { type: 'set', key: markerKey, value: attemptKey },
-            { type: 'set', key: attemptKey, value: JSON.stringify(attemptRecord) },
-          ],
-        );
-        if (committed) return;
-        // `committed === false` — distinguish WHICH precondition failed:
-        // the marker (benign — this exact fact was already recorded, by
-        // this call or a peer's) or the key (a collision with an
-        // UNRELATED record, needing a fresh key).
-        if (await store.has(markerKey)) return;
-        if (attemptsRemaining <= 0) {
-          throw new Error(
-            `[audit-trail] Exhausted retries resolving an audit-record key collision for dedupeKey "${writeOptions.dedupeKey}".`,
-          );
-        }
-        const nextSequence = allocateSequence();
-        const nextKey = encodeKey(attemptRecord.timestampMs, nextSequence, attemptRecord.runId);
-        const nextRecord: AuditRecord = { ...attemptRecord, sequence: nextSequence };
-        await attemptDeduplicatedWrite(nextKey, nextRecord, attemptsRemaining - 1);
-      };
-      const dedupedWrite = attemptDeduplicatedWrite(key, record, 3);
+      // See `attemptKeyFencedWrite`'s own doc comment above for the
+      // key-collision fencing this shares with the ordinary write path
+      // below.
+      const dedupedWrite = attemptKeyFencedWrite(store, key, record, markerKey, 3);
       // AB-391 (Codex P2 review finding, PR #601, "Track deduplicated audit
       // writes before returning"): unlike every other write path in this
       // function, this branch used to return its write promise directly
@@ -1190,7 +1243,24 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       return dedupedWrite;
     }
 
-    const rawWrite = kv.set(key, JSON.stringify(record));
+    // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+    // against deduplicated audit keys"): the collision fence above only
+    // protects a `dedupeKey`-guarded write from ANOTHER `dedupeKey`-guarded
+    // write racing on the same derived `key` — this ordinary path used to
+    // call the unconditional `kv.set(key, ...)` regardless, which can still
+    // silently overwrite a record a `dedupeKey` write already committed
+    // (two AuditTrail instances sharing the same sequence floor derive the
+    // same key for the same run/timestamp) while that write's dedupe
+    // marker survives untouched. A later replay then reads the marker as
+    // proof the fact was already recorded and never rewrites it —
+    // permanently losing the review audit while looking successful. Every
+    // ordinary write now goes through the SAME key-fenced, collision-retry
+    // path as a `dedupeKey` write (with no marker key of its own, so the
+    // fence is solely "is this exact key already occupied") — best-effort
+    // callers still never reject: retry exhaustion here degrades to
+    // diagnose-and-drop below, exactly like any other storage failure,
+    // rather than looping forever or silently overwriting.
+    const rawWrite = attemptKeyFencedWrite(store, key, record, undefined, 3);
 
     // Best-effort observability path: never rejects. This is what gets
     // tracked in `activeWrites`/`activeWritesByRunId` — `dispose()` awaits

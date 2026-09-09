@@ -1950,6 +1950,44 @@ describe('SessionStore outbox attachments (AB-391)', () => {
     ).rejects.toThrow(TypeError);
     expect(await store.load('empty-namespace-attachment')).toBeUndefined();
   });
+
+  it('commits the ORIGINAL validated attachment payload even when the updater mutates the caller\'s own attachment object afterward (Codex P2 review finding, PR #601, "Snapshot attachments before invoking the updater")', async () => {
+    // `options.outbox` is validated once, before the retry loop, against
+    // the SAME objects the caller passed in. `updater` is caller code,
+    // awaited inside that loop — it can mutate one of those same objects
+    // (setting `payload` to `undefined`, say) after it passed validation
+    // but before `commit()` serializes it. Without a snapshot, `commit()`
+    // would durably write a `session.attachment` entry missing `payload`
+    // entirely (`JSON.stringify` silently omits an `undefined` value),
+    // permanently blocking every later `outbox.pending()` call on that
+    // entry.
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const attachment: { namespace: string; payload: JSONValue } = {
+      namespace: 'audit-record',
+      payload: { original: true },
+    };
+    await store.update(
+      'snapshot-attachment-session',
+      (existing) => {
+        // Mutate the caller-owned attachment object AFTER `update()`'s own
+        // validation already ran against it, but BEFORE `commit()` below
+        // serializes it.
+        (attachment as { payload: unknown }).payload = undefined;
+        return existing ?? makeSession({ id: 'snapshot-attachment-session' });
+      },
+      { outbox: [attachment] },
+    );
+
+    const pending = await store.outbox.pending();
+    const entry = pending.find((candidate) => candidate.kind === 'session.attachment');
+    if (entry?.kind !== 'session.attachment') {
+      throw new Error('expected a session.attachment outbox entry');
+    }
+    // The committed entry carries the ORIGINAL validated payload, not the
+    // mutated (now-`undefined`) one — and, critically, is still a valid
+    // entry a later `outbox.pending()` call can parse without throwing.
+    expect(entry.payload).toEqual({ original: true });
+  });
 });
 
 describe('SessionStore outbox claim lease (AB-390)', () => {

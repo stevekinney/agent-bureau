@@ -9912,6 +9912,65 @@ describe('createBureau review queue (AB-20)', () => {
 
     bureau.dispose();
   });
+
+  it('deleteRun prunes that run\'s entries out of the sibling resolvedReviewDecisions map too (Codex P2 review finding, PR #601, "Prune decision identities with resolved review IDs")', async () => {
+    // `resolvedReviewDecisions` (AB-391) is a sibling map to
+    // `resolvedReviewIds`, keyed by the exact same review ids — pruning one
+    // without the other leaves stale decision/principal/reason data behind
+    // forever for a deleted run on a long-lived session.
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'call-prune-decisions', name: 'charge-card', arguments: { cents: 500 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('prune-decisions-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      await bureau.resolveReview({
+        id: review.id,
+        decision: 'deny',
+        principal: 'api-key:prune-decisions-reviewer',
+        reason: 'pruning coverage',
+      });
+
+      const sessionBeforeDelete = await bureau.getSession(run.sessionId);
+      expect(sessionBeforeDelete?.metadata['resolvedReviewIds']).toContain(review.id);
+      expect(sessionBeforeDelete?.metadata['resolvedReviewDecisions']).toHaveProperty(review.id);
+
+      await bureau.deleteRun(run.id);
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        const decisions = session?.metadata['resolvedReviewDecisions'];
+        const hasStaleDecision =
+          typeof decisions === 'object' &&
+          decisions !== null &&
+          !Array.isArray(decisions) &&
+          Object.prototype.hasOwnProperty.call(decisions, review.id);
+        return !hasStaleDecision;
+      });
+
+      const sessionAfterDelete = await bureau.getSession(run.sessionId);
+      expect(sessionAfterDelete?.metadata['resolvedReviewIds'] ?? []).not.toContain(review.id);
+      expect(sessionAfterDelete?.metadata['resolvedReviewDecisions']).not.toHaveProperty(review.id);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });
 
 describe('createBureau review lifecycle (AB-46)', () => {
@@ -18204,6 +18263,20 @@ describe('AB-389 — session commit outbox', () => {
         }
         return backingStore.set(key, value);
       },
+      // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+      // against deduplicated audit keys"): the session-deletion listener's
+      // out-of-band `session.deleted` audit record now commits through
+      // `conditionalBatch`'s key-collision fence rather than a plain
+      // `set` — mirrored here so this injected failure still reaches it.
+      conditionalBatch: async (conditions, operations) => {
+        if (
+          failAuditWrites &&
+          operations.some((operation) => operation.key.startsWith('audit:v1:'))
+        ) {
+          throw new Error('injected audit-trail write failure');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
     });
     const runtime = createManualRuntimeServices();
     const diagnostics: string[] = [];
@@ -18523,15 +18596,19 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
     }
   });
 
-  it('leaves an unrecognized session.attachment namespace pending and UNCLAIMED, and still drains a later ordinal past it in the same pass (Copilot review finding, PR #601)', async () => {
+  it('leaves an unrecognized session.attachment namespace pending and UNCLAIMED, and stops the drain pass there rather than reordering past it (Codex P1 review finding, PR #601, "Stop before later ordinals when an attachment is unknown")', async () => {
     // `SessionStore.update({ outbox })` is explicitly session-agnostic — a
     // namespace this bureau does not recognize might still be meaningful to
     // a different consumer that has not drained it yet. Acknowledging
     // (permanently removing) it would silently discard that fact, and
     // claiming it would starve that other consumer for as long as this
     // bureau keeps renewing the claim on every maintenance tick — so this
-    // bureau never claims it at all, and the drain pass moves on to later
-    // ordinals rather than looping on it forever.
+    // bureau never claims it at all. `SessionStore.outbox`'s own contract
+    // requires replay "exactly once, in ordinal order" (a STORE-WIDE
+    // ordinal), so this pass must also stop here rather than drain a LATER
+    // ordinal first — the earlier Copilot-review fix's "skip and keep
+    // going" behavior itself reordered past a still-pending fact, which is
+    // exactly what this test now guards against.
     const bureau = await createBureau({
       agents: {},
       generate: createMockGenerate('unused'),
@@ -18570,8 +18647,10 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
       const pendingAfterDrain = await sessionStore.outbox.pending();
       // Ordinal 3 (the unrecognized namespace) is still pending — never
       // dropped — and UNCLAIMED, so a different consumer could take it
-      // immediately. Ordinals 1, 2, and 4 all drained past it.
-      expect(pendingAfterDrain.map((entry) => entry.ordinal)).toEqual([3]);
+      // immediately. Ordinal 4 stays pending too: the pass stops AT the
+      // unrecognized ordinal rather than reordering past it, preserving
+      // `SessionStore.outbox`'s exactly-once-in-ordinal-order contract.
+      expect(pendingAfterDrain.map((entry) => entry.ordinal)).toEqual([3, 4]);
       const attachment = pendingAfterDrain[0];
       if (attachment?.kind !== 'session.attachment') {
         throw new Error('expected a session.attachment outbox entry');
@@ -19014,6 +19093,112 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
       await bureau.dispose();
     }
   });
+
+  it('fences a losing resolver BEFORE its irreversible action runs — the tool never executes when a different decision already won (Codex P1 review finding, PR #601, "Fence concurrent resolutions before performing the action")', async () => {
+    // Same foreign-decision setup as the test above, but this one proves
+    // the fix actually closes the gap Codex flagged: the PRIOR fix
+    // (`persistReviewResolution`'s own conflict detection) only ran AFTER
+    // `resumeApproval` — so a losing `approve` call could execute the tool
+    // before ever discovering a foreign `deny` already won. `charges` is a
+    // shared array the toolbox's `execute` pushes into; an empty array
+    // after the CONFLICT proves the tool call was never admitted.
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'ab-391-fence-call', name: 'charge-card', arguments: { cents: 750 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-fence-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      if (!bureau.sessionStore) throw new Error('Expected a configured session store');
+      await bureau.sessionStore.update(
+        review.sessionId,
+        (session) => {
+          if (!session) return session;
+          return {
+            ...session,
+            metadata: {
+              ...session.metadata,
+              resolvedReviewIds: [review.id],
+              resolvedReviewDecisions: {
+                [review.id]: {
+                  decision: 'deny',
+                  principal: 'api-key:foreign-fence-resolver',
+                  reason: 'a different resolver already denied this',
+                },
+              },
+            },
+          };
+        },
+        {
+          outbox: [
+            {
+              namespace: 'audit-record',
+              payload: {
+                runId: run.id,
+                type: 'review.tool-approval.denied',
+                detail: {
+                  reviewId: review.id,
+                  decision: 'deny',
+                  reason: 'a different resolver already denied this',
+                },
+                principal: 'api-key:foreign-fence-resolver',
+              },
+            },
+          ],
+        },
+      );
+
+      const error = await bureau
+        .resolveReview({
+          id: review.id,
+          decision: 'approve',
+          principal: 'api-key:losing-fence-reviewer',
+        })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      // The tool never ran: the fence rejected before `resumeApproval` (and
+      // therefore before tool execution) ever started.
+      expect(charges).toEqual([]);
+      // Two direct consequences of the fence rejecting BEFORE
+      // `persistApprovalResolutionStartedWithRetry`/`resumeApproval` ever
+      // ran: the crash-recovery marker was never written, and the
+      // review's original approval token is still the one on file — a
+      // losing call that had actually reached `resumeApproval` and gotten
+      // re-gated would have persisted a REPLACEMENT override with a
+      // different token instead.
+      const persistedSession = await bureau.getSession(review.sessionId);
+      expect(persistedSession?.metadata['approvalResolutionStartedIds'] ?? []).not.toContain(
+        review.id,
+      );
+      if (review.kind !== 'tool-approval') throw new Error('expected a tool-approval review');
+      const originalApprovalToken = review.approval.approvalToken;
+      if (originalApprovalToken === undefined) {
+        throw new Error('expected the review to carry a signed approval token');
+      }
+      expect(persistedApprovalToken(persistedSession, review.id)).toBe(originalApprovalToken);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });
 
 describe('AB-390 — outbox claim lease', () => {
@@ -19218,6 +19403,20 @@ describe('AB-390 — outbox claim lease', () => {
         }
         return backingStore.set(key, value);
       },
+      // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+      // against deduplicated audit keys"): the session-deletion listener's
+      // out-of-band `session.deleted` audit record now commits through
+      // `conditionalBatch`'s key-collision fence rather than a plain
+      // `set` — mirrored here so this write still gates as intended.
+      conditionalBatch: async (conditions, operations) => {
+        if (operations.some((operation) => operation.key.startsWith('audit:v1:'))) {
+          auditWriteStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseAuditWrite = resolve;
+          });
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
     });
     const runtime = createManualRuntimeServices();
     const bureau = await createBureau({
@@ -19310,6 +19509,20 @@ describe('AB-390 — outbox claim lease', () => {
           });
         }
         return backingStore.set(key, value);
+      },
+      // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+      // against deduplicated audit keys"): the session-deletion listener's
+      // out-of-band `session.deleted` audit record now commits through
+      // `conditionalBatch`'s key-collision fence rather than a plain
+      // `set` — mirrored here so this write still gates as intended.
+      conditionalBatch: async (conditions, operations) => {
+        if (operations.some((operation) => operation.key.startsWith('audit:v1:'))) {
+          auditWriteStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseAuditWrite = resolve;
+          });
+        }
+        return backingStore.conditionalBatch(conditions, operations);
       },
       get: async (key) => {
         if (

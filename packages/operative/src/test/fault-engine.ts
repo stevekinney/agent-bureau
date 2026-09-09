@@ -582,7 +582,10 @@ export function createFaultEngine(plan: FaultPlan, runtime: RuntimeServices): Fa
     },
 
     wrapStorage<T>(store: T): T {
-      const verbs = ['get', 'set', 'delete', 'query'] as const;
+      // AB-391: `conditionalBatch` added alongside the original four verbs
+      // — the audit trail's key-fenced writes call it, and a test
+      // targeting one of those writes needs `wrapStorage` to reach it.
+      const verbs = ['get', 'set', 'delete', 'query', 'conditionalBatch'] as const;
       if (typeof store !== 'object' || store === null) return store;
       const target = store;
       const handler: ProxyHandler<T & object> = {
