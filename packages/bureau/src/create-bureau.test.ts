@@ -18773,6 +18773,123 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
       await bureau.dispose();
     }
   });
+
+  it('throws CONFLICT, dispatches no live event, and keeps the durable audit trail truthful when a DIFFERENT resolver already won the same review (Codex P1 review finding, PR #601, "Distinguish concurrent resolvers from commit retries")', async () => {
+    // Simulates the scenario the ambiguous-commit fix's OWN early-return
+    // could not distinguish from a self-retry: some OTHER commit — a
+    // second Bureau instance sharing this session store, or a foreign
+    // resolver of any kind — already durably recorded a DIFFERENT decision
+    // for this exact reviewId before this call's own commit runs.
+    // Committed directly through `bureau.sessionStore.update()` (not
+    // through `bureau.resolveReview()`), mirroring the standalone-store
+    // pattern the AB-390/AB-391 crash-recovery tests above use to commit
+    // "from outside" this bureau's own request path.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'ab-391-conflict-call', name: 'charge-card', arguments: { cents: 900 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-conflict-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      const approved: string[] = [];
+      const denied: string[] = [];
+      bureau.addEventListener('review.approved', (event) => approved.push(event.reviewId));
+      bureau.addEventListener('review.denied', (event) => denied.push(event.reviewId));
+
+      if (!bureau.sessionStore) throw new Error('Expected a configured session store');
+      await bureau.sessionStore.update(
+        review.sessionId,
+        (session) => {
+          if (!session) return session;
+          return {
+            ...session,
+            metadata: {
+              ...session.metadata,
+              resolvedReviewIds: [review.id],
+              resolvedReviewDecisions: {
+                [review.id]: {
+                  decision: 'deny',
+                  principal: 'api-key:foreign-resolver',
+                  reason: 'a different resolver already denied this',
+                },
+              },
+            },
+          };
+        },
+        {
+          outbox: [
+            {
+              namespace: 'audit-record',
+              payload: {
+                runId: run.id,
+                type: 'review.tool-approval.denied',
+                detail: {
+                  reviewId: review.id,
+                  decision: 'deny',
+                  reason: 'a different resolver already denied this',
+                },
+                principal: 'api-key:foreign-resolver',
+              },
+            },
+          ],
+        },
+      );
+
+      const error = await bureau
+        .resolveReview({
+          id: review.id,
+          decision: 'approve',
+          principal: 'api-key:conflicting-reviewer',
+        })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      expect((error as BureauError).message).toContain('deny');
+
+      // No live event for the decision that never actually landed, and
+      // none for the foreign one either — that decision was committed
+      // directly through the session store, not through this bureau's own
+      // `resolveReview`/`recordReviewDecision` path, so it dispatches no
+      // live event of its own; only the durable audit trail speaks for it.
+      expect(approved).toEqual([]);
+      expect(denied).toEqual([]);
+
+      await bureau.runDurableMaintenance();
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      const deniedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.denied',
+      );
+      // The sole durable record reflects the resolution that actually won
+      // — never a second, fabricated "approved" record for the caller
+      // whose commit was correctly refused.
+      expect(approvedRecords).toHaveLength(0);
+      expect(deniedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });
 
 describe('AB-390 — outbox claim lease', () => {

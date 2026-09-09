@@ -2385,6 +2385,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     reviewId: string,
     removePendingApproval: boolean,
     runId: string,
+    // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+    // resolvers from commit retries"): this call's OWN decision identity,
+    // persisted alongside `resolvedReviewIds` (as `resolvedReviewDecisions`)
+    // so a later attempt that finds `reviewId` already resolved can tell
+    // apart two cases that both look identical from `resolvedReviewIds`
+    // alone: THIS SAME caller's own retry after an ambiguous commit (the
+    // persisted decision matches), versus a DIFFERENT resolver's genuinely
+    // different decision having already won a race (two Bureau instances
+    // sharing a session store, both resolving the same still-pending
+    // review). See the `resolvedReviewIds.includes(reviewId)` branch below.
+    decision: 'approve' | 'deny' | 'reject',
+    principal: string,
+    reason: string | undefined,
     // AB-391: the decision's audit payload, appended as a `session.attachment`
     // outbox entry in the SAME `conditionalBatch` as this function's own
     // `sessionStore.update()` commit below — see `reviewAuditOutboxAttachment`.
@@ -2428,6 +2441,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // just an in-loop retry of THIS call), so this is the one place that
     // sees every attempt's live state without an extra read.
     let alreadyLanded = false;
+    let conflictingDecision: { decision?: string; principal?: string; reason?: string } | undefined;
     const committed = await runtime.sessionStore.update(
       sessionId,
       (session) => {
@@ -2440,6 +2454,44 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
         }
         if (resolvedReviewIds.includes(reviewId)) {
+          // AB-391 (Codex P1 review finding, PR #601, "Distinguish
+          // concurrent resolvers from commit retries"): `resolvedReviewIds`
+          // alone cannot tell this call's own ambiguous-commit retry apart
+          // from a DIFFERENT resolver's already-won, genuinely different
+          // decision — both look identical here. Compare against the
+          // persisted decision identity instead. A resolution recorded
+          // before this field existed (`prior === undefined`) is treated as
+          // benign/own-retry, matching this fix's own backward-compatible
+          // default.
+          const currentDecisionsRaw = session.metadata['resolvedReviewDecisions'];
+          const currentDecisions: Record<string, JSONValue> =
+            typeof currentDecisionsRaw === 'object' &&
+            currentDecisionsRaw !== null &&
+            !Array.isArray(currentDecisionsRaw)
+              ? (currentDecisionsRaw as Record<string, JSONValue>)
+              : {};
+          const priorRaw = currentDecisions[reviewId];
+          const prior =
+            typeof priorRaw === 'object' && priorRaw !== null && !Array.isArray(priorRaw)
+              ? (priorRaw as Record<string, JSONValue>)
+              : undefined;
+          if (prior !== undefined) {
+            const priorDecision =
+              typeof prior['decision'] === 'string' ? prior['decision'] : undefined;
+            const priorPrincipal =
+              typeof prior['principal'] === 'string' ? prior['principal'] : undefined;
+            const priorReason = typeof prior['reason'] === 'string' ? prior['reason'] : undefined;
+            const isSameDecision =
+              priorDecision === decision && priorPrincipal === principal && priorReason === reason;
+            if (!isSameDecision) {
+              conflictingDecision = {
+                ...(priorDecision !== undefined ? { decision: priorDecision } : {}),
+                ...(priorPrincipal !== undefined ? { principal: priorPrincipal } : {}),
+                ...(priorReason !== undefined ? { reason: priorReason } : {}),
+              };
+              return undefined;
+            }
+          }
           alreadyLanded = true;
           return undefined;
         }
@@ -2489,9 +2541,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               ? omitStringValue(session.metadata['approvalResolutionStartedIds'], reviewId)
               : [],
             // `resolvedReviewIds` is guaranteed to NOT already include
-            // `reviewId` here — the `alreadyLanded` early return above
-            // handles that case before this object is ever built.
+            // `reviewId` here — the `alreadyLanded`/`conflictingDecision`
+            // early returns above handle that case before this object is
+            // ever built.
             resolvedReviewIds: [...resolvedReviewIds, reviewId],
+            // AB-391: this call's own decision identity, persisted so a
+            // LATER attempt that finds `reviewId` already resolved can
+            // compare against it — see the `resolvedReviewIds.includes`
+            // branch above.
+            resolvedReviewDecisions: {
+              ...(typeof session.metadata['resolvedReviewDecisions'] === 'object' &&
+              session.metadata['resolvedReviewDecisions'] !== null &&
+              !Array.isArray(session.metadata['resolvedReviewDecisions'])
+                ? session.metadata['resolvedReviewDecisions']
+                : {}),
+              [reviewId]: {
+                decision,
+                principal,
+                ...(reason !== undefined ? { reason } : {}),
+              },
+            },
             ...(removePendingApproval ? { pendingApprovalOverrides } : {}),
             ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
               ? { lastRequestAuthorities }
@@ -2501,6 +2570,22 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       },
       { outbox: reviewAuditOutboxAttachment(auditAttachment) },
     );
+    if (conflictingDecision) {
+      // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+      // resolvers from commit retries"): a DIFFERENT resolver's decision
+      // already durably won this review — this call made no partial
+      // commitment of its own (the updater returned `undefined` before
+      // building any candidate object), so reporting a fabricated success
+      // here (the pre-fix behavior) would return a result, and dispatch a
+      // live event, contradicting the sole durable audit record. Mirrors
+      // the existing `reviewResolutionCleanupPending` CONFLICT shape
+      // (`resolveReview`'s own "already resolved" throw) rather than
+      // inventing a new error shape for the same underlying situation.
+      throw new BureauError(
+        `Review "${reviewId}" was already resolved as "${conflictingDecision.decision ?? 'unknown'}" by a different resolver`,
+        'CONFLICT',
+      );
+    }
     if (alreadyLanded) return true;
     return committed !== undefined;
   }
@@ -2510,6 +2595,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     reviewId: string,
     removePendingApproval: boolean,
     runId: string,
+    decision: 'approve' | 'deny' | 'reject',
+    principal: string,
+    reason: string | undefined,
     auditAttachment?: ReviewAuditAttachment,
     // AB-391: see `persistReviewResolution`'s own doc comment on this
     // return value, including its `alreadyLanded` handling of an ambiguous
@@ -2527,9 +2615,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           reviewId,
           removePendingApproval,
           runId,
+          decision,
+          principal,
+          reason,
           auditAttachment,
         );
       } catch (error) {
+        // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+        // resolvers from commit retries"): a genuine CONFLICT — a DIFFERENT
+        // resolver's decision already durably won — is not transient, so
+        // retrying would only re-throw the identical CONFLICT again. Fail
+        // fast instead of burning the remaining attempts and their sleeps.
+        if (error instanceof BureauError && error.code === 'CONFLICT') throw error;
         lastError = error;
         if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
           await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
@@ -7017,6 +7114,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             input.id,
             cleanup.kind === 'tool-approval',
             cleanup.runId,
+            cleanup.decision,
+            cleanup.principal,
+            cleanup.reason,
             cleanupAuditAttachment,
           );
           reviewResolutionCleanupPending.delete(input.id);
@@ -7277,18 +7377,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           review.id,
           review.kind === 'tool-approval',
           review.runId,
+          input.decision,
+          input.principal,
+          input.reason,
           auditAttachment,
         );
       } catch (error) {
-        reviewResolutionCleanupPending.set(review.id, {
-          sessionId: review.sessionId,
-          runId: review.runId,
-          kind: review.kind,
-          decision: input.decision,
-          review,
-          principal: input.principal,
-          ...(input.reason !== undefined ? { reason: input.reason } : {}),
-        });
+        // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+        // resolvers from commit retries"): a genuine CONFLICT here means a
+        // DIFFERENT resolver's decision already durably won this review —
+        // THIS call's own attempt made no partial commitment (the updater
+        // returned `undefined` before building any candidate object), so
+        // there is nothing to clean up and nothing for a future retry to
+        // ever successfully complete: registering `reviewResolutionCleanupPending`
+        // for it would only make every future call for this id re-throw the
+        // identical CONFLICT via the cleanup branch above, forever. Rethrow
+        // directly instead — every OTHER rejection here (a transient
+        // storage failure, genuinely ambiguous) still registers cleanup as
+        // before, since `resumeApproval` above may already have run and its
+        // audit trace must not be lost.
+        if (!(error instanceof BureauError && error.code === 'CONFLICT')) {
+          reviewResolutionCleanupPending.set(review.id, {
+            sessionId: review.sessionId,
+            runId: review.runId,
+            kind: review.kind,
+            decision: input.decision,
+            review,
+            principal: input.principal,
+            ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          });
+        }
         resolvingReviewIds.delete(review.id);
         throw error;
       }
