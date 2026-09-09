@@ -6835,7 +6835,32 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // this branch is session-only.
       if (owner.kind === 'session' && runtime.sessionStore) {
         const liveSession = await runtime.sessionStore.load(owner.id);
-        if (liveSession) return page;
+        if (liveSession) {
+          // AB-372 (Codex review finding, PR #580, "Reauthorize the live
+          // session before returning its page") — the authorization check
+          // above ran against whatever session record existed BEFORE the
+          // owner-write wait and the global history replay this function
+          // just performed; if this id was deleted at that point (or never
+          // existed), that check was a no-op (an owner with no live record
+          // at authorization time is open by the SAME "no recorded
+          // authority" convention every other session verb follows — see
+          // this function's own doc comment), which is only correct for an
+          // id that STAYS deleted. If the id was recreated in that window,
+          // `liveSession` here is a DIFFERENT record than what authorization
+          // saw (or didn't see) — it must be checked on ITS OWN authority
+          // metadata before its history is returned, exactly as the
+          // up-front check would have done had it observed this record in
+          // the first place. Omitting `principal` entirely still skips this
+          // (an internal/trusted caller), matching the up-front check's own
+          // convention.
+          if (
+            principal !== undefined &&
+            !isSessionAuthorityAuthorized(liveSession.metadata, principal)
+          ) {
+            return { outcome: 'not-found' };
+          }
+          return page;
+        }
       }
       return { outcome: 'deleted-aggregate', owner, ...page };
     }

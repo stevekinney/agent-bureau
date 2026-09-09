@@ -13422,6 +13422,73 @@ describe('bureau.eventHistory deleted-aggregate through a real session deletion 
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('reauthorizes a recreated, live session against ITS OWN authority before returning its page — a principal unauthorized for the new incarnation is denied (Codex P1 review finding, PR #580, "Reauthorize the live session before returning its page")', async () => {
+    // The up-front authorization check runs against whatever session record
+    // existed BEFORE this function's owner-write wait and history replay —
+    // for an id that was deleted (no live record at that point), it is a
+    // no-op by the "no recorded authority is open" convention, which is
+    // only correct for an id that STAYS deleted. If the id is recreated in
+    // that window with a DIFFERENT recorded authority, the live-session
+    // override this issue adds must reauthorize against THAT record before
+    // returning its page — never fall through to treating the id as still
+    // open just because it once had no live record.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-reauth-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Recreate the SAME id, this time owned by a specific principal.
+      const recreatedRun = await bureau.createRun({
+        message: 'the second incarnation',
+        sessionId,
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+      expect(await bureau.getSession(sessionId)).toBeDefined();
+
+      // A principal never authorized for either incarnation must be denied
+      // the SAME not-found-shaped outcome every other unauthorized read
+      // gets — not the recreated session's live history.
+      const deniedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'mallory' },
+      );
+      expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+
+      // The actual owner still reads the live page.
+      const allowedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'alice' },
+      );
+      expect('outcome' in allowedOutcome).toBe(false);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
