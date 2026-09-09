@@ -719,6 +719,31 @@ describe('createBureau', () => {
     expect(bureau.store).toBe(store);
   });
 
+  it('AB-387: stamps Action.timestamp from the bureau-level manual runtime clock when no store is supplied', async () => {
+    // No pre-built `store` here — `createBureau`'s own internal
+    // `createStore()` call must compose the store with THIS SAME `runtime`
+    // for `Action.timestamp` to follow the injected clock rather than
+    // operative's own real-clock default.
+    const runtime = createManualRuntimeServices();
+    const pinnedTime = runtime.clock.now();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      runtime,
+    });
+
+    try {
+      const summary = await bureau.createRun({ message: 'stamp check' });
+      const runState = bureau.store.getRun(summary.id);
+      expect(runState?.actions.length).toBeGreaterThan(0);
+      for (const action of runState?.actions ?? []) {
+        expect(action.timestamp).toBe(pinnedTime);
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('exposes the event facade through the public bureau surface', async () => {
     const bureau = await createBureau({
       agents: {},
@@ -16465,14 +16490,11 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     ]);
 
     const runtime = createManualRuntimeServices();
-    // `createBureau`'s own `createStore()` call (`create-bureau.ts`) always
-    // builds the operative store with ITS OWN default (real) runtime unless
-    // a pre-built store is supplied — the bureau-level `runtime` option
-    // alone does not reach `Action.timestamp`. Passing `store` here,
-    // pre-built against the SAME manual `runtime`, is what makes the run's
-    // own action timestamps deterministic and pinned alongside the audit
-    // trail's out-of-band writes below.
-    const store = createStore({ runtime });
+    // AB-387: `createBureau`'s own `createStore()` call now composes the
+    // store with THIS SAME `runtime` internally, so the bureau-level
+    // `runtime` option alone is what makes the run's own action timestamps
+    // deterministic and pinned alongside the audit trail's out-of-band
+    // writes below — no pre-built `store` needed.
     const bureau = await createBureau({
       agents: {},
       generate,
@@ -16480,7 +16502,6 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       persistence: textValueStore(new MemoryStorage()),
       stopWhen: stopWhen.noToolCalls(),
       runtime,
-      store,
     });
 
     try {

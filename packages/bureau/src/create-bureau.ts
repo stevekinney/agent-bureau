@@ -1354,8 +1354,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   );
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
-  const store: Store = options.store ?? createStore();
-  const emitter = new CompletableEventTarget<BureauEventMap>();
   // AB-260 — resolve the injectable runtime-service seam exactly once,
   // before any subsystem is constructed. Every run, session, schedule,
   // scheduler task, heartbeat tick, audit write, webhook delivery, and
@@ -1366,6 +1364,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // (not `runtime`) to avoid colliding with the pre-existing local `runtime`
   // below, which names the unrelated `RuntimeComposition` value.
   const runtimeServices: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
+  // AB-387 — `createStore()` must draw `Action.timestamp` from the SAME
+  // resolved `runtimeServices` instance every other bureau subsystem reads,
+  // not operative's own real-clock default. Without this, a bureau built
+  // with a manual runtime still stamps actions from `Date.now()`, so a test
+  // had to construct and pass a pre-built store just to get deterministic
+  // timestamps (AB-370's regression test did exactly that before this fix).
+  const store: Store = options.store ?? createStore({ runtime: runtimeServices });
+  const emitter = new CompletableEventTarget<BureauEventMap>();
   // Snapshot `agents` synchronously, before the first `await` below — the
   // "fixed at createBureau() call time" catalog contract otherwise has a
   // real mutation window: a caller that mutates the SAME `agents` object it
