@@ -1175,12 +1175,15 @@ describe('createAuditTrail', () => {
 
     it('computeInitialAuditSequence ignores a legacy record with no sequence field', async () => {
       const kv = textValueStore(new MemoryStorage());
-      // A record written before `sequence` existed — encoded with a
-      // placeholder key segment (its own `sequence` field is simply absent
-      // from the stored JSON), which must not crash the scan or count as a
-      // real sequence to resume above.
+      // A record written before `sequence` existed — `encodeKey` always
+      // requires a numeric argument, so a genuinely pre-`sequence` key
+      // could never have used TODAY's `<ts>:<seq>:<runId>` shape; this key
+      // stands in for that by using a non-numeric placeholder segment
+      // where `<seq>` would be, which `parseSequenceFromKey`'s fast path
+      // must reject (falling back to reading the record itself) rather
+      // than crash the scan or count as a real sequence to resume above.
       await kv.set(
-        'audit:v1:0000000000001000:000000000000:run-legacy',
+        'audit:v1:0000000000001000:legacy:run-legacy',
         JSON.stringify({
           timestamp: new Date(1000).toISOString(),
           timestampMs: 1000,
@@ -1192,10 +1195,25 @@ describe('createAuditTrail', () => {
       expect(await computeInitialAuditSequence(kv)).toBe(0);
     });
 
+    it('computeInitialAuditSequence falls back to reading a record whose key it cannot fast-path parse, and still counts its real sequence', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // A key `parseSequenceFromKey` cannot fast-path (non-numeric segment
+      // where `<seq>` would be) but whose stored JSON DOES carry a real,
+      // valid `sequence` — the fallback read must still find and count it.
+      await kv.set(
+        'audit:v1:0000000000001000:unparseable:run-fallback',
+        JSON.stringify(makeRecord(9, { timestampMs: 1000, runId: 'run-fallback' })),
+      );
+      expect(await computeInitialAuditSequence(kv)).toBe(10);
+    });
+
     it('computeInitialAuditSequence skips a record whose stored JSON is malformed instead of throwing', async () => {
       const kv = textValueStore(new MemoryStorage());
       await seedRecord(kv, makeRecord(3, { timestampMs: 1000, runId: 'run-ok' }));
-      await kv.set('audit:v1:0000000000002000:000000000004:run-corrupt', '{not valid json');
+      // A non-numeric key segment forces `parseSequenceFromKey`'s fast path
+      // to fall back to `kv.get` + `JSON.parse` for THIS key — which is
+      // exactly the malformed-JSON case this test targets.
+      await kv.set('audit:v1:0000000000002000:corrupt:run-corrupt', '{not valid json');
 
       // The malformed record must not crash the scan and must not count as
       // a real sequence — the valid record's sequence (3) still wins.

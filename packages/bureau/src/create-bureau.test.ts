@@ -16179,7 +16179,7 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
-  it('dispatches session.deleted immediately, so it durably sorts BEFORE a released run own later terminal action rather than after it (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
+  it('dispatches session.deleted immediately, so it durably sorts BEFORE a released run\'s own later terminal action rather than after it (Codex P1 review finding, PR #566, "Persist deletion before waiting for run terminals")', async () => {
     // A prior round dispatched `session.deleted` only after every run this
     // deletion released or aborted had actually settled, specifically so a
     // released-paused-run's own terminal action — landing in the same
@@ -16263,7 +16263,7 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
-  it('AB-370: orders session.deleted before a released run own later terminal action by sequence when both land in the exact same manual-clock millisecond', async () => {
+  it("AB-370: orders session.deleted before a released run's own later terminal action by sequence when both land in the exact same manual-clock millisecond", async () => {
     // The test just above proves timestamp ordering when the two records
     // genuinely land in different milliseconds (real elapsed wall-clock
     // time between the dispatch and the released run's eventual terminal

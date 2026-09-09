@@ -159,7 +159,7 @@ export function createAuditRoutes(bureau: Bureau) {
 
     // Layer A — live store actions. Include live actions whose specific event
     // is not already present in the durable trail. We deduplicate on the
-    // composite event key (runId + type + sequence) rather than on runId alone
+    // composite event key (runId + type + sequence + timestamp) rather than on runId alone
     // so that in-flight actions for a run that already has some durable records
     // are not incorrectly suppressed. The durable trail only captures selected
     // AUDIT_EVENT_TYPES; non-audited event types (e.g. generate.*) are never
@@ -175,9 +175,22 @@ export function createAuditRoutes(bureau: Bureau) {
     // all — an out-of-band record (`session.deleted`, `schedule.*`,
     // `review.*`) never has a live counterpart in `liveState.actions`, so
     // it never needs a dedup key.
+    //
+    // `timestampMs` is included too (Copilot review finding, PR #594):
+    // `action.sequence` is the operative store's per-process counter — it
+    // restarts from 0 on every `createStore()` (a fresh process, or a
+    // caller-supplied store), so a run that continues across a restart and
+    // re-emits the same `type` at the same low per-process sequence number
+    // could otherwise collide with an unrelated durable record's
+    // `actionSequence` and be wrongly suppressed as "already durable".
+    // Folding `timestampMs` in correlates the exact event instance, not
+    // just its per-process sequence number.
     const durableEventKeys = new Set(
-      durableRecords.flatMap((r: { runId: string; type: string; actionSequence?: number }) =>
-        r.actionSequence !== undefined ? [`${r.runId}:${r.type}:${r.actionSequence}`] : [],
+      durableRecords.flatMap(
+        (r: { runId: string; type: string; actionSequence?: number; timestampMs: number }) =>
+          r.actionSequence !== undefined
+            ? [`${r.runId}:${r.type}:${r.actionSequence}:${r.timestampMs}`]
+            : [],
       ),
     );
 
@@ -197,10 +210,16 @@ export function createAuditRoutes(bureau: Bureau) {
       if (type !== undefined && action.type !== type) continue;
 
       // Exclude actions already present in the durable trail to avoid
-      // duplicates. Match on the composite event key (runId + type + sequence)
-      // so only the exact event is suppressed — not all events for the run.
-      // When there is no durable trail (no persistence), include all live actions.
-      if (auditTrail && durableEventKeys.has(`${action.runId}:${action.type}:${action.sequence}`))
+      // duplicates. Match on the composite event key (runId + type +
+      // sequence + timestamp) so only the exact event is suppressed — not
+      // all events for the run. When there is no durable trail (no
+      // persistence), include all live actions.
+      if (
+        auditTrail &&
+        durableEventKeys.has(
+          `${action.runId}:${action.type}:${action.sequence}:${action.timestamp}`,
+        )
+      )
         continue;
 
       liveRecords.push({

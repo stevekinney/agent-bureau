@@ -315,6 +315,39 @@ export interface AuditTrailOptions {
 }
 
 /**
+ * AB-370 (Copilot review finding, PR #594): `encodeKey` bakes `sequence` into
+ * the key itself (`audit:v1:<ts16>:<seq>:<runId>`), so
+ * {@link computeInitialAuditSequence} can read it straight off a `kv.list()`
+ * result WITHOUT a `kv.get` round trip per key — the difference between one
+ * network call and `1 + keys.length` on a network-backed `kv` (R2, etc.),
+ * which otherwise makes bureau boot time scale with total audit history
+ * size. Returns `undefined` for any key that doesn't match this exact,
+ * fixed-width shape (wrong prefix, a non-16-digit timestamp segment, or no
+ * numeric segment before the next `:`) — safe fallback for the hypothetical
+ * "record written before `sequence` existed" case {@link AuditRecord.sequence}'s
+ * own doc comment describes, and for anything unrelated an unexpected caller
+ * ever wrote under this prefix.
+ *
+ * `runId` is deliberately NOT parsed by position (it can itself contain
+ * `:`, e.g. the synthetic `schedule:<id>`/`session:<id>` owners this file's
+ * own listeners use) — this only needs the two FIXED-width segments before
+ * it, so runId's own content never matters here.
+ */
+function parseSequenceFromKey(key: string): number | undefined {
+  if (!key.startsWith(PREFIX)) return undefined;
+  const rest = key.slice(PREFIX.length);
+  const TIMESTAMP_WIDTH = 16;
+  if (rest.length <= TIMESTAMP_WIDTH + 1 || rest[TIMESTAMP_WIDTH] !== ':') return undefined;
+  const afterTimestamp = rest.slice(TIMESTAMP_WIDTH + 1);
+  const nextColon = afterTimestamp.indexOf(':');
+  if (nextColon === -1) return undefined;
+  const sequenceSegment = afterTimestamp.slice(0, nextColon);
+  if (!/^\d+$/.test(sequenceSegment)) return undefined;
+  const parsed = Number(sequenceSegment);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
  * AB-370: scans every record already persisted under this trail's `kv` and
  * returns the value {@link AuditTrailOptions.initialSequence} should start
  * from — one past the highest `sequence` any record already carries, or `0`
@@ -324,12 +357,14 @@ export interface AuditTrailOptions {
  * the shared counter this issue introduces resumes above anything a prior
  * process lifetime already persisted rather than colliding with it.
  *
- * A malformed stored record is skipped the same way {@link AuditTrail.query}
- * skips one — this is a best-effort scan, not a second source of truth for
- * data integrity — and a `kv.get`/`kv.list` failure is diagnosed and falls
- * back to `0` (existing records keep their invariant key uniqueness via
- * `runId`, so a conservative restart floor cannot collide, only start lower
- * than ideal).
+ * The fast path ({@link parseSequenceFromKey}) reads every key returned by
+ * one `kv.list()` call with no further I/O; a key it cannot parse falls back
+ * to reading and JSON-parsing that one record, mirroring
+ * {@link AuditTrail.query}'s own tolerance for a malformed stored record —
+ * this is a best-effort scan, not a second source of truth for data
+ * integrity. A `kv.get`/`kv.list` failure is diagnosed and falls back to `0`
+ * (existing records keep their invariant key uniqueness via `runId`, so a
+ * conservative restart floor cannot collide, only start lower than ideal).
  */
 export async function computeInitialAuditSequence(
   kv: TextValueStore | undefined,
@@ -341,6 +376,14 @@ export async function computeInitialAuditSequence(
     const keys = await kv.list(PREFIX);
     let highest = -1;
     for (const key of keys) {
+      const fromKey = parseSequenceFromKey(key);
+      if (fromKey !== undefined) {
+        if (fromKey > highest) highest = fromKey;
+        continue;
+      }
+
+      // Fallback for a key this fast path could not parse — read and
+      // decode the record the slow way, same as `query()`.
       const raw = await kv.get(key);
       if (!raw) continue;
       try {
@@ -751,20 +794,33 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         if (type !== undefined && record.type !== type) continue;
 
         records.push(record);
+
+        // Apply the limit AFTER filtering so we count only records that match all
+        // predicates. Stopping before filtering would cause the loop to break on
+        // non-matching records and miss in-range entries later in the key scan.
+        // AB-370 (Copilot review finding, PR #594): keeping this early break —
+        // rather than scanning every matching key before ever truncating —
+        // is what keeps this call's `kv.get`/`JSON.parse` cost bounded by
+        // `limit` instead of by total audit history size, which matters for
+        // the gateway's `GET /api/v1/audit` route calling `query({ limit })`
+        // on every request.
+        if (records.length >= limit) break;
       }
 
-      // AB-370: explicit, timestamp-primary sort rather than trusting the
-      // KV backend's raw key-scan order alone. `encodeKey` still embeds
-      // `sequence` in the key for uniqueness (via the trailing `runId`
-      // tiebreak) and for backends whose scan order already happens to be
-      // lexicographic, but this sort is what actually GUARANTEES "sequence
-      // breaks a timestamp tie" for every backend, and it is what makes a
-      // record with no `sequence` (written before this field existed) fall
-      // back to timestamp-only ordering rather than sorting arbitrarily
-      // first or last: `Array.prototype.sort` is stable, so returning `0`
-      // when either side lacks a `sequence` preserves that record's
-      // original scan-order position among same-timestamp peers instead of
-      // forcing an order this trail has no basis to assert.
+      // AB-370: explicit, timestamp-primary sort over the (already
+      // limit-bounded) collected records, rather than trusting the KV
+      // backend's raw key-scan order alone for the same-millisecond
+      // tiebreak. `encodeKey` still embeds `sequence` in the key for
+      // uniqueness (via the trailing `runId` tiebreak) and for backends
+      // whose scan order already happens to be lexicographic, but this
+      // sort is what actually GUARANTEES "sequence breaks a timestamp tie"
+      // for every backend, and it is what makes a record with no
+      // `sequence` (written before this field existed) fall back to
+      // timestamp-only ordering rather than sorting arbitrarily first or
+      // last: `Array.prototype.sort` is stable, so returning `0` when
+      // either side lacks a `sequence` preserves that record's original
+      // scan-order position among same-timestamp peers instead of forcing
+      // an order this trail has no basis to assert.
       //
       // Deliberately timestamp-first, sequence only as the tiebreak — NOT
       // sequence-first — so a query's order for two records that do NOT
@@ -778,10 +834,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         return a.sequence - b.sequence;
       });
 
-      // Apply the limit AFTER filtering AND sorting, so a truncated result
-      // is always the oldest `limit` matching records by the order above,
-      // never an artifact of scan position.
-      return records.slice(0, limit);
+      return records;
     },
 
     async dispose(): Promise<void> {
