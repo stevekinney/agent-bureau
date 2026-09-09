@@ -496,7 +496,12 @@ describe('GET /api/v1/audit', () => {
     // compare across domains for two records that were genuinely the same
     // event. This assertion mirrors that same "actionSequence when
     // present, else sequence" key, matching the ordering the route
-    // actually guarantees rather than the raw `sequence` field alone.
+    // actually guarantees rather than the raw `sequence` field alone. This
+    // test's own records are all action-derived (two ordinary runs), so it
+    // never exercises the route's OUT-OF-BAND durable-record fallback (a
+    // record with no `actionSequence` at all, e.g. `session.deleted`) —
+    // that path is covered directly by the gateway's own merge-order unit
+    // tests instead.
     const orderingSequence = (record: { sequence?: number; actionSequence?: number }): number =>
       record.actionSequence ?? record.sequence ?? -1;
     if (records.length >= 2) {
@@ -649,6 +654,215 @@ describe('GET /api/v1/audit', () => {
 
     // Total: 2 records (1 durable + 1 live non-audited), not 1 (old buggy behaviour).
     expect(records.filter((r) => r.runId === runId)).toHaveLength(2);
+  });
+
+  it('merges live and durable records via a stable two-list merge, preserving durable-vs-durable order and using actionSequence only for the cross-list tiebreak (Codex P1 review finding, PR #594)', async () => {
+    const runId = 'run-merge-order';
+    const sameMs = 5_000_000;
+
+    // Two durable, action-derived records ALREADY in their correct order
+    // (as `AuditTrail.query()` itself would return them — ascending shared
+    // `sequence`), but with `actionSequence` values DELIBERATELY inverted
+    // relative to that order. A buggy global re-sort that compares every
+    // record's `actionSequence` against every other record's would swap
+    // these two (5 < 500); the correct merge never compares them against
+    // each other at all — only against the live list's current head.
+    const durableFirst: AuditRecord = {
+      timestamp: new Date(sameMs).toISOString(),
+      timestampMs: sameMs,
+      sequence: 10,
+      actionSequence: 500,
+      runId,
+      type: 'run.completed',
+      detail: {},
+    };
+    const durableSecond: AuditRecord = {
+      timestamp: new Date(sameMs).toISOString(),
+      timestampMs: sameMs,
+      sequence: 11,
+      actionSequence: 5,
+      runId,
+      type: 'tool.settled',
+      detail: {},
+    };
+
+    const stubAuditTrail: AuditTrail = {
+      query: async () => [durableFirst, durableSecond],
+      record: async () => {},
+      dispose: async () => {},
+    };
+
+    const stubStore = {
+      getState: () => ({
+        runs: new Map(),
+        actions: [
+          // Same millisecond as both durable records, unaudited (never
+          // deduped) — its own `sequence` (7) sits BETWEEN durableSecond's
+          // `actionSequence` (5) and durableFirst's (500), so the correct
+          // cross-list comparison (against durableFirst's `actionSequence`
+          // — the durable list's CURRENT head, not durableSecond's) must
+          // place it BEFORE both durable records.
+          {
+            sequence: 7,
+            runId,
+            type: 'step.generated',
+            detail: {},
+            timestamp: sameMs,
+          },
+          // A LATER timestamp than every durable record — durableRecords
+          // is exhausted before this is reached, exercising the merge's
+          // live-side tail loop.
+          {
+            sequence: 8,
+            runId,
+            type: 'step.generated',
+            detail: {},
+            timestamp: sameMs + 1000,
+          },
+        ],
+      }),
+    } as unknown as Bureau['store'];
+
+    const stubBureau: Bureau = {
+      store: stubStore,
+      auditTrail: stubAuditTrail,
+      memory: undefined,
+      scheduler: undefined,
+      ready: true,
+      createRun: async () => {
+        throw new Error('not implemented');
+      },
+      listRuns: () => [],
+      getRun: () => undefined,
+      abortRun: () => {
+        throw new Error('not implemented');
+      },
+      deleteRun: () => {},
+      listSessions: async () => [],
+      getSession: async () => undefined,
+      deleteSession: async () => {},
+      getConfiguration: () => ({
+        provider: undefined,
+        providers: [],
+        maximumSteps: 10,
+        systemPrompt: undefined,
+        tools: [],
+      }),
+      getTools: () => [],
+      subscribeLiveFrames: () => () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      on: () => ({ subscribe: () => ({ closed: false, unsubscribe: () => {} }) }),
+      once: () => {},
+      subscribe: () => ({ closed: false, unsubscribe: () => {} }),
+      toObservable: () => ({ subscribe: () => ({ closed: false, unsubscribe: () => {} }) }),
+      events: async function* () {},
+      complete: () => {},
+      completed: false,
+      signal: new AbortController().signal,
+      dispose: async () => {},
+      sessionStore: undefined,
+      kv: undefined,
+    } as unknown as Bureau;
+
+    const app = new Hono();
+    app.route('/api/v1/audit', createAuditRoutes(stubBureau));
+
+    const response = await app.request('/api/v1/audit');
+    expect(response.status).toBe(200);
+
+    const records = (await response.json()) as Array<{
+      runId: string;
+      type: string;
+      sequence: number;
+      timestampMs: number;
+    }>;
+
+    // Expected order: the live step.generated at the shared timestamp
+    // first (its own sequence, 7, sorts before durableFirst's
+    // actionSequence, 500), then durableFirst, then durableSecond (their
+    // OWN established order preserved, despite the actionSequence
+    // inversion), then the later live step.generated last.
+    expect(records.map((r) => `${r.type}:${r.sequence}:${r.timestampMs}`)).toEqual([
+      `step.generated:7:${sameMs}`,
+      `run.completed:10:${sameMs}`,
+      `tool.settled:11:${sameMs}`,
+      `step.generated:8:${sameMs + 1000}`,
+    ]);
+  });
+
+  it('builds no dedup key for a durable record with neither sequence nor actionSequence, without crashing', async () => {
+    // A genuinely pre-`sequence`-field legacy record (see
+    // `AuditRecord.sequence`'s own doc comment) — the dedup key builder's
+    // `correlated !== undefined` fallback must skip it cleanly rather than
+    // producing a key like `run-x:tool.started:undefined:1000`.
+    const runId = 'run-no-correlation';
+    const legacyRecord = {
+      timestamp: new Date(1000).toISOString(),
+      timestampMs: 1000,
+      runId,
+      type: 'tool.started',
+      detail: {},
+    } as unknown as AuditRecord;
+
+    const stubAuditTrail: AuditTrail = {
+      query: async () => [legacyRecord],
+      record: async () => {},
+      dispose: async () => {},
+    };
+    const stubStore = {
+      getState: () => ({ runs: new Map(), actions: [] }),
+    } as unknown as Bureau['store'];
+    const stubBureau: Bureau = {
+      store: stubStore,
+      auditTrail: stubAuditTrail,
+      memory: undefined,
+      scheduler: undefined,
+      ready: true,
+      createRun: async () => {
+        throw new Error('not implemented');
+      },
+      listRuns: () => [],
+      getRun: () => undefined,
+      abortRun: () => {
+        throw new Error('not implemented');
+      },
+      deleteRun: () => {},
+      listSessions: async () => [],
+      getSession: async () => undefined,
+      deleteSession: async () => {},
+      getConfiguration: () => ({
+        provider: undefined,
+        providers: [],
+        maximumSteps: 10,
+        systemPrompt: undefined,
+        tools: [],
+      }),
+      getTools: () => [],
+      subscribeLiveFrames: () => () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      on: () => ({ subscribe: () => ({ closed: false, unsubscribe: () => {} }) }),
+      once: () => {},
+      subscribe: () => ({ closed: false, unsubscribe: () => {} }),
+      toObservable: () => ({ subscribe: () => ({ closed: false, unsubscribe: () => {} }) }),
+      events: async function* () {},
+      complete: () => {},
+      completed: false,
+      signal: new AbortController().signal,
+      dispose: async () => {},
+      sessionStore: undefined,
+      kv: undefined,
+    } as unknown as Bureau;
+
+    const app = new Hono();
+    app.route('/api/v1/audit', createAuditRoutes(stubBureau));
+
+    const response = await app.request('/api/v1/audit');
+    expect(response.status).toBe(200);
+    const records = (await response.json()) as Array<{ runId: string; type: string }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]?.runId).toBe(runId);
   });
 
   it('live+durable trail reconcile: events visible in live store are captured in durable trail', async () => {

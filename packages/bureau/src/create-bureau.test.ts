@@ -16380,16 +16380,27 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
-  it('AB-370 (Codex P1 review finding, PR #594): boots successfully and seeds the sequence counter from the clock, not 0, when the boot floor scan itself fails', async () => {
-    // A transient `kv.list` failure during boot must not silently reset
-    // the shared sequence counter to 0 — that would defeat this issue's
-    // own ordering invariant. `createBureau` passes
-    // `runtimeServices.clock.now()` as `computeInitialAuditSequence`'s
-    // `emergencyFloor`, so bureau construction still succeeds and the
-    // first record this process writes lands at that clock reading, not 0.
+  it('AB-370: boots normally and resumes the sequence counter above prior history when a one-shot boot-scan failure recovers on retry', async () => {
+    // `computeInitialAuditSequence` retries a transient `kv.list` failure
+    // up to three times before this even reaches `createBureau` — this
+    // proves the RETRY, not a fallback, is what makes boot see the correct
+    // floor: a prior process already persisted sequence 9 for this run's
+    // owner, and the very first write after this (flaky) boot must land at
+    // 10, never re-issuing (or falling back below) anything already
+    // persisted.
     const runtime = createManualRuntimeServices();
-    runtime.setTime(1_700_000_000_000);
     const baseKv = textValueStore(new MemoryStorage());
+    await baseKv.set(
+      'audit:v1:0000000000001000:000000000009:run-prior',
+      JSON.stringify({
+        timestamp: new Date(1000).toISOString(),
+        timestampMs: 1000,
+        sequence: 9,
+        runId: 'run-prior',
+        type: 'run.completed',
+        detail: null,
+      }),
+    );
     let failListOnce = true;
     const flakyKv: ReturnType<typeof textValueStore> = {
       ...baseKv,
@@ -16416,9 +16427,74 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       await waitForRunCompletion(bureau, run.id);
 
       const [record] = await bureau.auditTrail!.query({ runId: run.id, type: 'run.completed' });
-      // Far above 0 — the emergency clock-based floor, not the unsafe
-      // default a bare scan-failure fallback would have used.
-      expect(record?.sequence).toBeGreaterThanOrEqual(1_700_000_000_000);
+      // At or above 10 — the run may write several other audited events
+      // (tool.*, step.completed) before its own terminal action, each
+      // consuming one more value from the same shared counter; the exact
+      // count is an implementation detail, the FLOOR is what this test
+      // guards.
+      expect(record?.sequence).toBeGreaterThanOrEqual(10);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('AB-370: still boots successfully, diagnosing loudly and starting the sequence counter at 0, when the boot floor scan fails on every retry', async () => {
+    // Exhausting every retry must degrade — same as every other boot-time
+    // KV failure in `create-bureau.ts` — rather than failing bureau
+    // construction outright over one subsystem (Codex review, PR #594: an
+    // earlier round tried a clock-based "emergency floor" here instead,
+    // which turned out to be no safer than 0 against a deployment that
+    // already holds pre-existing, much-larger legacy sequences — see
+    // `computeInitialAuditSequence`'s own doc comment).
+    const runtime = createManualRuntimeServices();
+    const received: unknown[] = [];
+    const baseKv = textValueStore(new MemoryStorage());
+    // Only the audit trail's own `audit:v1:` prefix scan fails, and only
+    // for the boot scan's own three attempts — a bare "every `list()` call
+    // throws forever" stub would also break the session store's OWN
+    // unrelated `list()` usage AND every later `query()` this test itself
+    // calls afterward, for reasons this test isn't targeting.
+    let auditListFailuresRemaining = 3;
+    const failingKv: ReturnType<typeof textValueStore> = {
+      ...baseKv,
+      list: async (prefix: string) => {
+        if (prefix === 'audit:v1:' && auditListFailuresRemaining > 0) {
+          auditListFailuresRemaining -= 1;
+          throw new Error('storage unavailable');
+        }
+        return baseKv.list(prefix);
+      },
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: failingKv,
+      runtime,
+      onDiagnostic: (diagnostic) => received.push(diagnostic),
+    });
+
+    try {
+      expect(bureau.ready).toBe(true);
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      // The counter started at 0 (not a clock reading, not left unset) —
+      // some record from this run landed at exactly 0, proving the
+      // fallback floor rather than merely that SOME sequence exists.
+      const allRecords = await bureau.auditTrail!.query({ runId: run.id, limit: 1000 });
+      expect(allRecords.some((r) => r.sequence === 0)).toBe(true);
+      expect(
+        received.some(
+          (d) =>
+            typeof d === 'object' &&
+            d !== null &&
+            'message' in d &&
+            typeof d.message === 'string' &&
+            d.message.includes('starting the shared counter from 0'),
+        ),
+      ).toBe(true);
     } finally {
       await bureau.dispose();
     }

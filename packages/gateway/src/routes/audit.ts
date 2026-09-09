@@ -165,16 +165,26 @@ export function createAuditRoutes(bureau: Bureau) {
     // AUDIT_EVENT_TYPES; non-audited event types (e.g. generate.*) are never
     // in durableRecords and must always pass through from the live store.
     const liveState = bureau.store.getState();
-    // AB-370: dedup on `actionSequence` — the originating operative-store
-    // `Action`'s own per-process `sequence`, which is what the live store's
-    // `action.sequence` below is also drawn from — NOT on `sequence`, which
-    // is now the durable trail's shared, per-bureau ordering counter and no
-    // longer equal to `action.sequence` (see `AuditRecord.actionSequence`'s
-    // own doc comment in `packages/bureau/src/audit-trail.ts`). Only
-    // records the action-stream listener wrote carry `actionSequence` at
-    // all — an out-of-band record (`session.deleted`, `schedule.*`,
-    // `review.*`) never has a live counterpart in `liveState.actions`, so
-    // it never needs a dedup key.
+    // AB-370: dedup on `actionSequence ?? sequence` — the originating
+    // operative-store `Action`'s own per-process `sequence`, which is what
+    // the live store's `action.sequence` below is also drawn from — NOT on
+    // the durable trail's shared, per-bureau ordering counter alone (see
+    // `AuditRecord.actionSequence`'s own doc comment in
+    // `packages/bureau/src/audit-trail.ts`). `?? sequence` (Codex P2
+    // review finding, PR #594, "Preserve deduplication for
+    // pre-actionSequence records") covers a durable record a PRIOR version
+    // of this trail wrote, before `actionSequence` existed as a distinct
+    // field: back then `sequence` WAS the action's own `action.sequence`
+    // (the two fields only diverged once this issue shipped), so falling
+    // back to `sequence` for such a record still correlates correctly — an
+    // upgrade with existing durable history and a reused/restored live
+    // store must not start duplicating every pre-upgrade action-derived
+    // event. A genuinely out-of-band record (`session.deleted`,
+    // `schedule.*`, `review.*`) gets a dedup key from this same fallback
+    // too, but that is harmless: those always carry a synthetic runId
+    // (`schedule:<id>`/`session:<id>`) or a `review.<kind>.<status>` type
+    // string that never appears on the live action stream at all, so this
+    // key can never coincidentally match a real live action's key.
     //
     // `timestampMs` is included too (Copilot review finding, PR #594):
     // `action.sequence` is the operative store's per-process counter — it
@@ -182,15 +192,23 @@ export function createAuditRoutes(bureau: Bureau) {
     // caller-supplied store), so a run that continues across a restart and
     // re-emits the same `type` at the same low per-process sequence number
     // could otherwise collide with an unrelated durable record's
-    // `actionSequence` and be wrongly suppressed as "already durable".
+    // correlated sequence and be wrongly suppressed as "already durable".
     // Folding `timestampMs` in correlates the exact event instance, not
     // just its per-process sequence number.
     const durableEventKeys = new Set(
       durableRecords.flatMap(
-        (r: { runId: string; type: string; actionSequence?: number; timestampMs: number }) =>
-          r.actionSequence !== undefined
-            ? [`${r.runId}:${r.type}:${r.actionSequence}:${r.timestampMs}`]
-            : [],
+        (r: {
+          runId: string;
+          type: string;
+          sequence?: number;
+          actionSequence?: number;
+          timestampMs: number;
+        }) => {
+          const correlated = r.actionSequence ?? r.sequence;
+          return correlated !== undefined
+            ? [`${r.runId}:${r.type}:${correlated}:${r.timestampMs}`]
+            : [];
+        },
       ),
     );
 
@@ -238,35 +256,63 @@ export function createAuditRoutes(bureau: Bureau) {
       });
     }
 
-    // AB-370 (Codex P1 review finding, PR #594, "Preserve a common order
-    // when merging live and durable records"): a durable record's shared
-    // `sequence` counter and a live action's `action.sequence` are two
-    // DIFFERENT numbering domains — comparing them directly (as an earlier
-    // round of this fix did) can put a live action out of chronological
-    // order against a durable one that shares its millisecond. For a
-    // durable record the action-stream listener wrote, `actionSequence`
-    // (present on those, and absent on this file's `liveRecords`) IS in
-    // the same domain as a live action's own `sequence` — so this key
-    // prefers it, falling back to the durable trail's own `sequence` only
-    // for an out-of-band record (`session.deleted`, `schedule.*`,
-    // `review.*`) that has no live counterpart to correlate with anyway.
-    // `-1` (not `0`) for a value that's entirely absent keeps the
-    // comparator a genuine total order — see `audit-trail.ts`'s own
-    // `query()` comparator, which uses the same sentinel for the same
-    // transitivity reason.
-    const orderingSequence = (record: { sequence?: number; actionSequence?: number }): number => {
-      if ('actionSequence' in record && record.actionSequence !== undefined) {
-        return record.actionSequence;
-      }
-      return record.sequence ?? -1;
-    };
+    // AB-370 (Codex P1 review finding, PR #594, two rounds — "Preserve a
+    // common order when merging live and durable records", then "Use one
+    // domain for same-millisecond comparisons"): `durableRecords` is
+    // already correctly ordered by `AuditTrail.query()`'s own
+    // (`timestampMs`, `sequence`) comparator — comparing a durable
+    // record's `sequence` DIRECTLY against another durable record's
+    // `actionSequence` (a single global re-sort naturally does this once
+    // both live and durable records are thrown into one array) discards
+    // that established order in favor of a domain mismatch that only
+    // matters for a durable-VS-live comparison. `liveRecords` is sorted by
+    // its own `sequence` (`action.sequence` — a single, self-consistent
+    // domain) so it, too, arrives at the merge below already correctly
+    // ordered internally.
+    liveRecords.sort((a, b) => a.sequence - b.sequence);
 
-    // Merge and sort chronologically (oldest first), using the ordering
-    // key above as the same-timestamp tiebreak.
-    const merged = [...durableRecords, ...liveRecords].sort((a, b) => {
-      if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
-      return orderingSequence(a) - orderingSequence(b);
-    });
+    // A proper two-list STABLE merge (mergesort's merge step), not a
+    // single `Array.sort` over the concatenation: each list's own,
+    // already-correct internal order is preserved (an item is only ever
+    // pushed from the FRONT of its own list, never reordered relative to
+    // its own list's peers) — the domain-mismatch problem above only ever
+    // arises comparing the two lists' current HEADS against each other,
+    // which is exactly the one comparison where a durable record's
+    // `actionSequence` (the same domain as a live action's own `sequence`)
+    // is the right key; a durable record with no `actionSequence`
+    // (out-of-band: `session.deleted`, `schedule.*`, `review.*`) falls
+    // back to its own `sequence` for this cross-list comparison only —
+    // best-effort, since it has no live counterpart to correlate with —
+    // via `-1` when even that is absent, the same sentinel
+    // `audit-trail.ts`'s own `query()` comparator uses for the same
+    // transitivity reason.
+    const merged: Array<(typeof durableRecords)[number] | (typeof liveRecords)[number]> = [];
+    let durableIndex = 0;
+    let liveIndex = 0;
+    while (durableIndex < durableRecords.length && liveIndex < liveRecords.length) {
+      const durableRecord = durableRecords[durableIndex]!;
+      const liveRecord = liveRecords[liveIndex]!;
+      if (durableRecord.timestampMs !== liveRecord.timestampMs) {
+        if (durableRecord.timestampMs < liveRecord.timestampMs) {
+          merged.push(durableRecord);
+          durableIndex++;
+        } else {
+          merged.push(liveRecord);
+          liveIndex++;
+        }
+        continue;
+      }
+      const durableOrderingKey = durableRecord.actionSequence ?? durableRecord.sequence ?? -1;
+      if (durableOrderingKey <= liveRecord.sequence) {
+        merged.push(durableRecord);
+        durableIndex++;
+      } else {
+        merged.push(liveRecord);
+        liveIndex++;
+      }
+    }
+    while (durableIndex < durableRecords.length) merged.push(durableRecords[durableIndex++]!);
+    while (liveIndex < liveRecords.length) merged.push(liveRecords[liveIndex++]!);
 
     return context.json(merged.slice(0, limit), 200);
   });

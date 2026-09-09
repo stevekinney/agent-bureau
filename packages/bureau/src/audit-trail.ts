@@ -351,79 +351,102 @@ function parseSequenceFromKey(key: string): number | undefined {
  * AB-370: scans every record already persisted under this trail's `kv` and
  * returns the value {@link AuditTrailOptions.initialSequence} should start
  * from — one past the highest `sequence` any record already carries, or `0`
- * when there is no `kv` (ephemeral bureau) or no record carries a `sequence`
- * yet. `create-bureau.ts` calls this and passes the result into
- * {@link createAuditTrail} BEFORE the trail starts admitting new writes, so
- * the shared counter this issue introduces resumes above anything a prior
- * process lifetime already persisted rather than colliding with it.
+ * when there is no `kv` (ephemeral bureau), no record carries a `sequence`
+ * yet, or every scan attempt below fails. `create-bureau.ts` calls this and
+ * passes the result into {@link createAuditTrail} BEFORE the trail starts
+ * admitting new writes, so the shared counter this issue introduces resumes
+ * above anything a prior process lifetime already persisted rather than
+ * colliding with it.
  *
  * The fast path ({@link parseSequenceFromKey}) reads every key returned by
  * one `kv.list()` call with no further I/O; a key it cannot parse falls back
- * to reading and JSON-parsing that one record, mirroring
- * {@link AuditTrail.query}'s own tolerance for a malformed stored record —
- * this is a best-effort scan, not a second source of truth for data
- * integrity.
+ * to reading and JSON-parsing that one record (validated the same way —
+ * `Number.isSafeInteger`, non-negative — so a corrupted record whose stored
+ * `sequence` is fractional, negative, or astronomically large, e.g. `1e308`,
+ * cannot poison the floor: incrementing a value that large no longer even
+ * changes it, which would make every write in the same millisecond for the
+ * same run collide on the exact same key, Codex P2 review finding, PR
+ * #594), mirroring {@link AuditTrail.query}'s own tolerance for a malformed
+ * stored record — this is a best-effort scan, not a second source of truth
+ * for data integrity.
  *
- * A `kv.get`/`kv.list` failure is diagnosed. It deliberately does NOT fall
- * back to `0` (Codex P1 review finding, PR #594): a transient scan failure
- * against a store that already holds persisted records would otherwise
- * silently reopen the exact bug this issue fixes — a fresh process
- * re-issuing sequence values a prior lifetime already used, which can sort
- * a genuinely later record BEFORE an earlier one on a same-millisecond tie.
- * `emergencyFloor` (a caller-supplied clock reading — `create-bureau.ts`
- * passes `runtimeServices.clock.now()`, never a raw `Date.now()`, per this
- * package's determinism rule) is used instead, the same
- * "wall-clock-far-larger-than-any-real-counter" technique
- * `seedRunSeqGeneration` already uses in `create-bureau.ts` for an
- * analogous problem: any realistic sequence count is astronomically
- * smaller than an epoch-millisecond reading, so this is safely far above
- * anything a previously-scanned lifetime could have persisted. Omitting
- * `emergencyFloor` (any direct caller of this exported function other than
- * `create-bureau.ts`) keeps the old, less-safe `0` fallback rather than
- * forcing every caller to thread a clock through — documented here as the
- * tradeoff, not a silent gap.
+ * A `kv.get`/`kv.list` failure is retried up to three times (immediate
+ * retry, no artificial delay — a genuinely transient blip resolves quickly,
+ * and this package's determinism rule rules out a real timer here anyway)
+ * before falling back to `0` and diagnosing loudly (Codex review, PR #594,
+ * two rounds): the first round's `0` fallback was flagged as unsafe (a scan
+ * failure against a store that already holds records could silently
+ * reissue a value a prior lifetime used); the fix tried next — seeding from
+ * a caller-supplied clock reading instead of `0` — was ALSO flagged as
+ * unsafe, correctly: a deployment upgraded from this trail's OWN prior
+ * `manualSequence` scheme (seeded near `Number.MAX_SAFE_INTEGER`,
+ * ~9×10^15) can already hold out-of-band sequences far ABOVE any real
+ * epoch-millisecond clock reading (~1.8×10^12 today), so a clock-based
+ * floor is not actually guaranteed to exceed persisted history either —
+ * it just LOOKS safe. There is no floor this function can compute or guess
+ * that is provably correct without a successful scan, so `0` — the
+ * pre-existing, understood fallback every other boot-time KV failure in
+ * `create-bureau.ts` already degrades to (diagnose and continue, never
+ * hard-fail bureau construction over a single subsystem) — is what it
+ * falls back to after retries are exhausted, loudly, rather than a value
+ * that merely appears safer. `0` can only misorder two records that
+ * collide on the SAME millisecond after a clock rewind — the exact
+ * scenario `encodeKey`'s own `runId` segment already guards the append-only
+ * invariant against — and never changes order for two records that do not
+ * share a millisecond, this issue's own rollback trigger.
  */
 export async function computeInitialAuditSequence(
   kv: TextValueStore | undefined,
   onDiagnostic?: DiagnosticSink,
-  emergencyFloor?: () => number,
 ): Promise<number> {
   if (!kv) return 0;
   const diagnose = resolveDiagnosticSink(onDiagnostic);
-  try {
-    const keys = await kv.list(PREFIX);
-    let highest = -1;
-    for (const key of keys) {
-      const fromKey = parseSequenceFromKey(key);
-      if (fromKey !== undefined) {
-        if (fromKey > highest) highest = fromKey;
-        continue;
-      }
-
-      // Fallback for a key this fast path could not parse — read and
-      // decode the record the slow way, same as `query()`.
-      const raw = await kv.get(key);
-      if (!raw) continue;
-      try {
-        const record = JSON.parse(raw) as AuditRecord;
-        if (typeof record.sequence === 'number' && record.sequence > highest) {
-          highest = record.sequence;
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const keys = await kv.list(PREFIX);
+      let highest = -1;
+      for (const key of keys) {
+        const fromKey = parseSequenceFromKey(key);
+        if (fromKey !== undefined) {
+          if (fromKey > highest) highest = fromKey;
+          continue;
         }
-      } catch {
-        continue;
+
+        // Fallback for a key this fast path could not parse — read and
+        // decode the record the slow way, same as `query()`.
+        const raw = await kv.get(key);
+        if (!raw) continue;
+        try {
+          const record = JSON.parse(raw) as AuditRecord;
+          if (
+            typeof record.sequence === 'number' &&
+            Number.isSafeInteger(record.sequence) &&
+            record.sequence >= 0 &&
+            record.sequence > highest
+          ) {
+            highest = record.sequence;
+          }
+        } catch {
+          continue;
+        }
       }
+      return highest + 1;
+    } catch (error: unknown) {
+      diagnose({
+        level: 'error',
+        scope: 'audit-trail',
+        message: `[audit-trail] Boot sequence floor scan failed (attempt ${attempt}/${MAX_ATTEMPTS}):`,
+        cause: error,
+      });
     }
-    return highest + 1;
-  } catch (error: unknown) {
-    const fallback = emergencyFloor?.() ?? 0;
-    diagnose({
-      level: 'error',
-      scope: 'audit-trail',
-      message: `[audit-trail] Failed to compute the boot sequence floor; starting from ${fallback}:`,
-      cause: error,
-    });
-    return fallback;
   }
+  diagnose({
+    level: 'error',
+    scope: 'audit-trail',
+    message: `[audit-trail] Could not compute the boot sequence floor after ${MAX_ATTEMPTS} attempts; starting the shared counter from 0. This can only misorder two records colliding on the exact same millisecond after a clock rewind — the same residual risk \`encodeKey\`'s own \`runId\` segment already guards the append-only invariant against.`,
+  });
+  return 0;
 }
 
 // ── Key encoding ────────────────────────────────────────────────────
@@ -794,7 +817,29 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // range-prefix trick could narrow further (the timestamp is the first
       // segment after the prefix), but correctness-first: list all, filter in
       // memory. Suitable for per-run/per-session audit volumes.
-      const keys = await kv.list(PREFIX);
+      //
+      // AB-370 (Codex P2 review finding, PR #594, "Sort keys before
+      // stopping at the query limit"): `kv.list()`'s contract only
+      // promises "the underlying storage's natural scan order" — NOT
+      // lexicographic — so the early break below could otherwise select
+      // an arbitrary `limit`-sized subset from a backend that doesn't
+      // happen to return keys pre-sorted, rather than genuinely the
+      // oldest matches. Sorting the keys here is in-memory string
+      // comparison with no I/O (`kv.list` already materialized every key
+      // into this array), and since `encodeKey` embeds
+      // `<timestamp16>:<sequence>` right after the prefix, lexicographic
+      // key order IS chronological order for SELECTION purposes — the
+      // early break below can then safely stop at `limit` matches. The
+      // explicit `sequence`-tiebreak sort further down still runs
+      // afterward, over the (already limit-bounded) collected records, to
+      // handle a same-millisecond tie precisely and a legacy
+      // no-`sequence` record's `-1` mapping — this key sort alone is not
+      // enough for that (a `sequence`'s decimal-digit WIDTH can vary,
+      // e.g. a boot floor inherited from the old, much larger
+      // `manualSequence` scheme, so `<sequence>` segments of different
+      // lengths do not always compare correctly as plain strings).
+      const unsortedKeys = await kv.list(PREFIX);
+      const keys = unsortedKeys.sort();
 
       const records: AuditRecord[] = [];
       for (const key of keys) {

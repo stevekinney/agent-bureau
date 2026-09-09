@@ -1166,9 +1166,14 @@ describe('createAuditTrail', () => {
 
     it('query() sorts a sequence-less legacy record before every real sequence sharing its millisecond, using a transitive comparator (Codex P2 review finding, PR #594)', async () => {
       const kv = textValueStore(new MemoryStorage());
-      // Written in an order a `0`-for-either-side comparator would leave
-      // UNCHANGED (seq 2, then the legacy record, then seq 1) — proving
-      // this is a genuine sort, not an artifact of already-sorted input.
+      // Written out of final order; `query()`'s own `keys.sort()` (a
+      // separate, lexicographic KEY sort used only for bounding the scan
+      // — see its own doc comment) reorders the raw scan to
+      // [seq 1, seq 2, legacy] first (digits sort before the letter 'l'),
+      // which is STILL not the desired [legacy, seq 1, seq 2] final
+      // order — so the explicit `sequence`-tiebreak comparator below is
+      // what a `0`-for-either-side comparator would have left unchanged
+      // from that intermediate order, proving this is a genuine sort.
       await seedRecord(kv, makeRecord(2, { timestampMs: 5000, runId: 'run-X' }));
       await kv.set(
         'audit:v1:0000000000005000:legacy:run-X',
@@ -1251,7 +1256,34 @@ describe('createAuditTrail', () => {
       expect(await computeInitialAuditSequence(kv)).toBe(4);
     });
 
-    it('computeInitialAuditSequence falls back to 0 and diagnoses when the scan fails and no emergencyFloor is supplied', async () => {
+    it('computeInitialAuditSequence retries a transient scan failure and succeeds on the second attempt', async () => {
+      // AB-370 (Codex review, PR #594, two rounds — see this function's own
+      // doc comment for why NEITHER a bare `0` NOR a clock-based
+      // "emergency floor" is a safe first-failure fallback): a genuinely
+      // transient blip should recover on retry rather than falling back
+      // to anything at all.
+      const base = textValueStore(new MemoryStorage());
+      await seedRecord(base, makeRecord(7, { timestampMs: 1000, runId: 'run-retry' }));
+      let attempts = 0;
+      const flakyKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        list: async (prefix: string) => {
+          attempts += 1;
+          if (attempts === 1) throw new Error('storage temporarily unavailable');
+          return base.list(prefix);
+        },
+      };
+      const received: unknown[] = [];
+      const result = await computeInitialAuditSequence(flakyKv, (diagnostic) =>
+        received.push(diagnostic),
+      );
+      expect(result).toBe(8);
+      expect(attempts).toBe(2);
+      // One diagnostic for the failed first attempt; no "exhausted" diagnostic.
+      expect(received).toHaveLength(1);
+    });
+
+    it('computeInitialAuditSequence falls back to 0 and diagnoses loudly after exhausting every retry', async () => {
       const failingKv: ReturnType<typeof textValueStore> = {
         ...textValueStore(new MemoryStorage()),
         list: async () => {
@@ -1263,28 +1295,33 @@ describe('createAuditTrail', () => {
         received.push(diagnostic),
       );
       expect(result).toBe(0);
-      expect(received).toHaveLength(1);
+      // Three per-attempt diagnostics plus one final "starting from 0" one.
+      expect(received).toHaveLength(4);
     });
 
-    it('computeInitialAuditSequence uses the caller-supplied emergencyFloor instead of 0 when the scan fails against a store that already holds records (AB-370 Codex P1 finding)', async () => {
-      // A bare `0` fallback here would silently reopen this issue's own
-      // bug: a fresh process reusing a sequence value a prior lifetime
-      // already persisted. `emergencyFloor` — `create-bureau.ts` always
-      // passes `runtimeServices.clock.now()` — must win instead.
-      const failingKv: ReturnType<typeof textValueStore> = {
-        ...textValueStore(new MemoryStorage()),
-        list: async () => {
-          throw new Error('storage unavailable');
-        },
-      };
-      const received: unknown[] = [];
-      const result = await computeInitialAuditSequence(
-        failingKv,
-        (diagnostic) => received.push(diagnostic),
-        () => 1_700_000_000_000,
+    it('computeInitialAuditSequence rejects an unsafe stored sequence during the fallback scan instead of adopting it as the floor', async () => {
+      // Codex P2 review finding, PR #594: a corrupted record whose stored
+      // `sequence` is astronomically large (e.g. `1e308`) must not poison
+      // `highest` — incrementing a value that large no longer even changes
+      // it, which would collapse every subsequent same-millisecond write
+      // for the same run onto the exact same key.
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(3, { timestampMs: 1000, runId: 'run-ok' }));
+      await kv.set(
+        // A non-numeric key segment forces the slow fallback path.
+        'audit:v1:0000000000002000:unsafe:run-unsafe',
+        JSON.stringify({
+          timestamp: new Date(2000).toISOString(),
+          timestampMs: 2000,
+          runId: 'run-unsafe',
+          type: 'tool.started',
+          sequence: 1e308,
+          detail: null,
+        }),
       );
-      expect(result).toBe(1_700_000_000_000);
-      expect(received).toHaveLength(1);
+      // The unsafe value must be rejected — the valid record's sequence
+      // (3) still wins, not `1e308 + 1` (a no-op on a float that large).
+      expect(await computeInitialAuditSequence(kv)).toBe(4);
     });
   });
 });
