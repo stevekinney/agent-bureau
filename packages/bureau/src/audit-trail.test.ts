@@ -2022,6 +2022,51 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
+    it('successfully renews its lease based on elapsed time partway through reconciliation, then continues to reconcile the remaining markers — not a fixed marker count', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await kv.set('audit-dedupe:v1:orphan-1', 'audit:v1:0000000000000500:000000000000:run-gone-1');
+      await kv.set('audit-dedupe:v1:orphan-2', 'audit:v1:0000000000000500:000000000000:run-gone-2');
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
+
+      let renewCount = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...kv,
+        async conditionalBatch(conditions, operations) {
+          const isLeaseRenewal = operations.some(
+            (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
+          );
+          if (isLeaseRenewal) renewCount += 1;
+          return kv.conditionalBatch(conditions, operations);
+        },
+        async get(key: string) {
+          const value = await kv.get(key);
+          if (key.startsWith('audit-dedupe:v1:')) {
+            runtime.setTime(runtime.clock.now() + 350_000);
+          }
+          return value;
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 0 }, runtime);
+
+      const result = await trail.prune(1000);
+      expect(result).toEqual({ prunedCount: 0, cutoffMs: 1000 });
+
+      // Both orphans were reconciled — the renewal check between them
+      // succeeded and reconciliation carried on, rather than stopping at
+      // the first marker the way a lost renewal would.
+      expect(await kv.list('audit-dedupe:v1:')).toHaveLength(0);
+      // Acquisition + at least one successful periodic renewal reached by
+      // elapsed time (this pass's own delete loop never runs — nothing
+      // qualified — so every renewal call here is reconciliation's own).
+      expect(renewCount).toBeGreaterThanOrEqual(2);
+
+      trail.dispose();
+    });
+
     it('isolates a dedupe-marker reconciliation failure from an otherwise-successful record prune', async () => {
       const base = textValueStore(new MemoryStorage());
       await seedRecord(base, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
@@ -2209,6 +2254,154 @@ describe('createAuditTrail', () => {
     });
   });
 
+  describe('AB-393 — prune() protectRunId re-checked immediately before delete (Codex review, PR #600)', () => {
+    it('passes "listing" for the candidate-collection check and "delete" for the immediately-before-delete re-check, and survives a record protectRunId only approves on the second call', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-a' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const phasesSeen: Array<'listing' | 'delete'> = [];
+      let deleteCallsForRunA = 0;
+      const result = await trail.prune(5000, {
+        protectRunId: (runId, phase) => {
+          phasesSeen.push(phase);
+          if (runId !== 'run-a') return false;
+          if (phase === 'delete') {
+            deleteCallsForRunA += 1;
+            // Approved only once the delete-phase re-check itself runs —
+            // a listing-phase "not protected" answer must never be the
+            // last word.
+            return true;
+          }
+          return false;
+        },
+      });
+
+      expect(phasesSeen).toEqual(['listing', 'delete']);
+      expect(deleteCallsForRunA).toBe(1);
+      expect(result?.prunedCount).toBe(0);
+
+      const records = await trail.query({ runId: 'run-a' });
+      expect(records).toHaveLength(1);
+
+      trail.dispose();
+    });
+
+    it('never calls protectRunId with phase "listing" for a candidate protectRunId already approved from the cached snapshot, and never refreshes for a "listing" call (Codex review, PR #600, "Avoid replaying the feed for every unprotected audit record")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-unretained' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const calls: Array<{ runId: string; phase: 'listing' | 'delete' }> = [];
+      const result = await trail.prune(5000, {
+        protectRunId: (runId, phase) => {
+          calls.push({ runId, phase });
+          return false;
+        },
+      });
+
+      // Exactly two calls total for the one candidate: one at listing,
+      // one immediately before its delete — never more, so a predicate
+      // that refreshes only on `'delete'` (this option's documented
+      // contract) is asked to refresh at most once per candidate here,
+      // not once per phase-agnostic call site.
+      expect(calls).toEqual([
+        { runId: 'run-unretained', phase: 'listing' },
+        { runId: 'run-unretained', phase: 'delete' },
+      ]);
+      expect(result?.prunedCount).toBe(1);
+
+      trail.dispose();
+    });
+
+    it('renews the prune lease based on ELAPSED TIME since the last renewal, not a candidate count — a single slow delete-time protectRunId check that stalls past the renewal interval is caught on the VERY NEXT candidate (Codex review, PR #600, "Renew the lease while skipping protected candidates" / "Renew the prune lease before deleting after async checks")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-a' }));
+      await seedRecord(kv, makeRecord(1, { timestampMs: 1000, runId: 'run-b' }));
+
+      const { bureau } = createStubBureau();
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 2 }, runtime);
+
+      // Only TWO candidates — nowhere near a 200-candidate count-based
+      // threshold — proving this renewal is genuinely time-driven, not
+      // count-driven. The FIRST candidate's `'delete'`-phase check is
+      // ordinary (no time jump, well inside the renewal interval). The
+      // SECOND candidate's own check corrupts the lease and then
+      // simulates that check itself having taken a long time (the clock
+      // jumps past `PRUNE_LEASE_TTL_MS / 3`), standing in for one slow,
+      // real `refreshRetainedRunOwnerIds()` network round trip. Every
+      // candidate here is approved (skipped, never deleted) at delete
+      // time, so `prunedCount` never advances — proof this renewal is
+      // not keyed off it either.
+      let deleteTimeCalls = 0;
+      const result = trail.prune(5000, {
+        protectRunId: async (_runId, phase) => {
+          if (phase !== 'delete') return false;
+          deleteTimeCalls += 1;
+          if (deleteTimeCalls === 2) {
+            await kv.set('audit-retention:v1:prune-lease', '{not json');
+            runtime.setTime(400_000); // > PRUNE_LEASE_TTL_MS / 3 (300_000)
+          }
+          return true;
+        },
+      });
+
+      await expect(result).rejects.toThrow('lost the prune lease mid-delete');
+      // Aborted on the SECOND candidate's own renewal check — proof the
+      // check runs per candidate, driven by elapsed time, not a fixed
+      // count.
+      expect(deleteTimeCalls).toBe(2);
+
+      // Nothing was deleted (every candidate was protected at delete
+      // time) — the abort is evidence the renewal check itself fired
+      // despite that, not evidence of an unrelated failure.
+      const records = await trail.query();
+      expect(records).toHaveLength(2);
+
+      trail.dispose();
+    });
+
+    it('renews (or aborts on a lost lease) BEFORE deleting a candidate the async protectRunId check just approved for deletion, never after (Codex review, PR #600, "Renew the prune lease before deleting after async checks")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-a' }));
+
+      const { bureau } = createStubBureau();
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 }, runtime);
+
+      // The one candidate's own `'delete'`-phase check corrupts the
+      // lease and advances the clock past the renewal interval, then
+      // approves the candidate for DELETION (returns `false`, not
+      // protected) — if renewal ran AFTER the delete instead of before
+      // it, this record would already be gone by the time the (still
+      // necessary) renewal check finally ran.
+      const result = trail.prune(5000, {
+        protectRunId: async (_runId, phase) => {
+          if (phase !== 'delete') return false;
+          await kv.set('audit-retention:v1:prune-lease', '{not json');
+          runtime.setTime(400_000);
+          return false;
+        },
+      });
+
+      await expect(result).rejects.toThrow('lost the prune lease mid-delete');
+
+      // The record survives — the abort happened BEFORE its delete, not
+      // after.
+      const records = await trail.query({ runId: 'run-a' });
+      expect(records).toHaveLength(1);
+
+      trail.dispose();
+    });
+  });
+
   describe('AB-388 — record successful deletions when a later delete fails (Codex review, PR #597)', () => {
     it('writes a partial audit.pruned summary naming only the deletions that committed, then rethrows the delete failure', async () => {
       const base = textValueStore(new MemoryStorage());
@@ -2319,12 +2512,15 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
-    it('renews its own lease periodically during a large delete loop (every 200 deletions), rather than letting it age toward the TTL untouched', async () => {
+    it('renews its own lease based on ELAPSED TIME during a large delete loop — not a fixed deletion count — as real wall-clock time (simulated here via a manual clock advanced per delete) crosses the renewal interval (Codex review, PR #600, "Renew the lease while skipping protected candidates" / "Renew the prune lease before deleting after async checks")', async () => {
       const kv = textValueStore(new MemoryStorage());
-      const seedCount = 401; // crosses the 200-deletion renewal boundary twice
+      const seedCount = 8;
       for (let i = 0; i < seedCount; i += 1) {
         await seedRecord(kv, makeRecord(i, { timestampMs: 1000, runId: `run-old-${i}` }));
       }
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
 
       let renewCount = 0;
       const trackedKv: ReturnType<typeof textValueStore> = {
@@ -2336,18 +2532,35 @@ describe('createAuditTrail', () => {
           if (isLeaseRenewal) renewCount += 1;
           return kv.conditionalBatch(conditions, operations);
         },
+        // Stands in for each candidate's real processing time — this
+        // pass's own renewal check runs based on the CLOCK, not on how
+        // many deletes have happened, so advancing time here (rather
+        // than a real timer) deterministically proves that.
+        async delete(key: string) {
+          await kv.delete(key);
+          runtime.setTime(runtime.clock.now() + 150_000);
+        },
       };
 
       const { bureau } = createStubBureau();
-      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: seedCount });
+      const trail = createAuditTrail(
+        bureau,
+        trackedKv,
+        undefined,
+        { initialSequence: seedCount },
+        runtime,
+      );
 
       const result = await trail.prune(5000);
       expect(result?.prunedCount).toBe(seedCount);
-      // One `conditionalBatch` set for the initial acquisition, one for
-      // the renewal right before the delete loop starts, and two periodic
-      // renewals (after the 200th and 400th deletions) — the release at
-      // the end is a `delete` operation, not counted here.
-      expect(renewCount).toBe(4);
+      // Acquisition + the pre-delete-loop renewal + exactly three
+      // periodic renewals — the elapsed-time check crosses
+      // `PRUNE_LEASE_TTL_MS / 3` (300_000ms) once every TWO 150_000ms
+      // deletes, landing on candidates 3, 5, and 7 of 8. A fixed
+      // "every 200 deletions" check would never renew at all across
+      // only 8 candidates — this count is only reachable through the
+      // elapsed-time path.
+      expect(renewCount).toBe(5);
 
       trail.dispose();
     });
@@ -2394,12 +2607,15 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
-    it('stops deleting mid-pass when a periodic lease renewal loses its CAS, but still writes a partial summary for what it already deleted (Codex review, PR #597, "Abort pruning when lease renewal loses its CAS")', async () => {
+    it('stops deleting mid-pass when a periodic (elapsed-time-driven) lease renewal loses its CAS, but still writes a partial summary for what it already deleted (Codex review, PR #597, "Abort pruning when lease renewal loses its CAS"; Codex review, PR #600, "Renew the prune lease before deleting after async checks")', async () => {
       const kv = textValueStore(new MemoryStorage());
-      const seedCount = 200; // exactly one periodic renewal boundary
+      const seedCount = 4;
       for (let i = 0; i < seedCount; i += 1) {
         await seedRecord(kv, makeRecord(i, { timestampMs: 1000, runId: `run-old-${i}` }));
       }
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
 
       let callIndex = 0;
       const trackedKv: ReturnType<typeof textValueStore> = {
@@ -2410,46 +2626,125 @@ describe('createAuditTrail', () => {
             (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
           );
           // Call 1: acquisition. Call 2: renewal before the delete loop.
-          // Call 3: the first periodic renewal, after the 200th deletion —
-          // simulated here as having lost its CAS.
+          // Call 3: the first periodic (elapsed-time-driven) renewal,
+          // checked before the SECOND candidate's own delete once enough
+          // simulated wall-clock time has passed — simulated here as
+          // having lost its CAS.
           if (isLeaseSet && callIndex === 3) return false;
           return kv.conditionalBatch(conditions, operations);
+        },
+        // Advances the clock past `PRUNE_LEASE_TTL_MS / 3` after the
+        // FIRST delete, so the second candidate's pre-delete renewal
+        // check (not a 200-deletion count, unreachable with only 4
+        // candidates) is what triggers call 3 above.
+        async delete(key: string) {
+          await kv.delete(key);
+          runtime.setTime(runtime.clock.now() + 350_000);
         },
       };
 
       const { bureau } = createStubBureau();
-      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: seedCount });
+      const trail = createAuditTrail(
+        bureau,
+        trackedKv,
+        undefined,
+        { initialSequence: seedCount },
+        runtime,
+      );
 
       await expect(trail.prune(5000)).rejects.toThrow('lost the prune lease mid-delete');
 
-      // All 200 candidates that were deleted BEFORE the failed renewal
-      // check stay deleted — the abort only stops FURTHER deletes. The
-      // only record left is the pass's own `audit.pruned` summary.
+      // Only the FIRST candidate — deleted BEFORE the failed renewal
+      // check — stays deleted; the abort happened before the second
+      // candidate's own delete. The only surviving records are the
+      // pass's own `audit.pruned` summary and the three candidates never
+      // reached.
       const records = await trail.query();
-      expect(records.filter((record) => record.type !== 'audit.pruned')).toHaveLength(0);
+      expect(records.filter((record) => record.type !== 'audit.pruned')).toHaveLength(
+        seedCount - 1,
+      );
 
       const prunedRecords = await trail.query({ type: 'audit.pruned' });
       expect(prunedRecords).toHaveLength(1);
-      expect(prunedRecords[0]?.detail).toEqual({ count: seedCount, cutoffMs: 5000, partial: true });
+      // Only ONE delete actually committed before the abort — the
+      // summary's own `count` reflects `prunedCount` (what really
+      // happened), not the original candidate-list length.
+      expect(prunedRecords[0]?.detail).toEqual({ count: 1, cutoffMs: 5000, partial: true });
 
       trail.dispose();
     });
 
-    it('stops reconciling and aborts the pass (writing a partial summary) when a periodic lease renewal during marker reconciliation loses its CAS (Codex P2 review finding, PR #601, "Renew the prune lease during marker reconciliation")', async () => {
+    it('never deletes PRUNE_INTENT_KEY once this pass has lost its own lease mid-delete — a successor Bureau instance may have already reconciled and written its OWN fresh intent there by the time this pass\'s own cleanup runs (Codex review, PR #600, "Preserve the successor\'s intent after losing the lease")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-a' }));
+      await seedRecord(kv, makeRecord(1, { timestampMs: 1000, runId: 'run-b' }));
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
+
+      let leaseSetAttempts = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...kv,
+        async conditionalBatch(conditions, operations) {
+          const isLeaseSet = operations.some(
+            (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
+          );
+          if (isLeaseSet) {
+            leaseSetAttempts += 1;
+            // Call 1: acquisition. Call 2: renewal before the delete
+            // loop. Call 3: the first elapsed-time-driven periodic
+            // renewal, checked before the SECOND candidate's own delete.
+            // Simulates losing the CAS to a successor instance that has
+            // ALREADY reconciled this pass's own now-orphaned intent and
+            // written its OWN fresh one — the exact interleaving this
+            // fix protects against.
+            if (leaseSetAttempts === 3) {
+              await kv.set(
+                'audit-retention:v1:prune-intent',
+                JSON.stringify({ count: 999, cutoffMs: 123_456 }),
+              );
+              return false;
+            }
+          }
+          return kv.conditionalBatch(conditions, operations);
+        },
+        async delete(key: string) {
+          await kv.delete(key);
+          runtime.setTime(runtime.clock.now() + 350_000); // > PRUNE_LEASE_TTL_MS / 3
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 2 }, runtime);
+
+      await expect(trail.prune(5000)).rejects.toThrow('lost the prune lease mid-delete');
+
+      // The successor's own intent survives completely untouched — this
+      // pass never calls `kv.delete(PRUNE_INTENT_KEY)` once it knows it
+      // lost the lease, regardless of what currently occupies that key.
+      const intentRaw = await kv.get('audit-retention:v1:prune-intent');
+      expect(intentRaw).not.toBeNull();
+      expect(JSON.parse(intentRaw ?? '')).toEqual({ count: 999, cutoffMs: 123_456 });
+
+      trail.dispose();
+    });
+
+    it('stops reconciling and aborts the pass (writing a partial summary) when a periodic (elapsed-time-driven) lease renewal during marker reconciliation loses its CAS (Codex P2 review finding, PR #601, "Renew the prune lease during marker reconciliation")', async () => {
       const kv = textValueStore(new MemoryStorage());
       await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
-      // Orphaned markers — each names a record key that does not exist —
-      // exactly one periodic-renewal boundary's worth. The delete loop
-      // above has only ONE candidate, never reaching its OWN 200-per-
-      // renewal boundary, so this is deliberately the FIRST periodic
-      // renewal this pass performs, isolating it to reconciliation.
-      const orphanCount = 200;
-      for (let i = 0; i < orphanCount; i += 1) {
-        await kv.set(
-          `audit-dedupe:v1:orphan-${i}`,
-          `audit:v1:0000000000000500:000000000000:run-gone-${i}`,
-        );
-      }
+      // Two orphaned markers — each names a record key that does not
+      // exist. The delete loop above has only ONE real candidate and
+      // never advances the clock on its own delete, so it makes no
+      // periodic renewal call of its own; reconciliation's renewal check
+      // (elapsed time, same `RENEW_INTERVAL_MS` cadence as the delete
+      // loop, not a fixed marker count — mirroring AB-393's own
+      // elapsed-time rationale for the delete loop) is exercised in
+      // isolation.
+      await kv.set('audit-dedupe:v1:orphan-1', 'audit:v1:0000000000000500:000000000000:run-gone-1');
+      await kv.set('audit-dedupe:v1:orphan-2', 'audit:v1:0000000000000500:000000000000:run-gone-2');
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
 
       let callIndex = 0;
       const trackedKv: ReturnType<typeof textValueStore> = {
@@ -2461,24 +2756,40 @@ describe('createAuditTrail', () => {
           );
           // Call 1: acquisition. Call 2: renewal before the delete loop.
           // Call 3: the first periodic renewal, reached during marker
-          // reconciliation.
+          // reconciliation once simulated wall-clock time (advanced
+          // below, once per marker examined) crosses the renewal
+          // interval.
           if (isLeaseSet && callIndex === 3) return false;
           return kv.conditionalBatch(conditions, operations);
+        },
+        // Stands in for each marker's real lookup time — reconciliation's
+        // own renewal check runs based on the CLOCK, not a marker count,
+        // so advancing time here (rather than a real timer) is what
+        // deterministically crosses the interval after the FIRST marker.
+        async get(key: string) {
+          const value = await kv.get(key);
+          if (key.startsWith('audit-dedupe:v1:')) {
+            runtime.setTime(runtime.clock.now() + 350_000);
+          }
+          return value;
         },
       };
 
       const { bureau } = createStubBureau();
-      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 }, runtime);
 
       await expect(trail.prune(5000)).rejects.toThrow(
         'lost the prune lease during dedupe-marker reconciliation',
       );
 
       // The one real record still got deleted, and its summary still
-      // landed (partial), even though reconciliation was cut short.
+      // landed (partial), even though reconciliation was cut short — the
+      // FIRST marker (processed before the failed renewal check ahead of
+      // the SECOND) was still reconciled away.
       const prunedRecords = await trail.query({ type: 'audit.pruned' });
       expect(prunedRecords).toHaveLength(1);
       expect(prunedRecords[0]?.detail).toEqual({ count: 1, cutoffMs: 5000, partial: true });
+      expect(await kv.get('audit-dedupe:v1:orphan-1')).toBeNull();
 
       trail.dispose();
     });

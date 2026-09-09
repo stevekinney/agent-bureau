@@ -222,6 +222,53 @@ export interface RetainedRunOwnerSnapshot {
   readonly ownerIds: ReadonlySet<string>;
   /** Resume point for `feed.replay({ fromCursor: cursor })`. `undefined` means "replay from the start". */
   readonly cursor: Cursor | undefined;
+  /**
+   * AB-393 (Codex review, PR #600, "Batch retained-owner refreshes instead
+   * of replaying per record"): the `sequence` of the last envelope this
+   * snapshot walked (including a `fleet:gap` marker, same as `cursor`).
+   * Lets {@link DurableEventHistory.refreshRetainedRunOwnerIds} cheaply
+   * rule out "nothing new" with a single
+   * `FleetEventFeed.snapshotTailSequence()` read (the same tail record
+   * `FleetEventFeed.append()` always advances IN THE SAME storage batch
+   * as the event it appends — see that function's own doc comment)
+   * instead of unconditionally paying for a full `feed.replay()` page
+   * load on every call, most of which return nothing new. Opaque like
+   * `cursor` — never compare it to anything but another
+   * `snapshotTailSequence()` reading.
+   *
+   * AB-393 (Codex review, PR #600, "Fast-path refreshes for an initially
+   * empty feed"): never `undefined` in practice — a snapshot whose scan
+   * walked no `run` owner (nothing retained yet, or every envelope
+   * walked named a non-`run` owner — schedules, sessions, reviews) still
+   * gets a real, comparable value here via
+   * `FleetEventFeed.snapshotTailSequence()`, so a later refresh against
+   * an owner set that STAYS empty can still short-circuit instead of
+   * falling through to a full scan every single call. `undefined` is
+   * retained in the type only for a caller constructing a snapshot from
+   * scratch outside this module, which this module's own factories never
+   * do.
+   *
+   * ACCEPTED RESIDUAL (Codex review, PR #600, "Fast-path refreshes for an
+   * initially empty feed", round 2): this does NOT make every refresh
+   * against a feed cheap — a feed that has NEVER had a single event
+   * appended (no `KEYS.fleetEventTail()` record has ever been written)
+   * makes `FleetEventFeed.snapshotTailSequence()` ITSELF fall back to its
+   * own `storage.scan()` (see that function's own implementation in
+   * `fleet-event-feed.ts`), since there is no tail record yet to read
+   * cheaply. Every call against a genuinely virgin feed therefore still
+   * costs a scan, no cheaper than `feed.replay()`'s own scan would have
+   * — this module has no primitive available to distinguish "virgin,
+   * never appended" from "empty right now" any more cheaply than
+   * `FleetEventFeed` itself can. The moment ANY event is ever appended
+   * (by any run, schedule, or session action), the tail record exists
+   * permanently from then on and every later refresh becomes the cheap,
+   * single-`get` path described above — so this residual is bounded to
+   * the window before the very first durable event a bureau ever
+   * records. See this issue's own `upstreamDefects` for the weft-side
+   * enhancement (a cheap "has anything ever been appended" read, or an
+   * eagerly-written tail sentinel) that would close it fully.
+   */
+  readonly tailSequence: number | undefined;
 }
 
 /** Options for {@link DurableEventHistory.subscribeEventHistory}. */
@@ -413,12 +460,45 @@ export interface DurableEventHistory {
    *
    * Instead, this resumes `feed.replay()` from `snapshot.cursor` — the
    * position the previous call (either `retainedRunOwnerIds` or this same
-   * function) stopped at — so it only reads records appended since then.
-   * In the common case (nothing new happened between two calls in the
-   * same pass) that is zero storage reads. It reads the SAME shared feed
-   * every other write goes through, so it also observes a write committed
-   * by another Bureau instance in the interim, not only this process's
-   * own in-flight writes.
+   * function) stopped at — so it only ever walks records appended since
+   * then, never the retained window from the start. It reads the SAME
+   * shared feed every other write goes through, so it also observes a
+   * write committed by another Bureau instance in the interim, not only
+   * this process's own in-flight writes.
+   *
+   * AB-393 (Codex review, PR #600, "Avoid replaying the feed for every
+   * unprotected audit record" / "Batch retained-owner refreshes instead
+   * of replaying per record"): "no new records to walk" is NOT the same
+   * as "zero storage reads" for `feed.replay()` ITSELF — it always issues
+   * one consistency-checked page load (the retention floor, then a scan
+   * for anything past the cursor) even when that scan comes back empty,
+   * to confirm there genuinely is nothing new rather than merely
+   * assuming it. This function avoids paying that cost on every call by
+   * checking `feed.snapshotTailSequence()` FIRST — a single `storage.get`
+   * against the same tail record `FleetEventFeed.append()` always
+   * advances in the SAME storage batch as the event it appends (see that
+   * function's own doc comment), so `tailSequence <= snapshot.tailSequence`
+   * is a sound, safe-to-trust proof that nothing has been appended since
+   * this snapshot's own last scan — never a false negative, since the
+   * tail and the event it names always commit atomically together. Only
+   * when the tail has genuinely moved does this fall through to the full
+   * `feed.replay()` scan above. The common "nothing new" case this
+   * function exists for is therefore one cheap `storage.get`, not a page
+   * load — a caller invoking this once per SURVIVING candidate across a
+   * large backlog (see `AuditTrail.prune`'s `protectRunId` option in
+   * `audit-trail.ts`, and `pruneAuditTrail`'s own predicate in
+   * `create-bureau.ts`) now pays that single-read cost per candidate, not
+   * a page-load per candidate.
+   *
+   * `snapshot.tailSequence` is never `undefined` in practice — see that
+   * field's own doc comment on {@link RetainedRunOwnerSnapshot} for why
+   * even a snapshot taken against a genuinely empty feed still carries a
+   * real, comparable value (`FleetEventFeed.snapshotTailSequence()`'s own
+   * `-1` "nothing appended yet" sentinel), so THIS pre-check still
+   * short-circuits correctly for a feed that stays empty across
+   * repeated refreshes, rather than falling through to a full scan every
+   * single time (Codex review, PR #600, "Fast-path refreshes for an
+   * initially empty feed").
    *
    * The floor is monotonically non-decreasing once it has left 0 (nothing
    * un-retires a record), so a snapshot obtained while the floor was
@@ -961,10 +1041,34 @@ export function createDurableEventHistory(
   async function scanRunOwnerIdsFrom(
     owners: Set<string>,
     fromCursor: Cursor | undefined,
+    fromTailSequence: number | undefined,
   ): Promise<RetainedRunOwnerSnapshot> {
+    // AB-393 (Codex review, PR #600, "Do not advance the tail past an
+    // unscanned first append"): captured BEFORE `feed.replay()` starts
+    // below, ONLY for a fresh scan (`fromCursor === undefined` — a
+    // refresh always already carries a real `fromTailSequence` from its
+    // own originating scan, so this fallback is unreachable there; see
+    // this function's own note further down). A genuinely new event can
+    // commit at any point AFTER this read: reading the tail again AFTER
+    // the replay below (the original, buggy shape of this fast path)
+    // could then observe THAT new event's sequence even though the
+    // replay above never walked it — recording a `tailSequence` that
+    // claims coverage the scan never actually did, with `cursor` still
+    // `undefined` and that event's owner missing from `owners`. Every
+    // LATER `refreshRetainedRunOwnerIds()` call would then see its own
+    // fresh tail reading already `<=` this falsely-advanced value and
+    // skip scanning forever, permanently losing that owner. Reading the
+    // tail BEFORE the scan instead gives a reading the replay is
+    // GUARANTEED to cover at least up to (real time only moves forward),
+    // so the worst this can do is under-report — safe to be wrong in the
+    // "rescans a bit more than strictly needed next time" direction only,
+    // never the direction that skips a scan a real new owner needs.
+    const tailBeforeScan = fromCursor === undefined ? await feed.snapshotTailSequence() : undefined;
     let cursor = fromCursor;
+    let tailSequence = fromTailSequence;
     for await (const envelope of feed.replay(fromCursor === undefined ? {} : { fromCursor })) {
       cursor = envelope.cursor;
+      tailSequence = envelope.sequence;
       const workflowId = envelope.workflowId;
       if (workflowId === undefined) continue;
       const separator = workflowId.indexOf(':');
@@ -973,7 +1077,25 @@ export function createDurableEventHistory(
       if (ownerKind !== 'run') continue;
       owners.add(workflowId.slice(separator + 1));
     }
-    return { ownerIds: owners, cursor };
+
+    // AB-393 (Codex review, PR #600, "Fast-path refreshes for an
+    // initially empty feed"): `tailSequence` only advances from an
+    // envelope `feed.replay()` actually yields above — a scan that walks
+    // nothing (a genuinely virgin feed) OR walks only non-`run` owners
+    // (see `RetainedRunOwnerSnapshot.tailSequence`'s own doc comment for
+    // that distinction and its accepted residual) leaves `tailSequence`
+    // at whatever `fromTailSequence` already was — `undefined` for a
+    // fresh scan. Falling back to `tailBeforeScan` (rather than a FRESH
+    // `snapshotTailSequence()` read taken here, after the scan, which is
+    // exactly the race this comment block's own doc comment above
+    // documents and closes) gives `tailSequence` a value that is safe to
+    // trust: the scan above is guaranteed to have covered everything at
+    // or before it. Only runs when nothing was walked above, so it costs
+    // nothing on every OTHER call.
+    if (tailSequence === undefined) {
+      tailSequence = tailBeforeScan;
+    }
+    return { ownerIds: owners, cursor, tailSequence };
   }
 
   async function retainedRunOwnerIds(): Promise<RetainedRunOwnerSnapshot | undefined> {
@@ -983,7 +1105,7 @@ export function createDurableEventHistory(
     // No `fromCursor`: this walks every record the feed currently retains,
     // exactly once. A record at or before the floor never appears here
     // (weft's own `retain()` already deleted it).
-    return scanRunOwnerIdsFrom(new Set(), undefined);
+    return scanRunOwnerIdsFrom(new Set(), undefined, undefined);
   }
 
   function retainedRunOwnerIdsForAuditRetention(): Promise<RetainedRunOwnerSnapshot> {
@@ -993,7 +1115,7 @@ export function createDurableEventHistory(
     // real set is simply "every owner the feed has ever retained" — no
     // different in cost from the floor>0 case, since `scanRunOwnerIdsFrom`
     // already walks exactly the currently-retained window either way.
-    return scanRunOwnerIdsFrom(new Set(), undefined);
+    return scanRunOwnerIdsFrom(new Set(), undefined, undefined);
   }
 
   async function refreshRetainedRunOwnerIds(
@@ -1003,6 +1125,18 @@ export function createDurableEventHistory(
     // snapshot taken while it was already > 0 never needs a fresh
     // floor === 0 check here.
     //
+    // AB-393 (Codex review, PR #600, "Batch retained-owner refreshes
+    // instead of replaying per record"): a cheap, single `storage.get`
+    // proof that nothing has landed since `snapshot`'s own last scan —
+    // see this method's own doc comment for why comparing against the
+    // tail record is sound (it always advances atomically with the event
+    // it names). Skips the full `feed.replay()` page load entirely for
+    // the common case this function exists to optimize.
+    if (snapshot.tailSequence !== undefined) {
+      const currentTailSequence = await feed.snapshotTailSequence();
+      if (currentTailSequence <= snapshot.tailSequence) return snapshot;
+    }
+
     // `snapshot.ownerIds` is publicly typed `ReadonlySet` so a CONSUMER of
     // this interface cannot mutate it — but this module is the only place
     // that ever constructs one, and it always constructs the underlying
@@ -1012,7 +1146,11 @@ export function createDurableEventHistory(
     // than cloning it — see this function's own doc comment on
     // `scanRunOwnerIdsFrom` for why that clone would be a real cost, and
     // why reusing it here is safe.
-    return scanRunOwnerIdsFrom(snapshot.ownerIds as Set<string>, snapshot.cursor);
+    return scanRunOwnerIdsFrom(
+      snapshot.ownerIds as Set<string>,
+      snapshot.cursor,
+      snapshot.tailSequence,
+    );
   }
 
   async function latestDeletionMarker(

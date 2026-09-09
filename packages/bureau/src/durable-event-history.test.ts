@@ -1140,6 +1140,178 @@ describe('createDurableEventHistory', () => {
       adminFeed.dispose();
       await history.dispose();
     });
+
+    it('issues no storage.scan() at all when nothing new has landed (AB-393, Codex review, PR #600, "Batch retained-owner refreshes instead of replaying per record") — the tail-sequence pre-check short-circuits before any feed.replay()', async () => {
+      const backing = await createMemoryStorage();
+      const { storage, scanCalls } = createScanCountingStorage(backing);
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'sacrifice' }, 'run.started', {}); // sequence 0
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {}); // sequence 1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 });
+
+      const snapshot = await history.retainedRunOwnerIds();
+      if (!snapshot) throw new Error('expected a snapshot');
+
+      // Nothing appended since the snapshot — nothing SHOULD ever call
+      // `feed.replay()`, which is the only thing in this module that
+      // calls `storage.scan()`.
+      const scanCallsBeforeRefresh = scanCalls();
+      const refreshed = await history.refreshRetainedRunOwnerIds(snapshot);
+      expect(refreshed.ownerIds).toEqual(snapshot.ownerIds);
+      expect(scanCalls()).toBe(scanCallsBeforeRefresh);
+
+      // A repeated refresh with STILL nothing new costs no scan either —
+      // this is not a one-call fluke.
+      const secondRefresh = await history.refreshRetainedRunOwnerIds(refreshed);
+      expect(secondRefresh.ownerIds).toEqual(snapshot.ownerIds);
+      expect(scanCalls()).toBe(scanCallsBeforeRefresh);
+
+      // Once something genuinely new lands, the pre-check correctly falls
+      // through to the real scan and still observes the new owner — this
+      // optimization never trades correctness for the cheap path.
+      await history.record({ kind: 'run', id: 'run-2' }, 'run.completed', {});
+      const thirdRefresh = await history.refreshRetainedRunOwnerIds(secondRefresh);
+      expect(thirdRefresh.ownerIds).toEqual(new Set(['run-1', 'run-2']));
+      expect(scanCalls()).toBeGreaterThan(scanCallsBeforeRefresh);
+
+      adminFeed.dispose();
+      await history.dispose();
+    });
+
+    it('still short-circuits repeated refreshes against a snapshot whose OWNER SET is empty for a reason other than the feed being virgin — e.g. every envelope walked named a non-run owner (Codex review, PR #600, "Fast-path refreshes for an initially empty feed") — a scan that walks real envelopes but adds no `run` owner still confirms a real, comparable tailSequence', async () => {
+      const backing = await createMemoryStorage();
+      const { storage, scanCalls } = createScanCountingStorage(backing);
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      // A real fleet event exists (the tail record is written), but its
+      // owner kind is `schedule`, not `run` — `retainedRunOwnerIdsForAuditRetention()`'s
+      // own scan walks it (advancing `tailSequence` the NORMAL way, via
+      // the envelope itself) yet adds nothing to `ownerIds`, since only
+      // `run`-kind owners are ever tracked. This is the realistic shape
+      // of "an empty retained-owner set that is not simply an unused
+      // feed" the review named (administrative/schedule activity with no
+      // retained run candidates) — distinct from a feed that has NEVER
+      // had anything appended at all, where `FleetEventFeed`'s own
+      // `snapshotTailSequence()` falls back to its own storage scan
+      // (documented, not fixable from this module) regardless of this
+      // optimization.
+      await history.record({ kind: 'schedule', id: 'sched-1' }, 'schedule.created', {});
+
+      const snapshot = await history.retainedRunOwnerIdsForAuditRetention();
+      expect(snapshot.ownerIds.size).toBe(0);
+      expect(snapshot.tailSequence).not.toBeUndefined();
+
+      const scanCallsBeforeRefresh = scanCalls();
+      const firstRefresh = await history.refreshRetainedRunOwnerIds(snapshot);
+      expect(firstRefresh.ownerIds.size).toBe(0);
+      expect(scanCalls()).toBe(scanCallsBeforeRefresh);
+
+      const secondRefresh = await history.refreshRetainedRunOwnerIds(firstRefresh);
+      expect(secondRefresh.ownerIds.size).toBe(0);
+      expect(scanCalls()).toBe(scanCallsBeforeRefresh);
+
+      // A genuinely NEW run owner still correctly falls through and gets
+      // observed — this optimization never trades correctness away.
+      await history.record({ kind: 'run', id: 'first-run' }, 'run.completed', {});
+      const thirdRefresh = await history.refreshRetainedRunOwnerIds(secondRefresh);
+      expect(thirdRefresh.ownerIds).toEqual(new Set(['first-run']));
+      expect(scanCalls()).toBeGreaterThan(scanCallsBeforeRefresh);
+
+      await history.dispose();
+    });
+
+    it("gives a genuinely VIRGIN feed (never had a single event appended) a real tailSequence (-1), not undefined, and still resolves refreshes correctly — the ACCEPTED RESIDUAL for this exact case (documented on RetainedRunOwnerSnapshot.tailSequence) is that FleetEventFeed.snapshotTailSequence() itself still falls back to its own storage.scan() here (no tail record has ever been written for it to read cheaply), so this test asserts CORRECTNESS, not a scan-count win, for the narrow window before a bureau's first-ever durable event", async () => {
+      const backing = await createMemoryStorage();
+      const { storage, scanCalls } = createScanCountingStorage(backing);
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      // No `history.record()` call at all yet — genuinely virgin.
+      const snapshot = await history.retainedRunOwnerIdsForAuditRetention();
+      expect(snapshot.ownerIds.size).toBe(0);
+      // The whole point of this round's fix: NEVER `undefined`, even
+      // here — `FleetEventFeed.snapshotTailSequence()`'s own `-1`
+      // sentinel for "nothing has ever been appended".
+      expect(snapshot.tailSequence).toBe(-1);
+
+      // Refreshing against a snapshot that is still virgin resolves
+      // correctly (still empty, no error) — this DOES still cost a scan
+      // per call (the accepted residual), so this assertion is about
+      // correctness, not cost.
+      const refreshed = await history.refreshRetainedRunOwnerIds(snapshot);
+      expect(refreshed.ownerIds.size).toBe(0);
+      expect(refreshed.tailSequence).toBe(-1);
+      expect(scanCalls()).toBeGreaterThan(0);
+
+      // The FIRST-EVER durable event this bureau records is still
+      // observed correctly, closing the residual window from this point
+      // forward — every later refresh becomes the cheap, `get`-only path
+      // the sibling test above exercises.
+      await history.record({ kind: 'run', id: 'first-ever-run' }, 'run.completed', {});
+      const afterFirstEvent = await history.refreshRetainedRunOwnerIds(refreshed);
+      expect(afterFirstEvent.ownerIds).toEqual(new Set(['first-ever-run']));
+
+      await history.dispose();
+    });
+
+    it('reads FleetEventFeed.snapshotTailSequence() BEFORE starting the replay scan on a fresh snapshot, never after (Codex review, PR #600, "Do not advance the tail past an unscanned first append") — reading it after would let a run event that commits WHILE the scan is executing be silently marked as already covered, without its owner ever being recorded', async () => {
+      const backing = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+
+      // Tracks the ORDER `KEYS.fleetEventTail()` (read by
+      // `snapshotTailSequence()`) and `KEYS.fleetEventPrefix()` (scanned
+      // by `feed.replay()`'s own `loadConsistentReplayPage`, and by
+      // `snapshotTailSequence()`'s OWN virgin-feed fallback scan — see
+      // that function's doc comment) are read in — the exact ordering
+      // this fix depends on. If the tail were instead read AFTER the
+      // replay scan (this fix's own bug, closed here), a run event
+      // committed in the gap between "the scan walked nothing" and "the
+      // tail is read" would make the returned snapshot claim a
+      // `tailSequence` covering that event while never having recorded
+      // its owner or advanced `cursor` past it — permanently hiding that
+      // owner from every LATER refresh, since a fresh
+      // `snapshotTailSequence()` reading would already read as "no new
+      // activity" against the falsely-advanced value.
+      const callOrder: string[] = [];
+      const trackedStorage = new Proxy(backing, {
+        get(target, property, receiver) {
+          if (property === 'get') {
+            return async (key: string) => {
+              if (key === KEYS.fleetEventTail()) callOrder.push('tail-read');
+              return target.get(key);
+            };
+          }
+          if (property === 'scan') {
+            return (prefix: string, options?: Parameters<Storage['scan']>[1]) => {
+              if (prefix === KEYS.fleetEventPrefix()) callOrder.push('replay-scan');
+              return target.scan(prefix, options);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const history = createDurableEventHistory(trackedStorage, runtime);
+
+      // Genuinely virgin feed — this exercises the exact fresh-scan path
+      // (`fromCursor === undefined`) this fix's own pre-scan tail read
+      // guards.
+      await history.retainedRunOwnerIdsForAuditRetention();
+
+      const firstTailRead = callOrder.indexOf('tail-read');
+      const firstReplayScan = callOrder.indexOf('replay-scan');
+      expect(firstTailRead).toBeGreaterThanOrEqual(0);
+      expect(firstReplayScan).toBeGreaterThanOrEqual(0);
+      expect(firstTailRead).toBeLessThan(firstReplayScan);
+
+      await history.dispose();
+    });
   });
 
   describe('corrupt/unrecognized record handling', () => {
