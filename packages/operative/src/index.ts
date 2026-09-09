@@ -555,6 +555,8 @@ export type {
   SessionHandle,
   SessionHandleContext,
   SessionListOptions,
+  SessionOutboxClaim,
+  SessionOutboxClaimAttempt,
   SessionOutboxEntry,
   SessionRunOptions,
   SessionStore,

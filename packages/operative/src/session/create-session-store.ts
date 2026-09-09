@@ -10,6 +10,8 @@ import { SessionOutboxAppendedEvent } from '../events';
 import type {
   SessionCleanupOptions,
   SessionListOptions,
+  SessionOutboxClaim,
+  SessionOutboxClaimAttempt,
   SessionOutboxEntry,
   SessionStore,
   SessionSummary,
@@ -374,6 +376,33 @@ function outboxEntryKey(ordinal: number): string {
  * missing one, corrupting drain order. Mirrors `parseOutboxOrdinal`'s own
  * fail-loudly-on-corruption precedent in this same file.
  */
+/**
+ * Parses a stored entry's optional `claim` field (AB-390). `undefined`
+ * means unclaimed — a legitimate, common state, not an error. Anything
+ * else that fails to parse as `{ owner: string; until: number }` is a
+ * storage-integrity failure, fails loudly for the same reason
+ * `parseOutboxEntry` does: a corrupted claim silently read as "unclaimed"
+ * would let a second drainer claim an entry the first one still legitimately
+ * holds.
+ */
+function parseOutboxClaim(
+  raw: unknown,
+  fail: (reason: string) => never,
+): SessionOutboxClaim | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return fail(`expected "claim" to be an object, got ${JSON.stringify(raw)}`);
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record['owner'] !== 'string') {
+    return fail(`expected a string "claim.owner", got ${JSON.stringify(record['owner'])}`);
+  }
+  if (!Number.isFinite(record['until'])) {
+    return fail(`expected a finite number "claim.until", got ${JSON.stringify(record['until'])}`);
+  }
+  return { owner: record['owner'], until: record['until'] as number };
+}
+
 function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
   if (raw === null) return undefined;
   const fail = (reason: string): never => {
@@ -403,6 +432,7 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
       `expected a finite number "committedAtMs", got ${JSON.stringify(record['committedAtMs'])}`,
     );
   }
+  const claim = parseOutboxClaim(record['claim'], fail);
   const ordinal = record['ordinal'];
   const sessionId = record['sessionId'];
   const incarnation = record['incarnation'];
@@ -422,9 +452,17 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
         agentName: record['agentName'],
         incarnation,
         committedAtMs,
+        ...(claim ? { claim } : {}),
       };
     case 'session.deleted':
-      return { ordinal, kind: 'session.deleted', sessionId, incarnation, committedAtMs };
+      return {
+        ordinal,
+        kind: 'session.deleted',
+        sessionId,
+        incarnation,
+        committedAtMs,
+        ...(claim ? { claim } : {}),
+      };
     default:
       return fail(`unrecognized "kind" ${JSON.stringify(record['kind'])}`);
   }
@@ -1160,18 +1198,158 @@ export function createSessionStore(
         entries.sort((a, b) => a.ordinal - b.ordinal);
         return entries;
       },
-      async acknowledge(ordinal: number): Promise<void> {
+      async claim(
+        ordinal: number,
+        lease: { owner: string; until: number },
+      ): Promise<SessionOutboxClaimAttempt> {
+        // Codex P2 review finding, PR #599, "Validate the lease before
+        // persisting it": `lease.until` is typed `number`, but `NaN` and
+        // either `Infinity` are all valid TypeScript numbers a caller could
+        // pass. `JSON.stringify()` serializes every one of those as `null`,
+        // and `parseOutboxClaim()` then rejects that `null` as corrupted —
+        // permanently wedging this entry (and every later ordinal behind
+        // it) the moment such a lease is ever persisted. Rejected here,
+        // before any store operation, rather than left to surface as a
+        // "corrupted outbox entry" failure far from its actual cause.
+        if (!Number.isFinite(lease.until)) {
+          throw new TypeError(
+            `SessionStore: outbox.claim() requires a finite "until" timestamp, got ${JSON.stringify(lease.until)}.`,
+          );
+        }
         const key = outboxEntryKey(ordinal);
-        const raw = await store.get(key);
-        // Already gone — a concurrent drain (this process or a peer sharing
-        // this store) already acknowledged it. Acknowledging is idempotent,
-        // not a conflict: nothing left to remove is success, not an error.
-        if (raw === null) return;
-        // A CAS, not a bare delete: if the value has changed since the read
-        // above (should not happen — outbox entries are write-once — but a
-        // storage anomaly must not delete a DIFFERENT entry than the one
-        // just read), the delete is simply skipped rather than forced.
-        await store.conditionalBatch([{ key, expectedValue: raw }], [{ type: 'delete', key }]);
+        // Codex P2 review finding, PR #599, "Retry same-owner claim
+        // contention before returning false": two overlapping renewal
+        // calls for the SAME owner (a real scenario once a caller renews a
+        // claim on a timer while an earlier renewal is still in flight)
+        // can both read the same current value and both find themselves
+        // `claimable`, but only one `conditionalBatch` wins the CAS — the
+        // other must not report a conflict when the entry is still held by
+        // this SAME owner and simply needs a fresh read-and-retry. Bounded
+        // exactly like this file's other CAS retry loops (see
+        // `MAXIMUM_SAVE_ATTEMPTS`); a DIFFERENT owner holding the entry is
+        // detected by the `claimable` check itself on the very next
+        // iteration and returns immediately, without burning the
+        // remaining attempts.
+        for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt++) {
+          const raw = await store.get(key);
+          const entry = parseOutboxEntry(raw);
+          // Nothing left to claim — already acknowledged (by this drainer
+          // or a peer). Not a conflict, but not a successful claim either:
+          // there is no entry, and no lease, for the caller to go replay.
+          if (!entry) return { claimed: false };
+          const now = runtime.clock.now();
+          const currentClaim = entry.claim;
+          const sameOwner = currentClaim?.owner === lease.owner;
+          const claimable =
+            currentClaim === undefined ||
+            currentClaim.until <= now ||
+            // Same-owner reentry always succeeds — see this method's own
+            // doc comment on why renewal must not be refused.
+            sameOwner;
+          // Codex P1 review finding, PR #599, "Re-read the winning claim
+          // before deciding not to retry": a `false` result used to carry
+          // no evidence of WHO holds the blocking claim, forcing a caller
+          // to fall back on its own pre-CAS `pending()` snapshot — which a
+          // peer's `claim()` landing in between could have already made
+          // stale, leaving a caller with no live lease to schedule a retry
+          // against. Returning the CURRENT winning claim here, read in
+          // this same call, is always fresh.
+          if (!claimable) return { claimed: false, lease: currentClaim };
+          // Codex P1 review finding, PR #599, "Prevent stale renewals from
+          // shortening the active lease": two overlapping same-owner
+          // renewal calls (this drainer's own periodic lease-extension
+          // timer, see `create-bureau.ts`) can interleave so the call
+          // computed with the EARLIER `now` wins its retry AFTER a call
+          // computed with a LATER `now` has already persisted a longer
+          // `until` — without this, the earlier call's smaller `until`
+          // would overwrite the longer one already on record, potentially
+          // even resurrecting an already-expired deadline. A same-owner
+          // write may only ever extend the stored deadline, never shorten
+          // it; a genuinely new claim (no prior same-owner lease) is
+          // unaffected by the `Math.max` since there is nothing to compare
+          // against.
+          const nextUntil =
+            sameOwner && currentClaim ? Math.max(currentClaim.until, lease.until) : lease.until;
+          // Codex P1 review finding, PR #599, "Refuse leases that expire
+          // before the claim is persisted": `now` above was read once, at
+          // the TOP of this attempt — a slow `store.get()` (or a caller
+          // supplying an already-stale absolute `lease.until`) can leave
+          // `nextUntil` no longer in the future by the time this attempt is
+          // about to persist it. Persisting it anyway would report
+          // `{ claimed: true }` while the lease is already expired, letting
+          // ANY peer immediately reclaim the entry while this caller still
+          // believes it holds exclusivity — exactly the duplicate-dispatch
+          // hazard the lease exists to prevent. Re-reading the clock here,
+          // immediately before the write, catches both causes; refusing
+          // (never a conflict — this attempt itself made the lease
+          // pointless) rather than persisting a lease already born expired.
+          if (nextUntil <= runtime.clock.now()) {
+            return { claimed: false, lease: currentClaim };
+          }
+          const claimed: SessionOutboxEntry = {
+            ...entry,
+            claim: { owner: lease.owner, until: nextUntil },
+          };
+          const committed = await store.conditionalBatch(
+            [{ key, expectedValue: raw }],
+            [{ type: 'set', key, value: JSON.stringify(claimed) }],
+          );
+          if (committed) return { claimed: true };
+        }
+        // Retries exhausted against persistent contention — one more read
+        // reports the CURRENT winning claim (which may by now be this same
+        // owner's own successful renewal from a concurrent call, or a
+        // different owner's) rather than leaving the caller with nothing
+        // but a bare `false`.
+        const finalRaw = await store.get(key);
+        const finalEntry = parseOutboxEntry(finalRaw);
+        return { claimed: false, lease: finalEntry?.claim };
+      },
+      async acknowledge(ordinal: number, owner: string): Promise<boolean> {
+        const key = outboxEntryKey(ordinal);
+        // A CAS retry loop, not a single read-then-delete: the periodic
+        // same-owner lease-renewal timer (`create-bureau.ts`) can win a
+        // race between this call's read and its own delete CAS, in which
+        // case the delete is correctly refused (the stored value no longer
+        // matches what was read) even though `owner` still legitimately
+        // holds the claim (Codex P1 review finding, PR #599, "Retry
+        // acknowledge after a same-owner renewal wins the CAS") — retrying
+        // against the fresh value, rather than reporting a false conflict,
+        // lets this ordinary same-owner race resolve on its own instead of
+        // stranding the entry pending until a future drain retries it.
+        // Bounded like this file's other CAS retry loops.
+        for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt++) {
+          const raw = await store.get(key);
+          // Already gone — a concurrent drain (this process's own renewal
+          // race, or a peer sharing this store) already acknowledged it.
+          // Acknowledging is idempotent, not a conflict: nothing left to
+          // remove is success, not an error. This also covers the
+          // Copilot review finding, PR #599, "acknowledge() should return
+          // true when a peer reclaimed-and-acknowledged the entry": that
+          // peer's own claim-and-acknowledge landing between an earlier
+          // attempt's read and its own delete CAS is indistinguishable,
+          // from this owner's perspective, from any other reason the
+          // entry is simply gone.
+          if (raw === null) return true;
+          const entry = parseOutboxEntry(raw);
+          if (entry?.claim?.owner !== owner) {
+            // A different owner reclaimed this entry (this owner's own
+            // lease lapsed) — never delete an entry this owner no longer
+            // has any right to retire.
+            return false;
+          }
+          // A CAS, not a bare delete: if the value has changed since the
+          // read above (a peer reclaimed it, or this owner's own renewal
+          // timer updated it, in between this read and this write), the
+          // delete is simply skipped rather than forced — the next
+          // iteration re-reads and decides afresh.
+          const committed = await store.conditionalBatch(
+            [{ key, expectedValue: raw }],
+            [{ type: 'delete', key }],
+          );
+          if (committed) return true;
+        }
+        return false;
       },
     },
   };

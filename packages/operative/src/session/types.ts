@@ -46,9 +46,13 @@ export interface SessionCleanupOptions {
  * `revision`, which only orders one lineage, not the whole store. A drain
  * loop replays each entry as the matching `SessionCreatedEvent`/
  * `SessionSavedEvent`/`SessionDeletedEvent` and calls
- * `SessionStore.outbox.acknowledge(ordinal)` only once that replay's
- * downstream durable write has settled — never before, and never merely
- * because the event was dispatched.
+ * `SessionStore.outbox.acknowledge(ordinal, owner)` only once that
+ * replay's downstream durable write has settled — never before, and never
+ * merely because the event was dispatched. As of AB-390, a drain must
+ * first win `SessionStore.outbox.claim(ordinal, { owner, until })` — a
+ * compare-and-swap lease on this entry's own `claim` field, below — before
+ * replaying it at all; `acknowledge()` itself re-verifies that claim is
+ * still held before removing the entry.
  *
  * A discriminated union on `kind` (Codex P2 review finding, PR #598,
  * "Require agent names on created and saved entries"): `agentName` is
@@ -59,6 +63,41 @@ export interface SessionCleanupOptions {
  * have Bureau silently record `''` as the attributed agent can no longer
  * construct that value at all.
  */
+/**
+ * The lease a drainer currently holds on an outbox entry (AB-390). Absent
+ * means unclaimed — every entry appended before this field existed, and
+ * every entry no drainer has yet attempted, reads as unclaimed. `until` is
+ * an absolute `RuntimeServices.clock.now()` timestamp: a drainer whose
+ * lease has not reached `until` holds the entry exclusively; once `until`
+ * passes, ANY drainer (including a different owner) may reclaim it via
+ * `SessionStore.outbox.claim()` — see that method's own doc comment for the
+ * compare-and-swap semantics that make this safe across processes sharing
+ * one backend.
+ */
+export interface SessionOutboxClaim {
+  /** Opaque identifier of the drainer holding this lease. */
+  readonly owner: string;
+  /** Absolute `RuntimeServices.clock.now()` timestamp the lease expires at. */
+  readonly until: number;
+}
+
+/**
+ * The result of one `SessionStore.outbox.claim()` call (AB-390). `claimed:
+ * true` means the caller now exclusively holds the entry. `claimed: false`
+ * means it does not — `lease` names the CURRENT winning claim when one is
+ * known (a different owner's unexpired lease, or this same owner's own
+ * claim as observed by a concurrent renewal call that lost its own CAS),
+ * or is absent when the entry no longer exists at all (already
+ * acknowledged) — there is no lease for the caller to schedule a retry
+ * against in that case. Returning the lease directly, rather than leaving
+ * a caller to fall back on an earlier `pending()` snapshot that a peer's
+ * intervening `claim()` may have already made stale, is what lets a caller
+ * schedule a retry against fresh evidence (Codex P1 review finding, PR
+ * #599, "Re-read the winning claim before deciding not to retry").
+ */
+export type SessionOutboxClaimAttempt =
+  { readonly claimed: true } | { readonly claimed: false; readonly lease?: SessionOutboxClaim };
+
 export type SessionOutboxEntry =
   | {
       readonly ordinal: number;
@@ -76,6 +115,8 @@ export type SessionOutboxEntry =
        * the commit time with each outbox entry").
        */
       readonly committedAtMs: number;
+      /** See {@link SessionOutboxClaim}. Absent means unclaimed. */
+      readonly claim?: SessionOutboxClaim;
     }
   | {
       readonly ordinal: number;
@@ -84,6 +125,8 @@ export type SessionOutboxEntry =
       readonly incarnation: string;
       /** See the `'session.created' | 'session.saved'` variant's own doc comment. */
       readonly committedAtMs: number;
+      /** See {@link SessionOutboxClaim}. Absent means unclaimed. */
+      readonly claim?: SessionOutboxClaim;
     };
 
 /**
@@ -214,17 +257,56 @@ export interface SessionStore {
     /**
      * Pending entries, oldest (lowest `ordinal`) first. Safe to call
      * repeatedly and concurrently — it never mutates state, only reads.
+     * Entries are returned regardless of claim state; a caller intending to
+     * drain must `claim()` each entry before replaying it (AB-390) — this
+     * alone never grants exclusivity.
      */
     pending(): Promise<readonly SessionOutboxEntry[]>;
     /**
-     * Removes the entry at `ordinal`, once its replay's downstream durable
-     * write has settled. A caller must never call this before that write
-     * settles — doing so re-introduces exactly the lost-fact hazard this
-     * outbox exists to close. Resolves silently if the entry is already
-     * gone (a concurrent drain, in another process sharing this store,
-     * already acknowledged it) — acknowledging is idempotent, not a
-     * conflict.
+     * Claims exclusive replay rights to the entry at `ordinal` for `owner`
+     * until the absolute timestamp `until` (AB-390), by compare-and-swap on
+     * the entry's own `claim` field — never a separate lock record, so a
+     * claim can never drift out of sync with the entry it protects. Resolves
+     * `{ claimed: true }` when the entry was unclaimed, its prior claim's
+     * `until` has already passed (by this store's own
+     * `RuntimeServices.clock.now()`), or `owner` already held it (renewing a
+     * claim is always allowed — the ruling's exclusivity concern is
+     * cross-owner, not same-owner reentry, and refusing renewal would let a
+     * slow-but-alive drainer's own retry lock itself out before its lease
+     * naturally lapses; a same-owner renewal can only ever EXTEND the
+     * stored `until`, never shorten it, so two overlapping renewal calls
+     * can never resurrect an already-expired deadline). Resolves
+     * `{ claimed: false, lease }` when a DIFFERENT owner holds an unexpired
+     * claim (`lease` names it) or a concurrent same-owner call already won
+     * (`lease` names that fresher claim); resolves `{ claimed: false }`
+     * with no `lease` when the entry no longer exists at all (already
+     * acknowledged). A caller must treat `claimed: false` as "do not replay
+     * this entry right now", never as an error, and may use `lease.until`
+     * to schedule a retry.
      */
-    acknowledge(ordinal: number): Promise<void>;
+    claim(
+      ordinal: number,
+      lease: { owner: string; until: number },
+    ): Promise<SessionOutboxClaimAttempt>;
+    /**
+     * Removes the entry at `ordinal`, once its replay's downstream durable
+     * write has settled, but ONLY if `owner` still holds the claim on it
+     * (AB-390) — verified by compare-and-swap against the exact stored
+     * value `claim()` last wrote, so a claim reclaimed by a different owner
+     * in between (this owner's lease lapsed and someone else took over)
+     * makes the delete a no-op rather than removing an entry this owner no
+     * longer has any right to retire. A caller must never call this before
+     * the replay's durable write settles — doing so re-introduces exactly
+     * the lost-fact hazard this outbox exists to close. Resolves `true` when
+     * the entry is gone after this call returns — either because this call
+     * removed it, or because it was already gone (a concurrent drain, in
+     * another process sharing this store, already acknowledged it —
+     * acknowledging a vanished entry is idempotent, not a conflict).
+     * Resolves `false` only when the entry still exists and a DIFFERENT
+     * owner holds its claim — this owner's own lease lapsed and someone
+     * else reclaimed it first, so THIS replay must not be trusted as the
+     * one that retires the entry.
+     */
+    acknowledge(ordinal: number, owner: string): Promise<boolean>;
   };
 }

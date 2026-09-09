@@ -55,6 +55,7 @@ import {
 import { createMockTool, createTestToolbox } from 'armorer/test';
 import { afterEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { Conversation, createConversationHistory, getMessages } from 'conversationalist';
+import type { RuntimeTimeoutHandle } from 'lifecycle';
 import { CompletableEventTarget, createManualRuntimeServices, TypedEventTarget } from 'lifecycle';
 import { createMemory, type Memory } from 'memory';
 import { createInMemoryMemoryRecordStorage, createMockEmbedder } from 'memory/test';
@@ -4344,15 +4345,17 @@ describe('createBureau', () => {
     failNextDeletionPersistence = true;
     await bureau.deleteRun(run.id);
     expect(revocations).toBe(1);
-    // AB-389 — this counter counts every `conditionalBatch` call against the
-    // shared persistence store once the first (injected) failure has
-    // occurred, not merely retries of the `agent-session:` write itself.
-    // The session-store commit outbox adds its own `conditionalBatch` calls
-    // to that same store (the outbox-ordinal/entry write inside the retried
-    // commit, and the drain's own `outbox.acknowledge()` once the commit
+    // AB-389/AB-390 — this counter counts every `conditionalBatch` call
+    // against the shared persistence store once the first (injected)
+    // failure has occurred, not merely retries of the `agent-session:`
+    // write itself. The session-store commit outbox adds its own
+    // `conditionalBatch` calls to that same store (the outbox-ordinal/entry
+    // write inside the retried commit, plus the drain's own
+    // `outbox.claim()` and `outbox.acknowledge()` once the commit
     // succeeds), so this total is legitimately higher than it was before
-    // the outbox existed — was 4, now 6.
-    expect(deletionPersistenceAttempts).toBe(6);
+    // the outbox existed — was 4 pre-AB-389, 6 after AB-389's ack-only
+    // drain, and 8 now that AB-390's drain claims before it acknowledges.
+    expect(deletionPersistenceAttempts).toBe(8);
     const persistedSession = await bureau.getSession(run.sessionId);
     expect(persistedSession?.metadata['pendingApprovalOverrides']).toEqual({});
     expect(persistedSession?.metadata['approvalResolutionStartedIds']).toEqual([]);
@@ -17777,7 +17780,14 @@ describe('AB-389 — session commit outbox', () => {
     expect(pendingAfterRestart[0]?.kind).toBe('session.created');
     expect(pendingAfterRestart[0]?.sessionId).toBe(session.id);
 
-    await secondInstance.outbox.acknowledge(pendingAfterRestart[0]!.ordinal);
+    // AB-390 — `acknowledge()` now requires holding the entry's claim.
+    const ordinal = pendingAfterRestart[0]!.ordinal;
+    const claimAttempt = await secondInstance.outbox.claim(ordinal, {
+      owner: 'second-instance',
+      until: runtime.clock.now() + 1_000,
+    });
+    expect(claimAttempt.claimed).toBe(true);
+    await secondInstance.outbox.acknowledge(ordinal, 'second-instance');
     expect(await secondInstance.outbox.pending()).toHaveLength(0);
   });
 
@@ -18134,8 +18144,18 @@ describe('AB-389 — session commit outbox', () => {
         }),
       );
       await runtime.deferred.drain();
-
-      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+      // AB-390 — this drain now processes TWO entries (the earlier stuck
+      // `session.deleted` renewing its own claim, then the fresh
+      // `session.created`), each with its own claim-then-acknowledge
+      // compare-and-swap round trip. That is more real async depth than
+      // `runtime.deferred.drain()`'s fixed microtask-quiescence budget
+      // always guarantees settles in a single pass, so this test polls for
+      // the OBSERVABLE outcome (real macrotask yields, not a synthetic
+      // microtask count) rather than assuming one `drain()` call is enough.
+      await waitForCondition(async () => {
+        const pending = await sessionStore.outbox.pending();
+        return pending.length === 0;
+      }, 'expected the outbox to fully drain after the audit backend recovered');
       const records = await bureau.auditTrail!.query({
         runId: `session:${session.id}`,
         type: 'session.deleted',
@@ -18254,6 +18274,899 @@ describe('AB-389 — session commit outbox', () => {
     } finally {
       await bureauA.dispose();
       await bureauB.dispose();
+    }
+  });
+});
+
+describe('AB-390 — outbox claim lease', () => {
+  it('two Bureau instances over one backend running maintenance drains against one pending entry both dispatch it, but every listener observes it exactly once', async () => {
+    // The coordinator ruling's own scenario: TWO SEPARATE `Bureau`
+    // instances, over ONE shared backend, both run their maintenance drain
+    // against the SAME still-pending entry. Without a claim, both would
+    // dispatch it — durable event history is ordinal-deduped either way,
+    // but `audit-trail.ts`'s own `session.deleted` listener and a direct
+    // `bureau.addEventListener('session.deleted', ...)` consumer are NOT,
+    // so `session.deleted` is the kind that actually exercises the
+    // hazard (a `session.created`/`session.saved` entry would pass this
+    // test even without AB-390's fix). `runDurableMaintenance()` requires a
+    // durable engine (`runtime.durable`), which needs real `storage` — a
+    // KV-only `persistence` value is incompatible with it — so both
+    // instances share ONE SQLite file, the same pattern the AB-389
+    // "restart" tests above use for two bureaus over one backend. One
+    // SHARED `createManualRuntimeServices()` gives both instances the same
+    // clock the claim's `until` compares against and keeps
+    // `identifiers.next()` producing distinct drain-owner ids for the two
+    // bureaus.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-two-instance-claim-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    const bureauA = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+    });
+    const bureauB = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+    });
+
+    let sessionDeletedSeenByA = 0;
+    let sessionDeletedSeenByB = 0;
+    bureauA.addEventListener('session.deleted', () => {
+      sessionDeletedSeenByA += 1;
+    });
+    bureauB.addEventListener('session.deleted', () => {
+      sessionDeletedSeenByB += 1;
+    });
+
+    try {
+      await bureauA.waitForRecovery?.();
+      await bureauB.waitForRecovery?.();
+      const sessionStoreA = bureauA.sessionStore;
+      if (!sessionStoreA) throw new Error('expected a configured session store');
+
+      // Committed and deleted through a STANDALONE `SessionStore` over the
+      // SAME backend, never through either bureau's own `sessionStore` —
+      // a commit through `bureauA.sessionStore` fires ITS OWN best-effort
+      // post-commit drain trigger immediately (real, ungated async work),
+      // which would race and consume the entry before this test ever gets
+      // to run the two maintenance passes concurrently. A standalone store
+      // commits the same durable entries with no listener of its own.
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime },
+      );
+      const session = createAgentSession({
+        id: 'ab-390-two-instance-claim',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-390-two-instance-claim' }),
+      });
+      await standaloneSessionStore.save(session);
+      // Drain the creation entry deterministically (bureauA alone, no
+      // race) so only the deletion entry — the one this test actually
+      // races both bureaus against — remains pending afterward.
+      await bureauA.runDurableMaintenance();
+      expect(await sessionStoreA.outbox.pending()).toHaveLength(0);
+
+      await standaloneSessionStore.delete(session.id);
+      standaloneStorage[Symbol.dispose]();
+      expect(await sessionStoreA.outbox.pending()).toHaveLength(1);
+
+      // Both bureaus' maintenance passes race against the SAME pending
+      // entry. Whichever wins the claim dispatches it; the other's
+      // `claim()` fails and its pass stops without dispatching.
+      await Promise.all([bureauA.runDurableMaintenance(), bureauB.runDurableMaintenance()]);
+
+      expect(sessionDeletedSeenByA + sessionDeletedSeenByB).toBe(1);
+      const auditRecords = await bureauA.auditTrail!.query({
+        runId: `session:${session.id}`,
+        type: 'session.deleted',
+      });
+      expect(auditRecords).toHaveLength(1);
+    } finally {
+      await bureauA.dispose();
+      await bureauB.dispose();
+    }
+  });
+
+  it("reclaims and completes an outbox entry once a crashed drainer's claim lease has expired", async () => {
+    // Simulates a drainer that claimed an entry and crashed before
+    // acknowledging it — never a throwing store wrapper (nondeterministic),
+    // just calling `outbox.claim()` directly with a lease, the same
+    // primitive a real drainer uses, standing in for "a peer already
+    // claimed this and is gone".
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-crashed-drainer-reclaim-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+    });
+
+    let sessionCreatedSeen = 0;
+    bureau.addEventListener('session.created', () => {
+      sessionCreatedSeen += 1;
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      // Committed through a STANDALONE `SessionStore` over the SAME
+      // backend, never through `bureau.sessionStore` itself — a commit on
+      // `bureau.sessionStore` fires ITS OWN best-effort post-commit drain
+      // trigger immediately (real, ungated async work, not gated behind
+      // this test's manual clock), which would race this test's own
+      // "crashed drainer" claim below. A standalone store commits the same
+      // durable entry with no listener of its own to trigger anything.
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime },
+      );
+      await standaloneSessionStore.save(
+        createAgentSession({
+          id: 'ab-390-crashed-drainer-reclaim',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({
+            id: 'ab-390-crashed-drainer-reclaim',
+          }),
+        }),
+      );
+      standaloneStorage[Symbol.dispose]();
+      const [entry] = await sessionStore.outbox.pending();
+      if (!entry) throw new Error('expected a pending outbox entry');
+
+      // A "crashed drainer" claims the entry with a short lease and never
+      // acknowledges it.
+      const LEASE_MS = 5_000;
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
+
+      // This bureau's own maintenance drain, run WHILE the crashed
+      // drainer's lease is still live, must not dispatch the entry — its
+      // own `claim()` call fails (a different owner holds it).
+      await bureau.runDurableMaintenance();
+      expect(sessionCreatedSeen).toBe(0);
+      expect(await sessionStore.outbox.pending()).toHaveLength(1);
+
+      // Once the lease lapses, this bureau's next maintenance drain
+      // reclaims and completes the entry exactly once.
+      await runtime.advance(LEASE_MS + 1);
+      await bureau.runDurableMaintenance();
+      expect(sessionCreatedSeen).toBe(1);
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('renews the claim lease for the entire duration of a slow replay, so a peer cannot reclaim mid-flight (Codex P1 review finding, PR #599, "Renew the claim while replay is in flight")', async () => {
+    // A KV-only bureau (no `storage`/durable engine) keeps this test
+    // focused on the ONE async wait this drain actually has under a
+    // KV-only profile — the audit trail's own out-of-band write — without
+    // a real durable engine's own timing in the mix. Intercepting that
+    // write's `persistence.set()` call gives full, deterministic control
+    // over how long the replay stays "in flight", entirely independent of
+    // the manual clock this test also drives.
+    const backingStore = textValueStore(new MemoryStorage());
+    let releaseAuditWrite: (() => void) | undefined;
+    let auditWriteStarted = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      set: async (key, value) => {
+        if (key.startsWith('audit:v1:')) {
+          auditWriteStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseAuditWrite = resolve;
+          });
+        }
+        return backingStore.set(key, value);
+      },
+    });
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence,
+      runtime,
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-390-renewal-slow-replay',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-390-renewal-slow-replay' }),
+      });
+      await sessionStore.save(session);
+      await runtime.deferred.drain();
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+
+      // Deliberately NOT awaited: `deleteSession()` itself awaits the
+      // outbox drain directly (the same call site AB-389 documents as
+      // draining "right here, before anything below that can stall"),
+      // which is exactly the call this test holds open via the blocked
+      // audit write below. Awaiting it here would deadlock the test
+      // against its own injected delay.
+      const deletionPromise = bureau.deleteSession(session.id);
+      await waitForCondition(
+        () => auditWriteStarted,
+        'expected the deletion audit write to start (and block) before proceeding',
+      );
+
+      const [claimedEntry] = await sessionStore.outbox.pending();
+      if (!claimedEntry?.claim) throw new Error('expected the entry to already be claimed');
+      const initialUntil = claimedEntry.claim.until;
+
+      // Advance well past the ORIGINAL 30s lease while the write is still
+      // blocked — the renewal timer (armed every ~10s) must keep
+      // extending it, or the peer claim below would wrongly succeed.
+      await runtime.advance(35_000);
+      const renewed = await pollUntil(async () => {
+        const [entry] = await sessionStore.outbox.pending();
+        return (entry?.claim?.until ?? 0) > initialUntil;
+      });
+      expect(renewed).toBe(true);
+
+      // A peer's claim attempt must still be refused: the lease has been
+      // renewed past this point, not merely left to lapse.
+      const peerClaimAttempt = await sessionStore.outbox.claim(claimedEntry.ordinal, {
+        owner: 'peer-drainer',
+        until: runtime.clock.now() + 30_000,
+      });
+      expect(peerClaimAttempt.claimed).toBe(false);
+
+      releaseAuditWrite?.();
+      await deletionPromise;
+      await waitForCondition(async () => {
+        const pending = await sessionStore.outbox.pending();
+        return pending.length === 0;
+      }, 'expected the drain to complete once the audit write settles');
+      const records = await bureau.auditTrail!.query({
+        runId: `session:${session.id}`,
+        type: 'session.deleted',
+      });
+      expect(records).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('diagnoses (never throws) when renewing the claim during a slow replay itself fails', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let releaseAuditWrite: (() => void) | undefined;
+    let auditWriteStarted = false;
+    // Gated on the audit write already being in flight — never a raw call
+    // count — so this targets ONLY the renewal timer's own `claim()` call
+    // made WHILE the entry is held "in flight" behind that write, never
+    // `drainSessionOutboxPass`'s own initial claim (made before the audit
+    // write starts) or `pending()`'s unrelated reads of the same key.
+    let failOutboxEntryGetOnceAuditWriteBlocks = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      set: async (key, value) => {
+        if (key.startsWith('audit:v1:')) {
+          auditWriteStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseAuditWrite = resolve;
+          });
+        }
+        return backingStore.set(key, value);
+      },
+      get: async (key) => {
+        if (
+          failOutboxEntryGetOnceAuditWriteBlocks &&
+          auditWriteStarted &&
+          key.startsWith('agent-session-outbox:v1:entry:')
+        ) {
+          failOutboxEntryGetOnceAuditWriteBlocks = false;
+          throw new Error('injected outbox storage failure during claim renewal');
+        }
+        return backingStore.get(key);
+      },
+    });
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence,
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-390-renewal-failure',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-390-renewal-failure' }),
+      });
+      await sessionStore.save(session);
+      await runtime.deferred.drain();
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+
+      failOutboxEntryGetOnceAuditWriteBlocks = true;
+      const deletionPromise = bureau.deleteSession(session.id);
+      await waitForCondition(
+        () => auditWriteStarted,
+        'expected the deletion audit write to start (and block) before proceeding',
+      );
+
+      // Fires the renewal timer's own `claim()` call, which fails per the
+      // interception above.
+      await runtime.advance(10_001);
+      await waitForCondition(
+        () =>
+          diagnostics.some((message) =>
+            message.includes('Failed to renew the claim on session outbox entry'),
+          ),
+        'expected a diagnostic reporting the failed claim renewal',
+      );
+
+      releaseAuditWrite?.();
+      await deletionPromise;
+      await waitForCondition(async () => {
+        const pending = await sessionStore.outbox.pending();
+        return pending.length === 0;
+      }, 'expected the drain to complete once the audit write settles');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('diagnoses (never throws) when a scheduled retry drain itself fails', async () => {
+    const backingStore = textValueStore(new MemoryStorage());
+    let failOutboxList = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      list: async (prefix) => {
+        if (failOutboxList && prefix.startsWith('agent-session-outbox:')) {
+          throw new Error('injected outbox list failure during scheduled retry');
+        }
+        return backingStore.list(prefix);
+      },
+    });
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence,
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      // Committed through a STANDALONE `SessionStore` over the SAME
+      // backing `persistence`, never through `bureau.sessionStore` — a
+      // commit on `bureau.sessionStore` fires ITS OWN best-effort
+      // post-commit drain trigger immediately, which would claim AND
+      // acknowledge this entry before the "crashed drainer" below ever
+      // gets to claim it (a KV-only bureau has nothing gating that
+      // creation entry). A standalone store commits the same durable
+      // entry with no listener of its own to race.
+      const standaloneSessionStore = createSessionStore(persistence, { runtime });
+      const session = createAgentSession({
+        id: 'ab-390-retry-drain-failure',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-390-retry-drain-failure' }),
+      });
+      await standaloneSessionStore.save(session);
+      const [entry] = await sessionStore.outbox.pending();
+      if (!entry) throw new Error('expected a pending outbox entry');
+
+      const LEASE_MS = 5_000;
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
+
+      // A fresh commit through this bureau's OWN session store fires its
+      // post-commit drain trigger, which observes the live claim on the
+      // earlier (standalone-committed) entry and arms a retry timer at
+      // that claim's `until`.
+      await sessionStore.save(
+        createAgentSession({
+          id: 'ab-390-retry-drain-failure-2',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({ id: 'ab-390-retry-drain-failure-2' }),
+        }),
+      );
+      await runtime.deferred.drain();
+
+      failOutboxList = true;
+      await runtime.advance(LEASE_MS + 1);
+      await waitForCondition(
+        () =>
+          diagnostics.some((message) =>
+            message.includes('Session outbox retry drain (scheduled after losing a claim'),
+          ),
+        'expected a diagnostic reporting the failed scheduled retry drain',
+      );
+    } finally {
+      failOutboxList = false;
+      await bureau.dispose();
+    }
+  });
+
+  it('arms a retry timer at a live peer\'s own claim expiry, rather than depending on an unrelated future trigger, when a claim is refused (Codex P1 review finding, PR #599, "Schedule a retry when a live claim blocks recovery")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-scheduled-retry-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+    });
+
+    let sessionCreatedSeen = 0;
+    bureau.addEventListener('session.created', () => {
+      sessionCreatedSeen += 1;
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime },
+      );
+      await standaloneSessionStore.save(
+        createAgentSession({
+          id: 'ab-390-scheduled-retry',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({ id: 'ab-390-scheduled-retry' }),
+        }),
+      );
+      standaloneStorage[Symbol.dispose]();
+      const [entry] = await sessionStore.outbox.pending();
+      if (!entry) throw new Error('expected a pending outbox entry');
+
+      // A "crashed drainer" claims the entry with a short lease and never
+      // acknowledges it.
+      const LEASE_MS = 5_000;
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
+
+      // This bureau's own maintenance drain observes the live claim and
+      // must not dispatch — but per the finding under test, it must also
+      // arm its OWN retry at that claim's `until`, rather than depending
+      // on some later, unrelated trigger (a fresh commit, or the
+      // five-minute automatic maintenance tick) to ever try again.
+      await bureau.runDurableMaintenance();
+      expect(sessionCreatedSeen).toBe(0);
+
+      // Advancing the clock to exactly the blocking claim's expiry — with
+      // NO further call to `runDurableMaintenance()` and NO new commit —
+      // must fire the armed retry on its own and complete the drain.
+      await runtime.advance(LEASE_MS + 1);
+      const drained = await pollUntil(async () => sessionCreatedSeen === 1);
+      expect(drained).toBe(true);
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('mints a drain-owner id unique across bureau PROCESSES, not merely across one shared runtime — two independently constructed manual runtimes with the SAME identifierSeed never collide on a drain-owner id (Codex P1 review finding, PR #599, "Use an owner identifier unique across runtime instances")', async () => {
+    // Two SEPARATE `ManualRuntimeServices` instances built with the SAME
+    // `identifierSeed` are documented to mint byte-identical
+    // `identifiers.next()` sequences — exact reproduction is the whole
+    // point of that seam. Without a uniqueness guarantee layered on top,
+    // `runtimeServices.identifiers.next('session-outbox-drainer')` alone
+    // would hand both of these bureaus the IDENTICAL drain-owner id, and
+    // `outbox.claim()` treats a matching owner as same-owner renewal —
+    // exactly the cross-owner exclusivity this whole lease exists to
+    // enforce, silently defeated. This is otherwise the SAME two-bureaus-
+    // one-backend race as the "two Bureau instances" test above, just with
+    // the identifier collision made real instead of avoided by sharing one
+    // runtime.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-owner-collision-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const SAME_SEED = 'ab-390-owner-collision-seed';
+    const runtimeA = createManualRuntimeServices({ identifierSeed: SAME_SEED });
+    const runtimeB = createManualRuntimeServices({ identifierSeed: SAME_SEED });
+    expect(runtimeA.identifiers.next('session-outbox-drainer')).toBe(
+      runtimeB.identifiers.next('session-outbox-drainer'),
+    );
+
+    const bureauA = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime: runtimeA,
+    });
+    const bureauB = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime: runtimeB,
+    });
+
+    let sessionDeletedSeenByA = 0;
+    let sessionDeletedSeenByB = 0;
+    bureauA.addEventListener('session.deleted', () => {
+      sessionDeletedSeenByA += 1;
+    });
+    bureauB.addEventListener('session.deleted', () => {
+      sessionDeletedSeenByB += 1;
+    });
+
+    try {
+      await bureauA.waitForRecovery?.();
+      await bureauB.waitForRecovery?.();
+      const sessionStoreA = bureauA.sessionStore;
+      if (!sessionStoreA) throw new Error('expected a configured session store');
+
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime: runtimeA },
+      );
+      const session = createAgentSession({
+        id: 'ab-390-owner-collision',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-390-owner-collision' }),
+      });
+      await standaloneSessionStore.save(session);
+      await bureauA.runDurableMaintenance();
+      expect(await sessionStoreA.outbox.pending()).toHaveLength(0);
+
+      await standaloneSessionStore.delete(session.id);
+      standaloneStorage[Symbol.dispose]();
+      expect(await sessionStoreA.outbox.pending()).toHaveLength(1);
+
+      // If the two bureaus' drain-owner ids collided (the bug this fix
+      // closes), bureauB's `claim()` would read bureauA's live claim as
+      // its OWN prior claim and "renew" it, and both would dispatch.
+      await Promise.all([bureauA.runDurableMaintenance(), bureauB.runDurableMaintenance()]);
+
+      expect(sessionDeletedSeenByA + sessionDeletedSeenByB).toBe(1);
+      const auditRecords = await bureauA.auditTrail!.query({
+        runId: `session:${session.id}`,
+        type: 'session.deleted',
+      });
+      expect(auditRecords).toHaveLength(1);
+    } finally {
+      await bureauA.dispose();
+      await bureauB.dispose();
+    }
+  });
+
+  it('shutdown awaits a retry drain that already started before the retry timer was cleared (Codex P2 review finding, PR #599, "Await retry drains that have already fired during shutdown")', async () => {
+    // The retry timer's callback can start running (calling
+    // `drainSessionOutbox()`, which sets `sessionOutboxDrainInFlight`
+    // synchronously) before `dispose()` reaches the point where it clears
+    // that timer — `clearTimeout` cannot un-fire a callback that already
+    // started. Without also awaiting the in-flight drain, `dispose()` would
+    // proceed to abort the durable event producer's signal and tear down
+    // storage while that drain is still dispatching the event and writing
+    // through it.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-shutdown-awaits-retry-drain-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    let sessionCreatedSeen = 0;
+    bureau.addEventListener('session.created', () => {
+      sessionCreatedSeen += 1;
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime },
+      );
+      await standaloneSessionStore.save(
+        createAgentSession({
+          id: 'ab-390-shutdown-awaits-retry-drain',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({
+            id: 'ab-390-shutdown-awaits-retry-drain',
+          }),
+        }),
+      );
+      standaloneStorage[Symbol.dispose]();
+      const [entry] = await sessionStore.outbox.pending();
+      if (!entry) throw new Error('expected a pending outbox entry');
+
+      // A "crashed drainer" claims the entry with a short lease and never
+      // acknowledges it, forcing this bureau to arm a retry timer.
+      const LEASE_MS = 5_000;
+      const crashedClaimAttempt = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + LEASE_MS,
+      });
+      expect(crashedClaimAttempt.claimed).toBe(true);
+      await bureau.runDurableMaintenance();
+      expect(sessionCreatedSeen).toBe(0);
+
+      // Advancing the clock fires the armed retry timer's callback
+      // SYNCHRONOUSLY within this call (per `ManualRuntimeServices.advance`'s
+      // own contract) — `sessionOutboxDrainInFlight` is set before this
+      // `await` resolves, but the drain itself (several of its own awaited
+      // storage calls) is not yet complete.
+      await runtime.advance(LEASE_MS + 1);
+
+      // Dispose immediately, with no further await letting the drain
+      // finish on its own first. If shutdown does not await the in-flight
+      // drain, `waitForActiveWrites`/`wasRecorded` race the producer's
+      // signal being aborted and the entry's durable write is diagnosed as
+      // not recorded — even though the event WAS already dispatched
+      // synchronously before that race, which is why `sessionCreatedSeen`
+      // alone cannot distinguish the fix from its absence.
+      await bureau.dispose();
+
+      expect(sessionCreatedSeen).toBe(1);
+      expect(diagnostics).not.toContainEqual(expect.stringContaining('was not durably recorded'));
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('caps a retry delay beyond setTimeout\'s int32 range instead of overflowing it, and reschedules for the remaining time when a capped timer fires early (Codex P1 review finding, PR #599, "Cap retry delays before passing them to setTimeout")', async () => {
+    // Node's and Bun's timers silently truncate a delay beyond ~24.8 days
+    // (2_147_483_647 ms) to roughly 1ms rather than throwing or waiting the
+    // full duration — passing an uncapped delay straight through would fire
+    // almost immediately, observe the SAME still-live claim, and busy-loop
+    // re-arming itself for the entry's entire remaining lease.
+    const MAXIMUM_SETTIMEOUT_DELAY_MS = 2_147_483_647;
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-retry-delay-cap-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const recordedDelays: number[] = [];
+    // Wraps ONLY `timers.setTimeout` to record the delay each call actually
+    // requests, while still delegating to the manual runtime's own timer
+    // queue (so `runtime.advance()` continues to drive it deterministically)
+    // — every other RuntimeServices surface (clock, identifiers, etc.) is
+    // the SAME shared instance the standalone session store below also
+    // uses, so both sides observe one consistent clock.
+    const instrumentedRuntime = {
+      ...runtime,
+      timers: {
+        ...runtime.timers,
+        setTimeout: (callback: () => void, delayMs?: number): RuntimeTimeoutHandle => {
+          recordedDelays.push(delayMs ?? 0);
+          return runtime.timers.setTimeout(callback, delayMs);
+        },
+      },
+    };
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime: instrumentedRuntime,
+    });
+
+    let sessionCreatedSeen = 0;
+    bureau.addEventListener('session.created', () => {
+      sessionCreatedSeen += 1;
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime },
+      );
+      await standaloneSessionStore.save(
+        createAgentSession({
+          id: 'ab-390-retry-delay-cap',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({ id: 'ab-390-retry-delay-cap' }),
+        }),
+      );
+      standaloneStorage[Symbol.dispose]();
+      const [entry] = await sessionStore.outbox.pending();
+      if (!entry) throw new Error('expected a pending outbox entry');
+
+      // A peer holds a lease that expires FAR beyond the int32 setTimeout
+      // range — a legitimate value for `outbox.claim()`'s public contract,
+      // even though no Bureau-internal lease is ever this long.
+      const FAR_FUTURE_LEASE_MS = MAXIMUM_SETTIMEOUT_DELAY_MS + 5_000_000;
+      const distantClaim = await sessionStore.outbox.claim(entry.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + FAR_FUTURE_LEASE_MS,
+      });
+      expect(distantClaim.claimed).toBe(true);
+
+      await bureau.runDurableMaintenance();
+      expect(sessionCreatedSeen).toBe(0);
+      expect(recordedDelays).toHaveLength(1);
+      expect(recordedDelays[0]).toBeLessThanOrEqual(MAXIMUM_SETTIMEOUT_DELAY_MS);
+
+      // Advancing by exactly the CAPPED delay fires that timer early — the
+      // real deadline has not arrived yet. A correct implementation
+      // re-arms a second timer for the remaining time instead of draining.
+      await runtime.advance(recordedDelays[0]!);
+      expect(sessionCreatedSeen).toBe(0);
+      expect(recordedDelays).toHaveLength(2);
+      expect(recordedDelays[1]).toBeLessThanOrEqual(MAXIMUM_SETTIMEOUT_DELAY_MS);
+
+      // Advancing past the full remaining lease now completes the drain.
+      const remainingMs = FAR_FUTURE_LEASE_MS - recordedDelays[0]! + 1;
+      await runtime.advance(remainingMs);
+      const drained = await pollUntil(async () => sessionCreatedSeen === 1);
+      expect(drained).toBe(true);
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('closes retry-timer admission during shutdown so a drain awaited at shutdown cannot arm a NEW retry timer shutdown never clears (Codex P2 review finding, PR #599, "Clear retry timers armed by the drain awaited at shutdown")', async () => {
+    // Two pending entries. The FIRST is claimed by a crashed drainer with a
+    // SHORT lease (about to expire); the SECOND is claimed by a still-live
+    // peer with a LONG lease. `runDurableMaintenance()` observes entry one
+    // as live and arms a retry at its expiry, stopping before ever
+    // examining entry two (a pass never skips ahead past an unclaimable
+    // entry). Advancing the clock past entry one's expiry fires that retry
+    // — the resulting drain reclaims and completes entry one, THEN reaches
+    // entry two, finds the SECOND live peer's claim, and calls
+    // `scheduleSessionOutboxRetry` a second time — precisely the call this
+    // fix must refuse once shutdown has begun, since `dispose()` below is
+    // invoked before that second drain has necessarily finished.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-390-shutdown-closes-retry-admission-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    let setTimeoutCalls = 0;
+    const instrumentedRuntime = {
+      ...runtime,
+      timers: {
+        ...runtime.timers,
+        setTimeout: (callback: () => void, delayMs?: number): RuntimeTimeoutHandle => {
+          setTimeoutCalls += 1;
+          return runtime.timers.setTimeout(callback, delayMs);
+        },
+      },
+    };
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      runtime: instrumentedRuntime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const standaloneStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const standaloneSessionStore = createSessionStore(
+        textValueStore(standaloneStorage, { disposeUnderlyingStorage: false }),
+        { runtime },
+      );
+      await standaloneSessionStore.save(
+        createAgentSession({
+          id: 'ab-390-shutdown-closes-retry-admission-a',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({
+            id: 'ab-390-shutdown-closes-retry-admission-a',
+          }),
+        }),
+      );
+      await standaloneSessionStore.save(
+        createAgentSession({
+          id: 'ab-390-shutdown-closes-retry-admission-b',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({
+            id: 'ab-390-shutdown-closes-retry-admission-b',
+          }),
+        }),
+      );
+      standaloneStorage[Symbol.dispose]();
+      const [entryOne, entryTwo] = await sessionStore.outbox.pending();
+      if (!entryOne || !entryTwo) throw new Error('expected two pending outbox entries');
+
+      const SHORT_LEASE_MS = 5_000;
+      const crashedClaim = await sessionStore.outbox.claim(entryOne.ordinal, {
+        owner: 'crashed-drainer',
+        until: runtime.clock.now() + SHORT_LEASE_MS,
+      });
+      expect(crashedClaim.claimed).toBe(true);
+      const livePeerClaim = await sessionStore.outbox.claim(entryTwo.ordinal, {
+        owner: 'live-peer',
+        until: runtime.clock.now() + 60_000,
+      });
+      expect(livePeerClaim.claimed).toBe(true);
+
+      await bureau.runDurableMaintenance();
+
+      // Fires the armed retry, starting a drain that will reclaim entry
+      // one and then reach entry two's still-live peer claim.
+      await runtime.advance(SHORT_LEASE_MS + 1);
+      const setTimeoutCallsBeforeDispose = setTimeoutCalls;
+
+      // Dispose immediately, with no further await letting that drain
+      // settle on its own first — this is the exact window the finding
+      // describes: shutdown's own timer-clear runs, then its await on
+      // `sessionOutboxDrainInFlight` overlaps the drain calling
+      // `scheduleSessionOutboxRetry` again for entry two.
+      await bureau.dispose();
+
+      // The retry-triggered drain's own second `scheduleSessionOutboxRetry`
+      // call for entry two must have been REFUSED once shutdown closed
+      // admission — no additional `setTimeout` call armed during (or after)
+      // `dispose()` beyond whatever had already been armed before it.
+      expect(setTimeoutCalls).toBe(setTimeoutCallsBeforeDispose);
+
+      // No dangling timer survived shutdown: advancing the clock well past
+      // entry two's peer's lease, after disposal, must not invoke a drain
+      // against now-closed storage.
+      await runtime.advance(120_000);
+      expect(diagnostics).not.toContainEqual(expect.stringContaining('closed database'));
+    } finally {
+      await bureau.dispose();
     }
   });
 });
