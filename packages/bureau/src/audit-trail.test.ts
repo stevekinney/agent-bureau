@@ -843,7 +843,7 @@ describe('createAuditTrail', () => {
       const { bureau, emit } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);
 
-      emit(new SessionDeletedEvent('session-1', 'incarnation-1', 1));
+      emit(new SessionDeletedEvent('session-1', 'incarnation-1', 1, 0));
       await yieldToPortableEventLoop();
 
       const records = await trail.query({ runId: 'session:session-1' });

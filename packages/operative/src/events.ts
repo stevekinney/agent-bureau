@@ -478,12 +478,29 @@ export class SessionSavedEvent extends Event {
   readonly agentName: string;
   readonly incarnation: string;
   readonly ordinal: number;
-  constructor(sessionId: string, agentName: string, incarnation: string, ordinal: number) {
+  /**
+   * The wall-clock time (`RuntimeServices.clock.now()`) this commit's own
+   * `SessionOutboxEntry` was appended, NOT the moment this event is
+   * dispatched — a replay can run long after the commit it describes
+   * (AB-389, Codex P2 review finding, PR #598, "Persist the commit time
+   * with each outbox entry"). Durable history and the audit trail stamp
+   * their own record of this fact with this value, so a delayed replay
+   * never misdates it as happening "now".
+   */
+  readonly committedAtMs: number;
+  constructor(
+    sessionId: string,
+    agentName: string,
+    incarnation: string,
+    ordinal: number,
+    committedAtMs: number,
+  ) {
     super(SessionSavedEvent.type);
     this.sessionId = sessionId;
     this.agentName = agentName;
     this.incarnation = incarnation;
     this.ordinal = ordinal;
+    this.committedAtMs = committedAtMs;
   }
 }
 
@@ -513,12 +530,21 @@ export class SessionCreatedEvent extends Event {
   readonly incarnation: string;
   /** See `SessionSavedEvent.ordinal`'s doc comment (AB-389). */
   readonly ordinal: number;
-  constructor(sessionId: string, agentName: string, incarnation: string, ordinal: number) {
+  /** See `SessionSavedEvent.committedAtMs`'s doc comment (AB-389). */
+  readonly committedAtMs: number;
+  constructor(
+    sessionId: string,
+    agentName: string,
+    incarnation: string,
+    ordinal: number,
+    committedAtMs: number,
+  ) {
     super(SessionCreatedEvent.type);
     this.sessionId = sessionId;
     this.agentName = agentName;
     this.incarnation = incarnation;
     this.ordinal = ordinal;
+    this.committedAtMs = committedAtMs;
   }
 }
 
@@ -542,11 +568,14 @@ export class SessionDeletedEvent extends Event {
   readonly sessionId: string;
   readonly incarnation: string;
   readonly ordinal: number;
-  constructor(sessionId: string, incarnation: string, ordinal: number) {
+  /** See `SessionSavedEvent.committedAtMs`'s doc comment (AB-389). */
+  readonly committedAtMs: number;
+  constructor(sessionId: string, incarnation: string, ordinal: number, committedAtMs: number) {
     super(SessionDeletedEvent.type);
     this.sessionId = sessionId;
     this.ordinal = ordinal;
     this.incarnation = incarnation;
+    this.committedAtMs = committedAtMs;
   }
 }
 

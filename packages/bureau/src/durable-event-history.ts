@@ -117,6 +117,7 @@ import type {
   DurableEventPage,
 } from '@lostgradient/operative/durable';
 import type { Subscription } from '@lostgradient/operative/liveness';
+import { encode } from '@lostgradient/weft';
 import {
   createFleetEventFeed,
   type Cursor,
@@ -142,6 +143,52 @@ import { resolveDiagnosticSink, serializeActionDetail } from './serialization';
 import type { Bureau, DiagnosticSink } from './types';
 
 // ── Public surface ──────────────────────────────────────────────────
+
+/**
+ * Options for {@link DurableEventHistory.record}.
+ *
+ * AB-389 (Codex P2 review finding, PR #598, "Keep deduplication metadata
+ * out of application payloads"): the outbox drain used to embed
+ * `dedupeKey` directly in the recorded `payload`, which silently collapsed
+ * any two unrelated events an ordinary caller happened to give the same
+ * `dedupeKey`-named payload field. Both fields here live OUTSIDE the
+ * payload entirely — `dedupeKey` drives a storage-level compare-and-swap
+ * marker `record()` writes atomically alongside the event itself (never
+ * visible to a reader of the payload), and `emittedAtMs` overrides the
+ * envelope's timestamp for a caller that knows the true commit time (a
+ * replayed outbox entry) rather than the moment this call happens to run.
+ */
+export interface DurableEventRecordOptions {
+  /**
+   * Makes this write idempotent: a second `record()` call for the same
+   * `owner`/`kind`/`dedupeKey` is a no-op read of the first call's own
+   * result rather than a second durable append. Enforced by an atomic
+   * storage compare-and-swap (a `conditionalBatch` condition requiring a
+   * reserved marker key to be absent, committed in the SAME batch as the
+   * event append) — not a read-before-write scan, so two processes racing
+   * to record the identical `dedupeKey` can never both succeed (Codex P1
+   * review finding, PR #598, "Make cross-process outbox deduplication
+   * atomic").
+   */
+  dedupeKey?: string;
+  /**
+   * Overrides the envelope's `emittedAtMs` (otherwise `runtime.clock.now()`
+   * at call time). A caller replaying a fact that actually committed
+   * earlier — the session outbox drain, replaying a `SessionOutboxEntry`
+   * possibly long after its commit — passes the ORIGINAL commit time here
+   * so a delayed replay does not misdate the event as happening now
+   * (Codex P2 review finding, PR #598, "Persist the commit time with each
+   * outbox entry").
+   */
+  emittedAtMs?: number;
+}
+
+/** The reserved storage-key prefix for {@link DurableEventRecordOptions.dedupeKey} markers — never a Weft-reserved prefix (see `WEFT_RESERVED_KEY_PREFIXES`). */
+const DEDUPE_MARKER_PREFIX = 'outbox-dedupe:';
+
+function dedupeMarkerKey(owner: DurableEventOwner, kind: string, dedupeKey: string): string {
+  return `${DEDUPE_MARKER_PREFIX}${encodeOwner(owner)}:${kind}:${dedupeKey}`;
+}
 
 /** Options for {@link DurableEventHistory.page}. */
 export interface DurableEventHistoryPageOptions {
@@ -200,7 +247,12 @@ export interface DurableEventHistory {
    * `FleetEventFeed.append`, stamping `owner` into the envelope's
    * `workflowId` via the `${owner.kind}:${owner.id}` convention.
    */
-  record(owner: DurableEventOwner, kind: string, payload: unknown): Promise<DurableEventEnvelope>;
+  record(
+    owner: DurableEventOwner,
+    kind: string,
+    payload: unknown,
+    options?: DurableEventRecordOptions,
+  ): Promise<DurableEventEnvelope>;
   /**
    * AB-389 — whether a durable record for `owner`/`kind` carrying the
    * given `dedupeKey` has already been committed. Built for the session
@@ -211,9 +263,10 @@ export interface DurableEventHistory {
    * SETTLED, never that it succeeded — a storage failure is diagnosed and
    * swallowed by the write's own listener (`trackWrite`), never surfaced
    * to a caller that merely awaited settlement (Codex P1 review finding,
-   * PR #598, "Retain the outbox entry when its durable write fails").
-   * Shares `record()`'s own dedupe scan (`findByDedupeKey`), so a call
-   * here costs exactly what a redundant `record()` call would have.
+   * PR #598, "Retain the outbox entry when its durable write fails"). A
+   * direct O(1) read of `record()`'s own dedupe marker key (Codex P2
+   * review finding, PR #598, "Avoid rescanning retained history for every
+   * outbox entry") — never a history scan.
    */
   wasRecorded(owner: DurableEventOwner, kind: string, dedupeKey: string): Promise<boolean>;
   /**
@@ -376,6 +429,19 @@ export const DEFAULT_PAGE_LIMIT = 100;
 interface StoredDurableEventPayload {
   readonly schemaVersion: number;
   readonly payload: unknown;
+  /**
+   * AB-389 — `record()`'s own {@link DurableEventRecordOptions.dedupeKey},
+   * stamped onto this WRAPPER rather than the caller's `payload` (Codex P2
+   * review finding, PR #598, "Keep deduplication metadata out of
+   * application payloads"): `toDurableEventEnvelope` strips this wrapper
+   * down to `payload.payload` before returning a `DurableEventEnvelope` to
+   * any caller, so this field is never visible outside this module — a
+   * caller's own payload carrying a same-named `dedupeKey` property is
+   * unaffected. Present only on a write that opted in via `options`; used
+   * exclusively by this module's own collision-recovery scan
+   * (`findByDedupeKey`), never read by `page()`/`subscribeEventHistory`.
+   */
+  readonly dedupeKey?: string;
 }
 
 /** The only schema version this slice ever writes. */
@@ -407,22 +473,6 @@ export class UnsupportedDurableEventSchemaVersionError extends Error {
 
 function encodeOwner(owner: DurableEventOwner): string {
   return `${owner.kind}:${owner.id}`;
-}
-
-/**
- * AB-389 — reads the `dedupeKey` string a caller may have embedded directly
- * in a `record()` payload (the session outbox drain does this, keyed on the
- * outbox entry's own ordinal). Returns `undefined` for any payload shape
- * that doesn't carry one, including a non-string value — shared by
- * `record()`'s write-side check and `page()`'s read-side one so both use
- * the identical extraction rule.
- */
-function extractDedupeKey(payload: unknown): string | undefined {
-  if (payload === null || typeof payload !== 'object' || !('dedupeKey' in payload)) {
-    return undefined;
-  }
-  const value = (payload as Record<string, unknown>)['dedupeKey'];
-  return typeof value === 'string' ? value : undefined;
 }
 
 /**
@@ -544,81 +594,105 @@ export function createDurableEventHistory(
   const diagnose = resolveDiagnosticSink(onDiagnostic);
 
   /**
-   * AB-389 — finds an already-recorded event for `owner`/`kind` whose
-   * stored payload carries `dedupeKey`, by paging the owner's own history
-   * (the same primitive `page()` already exposes, reused rather than a
-   * second raw feed scan). Used only by `record()`'s own dedupe check
-   * below, so the cost is paid only by a caller that opts in.
+   * AB-389 — finds an already-recorded event for `owner`/`kind` carrying
+   * `dedupeKey` on its internal storage wrapper (never the caller's own
+   * `payload` — see {@link StoredDurableEventPayload.dedupeKey}), by
+   * replaying the raw feed directly rather than going through `page()`
+   * (which strips the wrapper down to the caller-visible payload before
+   * returning). `feed.replay()` resumes past any compacted retention floor
+   * on its own (its `fleet:gap` marker carries no `workflowId`, so this
+   * owner filter excludes it without any floor bookkeeping here) — closing
+   * the same gap a per-page bounded scan would otherwise need to retry
+   * across (Codex P2 review finding, PR #598, "Continue dedupe lookup from
+   * the retention floor").
+   *
+   * Used ONLY as `record()`'s collision-recovery path, never on every
+   * write (Codex P2 review finding, PR #598, "Avoid rescanning retained
+   * history for every outbox entry") — the common case is resolved by one
+   * atomic compare-and-swap with no scan at all.
    */
   async function findByDedupeKey(
     owner: DurableEventOwner,
     kind: string,
     dedupeKey: string,
   ): Promise<DurableEventEnvelope | undefined> {
-    let since: string | undefined;
-    for (;;) {
-      const result = await page(owner, { since, limit: DEFAULT_PAGE_LIMIT });
-      if ('outcome' in result) {
-        // AB-389 (Codex P2 review finding, PR #598, "Continue dedupe lookup
-        // from the retention floor"): once the fleet's retention floor has
-        // advanced past sequence 0, a `since: undefined` scan ALWAYS starts
-        // by hitting a gap (the floor check compares against sequence -1,
-        // which is always "before the floor" once the floor is nonzero) —
-        // treating that as "not found" would make this lookup a no-op in
-        // any production system with retention enabled, exactly the
-        // opposite of what it exists to prevent. The record we're looking
-        // for, if it still exists, is somewhere at or after the reported
-        // floor — resume the scan there instead of giving up.
-        since = String(result.firstRetainedSequence - 1);
+    const targetWorkflowId = encodeOwner(owner);
+    for await (const envelope of feed.replay()) {
+      if (envelope.workflowId !== targetWorkflowId || envelope.kind !== kind) continue;
+      if (!isStoredDurableEventPayload(envelope.payload)) continue;
+      if (envelope.payload.dedupeKey !== dedupeKey) continue;
+      try {
+        return toDurableEventEnvelope(envelope, owner);
+      } catch (error) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-event-history',
+          message: `[durable-event-history] Skipped corrupt durable record at sequence ${envelope.sequence} for ${owner.kind}:${owner.id} while resolving a dedupe collision:`,
+          cause: error,
+        });
         continue;
       }
-      for (const event of result.events) {
-        if (event.kind === kind && extractDedupeKey(event.payload) === dedupeKey) {
-          return event;
-        }
-      }
-      if (!result.hasMore || result.nextCursor === undefined) return undefined;
-      since = result.nextCursor;
     }
+    return undefined;
   }
 
   async function record(
     owner: DurableEventOwner,
     kind: string,
     payload: unknown,
+    options?: DurableEventRecordOptions,
   ): Promise<DurableEventEnvelope> {
-    // AB-389 — a caller (the session outbox drain) may embed a `dedupeKey`
-    // string directly in `payload` to make this write idempotent against a
-    // redelivery of the SAME outbox entry: a crash between this write
-    // settling and the entry's own removal replays it on the next drain,
-    // and two drains (this process's maintenance pass and its post-commit
-    // trigger, or two Bureau processes over one shared backend) can race
-    // the same entry. Every other caller's payload carries no such field
-    // and pays no extra cost — the scan below only runs when one is
-    // present.
-    //
-    // This read-before-write check is NOT atomic (Codex P1 review finding,
-    // PR #598, "Make cross-process outbox deduplication atomic"): two
-    // Bureau processes racing to drain the SAME entry can both complete
-    // this lookup, observe nothing, and both append — `FleetEventFeed`
-    // exposes no compare-and-swap append primitive to close that window
-    // with a write-side guarantee alone. `page()` below carries the other
-    // half of the fix: it deduplicates by the SAME `(kind, dedupeKey)`
-    // identity when READING, so even if a race lets two raw records land,
-    // a caller paging this owner's history never observes the fact twice.
-    const dedupeKey = extractDedupeKey(payload);
-    if (dedupeKey !== undefined) {
+    const emittedAtMs = options?.emittedAtMs ?? runtime.clock.now();
+    const dedupeKey = options?.dedupeKey;
+    if (dedupeKey === undefined) {
+      const stored: StoredDurableEventPayload = { schemaVersion: CURRENT_SCHEMA_VERSION, payload };
+      const appended = await feed.append({
+        kind,
+        workflowId: encodeOwner(owner),
+        emittedAtMs,
+        payload: stored,
+      });
+      return toDurableEventEnvelope(appended, owner);
+    }
+    const stored: StoredDurableEventPayload = {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      payload,
+      dedupeKey,
+    };
+    const markerKey = dedupeMarkerKey(owner, kind, dedupeKey);
+    // Fast pre-check: a redelivery of an entry this store already recorded
+    // (the common outbox-replay case, not a genuine cross-process race)
+    // resolves here with a single key read — no doomed compare-and-swap
+    // attempt, and no scan.
+    if ((await storage.get(markerKey)) !== null) {
       const existing = await findByDedupeKey(owner, kind, dedupeKey);
       if (existing) return existing;
     }
-    const stored: StoredDurableEventPayload = { schemaVersion: CURRENT_SCHEMA_VERSION, payload };
-    const appended = await feed.append({
-      kind,
-      workflowId: encodeOwner(owner),
-      emittedAtMs: runtime.clock.now(),
-      payload: stored,
-    });
-    return toDurableEventEnvelope(appended, owner);
+    // AB-389 (Codex P1 review finding, PR #598, "Make cross-process outbox
+    // deduplication atomic"): the marker is written in the SAME
+    // `conditionalBatch` as the event append itself (via
+    // `FleetEventFeed.append`'s own `options.conditions`/`operations`,
+    // which thread straight through to `Storage.conditionalBatch`) — so
+    // two processes racing to record the identical `dedupeKey` can never
+    // both succeed. The loser's `feed.append()` retries against the
+    // now-failing marker condition until it exhausts its internal retry
+    // budget and throws; that throw is caught below and resolved by
+    // reading back the winner's own record, rather than surfaced as an
+    // error to a caller that merely lost an idempotent race.
+    try {
+      const appended = await feed.append(
+        { kind, workflowId: encodeOwner(owner), emittedAtMs, payload: stored },
+        {
+          conditions: [{ key: markerKey, expectedValue: null }],
+          operations: [{ type: 'put', key: markerKey, value: encode(true) }],
+        },
+      );
+      return toDurableEventEnvelope(appended, owner);
+    } catch (error) {
+      const existing = await findByDedupeKey(owner, kind, dedupeKey);
+      if (existing) return existing;
+      throw error;
+    }
   }
 
   async function page(
@@ -646,21 +720,16 @@ export function createDurableEventHistory(
     const targetWorkflowId = encodeOwner(owner);
     const events: DurableEventEnvelope[] = [];
     let hasMore = false;
-    // AB-389 (Codex P1 review finding, PR #598, "Make cross-process outbox
-    // deduplication atomic"): `record()`'s own dedupe check is a
-    // read-before-write scan, not a compare-and-swap — two processes
-    // racing to drain the SAME outbox entry can both find nothing and both
-    // append, since `FleetEventFeed` exposes no atomic append-if-absent
-    // primitive to close that window on the write side. This Set closes it
-    // on the READ side instead: within this one page() scan, only the
-    // FIRST record carrying a given `(kind, dedupeKey)` pair is returned —
-    // a later duplicate is skipped exactly like a corrupt record (no
-    // diagnostic, since this is an expected, benign race outcome rather
-    // than data corruption), never consuming a `limit` slot or setting
-    // `hasMore`. This does not cover a duplicate landing in a LATER,
-    // separately-cursored page() call — see this module's own doc comment
-    // for the accepted residual.
-    const seenDedupeKeys = new Set<string>();
+    // AB-389 — no read-side dedupe skip is needed here: record()'s own
+    // write-side compare-and-swap (a dedupeKey-marker condition passed to
+    // feed.append()) guarantees a duplicate (kind, dedupeKey) pair can
+    // never be appended in the first place, across processes or
+    // otherwise (Codex P1 review finding, PR #598, "Make cross-process
+    // outbox deduplication atomic"). The earlier read-side Set this
+    // replaced could still expose a duplicate across separately-cursored
+    // page() calls (Codex P1 review finding, PR #598, "Preserve dedupe
+    // state across paginated history reads"); that is now moot for the
+    // same reason.
     for await (const envelope of feed.replay(since === undefined ? {} : { fromCursor: since })) {
       if (envelope.workflowId !== targetWorkflowId) continue;
       // AB-313 (AC2): decode BEFORE checking `limit` — a corrupt record
@@ -684,12 +753,6 @@ export function createDurableEventHistory(
           cause: error,
         });
         continue;
-      }
-      const dedupeKey = extractDedupeKey(decoded.payload);
-      if (dedupeKey !== undefined) {
-        const seenKey = `${decoded.kind} ${dedupeKey}`;
-        if (seenDedupeKeys.has(seenKey)) continue;
-        seenDedupeKeys.add(seenKey);
       }
       if (events.length >= limit) {
         hasMore = true;
@@ -922,7 +985,10 @@ export function createDurableEventHistory(
     kind: string,
     dedupeKey: string,
   ): Promise<boolean> {
-    return (await findByDedupeKey(owner, kind, dedupeKey)) !== undefined;
+    // A direct O(1) read of record()'s own dedupe marker key — never a
+    // history scan (Codex P2 review finding, PR #598, "Avoid rescanning
+    // retained history for every outbox entry").
+    return (await storage.get(dedupeMarkerKey(owner, kind, dedupeKey))) !== null;
   }
 
   return {
@@ -1172,10 +1238,15 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
     runtime.deferred.track(write, 'durable-event-record');
   }
 
-  function sink(owner: DurableEventOwner, kind: string, payload: unknown): void {
+  function sink(
+    owner: DurableEventOwner,
+    kind: string,
+    payload: unknown,
+    options?: DurableEventRecordOptions,
+  ): void {
     if (signal?.aborted) return;
     trackWrite(encodeOwner(owner), () =>
-      history.record(owner, kind, payload).then(
+      history.record(owner, kind, payload, options).then(
         () => undefined,
         (error: unknown) => {
           diagnose({
@@ -1439,16 +1510,23 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
     if (pendingSessionDeletionWrites.has(dedupeKey)) return;
     trackWrite(ownerKey, () => {
       const write = history
-        .record(owner, 'session.deleted', {
-          sessionId: event.sessionId,
-          incarnation: event.incarnation,
-          // AB-389 — the outbox entry's own ordinal, so a redelivery of the
-          // SAME entry (a crash between this write settling and the outbox
-          // drain acknowledging it, or two drains racing) is a no-op read
-          // instead of a second durable record — see `record()`'s own doc
-          // comment for the general mechanism.
-          dedupeKey: String(event.ordinal),
-        })
+        .record(
+          owner,
+          'session.deleted',
+          {
+            sessionId: event.sessionId,
+            incarnation: event.incarnation,
+          },
+          {
+            // AB-389 — the outbox entry's own ordinal, so a redelivery of
+            // the SAME entry (a crash between this write settling and the
+            // outbox drain acknowledging it, or two drains racing) is a
+            // no-op read instead of a second durable record — see
+            // `record()`'s own doc comment for the general mechanism.
+            dedupeKey: String(event.ordinal),
+            emittedAtMs: event.committedAtMs,
+          },
+        )
         .then(
           () => {
             // Only remember this event as handled on SUCCESS (Codex review
@@ -1494,21 +1572,29 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // second durable record — see `record()`'s own doc comment.
   const sessionCreatedListener = (event: SessionCreatedEvent): void => {
     if (signal?.aborted) return;
-    sink({ kind: 'session', id: event.sessionId }, 'session.created', {
-      sessionId: event.sessionId,
-      agentName: event.agentName,
-      incarnation: event.incarnation,
-      dedupeKey: String(event.ordinal),
-    });
+    sink(
+      { kind: 'session', id: event.sessionId },
+      'session.created',
+      {
+        sessionId: event.sessionId,
+        agentName: event.agentName,
+        incarnation: event.incarnation,
+      },
+      { dedupeKey: String(event.ordinal), emittedAtMs: event.committedAtMs },
+    );
   };
   const sessionSavedListener = (event: SessionSavedEvent): void => {
     if (signal?.aborted) return;
-    sink({ kind: 'session', id: event.sessionId }, 'session.saved', {
-      sessionId: event.sessionId,
-      agentName: event.agentName,
-      incarnation: event.incarnation,
-      dedupeKey: String(event.ordinal),
-    });
+    sink(
+      { kind: 'session', id: event.sessionId },
+      'session.saved',
+      {
+        sessionId: event.sessionId,
+        agentName: event.agentName,
+        incarnation: event.incarnation,
+      },
+      { dedupeKey: String(event.ordinal), emittedAtMs: event.committedAtMs },
+    );
   };
   bureau.addEventListener('session.created', sessionCreatedListener);
   bureau.addEventListener('session.saved', sessionSavedListener);

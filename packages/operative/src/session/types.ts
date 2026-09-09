@@ -49,15 +49,42 @@ export interface SessionCleanupOptions {
  * `SessionStore.outbox.acknowledge(ordinal)` only once that replay's
  * downstream durable write has settled — never before, and never merely
  * because the event was dispatched.
+ *
+ * A discriminated union on `kind` (Codex P2 review finding, PR #598,
+ * "Require agent names on created and saved entries"): `agentName` is
+ * REQUIRED for `'session.created'`/`'session.saved'` — every live commit
+ * always names an agent — and absent only for `'session.deleted'`, which
+ * has no live body left to describe. A caller-supplied `SessionStore`
+ * that used to be able to omit `agentName` for a created/saved entry and
+ * have Bureau silently record `''` as the attributed agent can no longer
+ * construct that value at all.
  */
-export interface SessionOutboxEntry {
-  readonly ordinal: number;
-  readonly kind: 'session.created' | 'session.saved' | 'session.deleted';
-  readonly sessionId: string;
-  /** Omitted for `kind: 'session.deleted'`, which has no live body left to describe. */
-  readonly agentName?: string;
-  readonly incarnation: string;
-}
+export type SessionOutboxEntry =
+  | {
+      readonly ordinal: number;
+      readonly kind: 'session.created' | 'session.saved';
+      readonly sessionId: string;
+      readonly agentName: string;
+      readonly incarnation: string;
+      /**
+       * The wall-clock time (`RuntimeServices.clock.now()`) this entry was
+       * appended — the true commit time, persisted so a drain replaying
+       * this entry long after it was appended (a delayed maintenance pass,
+       * or after a process restart) can stamp durable history and the
+       * audit trail with when the commit ACTUALLY happened, not when the
+       * replay happens to run (Codex P2 review finding, PR #598, "Persist
+       * the commit time with each outbox entry").
+       */
+      readonly committedAtMs: number;
+    }
+  | {
+      readonly ordinal: number;
+      readonly kind: 'session.deleted';
+      readonly sessionId: string;
+      readonly incarnation: string;
+      /** See the `'session.created' | 'session.saved'` variant's own doc comment. */
+      readonly committedAtMs: number;
+    };
 
 /**
  * A high-level store for agent sessions, built on top of ConditionalTextValueStore.

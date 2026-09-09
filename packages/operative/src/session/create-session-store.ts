@@ -359,35 +359,74 @@ function outboxEntryKey(ordinal: number): string {
 }
 
 /**
- * Parses a stored outbox entry, returning undefined for missing or
- * malformed data — mirrors `parseSession`'s own fail-closed discipline so a
- * corrupt entry is skipped by a drain rather than thrown from it.
+ * Parses a stored outbox entry, returning undefined for `raw === null`
+ * (the entry key does not exist — a legitimate, expected outcome for a
+ * caller that just raced a concurrent acknowledge) but throwing for any
+ * NON-NULL value that fails to parse.
+ *
+ * This is NOT `parseSession`'s fail-closed-by-skipping discipline (Codex
+ * P2 review finding, PR #598, "Fail visibly on malformed outbox entries"):
+ * an outbox entry is the SOLE record of a durable lifecycle fact until a
+ * drain replays it — silently treating a truncated/malformed entry as
+ * absent would make `pending()` report a falsely-empty or falsely-drained
+ * outbox while the underlying commit's `session.created`/`saved`/`deleted`
+ * fact is never recorded, and later ordinals would then replay past the
+ * missing one, corrupting drain order. Mirrors `parseOutboxOrdinal`'s own
+ * fail-loudly-on-corruption precedent in this same file.
  */
 function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
-  if (!raw) return undefined;
+  if (raw === null) return undefined;
+  const fail = (reason: string): never => {
+    throw new TypeError(`SessionStore: a stored outbox entry is corrupted — ${reason}.`);
+  };
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
-    const record = parsed as Record<string, unknown>;
-    if (
-      !Number.isSafeInteger(record['ordinal']) ||
-      typeof record['sessionId'] !== 'string' ||
-      typeof record['incarnation'] !== 'string' ||
-      (record['kind'] !== 'session.created' &&
-        record['kind'] !== 'session.saved' &&
-        record['kind'] !== 'session.deleted')
-    ) {
-      return undefined;
-    }
-    return {
-      ordinal: record['ordinal'] as number,
-      kind: record['kind'],
-      sessionId: record['sessionId'],
-      incarnation: record['incarnation'],
-      ...(typeof record['agentName'] === 'string' ? { agentName: record['agentName'] } : {}),
-    };
-  } catch {
-    return undefined;
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return fail(`invalid JSON (${String(error)})`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return fail('expected a JSON object');
+  }
+  const record = parsed as Record<string, unknown>;
+  if (typeof record['ordinal'] !== 'number' || !Number.isSafeInteger(record['ordinal'])) {
+    return fail(`expected a safe-integer "ordinal", got ${JSON.stringify(record['ordinal'])}`);
+  }
+  if (typeof record['sessionId'] !== 'string') {
+    return fail(`expected a string "sessionId", got ${JSON.stringify(record['sessionId'])}`);
+  }
+  if (typeof record['incarnation'] !== 'string') {
+    return fail(`expected a string "incarnation", got ${JSON.stringify(record['incarnation'])}`);
+  }
+  if (!Number.isFinite(record['committedAtMs'])) {
+    return fail(
+      `expected a finite number "committedAtMs", got ${JSON.stringify(record['committedAtMs'])}`,
+    );
+  }
+  const ordinal = record['ordinal'];
+  const sessionId = record['sessionId'];
+  const incarnation = record['incarnation'];
+  const committedAtMs = record['committedAtMs'] as number;
+  switch (record['kind']) {
+    case 'session.created':
+    case 'session.saved':
+      if (typeof record['agentName'] !== 'string') {
+        return fail(
+          `expected a string "agentName" for kind ${JSON.stringify(record['kind'])}, got ${JSON.stringify(record['agentName'])}`,
+        );
+      }
+      return {
+        ordinal,
+        kind: record['kind'],
+        sessionId,
+        agentName: record['agentName'],
+        incarnation,
+        committedAtMs,
+      };
+    case 'session.deleted':
+      return { ordinal, kind: 'session.deleted', sessionId, incarnation, committedAtMs };
+    default:
+      return fail(`unrecognized "kind" ${JSON.stringify(record['kind'])}`);
   }
 }
 
@@ -619,6 +658,7 @@ export function createSessionStore(
       sessionId: next.id,
       agentName: next.agentName,
       incarnation,
+      committedAtMs: runtime.clock.now(),
     };
     const committed = await store.conditionalBatch(
       [
@@ -714,6 +754,7 @@ export function createSessionStore(
           kind: 'session.deleted',
           sessionId: id,
           incarnation: removedIncarnation ?? '',
+          committedAtMs: runtime.clock.now(),
         };
         const deleted = await store.conditionalBatch(
           [

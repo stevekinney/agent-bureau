@@ -10,6 +10,7 @@ import {
   SessionConflictError,
   StaleSessionIncarnationError,
 } from './create-session-store';
+import type { SessionOutboxEntry } from './types';
 
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
 const BODY_PREFIX = 'agent-session-v2:body:';
@@ -1616,11 +1617,14 @@ describe('SessionStore commit outbox (AB-389)', () => {
     await store.save(session);
     let pending = await store.outbox.pending();
     expect(pending).toHaveLength(1);
-    expect(pending[0]?.kind).toBe('session.created');
-    expect(pending[0]?.sessionId).toBe('events-save');
-    expect(pending[0]?.agentName).toBe('events-agent');
-    expect(pending[0]?.incarnation).not.toBe('');
-    expect(pending[0]?.ordinal).toBe(1);
+    const firstEntry = pending[0];
+    if (firstEntry?.kind !== 'session.created') {
+      throw new Error('expected a session.created outbox entry');
+    }
+    expect(firstEntry.sessionId).toBe('events-save');
+    expect(firstEntry.agentName).toBe('events-agent');
+    expect(firstEntry.incarnation).not.toBe('');
+    expect(firstEntry.ordinal).toBe(1);
     // The best-effort drain trigger fires once per appended entry, naming
     // that entry's own ordinal.
     expect(triggers.map((event) => event.ordinal)).toEqual([1]);
@@ -1731,5 +1735,63 @@ describe('SessionStore commit outbox (AB-389)', () => {
     expect(store.save(makeSession({ id: 'corrupted-ordinal-next' }))).rejects.toThrow(
       /outbox ordinal counter is corrupted/,
     );
+  });
+
+  it('fails loudly, rather than silently treating it as absent, when a stored outbox entry is malformed (Codex P2 review finding, PR #598)', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    await store.save(makeSession({ id: 'malformed-entry' }));
+    const [entry] = await store.outbox.pending();
+
+    // Overwrite the entry's own stored value with something that parses as
+    // JSON but is missing a required field — not a value any commit here
+    // ever writes.
+    await rawStore.set(
+      `agent-session-outbox:v1:entry:${String(entry!.ordinal).padStart(20, '0')}`,
+      JSON.stringify({ ordinal: entry!.ordinal, kind: 'session.created', sessionId: 'x' }),
+    );
+
+    expect(store.outbox.pending()).rejects.toThrow(/outbox entry is corrupted/);
+  });
+
+  it('rejects a caller-supplied SessionStore contract where a discriminated-union outbox entry requires agentName for created/saved kinds (AB-389)', async () => {
+    // Type-level regression only: `SessionOutboxEntry` must not permit a
+    // 'session.created'/'session.saved' entry with a missing `agentName` —
+    // Codex P2 review finding, PR #598, "Require agent names on created and
+    // saved entries". This assignment would fail to compile if the union
+    // regressed to the old shape with an optional `agentName`.
+    const entry: SessionOutboxEntry = {
+      ordinal: 1,
+      kind: 'session.created',
+      sessionId: 'typed-entry',
+      agentName: 'typed-agent',
+      incarnation: 'incarnation-a',
+      committedAtMs: 0,
+    };
+    expect(entry.agentName).toBe('typed-agent');
+
+    const deleted: SessionOutboxEntry = {
+      ordinal: 2,
+      kind: 'session.deleted',
+      sessionId: 'typed-entry',
+      incarnation: 'incarnation-a',
+      committedAtMs: 0,
+    };
+    expect('agentName' in deleted).toBe(false);
+  });
+
+  it('persists the true commit time on each outbox entry, not the time a later drain happens to read it (AB-389)', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    const commitTime = runtime.clock.now();
+    await store.save(makeSession({ id: 'commit-time' }));
+
+    // Advance the clock well past the commit before a "drain" reads the
+    // entry back — a delayed maintenance pass or a process restart is
+    // exactly this scenario in production.
+    await runtime.advance(60_000);
+    const [entry] = await store.outbox.pending();
+    expect(entry?.committedAtMs).toBe(commitTime);
+    expect(entry?.committedAtMs).not.toBe(runtime.clock.now());
   });
 });

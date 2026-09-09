@@ -104,7 +104,12 @@ import {
 } from 'lifecycle';
 
 import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
-import { type AuditTrail, computeInitialAuditSequence, createAuditTrail } from './audit-trail';
+import {
+  type AuditTrail,
+  auditTrailSessionOwnerId,
+  computeInitialAuditSequence,
+  createAuditTrail,
+} from './audit-trail';
 import {
   createDurableEventHistory,
   createDurableEventProducer,
@@ -5257,43 +5262,61 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       sessionOutboxDrainRerunRequested = true;
       return sessionOutboxDrainInFlight;
     }
-    const drain = (async (): Promise<void> => {
-      const outboxSessionStore = runtime.sessionStore;
-      // Draining and dispatching happens whenever there is a session store
-      // to drain, regardless of whether a durable event history producer
-      // is configured — `bureau.addEventListener('session.deleted', ...)`
-      // and `audit-trail.ts`'s own listener (a KV-only bureau with no
-      // durable engine still has both) must keep receiving these events
-      // exactly as they did when `SessionStore`/`deleteSession` dispatched
-      // them directly. `durableEventProducerInstance` (not
-      // `eventHistoryInstance` itself, which is what exposes
-      // `waitForActiveWrites` — it exists exactly when `eventHistoryInstance`
-      // does, both wired together further down this function) is checked
-      // separately, only to decide whether there is a durable write to wait
-      // for before acknowledging: absent it, this bureau has no durable
-      // event history surface at all, so there is nothing for AC1's
-      // "delete only after the durable write settles" rule to apply to —
-      // acknowledging immediately after dispatch is correct, not a gap.
-      if (!outboxSessionStore) return;
-      const producer = durableEventProducerInstance;
-      do {
-        sessionOutboxDrainRerunRequested = false;
-        // Loop until one full pass finds nothing pending — an entry
-        // appended by a commit that lands WHILE this pass is draining is
-        // picked up by THIS pass rather than left for the next trigger.
-        await drainSessionOutboxPass(outboxSessionStore, producer);
-        // Re-checked with no `await` between the pass above returning and
-        // this read, so a join that set the flag at any point up to and
-        // including this exact moment is observed — see this function's
-        // own doc comment above for why that closes the race.
-      } while (sessionOutboxDrainRerunRequested);
+    // AB-389 (Codex P2 review finding, PR #598, "Recheck rerun requests
+    // after the drain promise resolves"): the in-flight guard is cleared
+    // INSIDE this same async function's own `finally`, synchronously right
+    // after the do-while loop's last (non-awaited) exit check — never in a
+    // separate `try { await drain } finally { ... }` wrapper one level up.
+    // That extra layer used to introduce a real gap: the do-while exiting
+    // (this promise settling) and the CALLER's `await drain` resuming to
+    // run its own `finally` are two different microtask turns, and a
+    // joiner's `drainSessionOutbox()` call landing in between would see
+    // `sessionOutboxDrainInFlight` still set, join this ALREADY-SETTLING
+    // promise, and set `sessionOutboxDrainRerunRequested` — a flag nothing
+    // would ever check again, since the do-while had already exited. With
+    // the guard cleared here instead, there is no such gap: everything
+    // from the do-while's condition evaluating false through this
+    // `finally` running is one synchronous stretch (a try/finally
+    // transition never yields to the microtask queue), so a joiner cannot
+    // execute in between — it can only ever land during the single
+    // `await` inside the loop, which the do-while's own re-check already
+    // catches.
+    sessionOutboxDrainInFlight = (async (): Promise<void> => {
+      try {
+        const outboxSessionStore = runtime.sessionStore;
+        // Draining and dispatching happens whenever there is a session
+        // store to drain, regardless of whether a durable event history
+        // producer is configured — `bureau.addEventListener('session.deleted',
+        // ...)` and `audit-trail.ts`'s own listener (a KV-only bureau with
+        // no durable engine still has both) must keep receiving these
+        // events exactly as they did when `SessionStore`/`deleteSession`
+        // dispatched them directly. `durableEventProducerInstance` (not
+        // `eventHistoryInstance` itself, which is what exposes
+        // `waitForActiveWrites` — it exists exactly when
+        // `eventHistoryInstance` does, both wired together further down
+        // this function) is checked separately, only to decide whether
+        // there is a durable write to wait for before acknowledging:
+        // absent it, this bureau has no durable event history surface at
+        // all, so there is nothing for AC1's "delete only after the
+        // durable write settles" rule to apply to — acknowledging
+        // immediately after dispatch is correct, not a gap.
+        if (!outboxSessionStore) return;
+        const producer = durableEventProducerInstance;
+        do {
+          sessionOutboxDrainRerunRequested = false;
+          // Loop until one full pass finds nothing pending — an entry
+          // appended by a commit that lands WHILE this pass is draining is
+          // picked up by THIS pass rather than left for the next trigger.
+          await drainSessionOutboxPass(outboxSessionStore, producer);
+          // Re-checked with no `await` between the pass above returning
+          // and this read, so a join that set the flag at any point up to
+          // and including this exact moment is observed.
+        } while (sessionOutboxDrainRerunRequested);
+      } finally {
+        sessionOutboxDrainInFlight = undefined;
+      }
     })();
-    sessionOutboxDrainInFlight = drain;
-    try {
-      await drain;
-    } finally {
-      sessionOutboxDrainInFlight = undefined;
-    }
+    await sessionOutboxDrainInFlight;
   }
 
   async function drainSessionOutboxPass(
@@ -5305,32 +5328,68 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       if (pending.length === 0) return;
       for (const entry of pending) {
         const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
-        switch (entry.kind) {
-          case 'session.created':
-            emitter.dispatch(
-              new SessionCreatedEvent(
-                entry.sessionId,
-                entry.agentName ?? '',
-                entry.incarnation,
-                entry.ordinal,
-              ),
-            );
-            break;
-          case 'session.saved':
-            emitter.dispatch(
-              new SessionSavedEvent(
-                entry.sessionId,
-                entry.agentName ?? '',
-                entry.incarnation,
-                entry.ordinal,
-              ),
-            );
-            break;
-          case 'session.deleted':
-            emitter.dispatch(
-              new SessionDeletedEvent(entry.sessionId, entry.incarnation, entry.ordinal),
-            );
-            break;
+        // AB-389 (Codex P2 review finding, PR #598, "Isolate subscriber
+        // exceptions while draining the outbox"): `emitter.dispatch()`
+        // fans out to two kinds of listener — `addEventListener`-registered
+        // ones (this includes `durableEventProducerInstance`'s own
+        // write-tracking listener, native-`EventTarget`-isolated per spec:
+        // a throw there never reaches this call) and a public
+        // `bureau.toObservable()` subscriber, which has NO such isolation
+        // (`CompletableEventTarget.dispatchEvent` calls those directly, no
+        // try/catch of its own — see that class's own doc comment on why
+        // this is intentionally NOT fixed there: `active-run-adapter.ts`'s
+        // OWN emitter relies on a throwing observer aborting its dispatch
+        // call, an unrelated, already-tested contract this fix must not
+        // disturb). Isolated HERE instead, scoped to exactly this call
+        // site: because the native listener above already started
+        // tracking its write synchronously before any observer runs, a
+        // throw from a downstream OBSERVER can never un-start that write —
+        // catching it here just stops one badly-behaved subscriber from
+        // permanently wedging the RESERVED lowest-ordinal entry (returned
+        // on every retry) and starving every later session lifecycle fact
+        // behind it.
+        try {
+          switch (entry.kind) {
+            case 'session.created':
+              emitter.dispatch(
+                new SessionCreatedEvent(
+                  entry.sessionId,
+                  entry.agentName,
+                  entry.incarnation,
+                  entry.ordinal,
+                  entry.committedAtMs,
+                ),
+              );
+              break;
+            case 'session.saved':
+              emitter.dispatch(
+                new SessionSavedEvent(
+                  entry.sessionId,
+                  entry.agentName,
+                  entry.incarnation,
+                  entry.ordinal,
+                  entry.committedAtMs,
+                ),
+              );
+              break;
+            case 'session.deleted':
+              emitter.dispatch(
+                new SessionDeletedEvent(
+                  entry.sessionId,
+                  entry.incarnation,
+                  entry.ordinal,
+                  entry.committedAtMs,
+                ),
+              );
+              break;
+          }
+        } catch (error) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] A bureau.toObservable() subscriber threw while replaying session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}"); continuing the drain:`,
+            cause: error,
+          });
         }
         // Waits for the durable write THIS dispatch just started (and
         // any other write already in flight for the same owner) to
@@ -5369,6 +5428,45 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             // still-failing entry forever within this one call: a LATER,
             // distinct trigger (the next commit, or the next maintenance
             // tick) starts a fresh pass and gets a fresh chance at it.
+            return;
+          }
+        }
+        // AB-389 (Codex P1 review finding, PR #598, "Verify deletion audit
+        // persistence before acknowledging"): `audit-trail.ts`'s own
+        // `session.deleted` listener writes an out-of-band KV record
+        // through the SAME swallow-and-diagnose discipline `sink()` uses
+        // for durable history — a failed `kv.set()` never surfaces to this
+        // drain. `eventHistoryInstance`'s own `wasRecorded` check above
+        // verifies ONLY durable event history, which can be entirely
+        // absent (a KV-only bureau with no durable engine) even though the
+        // audit trail is configured and its write is the ONLY record of
+        // this deletion. `query({ runId })` already waits for that
+        // specific owner's in-flight write to settle (AB-228) before
+        // reading back, so this both waits AND verifies in one call — a
+        // bureau with no `runtime.kv` configured skips this entirely
+        // (`query()` always returns `[]` there, which would otherwise read
+        // as a permanent, un-retryable failure).
+        if (entry.kind === 'session.deleted' && auditTrailInstance && runtime.kv) {
+          const ownerRunId = auditTrailSessionOwnerId(entry.sessionId);
+          const records = await auditTrailInstance.query({
+            runId: ownerRunId,
+            type: 'session.deleted',
+          });
+          const persisted = records.some((record) => {
+            const detail = record.detail;
+            return (
+              typeof detail === 'object' &&
+              detail !== null &&
+              'incarnation' in detail &&
+              detail.incarnation === entry.incarnation
+            );
+          });
+          if (!persisted) {
+            diagnose({
+              level: 'error',
+              scope: 'durable-maintenance',
+              message: `[bureau] Session outbox entry ${entry.ordinal} (session.deleted for session "${entry.sessionId}") was not durably recorded in the audit trail; leaving it pending for a later drain to retry.`,
+            });
             return;
           }
         }
@@ -6861,15 +6959,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         }
       }
 
-      // Bureau-owned background work is stopped/awaited identically under
-      // BOTH policies (2026-09-02 coordinator ruling) — abort the shared
-      // signal now, AFTER runs are aborted/drained and toolbox shutdown is
-      // awaited above, so an in-flight judge invocation / webhook delivery
-      // settles promptly against the owner drains immediately below rather
-      // than being told to abort before shutdown has even started (which
-      // would make the audit trail's `if (signal?.aborted) return` above
-      // drop the very `run.aborted`/`tool.*` records this shutdown produces).
-      backgroundShutdownController.abort();
       // AB-363: stop the automatic-profile run-ownership pruning timer, if
       // one was started — `clearInterval` alone only cancels FUTURE ticks,
       // so a pass already in flight is also awaited here, before the
@@ -6880,6 +6969,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // backend teardown"). `pruneStaleRunOwnership()`'s own promise chain
       // already `.catch()`es every failure before this point, so awaiting
       // it here never throws.
+      //
+      // AB-389 (Codex P1 review finding, PR #598, "Await the chained drain
+      // before aborting its producers"): this await MUST happen BEFORE
+      // `backgroundShutdownController.abort()` below, not after — the pass
+      // this awaits chains `drainSessionOutbox()` onto `pruneStaleRunOwnership()`
+      // (see the interval callback's own doc comment), and every session
+      // lifecycle listener `createDurableEventProducer` registers checks
+      // `signal?.aborted` and returns immediately once that shared signal
+      // is aborted, recording nothing. Aborting first would let a pass
+      // already inside `pruneStaleRunOwnership()` run its chained drain
+      // AFTER the abort, dispatching outbox entries whose durable writes
+      // never start — `wasRecorded` still leaves those entries pending for
+      // a later drain (the safety net a redelivery relies on generally),
+      // but there is no reason to manufacture that residual here when
+      // simply awaiting first avoids it entirely.
       if (automaticRunOwnershipPruneTimerStarted) {
         runtimeServices.timers.clearInterval(automaticRunOwnershipPruneTimer);
         automaticRunOwnershipPruneTimerStarted = false;
@@ -6887,6 +6991,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       if (automaticRunOwnershipPruneCurrentPass) {
         await automaticRunOwnershipPruneCurrentPass;
       }
+      // Bureau-owned background work is stopped/awaited identically under
+      // BOTH policies (2026-09-02 coordinator ruling) — abort the shared
+      // signal now, AFTER runs are aborted/drained, toolbox shutdown is
+      // awaited above, and the pruning/outbox pass above has settled, so
+      // an in-flight judge invocation / webhook delivery settles promptly
+      // against the owner drains immediately below rather than being told
+      // to abort before shutdown has even started (which would make the
+      // audit trail's `if (signal?.aborted) return` above drop the very
+      // `run.aborted`/`tool.*` records this shutdown produces).
+      backgroundShutdownController.abort();
 
       // All pre-teardown is BEST-EFFORT, and the whole body is under an OUTER
       // try/finally so the critical backend teardown (engine → storage → store)
@@ -7727,6 +7841,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
       hasDeferredGatewayAuthority = !requestAuthorityValidator;
     }
+  }
+  // AB-389 (Codex P1 review finding, PR #598, "Drain the outbox before
+  // deferring authority recovery"): the crash-recovery outbox drain used
+  // to live ONLY at the start of `recoverDurableRuns()` — when boot
+  // defers durable run reattachment below (no request-authority validator
+  // attached yet), that function is never called until
+  // `setRequestAuthorityValidator()` runs, so pending outbox entries from
+  // a previous process would sit undrained for however long attachment
+  // takes, or forever if it never happens. Draining is authority-
+  // independent (it only needs `runtime.sessionStore`/`eventHistoryInstance`,
+  // neither gated on gateway authority) and idempotent/single-flighted, so
+  // running it unconditionally here — BEFORE deciding whether to defer —
+  // costs nothing extra on the non-deferred path (`recoverDurableRuns()`'s
+  // own drain call below is then a no-op empty pass) and closes the gap
+  // on the deferred one.
+  try {
+    await drainSessionOutbox();
+  } catch (error) {
+    diagnose({
+      level: 'error',
+      scope: 'recovery',
+      message: `[bureau] Session outbox drain failed during boot recovery; continuing: ${serializeUnknownError(error)}`,
+      cause: error,
+    });
   }
   if (hasDeferredGatewayAuthority) {
     durableRecoveryDeferred = true;

@@ -577,17 +577,31 @@ of that same live body. A freshly constructed, not-yet-persisted session
 loaded from storage defaults to.
 
 **Commit outbox (AB-389):** every successful `save()`, `update()`, or
-`delete()` commit appends a `SessionOutboxEntry` — `{ ordinal, kind, sessionId,
-agentName?, incarnation }` — to the SAME atomic `conditionalBatch` as the body
-and summary-index write (or the removal). `kind` is `'session.created'` the
-first time an id's body is committed, `'session.saved'` on every later commit
-of the same live body, or `'session.deleted'` for a `delete()` that actually
-removed a live record (a delete that removes nothing appends no entry and
-consumes no ordinal). `ordinal` is the store's own commit ordinal: a single
-monotonically increasing counter shared across every session id in this
-store, never a per-session `revision` — a caller draining entries in ordinal
-order sees every commit across the whole store in true commit order, even
-across two `SessionStore` instances sharing one persistent backend.
+`delete()` commit appends a `SessionOutboxEntry` to the SAME atomic
+`conditionalBatch` as the body and summary-index write (or the removal) —
+a discriminated union on `kind`: `{ ordinal, kind: 'session.created' |
+'session.saved', sessionId, agentName, incarnation, committedAtMs }` or
+`{ ordinal, kind: 'session.deleted', sessionId, incarnation, committedAtMs }`.
+`agentName` is a required `string` for `'session.created'`/`'session.saved'`
+(every live commit always names an agent) and present only there — a
+`'session.deleted'` entry has no live body left to describe. `committedAtMs`
+is the wall-clock time (`RuntimeServices.clock.now()`) THIS commit was
+appended, not the time a later drain happens to read it back — persisted so
+a delayed replay (a stalled maintenance pass, or a process restart) stamps
+durable history and the audit trail with the true commit time. `kind` is
+`'session.created'` the first time an id's body is committed, `'session.saved'`
+on every later commit of the same live body, or `'session.deleted'` for a
+`delete()` that actually removed a live record (a delete that removes
+nothing appends no entry and consumes no ordinal). `ordinal` is the store's
+own commit ordinal: a single monotonically increasing counter shared across
+every session id in this store, never a per-session `revision` — a caller
+draining entries in ordinal order sees every commit across the whole store
+in true commit order, even across two `SessionStore` instances sharing one
+persistent backend. `outbox.pending()` fails loudly (throws), rather than
+silently treating the entry as absent, when a stored entry is malformed —
+it is the sole record of a durable lifecycle fact until a drain replays it,
+so silently skipping a corrupt one would misorder or lose that fact instead
+of surfacing the corruption.
 
 The store does **not** dispatch `SessionCreatedEvent`/`SessionSavedEvent`/
 `SessionDeletedEvent` directly anymore — that direct, fire-and-forget dispatch

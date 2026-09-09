@@ -17343,4 +17343,206 @@ describe('AB-389 — session commit outbox', () => {
       await bureau.dispose();
     }
   });
+
+  it('retains a pending session.deleted outbox entry, rather than acknowledging it, when the audit-trail write fails (Codex P1 review finding, PR #598, "Verify deletion audit persistence before acknowledging")', async () => {
+    // A KV-only bureau (no `storage`/durable engine — `persistence` alone)
+    // is exactly the case the finding calls out: `eventHistoryInstance` is
+    // absent, so the existing `wasRecorded` gate above never runs at all,
+    // and the audit trail's own out-of-band `session.deleted` record is
+    // the ONLY durable trace of this deletion.
+    const backingStore = textValueStore(new MemoryStorage());
+    let failAuditWrites = false;
+    const persistence = createTextStoreProxy(backingStore, {
+      set: async (key, value) => {
+        if (failAuditWrites && key.startsWith('audit:v1:')) {
+          throw new Error('injected audit-trail write failure');
+        }
+        return backingStore.set(key, value);
+      },
+    });
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence,
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-389-audit-retain-on-write-failure',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({
+          id: 'ab-389-audit-retain-on-write-failure',
+        }),
+      });
+      await sessionStore.save(session);
+      await runtime.deferred.drain();
+      // The creation drains and acknowledges normally — nothing gates it
+      // in a KV-only bureau (no durable event history to verify against).
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+
+      failAuditWrites = true;
+      await bureau.deleteSession(session.id);
+      await waitForCondition(
+        () =>
+          diagnostics.some((message) =>
+            message.includes('was not durably recorded in the audit trail'),
+          ),
+        'expected a diagnostic reporting the audit write failed',
+      );
+
+      // The delete's outbox entry must NOT have been acknowledged — the
+      // audit write failed, so there is no durable trace of the deletion
+      // anywhere yet.
+      expect(await sessionStore.outbox.pending()).toHaveLength(1);
+      expect(
+        await bureau.auditTrail!.query({
+          runId: `session:${session.id}`,
+          type: 'session.deleted',
+        }),
+      ).toHaveLength(0);
+
+      // Once the audit backend recovers, an unrelated commit's post-commit
+      // trigger drains the outbox — including the earlier stuck entry —
+      // and this time the audit write succeeds, so it is acknowledged.
+      failAuditWrites = false;
+      await sessionStore.save(
+        createAgentSession({
+          id: 'ab-389-audit-retain-on-write-failure-unrelated',
+          agentName: 'triage',
+          conversationHistory: createConversationHistory({
+            id: 'ab-389-audit-retain-on-write-failure-unrelated',
+          }),
+        }),
+      );
+      await runtime.deferred.drain();
+
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+      const records = await bureau.auditTrail!.query({
+        runId: `session:${session.id}`,
+        type: 'session.deleted',
+      });
+      expect(records).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('drains a session outbox entry left pending across a restart even when boot defers durable run reattachment for a missing request-authority validator (Codex P1 review finding, PR #598, "Drain the outbox before deferring authority recovery")', async () => {
+    // A session carrying a NON-bureau-internal `authorizationRevision`
+    // (`hasRecoverableTransportAuthority`'s own test — anything other than
+    // `'bureau:1'`/`'bureau:scheduler:1'`) while still `lastRunStatus:
+    // 'running'` makes boot classify this as gateway-owned authority that
+    // needs a validator before durable run recovery may safely reattach
+    // it — exactly the `hasDeferredGatewayAuthority` branch the finding
+    // names. bureauA is deliberately never disposed, simulating a crash
+    // with that run still "in flight".
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-drain-before-defer-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const bureauA = await createBureau({
+      agents: {},
+      // Hangs forever from step 0 — the run never reaches a terminal
+      // state, so its session's `lastRunStatus` stays 'running' when
+      // bureauA is (deliberately) never disposed below.
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+      // bureauA itself validates the transport-issued authority so the run
+      // can be created at all — the restart below (bureauB) is the one
+      // that deliberately omits a validator, exercising the deferred path.
+      requestAuthorityValidator: () => true,
+    });
+    const run = await bureauA.createRun({
+      message: 'Persist a gateway authority that requires a validator',
+      requestContext: {
+        authority: {
+          principalId: 'api-key:gateway-caller',
+          tenantId: 'bureau',
+          ownerId: 'bureau',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'gateway:api-key:gateway-caller',
+        },
+      },
+    });
+    await pollUntil(async () => {
+      const session = await bureauA.getSession(run.sessionId);
+      return session?.metadata['lastRunStatus'] === 'running';
+    });
+    const sessionBeforeRestart = await bureauA.getSession(run.sessionId);
+    expect(sessionBeforeRestart?.metadata['lastRunStatus']).toBe('running');
+    expect(sessionBeforeRestart?.metadata['lastRequestAuthorities']).toMatchObject({
+      [run.id]: expect.objectContaining({
+        authorizationRevision: 'gateway:api-key:gateway-caller',
+      }),
+    });
+    // Deliberately not disposed — see the doc comment above.
+
+    // A SECOND, unrelated session's outbox entry, committed through a
+    // standalone `SessionStore` over the SAME backend with nothing alive
+    // to drain it — the crash-recovery scenario the earlier test in this
+    // file already covers, combined here with the deferred-authority
+    // session above so both conditions hold simultaneously at the next
+    // boot.
+    const storageForOutboxCommit = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const standaloneSessionStore = createSessionStore(
+      textValueStore(storageForOutboxCommit, { disposeUnderlyingStorage: false }),
+    );
+    const outboxSession = createAgentSession({
+      id: 'ab-389-drain-before-defer-outbox-session',
+      agentName: 'triage',
+      conversationHistory: createConversationHistory({
+        id: 'ab-389-drain-before-defer-outbox-session',
+      }),
+    });
+    await standaloneSessionStore.save(outboxSession);
+    expect(await standaloneSessionStore.outbox.pending()).toHaveLength(1);
+    storageForOutboxCommit[Symbol.dispose]();
+
+    // "Restart": a fresh bureau over the SAME storage with no
+    // `requestAuthorityValidator` attached at construction time.
+    const bureauB = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+      durableExecution: true,
+    });
+
+    try {
+      // Proves durable run recovery genuinely deferred (not merely slow):
+      // the crashed run stays unrecovered until a validator is attached —
+      // if boot had run `recoverDurableRuns()` normally instead of
+      // deferring it, this run would already be reattached and visible.
+      expect(bureauB.getRun(run.id)).toBeUndefined();
+
+      // The unrelated outbox entry drains anyway — authority-independent
+      // draining runs before the defer decision, not gated behind it.
+      const recoveredSessionStore = bureauB.sessionStore;
+      if (!recoveredSessionStore) throw new Error('expected a configured session store');
+      await waitForCondition(async () => {
+        const pending = await recoveredSessionStore.outbox.pending();
+        return pending.length === 0;
+      }, 'expected the unrelated outbox entry to drain even though durable run recovery is deferred');
+      const page = await bureauB.eventHistory({ kind: 'session', id: outboxSession.id });
+      if ('outcome' in page) throw new Error(`expected a page, got outcome "${page.outcome}"`);
+      expect(page.events.map((event) => event.kind)).toEqual(['session.created']);
+
+      // Attaching a validator now lets the deferred recovery proceed.
+      bureauB.setRequestAuthorityValidator(() => true);
+      await pollUntil(() => bureauB.getRun(run.id) !== undefined);
+    } finally {
+      await bureauA.dispose();
+      await bureauB.dispose();
+    }
+  });
 });

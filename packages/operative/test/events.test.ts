@@ -295,10 +295,10 @@ describe('events', () => {
       budget: 1,
       model: 'gpt-test',
     });
-    const saved = new SessionSavedEvent('session-1', 'agent-a', 'incarnation-1', 1);
+    const saved = new SessionSavedEvent('session-1', 'agent-a', 'incarnation-1', 1, 0);
     const loaded = new SessionLoadedEvent('session-1', 'agent-a');
-    const created = new SessionCreatedEvent('session-1', 'agent-a', 'incarnation-1', 1);
-    const deleted = new SessionDeletedEvent('session-1', 'incarnation-1', 1);
+    const created = new SessionCreatedEvent('session-1', 'agent-a', 'incarnation-1', 1, 0);
+    const deleted = new SessionDeletedEvent('session-1', 'incarnation-1', 1, 0);
     const outboxAppended = new SessionOutboxAppendedEvent(1);
 
     expect(threshold.type).toBe('budget.threshold');
