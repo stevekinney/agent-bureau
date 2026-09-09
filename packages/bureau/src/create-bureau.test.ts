@@ -16380,6 +16380,50 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
+  it('AB-370 (Codex P1 review finding, PR #594): boots successfully and seeds the sequence counter from the clock, not 0, when the boot floor scan itself fails', async () => {
+    // A transient `kv.list` failure during boot must not silently reset
+    // the shared sequence counter to 0 — that would defeat this issue's
+    // own ordering invariant. `createBureau` passes
+    // `runtimeServices.clock.now()` as `computeInitialAuditSequence`'s
+    // `emergencyFloor`, so bureau construction still succeeds and the
+    // first record this process writes lands at that clock reading, not 0.
+    const runtime = createManualRuntimeServices();
+    runtime.setTime(1_700_000_000_000);
+    const baseKv = textValueStore(new MemoryStorage());
+    let failListOnce = true;
+    const flakyKv: ReturnType<typeof textValueStore> = {
+      ...baseKv,
+      async list(prefix: string) {
+        if (prefix === 'audit:v1:' && failListOnce) {
+          failListOnce = false;
+          throw new Error('storage temporarily unavailable');
+        }
+        return baseKv.list(prefix);
+      },
+    };
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: flakyKv,
+      runtime,
+    });
+
+    try {
+      expect(bureau.ready).toBe(true);
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [record] = await bureau.auditTrail!.query({ runId: run.id, type: 'run.completed' });
+      // Far above 0 — the emergency clock-based floor, not the unsafe
+      // default a bare scan-failure fallback would have used.
+      expect(record?.sequence).toBeGreaterThanOrEqual(1_700_000_000_000);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('durably records session.deleted before waiting on any run cleanup, so a genuinely stuck run cannot block the durable audit fact (Codex P1 review finding, PR #566)', async () => {
     // Before this fix, `session.deleted` was dispatched only after
     // `Promise.allSettled(runTerminals)` resolved — an UNBOUNDED wait for

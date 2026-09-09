@@ -362,13 +362,31 @@ function parseSequenceFromKey(key: string): number | undefined {
  * to reading and JSON-parsing that one record, mirroring
  * {@link AuditTrail.query}'s own tolerance for a malformed stored record —
  * this is a best-effort scan, not a second source of truth for data
- * integrity. A `kv.get`/`kv.list` failure is diagnosed and falls back to `0`
- * (existing records keep their invariant key uniqueness via `runId`, so a
- * conservative restart floor cannot collide, only start lower than ideal).
+ * integrity.
+ *
+ * A `kv.get`/`kv.list` failure is diagnosed. It deliberately does NOT fall
+ * back to `0` (Codex P1 review finding, PR #594): a transient scan failure
+ * against a store that already holds persisted records would otherwise
+ * silently reopen the exact bug this issue fixes — a fresh process
+ * re-issuing sequence values a prior lifetime already used, which can sort
+ * a genuinely later record BEFORE an earlier one on a same-millisecond tie.
+ * `emergencyFloor` (a caller-supplied clock reading — `create-bureau.ts`
+ * passes `runtimeServices.clock.now()`, never a raw `Date.now()`, per this
+ * package's determinism rule) is used instead, the same
+ * "wall-clock-far-larger-than-any-real-counter" technique
+ * `seedRunSeqGeneration` already uses in `create-bureau.ts` for an
+ * analogous problem: any realistic sequence count is astronomically
+ * smaller than an epoch-millisecond reading, so this is safely far above
+ * anything a previously-scanned lifetime could have persisted. Omitting
+ * `emergencyFloor` (any direct caller of this exported function other than
+ * `create-bureau.ts`) keeps the old, less-safe `0` fallback rather than
+ * forcing every caller to thread a clock through — documented here as the
+ * tradeoff, not a silent gap.
  */
 export async function computeInitialAuditSequence(
   kv: TextValueStore | undefined,
   onDiagnostic?: DiagnosticSink,
+  emergencyFloor?: () => number,
 ): Promise<number> {
   if (!kv) return 0;
   const diagnose = resolveDiagnosticSink(onDiagnostic);
@@ -397,13 +415,14 @@ export async function computeInitialAuditSequence(
     }
     return highest + 1;
   } catch (error: unknown) {
+    const fallback = emergencyFloor?.() ?? 0;
     diagnose({
       level: 'error',
       scope: 'audit-trail',
-      message: '[audit-trail] Failed to compute the boot sequence floor; starting from 0:',
+      message: `[audit-trail] Failed to compute the boot sequence floor; starting from ${fallback}:`,
       cause: error,
     });
-    return 0;
+    return fallback;
   }
 }
 
@@ -814,13 +833,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // uniqueness (via the trailing `runId` tiebreak) and for backends
       // whose scan order already happens to be lexicographic, but this
       // sort is what actually GUARANTEES "sequence breaks a timestamp tie"
-      // for every backend, and it is what makes a record with no
-      // `sequence` (written before this field existed) fall back to
-      // timestamp-only ordering rather than sorting arbitrarily first or
-      // last: `Array.prototype.sort` is stable, so returning `0` when
-      // either side lacks a `sequence` preserves that record's original
-      // scan-order position among same-timestamp peers instead of forcing
-      // an order this trail has no basis to assert.
+      // for every backend.
       //
       // Deliberately timestamp-first, sequence only as the tiebreak — NOT
       // sequence-first — so a query's order for two records that do NOT
@@ -828,10 +841,25 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // rollback trigger). The shared counter only disambiguates a genuine
       // same-millisecond collision; it is not a replacement for the
       // timestamp as the primary ordering key.
+      //
+      // A record with no `sequence` (written before this field existed)
+      // maps to `-1` for this comparison — NOT a `0`-returning special
+      // case (Codex P2 review finding, PR #594: a comparator that returns
+      // `0` for any pair involving an undefined `sequence` is not
+      // transitive — A vs legacy and legacy vs B can both compare "equal"
+      // even when A and B themselves compare unequal, and `Array.sort` is
+      // only required to produce the claimed order for a genuinely
+      // transitive comparator; some engines' sort algorithms can leave a
+      // non-transitive comparator's inputs in their original scan order
+      // instead). `-1` sorts a sequence-less record before every real
+      // `sequence` (which is always `>= 0`) within the same millisecond —
+      // a reasonable default (older code wrote it, before this field
+      // existed) — while keeping the comparator a genuine, transitive
+      // total order: two sequence-less records both map to `-1` and
+      // compare equal to each other, exactly as intended.
       records.sort((a, b) => {
         if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
-        if (a.sequence === undefined || b.sequence === undefined) return 0;
-        return a.sequence - b.sequence;
+        return (a.sequence ?? -1) - (b.sequence ?? -1);
       });
 
       return records;

@@ -7283,7 +7283,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // `AuditRecord.sequence`'s. This one `await` still lands before
     // `recoverDurableRuns()` further down, so the "subscribed BEFORE
     // durable run recovery" ordering above is unaffected.
-    const auditTrailInitialSequence = await computeInitialAuditSequence(runtime.kv, diagnose);
+    const auditTrailInitialSequence = await computeInitialAuditSequence(
+      runtime.kv,
+      diagnose,
+      // AB-370 (Codex P1 review finding, PR #594): a scan failure must not
+      // silently reset the boot floor to 0 — see
+      // `computeInitialAuditSequence`'s own doc comment.
+      // `runtimeServices.clock.now()`, never a raw `Date.now()`, per this
+      // package's determinism rule.
+      () => runtimeServices.clock.now(),
+    );
     // AB-207: threaded with the bureau-owned background-shutdown signal so
     // `shutdown()` can bound this subsystem's drain the same way it bounds
     // online-evals and the webhook notifier below.

@@ -238,18 +238,34 @@ export function createAuditRoutes(bureau: Bureau) {
       });
     }
 
-    // Merge and sort chronologically (oldest first). The same-timestamp
-    // tiebreak here compares two genuinely different numbering domains — a
-    // durable record's shared `sequence` (AB-370) versus a live action's
-    // own `action.sequence` — since a durable record whose `actionSequence`
-    // matches a live one was already excluded from `liveRecords` above by
-    // the dedup pass; whichever of the two remaining records land on the
-    // same millisecond were never the same event, so this tiebreak is
-    // best-effort ordering, not an identity claim. `?? 0` covers a durable
-    // record written before `sequence` existed.
+    // AB-370 (Codex P1 review finding, PR #594, "Preserve a common order
+    // when merging live and durable records"): a durable record's shared
+    // `sequence` counter and a live action's `action.sequence` are two
+    // DIFFERENT numbering domains — comparing them directly (as an earlier
+    // round of this fix did) can put a live action out of chronological
+    // order against a durable one that shares its millisecond. For a
+    // durable record the action-stream listener wrote, `actionSequence`
+    // (present on those, and absent on this file's `liveRecords`) IS in
+    // the same domain as a live action's own `sequence` — so this key
+    // prefers it, falling back to the durable trail's own `sequence` only
+    // for an out-of-band record (`session.deleted`, `schedule.*`,
+    // `review.*`) that has no live counterpart to correlate with anyway.
+    // `-1` (not `0`) for a value that's entirely absent keeps the
+    // comparator a genuine total order — see `audit-trail.ts`'s own
+    // `query()` comparator, which uses the same sentinel for the same
+    // transitivity reason.
+    const orderingSequence = (record: { sequence?: number; actionSequence?: number }): number => {
+      if ('actionSequence' in record && record.actionSequence !== undefined) {
+        return record.actionSequence;
+      }
+      return record.sequence ?? -1;
+    };
+
+    // Merge and sort chronologically (oldest first), using the ordering
+    // key above as the same-timestamp tiebreak.
     const merged = [...durableRecords, ...liveRecords].sort((a, b) => {
       if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
-      return (a.sequence ?? 0) - (b.sequence ?? 0);
+      return orderingSequence(a) - orderingSequence(b);
     });
 
     return context.json(merged.slice(0, limit), 200);

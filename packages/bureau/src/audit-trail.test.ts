@@ -1164,6 +1164,37 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
+    it('query() sorts a sequence-less legacy record before every real sequence sharing its millisecond, using a transitive comparator (Codex P2 review finding, PR #594)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // Written in an order a `0`-for-either-side comparator would leave
+      // UNCHANGED (seq 2, then the legacy record, then seq 1) — proving
+      // this is a genuine sort, not an artifact of already-sorted input.
+      await seedRecord(kv, makeRecord(2, { timestampMs: 5000, runId: 'run-X' }));
+      await kv.set(
+        'audit:v1:0000000000005000:legacy:run-X',
+        JSON.stringify({
+          timestamp: new Date(5000).toISOString(),
+          timestampMs: 5000,
+          runId: 'run-X',
+          type: 'tool.started',
+          detail: { marker: 'legacy' },
+        }),
+      );
+      await seedRecord(kv, makeRecord(1, { timestampMs: 5000, runId: 'run-X' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+      const records = await trail.query({ runId: 'run-X' });
+
+      expect(records).toHaveLength(3);
+      // Legacy (mapped to -1) first, then ascending real sequence.
+      expect(records[0]?.sequence).toBeUndefined();
+      expect(records[1]?.sequence).toBe(1);
+      expect(records[2]?.sequence).toBe(2);
+
+      trail.dispose();
+    });
+
     it('computeInitialAuditSequence returns 0 for a store with no persisted records', async () => {
       const kv = textValueStore(new MemoryStorage());
       expect(await computeInitialAuditSequence(kv)).toBe(0);
@@ -1220,7 +1251,7 @@ describe('createAuditTrail', () => {
       expect(await computeInitialAuditSequence(kv)).toBe(4);
     });
 
-    it('computeInitialAuditSequence falls back to 0 and diagnoses when the scan fails', async () => {
+    it('computeInitialAuditSequence falls back to 0 and diagnoses when the scan fails and no emergencyFloor is supplied', async () => {
       const failingKv: ReturnType<typeof textValueStore> = {
         ...textValueStore(new MemoryStorage()),
         list: async () => {
@@ -1232,6 +1263,27 @@ describe('createAuditTrail', () => {
         received.push(diagnostic),
       );
       expect(result).toBe(0);
+      expect(received).toHaveLength(1);
+    });
+
+    it('computeInitialAuditSequence uses the caller-supplied emergencyFloor instead of 0 when the scan fails against a store that already holds records (AB-370 Codex P1 finding)', async () => {
+      // A bare `0` fallback here would silently reopen this issue's own
+      // bug: a fresh process reusing a sequence value a prior lifetime
+      // already persisted. `emergencyFloor` — `create-bureau.ts` always
+      // passes `runtimeServices.clock.now()` — must win instead.
+      const failingKv: ReturnType<typeof textValueStore> = {
+        ...textValueStore(new MemoryStorage()),
+        list: async () => {
+          throw new Error('storage unavailable');
+        },
+      };
+      const received: unknown[] = [];
+      const result = await computeInitialAuditSequence(
+        failingKv,
+        (diagnostic) => received.push(diagnostic),
+        () => 1_700_000_000_000,
+      );
+      expect(result).toBe(1_700_000_000_000);
       expect(received).toHaveLength(1);
     });
   });

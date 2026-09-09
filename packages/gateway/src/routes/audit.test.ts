@@ -488,13 +488,32 @@ describe('GET /api/v1/audit', () => {
     expect(response.status).toBe(200);
 
     const records = await response.json();
+    // AB-370: a durable record's own `sequence` (the trail's shared,
+    // per-bureau counter) and a live action's `sequence` (`action.sequence`)
+    // are different numbering domains — the route's own same-millisecond
+    // tiebreak prefers a durable record's `actionSequence` (the same
+    // domain as a live action's `sequence`) precisely so it never needs to
+    // compare across domains for two records that were genuinely the same
+    // event. This assertion mirrors that same "actionSequence when
+    // present, else sequence" key, matching the ordering the route
+    // actually guarantees rather than the raw `sequence` field alone.
+    const orderingSequence = (record: { sequence?: number; actionSequence?: number }): number =>
+      record.actionSequence ?? record.sequence ?? -1;
     if (records.length >= 2) {
       for (let i = 1; i < records.length; i++) {
-        const prev = records[i - 1] as { timestampMs: number; sequence: number };
-        const curr = records[i] as { timestampMs: number; sequence: number };
+        const prev = records[i - 1] as {
+          timestampMs: number;
+          sequence?: number;
+          actionSequence?: number;
+        };
+        const curr = records[i] as {
+          timestampMs: number;
+          sequence?: number;
+          actionSequence?: number;
+        };
         // Each record should be at or after the previous one.
         if (curr.timestampMs === prev.timestampMs) {
-          expect(curr.sequence).toBeGreaterThanOrEqual(prev.sequence);
+          expect(orderingSequence(curr)).toBeGreaterThanOrEqual(orderingSequence(prev));
         } else {
           expect(curr.timestampMs).toBeGreaterThanOrEqual(prev.timestampMs);
         }
