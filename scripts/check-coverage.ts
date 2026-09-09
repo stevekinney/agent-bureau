@@ -119,12 +119,18 @@ export function isPackageSourceFile(filePath: string, context: SourceFileContext
   );
 }
 
+const NONNEGATIVE_INTEGER = /^\d+$/;
+
 function parseCoverageCount(line: string, prefixLength: number, field: string): number {
-  const value = Number(line.slice(prefixLength));
-  if (!Number.isFinite(value)) {
+  const text = line.slice(prefixLength);
+  // `Number('')` is `0`, a finite number — a truncated record with a bare
+  // `FNF:` counter would otherwise coerce to a silently "valid" zero
+  // instead of the malformed-record failure it actually is. Require an
+  // explicit nonnegative integer before coercing.
+  if (!NONNEGATIVE_INTEGER.test(text)) {
     throw new Error(`Malformed lcov record: could not parse "${field}" from "${line}"`);
   }
-  return value;
+  return Number(text);
 }
 
 /**
@@ -391,18 +397,50 @@ async function teeToParentAndBuffer(
 }
 
 /**
- * Real `bun test --coverage` runner (AB-386). Uses `Bun.spawn` with piped
- * stdio, streamed live to the parent's own stdout/stderr as it arrives (so
- * a long-running suite still shows progress) while also buffering it, so a
- * `coverage parse` failure can print the raw tail of what the child
- * produced.
+ * Spawns `command`, streaming its stdout/stderr live to the parent's own
+ * streams as they arrive (so a long-running child still shows progress)
+ * while also buffering both for the returned `ChildProcessResult`.
+ *
+ * `child.exited` only signals that the process has finished; its resolved
+ * value is a shell-style status (e.g. 143 for SIGTERM), not this
+ * function's `exitCode` contract. `child.exitCode` and `child.signalCode`
+ * are read only after `exited` resolves — Bun leaves `exitCode` `null` for
+ * a signal-terminated child, which `runCoverageCheck`'s `test failure`
+ * stage depends on to report the signal rather than a fabricated code.
+ */
+export async function spawnAndCollect(
+  command: string[],
+  options: { cwd: string },
+): Promise<ChildProcessResult> {
+  const child = Bun.spawn(command, {
+    cwd: options.cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+
+  const [stdout, stderr] = await Promise.all([
+    teeToParentAndBuffer(child.stdout, process.stdout),
+    teeToParentAndBuffer(child.stderr, process.stderr),
+  ]);
+  await child.exited;
+
+  return {
+    exitCode: child.exitCode,
+    signalCode: child.signalCode ?? null,
+    stdout,
+    stderr,
+  };
+}
+
+/**
+ * Real `bun test --coverage` runner (AB-386).
  */
 export function createRealRunTestsWithCoverage(options: {
   packageRoot: string;
   coverageDirectory: string;
 }): RunTestsWithCoverage {
-  return async () => {
-    const child = Bun.spawn(
+  return () =>
+    spawnAndCollect(
       [
         'bun',
         'test',
@@ -419,26 +457,8 @@ export function createRealRunTestsWithCoverage(options: {
         '--test-name-pattern',
         NIGHTLY_TEST_NAME_PATTERN,
       ],
-      {
-        cwd: options.packageRoot,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      },
+      { cwd: options.packageRoot },
     );
-
-    const [stdout, stderr] = await Promise.all([
-      teeToParentAndBuffer(child.stdout, process.stdout),
-      teeToParentAndBuffer(child.stderr, process.stderr),
-    ]);
-    const exitCode = await child.exited;
-
-    return {
-      exitCode,
-      signalCode: child.signalCode ?? null,
-      stdout,
-      stderr,
-    };
-  };
 }
 
 if (import.meta.main) {

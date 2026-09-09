@@ -9,6 +9,7 @@ import {
   isPackageSourceFile,
   parseCoverageTotals,
   runCoverageCheck,
+  spawnAndCollect,
 } from './check-coverage';
 
 const packageRoot = '/repo/packages/example';
@@ -168,6 +169,22 @@ describe('parseCoverageTotals', () => {
     const lcov = ['SF:src/a.ts', 'FNF:not-a-number', 'FNH:0', 'LF:1', 'LH:1', 'end_of_record'].join(
       '\n',
     );
+
+    expect(() =>
+      parseCoverageTotals(lcov, { packageRoot, sourceRoot, excluded: new Set() }),
+    ).toThrow(/Malformed lcov record/);
+  });
+
+  test("throws on a blank counter instead of letting Number('') coerce to zero", () => {
+    const lcov = ['SF:src/a.ts', 'FNF:', 'FNH:0', 'LF:1', 'LH:1', 'end_of_record'].join('\n');
+
+    expect(() =>
+      parseCoverageTotals(lcov, { packageRoot, sourceRoot, excluded: new Set() }),
+    ).toThrow(/Malformed lcov record/);
+  });
+
+  test('throws on a negative counter', () => {
+    const lcov = ['SF:src/a.ts', 'FNF:-1', 'FNH:0', 'LF:1', 'LH:1', 'end_of_record'].join('\n');
 
     expect(() =>
       parseCoverageTotals(lcov, { packageRoot, sourceRoot, excluded: new Set() }),
@@ -358,5 +375,27 @@ describe('runCoverageCheck', () => {
     expect(errors).toEqual([
       '✖ example: coverage check failed at stage "threshold" (exit 0, signal none): line coverage 50.00% is below 100.00%',
     ]);
+  });
+});
+
+describe('spawnAndCollect', () => {
+  test('reports a normal exit code with no signal', async () => {
+    const result = await spawnAndCollect(['bun', '-e', 'console.log("hi"); process.exit(0)'], {
+      cwd: process.cwd(),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.signalCode).toBeNull();
+    expect(result.stdout).toContain('hi');
+  });
+
+  test('reports a null exit code and the signal name when the child is killed, never a fabricated shell-style status code', async () => {
+    const result = await spawnAndCollect(
+      ['bun', '-e', 'process.kill(process.pid, "SIGTERM"); await new Promise(() => {});'],
+      { cwd: process.cwd() },
+    );
+
+    expect(result.exitCode).toBeNull();
+    expect(result.signalCode).toBe('SIGTERM');
   });
 });
