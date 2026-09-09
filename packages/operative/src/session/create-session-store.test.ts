@@ -1717,4 +1717,19 @@ describe('SessionStore commit outbox (AB-389)', () => {
     await store.outbox.acknowledge(entry!.ordinal);
     expect(await store.outbox.pending()).toHaveLength(0);
   });
+
+  it('fails loudly, rather than silently resetting to 0 and reusing ordinals, when the outbox ordinal counter itself is corrupted (Codex/Copilot review finding)', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    await store.save(makeSession({ id: 'corrupted-ordinal-seed' }));
+    const [seedEntry] = await store.outbox.pending();
+    await store.outbox.acknowledge(seedEntry!.ordinal);
+
+    // Corrupt the counter directly — not a value any commit here ever writes.
+    await rawStore.set('agent-session-outbox:v1:ordinal', 'not-a-number');
+
+    expect(store.save(makeSession({ id: 'corrupted-ordinal-next' }))).rejects.toThrow(
+      /outbox ordinal counter is corrupted/,
+    );
+  });
 });

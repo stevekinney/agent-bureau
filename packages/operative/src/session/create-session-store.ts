@@ -331,11 +331,27 @@ function serializeSummaryIndex(summaries: Map<string, SessionSummary>): string {
   });
 }
 
-/** AB-389 — parses the store-wide outbox ordinal counter, defaulting to 0 (no commit yet). */
+/**
+ * AB-389 — parses the store-wide outbox ordinal counter. `null` means "no
+ * commit has ever run in this store" and legitimately defaults to 0 — the
+ * NEXT commit mints ordinal 1. A NON-NULL value that fails to parse is
+ * never treated the same way (Copilot review finding): silently resetting
+ * a corrupted counter to 0 would mint ordinal 1 again on the next commit,
+ * overwriting whatever outbox entry already occupies that key and reusing
+ * a `dedupeKey` durable history has already recorded — exactly the
+ * ordering and exactly-once guarantees this counter exists to provide.
+ * Corruption here is a storage-integrity failure, not a resumable state:
+ * fail loudly so it gets fixed rather than silently misordering commits.
+ */
 function parseOutboxOrdinal(raw: string | null): number {
   if (raw === null) return 0;
   const parsed = Number(raw);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new TypeError(
+      `SessionStore: the outbox ordinal counter is corrupted — expected a non-negative safe integer, got ${JSON.stringify(raw)}.`,
+    );
+  }
+  return parsed;
 }
 
 function outboxEntryKey(ordinal: number): string {
