@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- exercises the deprecated `searchTools` on purpose for real-world ranking scenarios. */
 import { describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
@@ -234,3 +235,4 @@ function realWorldTools(): Tool[] {
     }),
   ];
 }
+/* eslint-enable @typescript-eslint/no-deprecated */

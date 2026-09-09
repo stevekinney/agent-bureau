@@ -423,22 +423,37 @@ export function queryTools(input: ToolQueryInput, criteria?: ToolQuery): QuerySe
 export function searchTools<TTool extends ToolDefinition>(
   input: ToolQueryInput<TTool>,
 ): ToolMatch<TTool>[];
+/**
+ * @deprecated Use `queryTools` for tool discovery.
+ */
 export function searchTools<TTool extends ToolDefinition>(
   input: ToolQueryInput<TTool>,
   options?: ToolSearchOptions<TTool> & { select?: 'tool' },
 ): ToolMatch<TTool>[];
+/**
+ * @deprecated Use `queryTools` for tool discovery.
+ */
 export function searchTools<TTool extends ToolDefinition>(
   input: ToolQueryInput<TTool>,
   options: ToolSearchOptions<TTool> & { select: 'name' },
 ): ToolMatch<string>[];
+/**
+ * @deprecated Use `queryTools` for tool discovery.
+ */
 export function searchTools<TTool extends ToolDefinition>(
   input: ToolQueryInput<TTool>,
   options: ToolSearchOptions<TTool> & { select: 'configuration' },
 ): ToolMatch<TTool>[];
+/**
+ * @deprecated Use `queryTools` for tool discovery.
+ */
 export function searchTools<TTool extends ToolDefinition>(
   input: ToolQueryInput<TTool>,
   options: ToolSearchOptions<TTool> & { select: 'summary' },
 ): ToolMatch<ToolSummary<TTool>>[];
+/**
+ * @deprecated Use `queryTools` for tool discovery.
+ */
 export function searchTools(
   input: ToolQueryInput,
   options: ToolSearchOptions = {},

@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- exercises the deprecated `searchTools` on purpose, alongside `queryTools`, for the ranking/pagination/select-mode coverage block. */
 import { describe, expect, expectTypeOf, it } from 'bun:test';
 import { hmacSha256HexSync } from 'interoperability';
 import { createManualRuntimeServices } from 'lifecycle';
@@ -8628,3 +8629,4 @@ describe('reusable approval grants (AB-46, AB-346)', () => {
     });
   });
 });
+/* eslint-enable @typescript-eslint/no-deprecated */
