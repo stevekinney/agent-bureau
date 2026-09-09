@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   type ChildProcessResult,
+  excludedFromCoverage,
   formatFailureReason,
   formatOutputTail,
   formatPercentage,
@@ -37,6 +38,20 @@ function createLogs() {
 const passingLcov = ['SF:src/index.ts', 'FNF:2', 'FNH:2', 'LF:10', 'LH:10', 'end_of_record'].join(
   '\n',
 );
+
+describe('excludedFromCoverage', () => {
+  test('returns the gateway Svelte UI exclusions for the gateway package', () => {
+    const excluded = excludedFromCoverage('gateway');
+
+    expect(excluded.has('ui/layout.svelte')).toBe(true);
+    expect(excluded.size).toBe(12);
+  });
+
+  test('returns no exclusions for any other package', () => {
+    expect(excludedFromCoverage('armorer')).toEqual(new Set());
+    expect(excludedFromCoverage(undefined)).toEqual(new Set());
+  });
+});
 
 describe('formatFailureReason', () => {
   test('names the package, stage, exit code, and signal', () => {
@@ -75,7 +90,9 @@ describe('formatOutputTail', () => {
       stderr: 'line 3\n',
     });
 
-    expect(formatOutputTail(child, 2)).toBe('--- child output tail (last 2 line(s)) ---\nline 3\n');
+    expect(formatOutputTail(child, 2)).toBe(
+      '--- child output tail (last 2 line(s)) ---\nline 2\nline 3',
+    );
   });
 });
 
@@ -165,7 +182,7 @@ describe('runCoverageCheck', () => {
       packageRoot,
       sourceRoot,
       excluded: new Set(),
-      runTestsWithCoverage: () => createChildResult({ exitCode: 0 }),
+      runTestsWithCoverage: () => Promise.resolve(createChildResult({ exitCode: 0 })),
       readLcovReport: () => Promise.resolve(passingLcov),
       log,
       logError,
@@ -208,7 +225,8 @@ describe('runCoverageCheck', () => {
       packageRoot,
       sourceRoot,
       excluded: new Set(),
-      runTestsWithCoverage: () => createChildResult({ exitCode: 1, stdout: '1 pass, 1 fail\n' }),
+      runTestsWithCoverage: () =>
+        Promise.resolve(createChildResult({ exitCode: 1, stdout: '1 pass, 1 fail\n' })),
       readLcovReport: () => Promise.resolve(passingLcov),
       log,
       logError,
@@ -228,7 +246,8 @@ describe('runCoverageCheck', () => {
       packageRoot,
       sourceRoot,
       excluded: new Set(),
-      runTestsWithCoverage: () => createChildResult({ exitCode: null, signalCode: 'SIGKILL' }),
+      runTestsWithCoverage: () =>
+        Promise.resolve(createChildResult({ exitCode: null, signalCode: 'SIGKILL' })),
       readLcovReport: () => Promise.resolve(passingLcov),
       log,
       logError,
@@ -248,7 +267,8 @@ describe('runCoverageCheck', () => {
       packageRoot,
       sourceRoot,
       excluded: new Set(),
-      runTestsWithCoverage: () => createChildResult({ exitCode: 0, stdout: '1108 pass, 0 fail\n' }),
+      runTestsWithCoverage: () =>
+        Promise.resolve(createChildResult({ exitCode: 0, stdout: '1108 pass, 0 fail\n' })),
       readLcovReport: () => Promise.reject(new Error('ENOENT: no such file or directory')),
       log,
       logError,
@@ -257,7 +277,7 @@ describe('runCoverageCheck', () => {
     expect(exitCode).toBe(1);
     expect(errors).toEqual([
       '✖ example: coverage check failed at stage "coverage parse" (exit 0, signal none): ENOENT: no such file or directory',
-      '--- child output tail (last 2 line(s)) ---\n1108 pass, 0 fail\n',
+      '--- child output tail (last 1 line(s)) ---\n1108 pass, 0 fail',
     ]);
   });
 
@@ -269,7 +289,8 @@ describe('runCoverageCheck', () => {
       packageRoot,
       sourceRoot,
       excluded: new Set(),
-      runTestsWithCoverage: () => createChildResult({ exitCode: 0, stdout: '1108 pass, 0 fail\n' }),
+      runTestsWithCoverage: () =>
+        Promise.resolve(createChildResult({ exitCode: 0, stdout: '1108 pass, 0 fail\n' })),
       readLcovReport: () =>
         Promise.resolve(
           ['SF:src/a.ts', 'FNF:garbage', 'FNH:0', 'LF:1', 'LH:1', 'end_of_record'].join('\n'),
@@ -281,7 +302,7 @@ describe('runCoverageCheck', () => {
     expect(exitCode).toBe(1);
     expect(errors).toEqual([
       '✖ example: coverage check failed at stage "coverage parse" (exit 0, signal none): Malformed lcov record: could not parse "FNF" from "FNF:garbage"',
-      '--- child output tail (last 2 line(s)) ---\n1108 pass, 0 fail\n',
+      '--- child output tail (last 1 line(s)) ---\n1108 pass, 0 fail',
     ]);
   });
 
@@ -294,7 +315,7 @@ describe('runCoverageCheck', () => {
       packageRoot,
       sourceRoot,
       excluded: new Set(),
-      runTestsWithCoverage: () => createChildResult({ exitCode: 0 }),
+      runTestsWithCoverage: () => Promise.resolve(createChildResult({ exitCode: 0 })),
       readLcovReport: () => Promise.resolve(lcov),
       log,
       logError,
@@ -315,7 +336,7 @@ describe('runCoverageCheck', () => {
       packageRoot,
       sourceRoot,
       excluded: new Set(),
-      runTestsWithCoverage: () => createChildResult({ exitCode: 0 }),
+      runTestsWithCoverage: () => Promise.resolve(createChildResult({ exitCode: 0 })),
       readLcovReport: () => Promise.resolve(lcov),
       log,
       logError,

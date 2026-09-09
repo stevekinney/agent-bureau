@@ -29,7 +29,7 @@ export type ChildProcessResult = {
  * `spawn` stage) — distinct from the child running and exiting non-zero
  * (the `test failure` stage).
  */
-export type RunTestsWithCoverage = () => ChildProcessResult;
+export type RunTestsWithCoverage = () => Promise<ChildProcessResult>;
 
 export type ReadLcovReport = () => Promise<string>;
 
@@ -209,8 +209,8 @@ export function formatFailureReason(input: {
  * inherited (see `createRealRunTestsWithCoverage`'s comment on why).
  */
 export function formatOutputTail(child: ChildProcessResult, maxLines = 40): string {
-  const combined = `${child.stdout}${child.stderr}`;
-  const lines = combined.split('\n');
+  const combined = `${child.stdout}${child.stderr}`.replace(/\n+$/, '');
+  const lines = combined.length > 0 ? combined.split('\n') : [];
   const tail = lines.slice(-maxLines).join('\n');
   return `--- child output tail (last ${Math.min(maxLines, lines.length)} line(s)) ---\n${tail}`;
 }
@@ -245,7 +245,7 @@ export async function runCoverageCheck(options: CoverageCheckOptions): Promise<n
 
   let child: ChildProcessResult;
   try {
-    child = runTestsWithCoverage();
+    child = await runTestsWithCoverage();
   } catch (error) {
     logError(
       formatFailureReason({
@@ -258,9 +258,6 @@ export async function runCoverageCheck(options: CoverageCheckOptions): Promise<n
     );
     return 1;
   }
-
-  if (child.stdout) process.stdout.write(child.stdout);
-  if (child.stderr) process.stderr.write(child.stderr);
 
   if (child.exitCode !== 0) {
     logError(
@@ -346,20 +343,43 @@ export async function runCoverageCheck(options: CoverageCheckOptions): Promise<n
 }
 
 /**
- * Real `bun test --coverage` runner (AB-386). Uses piped, not inherited,
- * stdio: the coordinator ruling requires printing the raw tail of the
- * child's output when a passing run's coverage table can't be parsed, and
- * that is only possible if the output is captured. The tradeoff is that
- * output now appears once the child exits rather than streaming live —
- * `runCoverageCheck` writes it to the parent's stdout/stderr immediately
- * after the child completes to keep it visible either way.
+ * Tees a child process stream to the parent's matching stream (so output
+ * keeps appearing live, exactly as it did under the old `stdio: 'inherit'`)
+ * while also buffering it, so the coordinator ruling's "print the raw tail
+ * of the child's output" requirement has something to print from even
+ * though the stream was captured rather than inherited.
+ */
+async function teeToParentAndBuffer(
+  stream: ReadableStream<Uint8Array> | undefined,
+  parentStream: typeof process.stdout | typeof process.stderr,
+): Promise<string> {
+  if (!stream) return '';
+
+  const decoder = new TextDecoder();
+  let buffered = '';
+
+  for await (const chunk of stream) {
+    const text = decoder.decode(chunk, { stream: true });
+    parentStream.write(text);
+    buffered += text;
+  }
+
+  return buffered;
+}
+
+/**
+ * Real `bun test --coverage` runner (AB-386). Uses `Bun.spawn` with piped
+ * stdio, streamed live to the parent's own stdout/stderr as it arrives (so
+ * a long-running suite still shows progress) while also buffering it, so a
+ * `coverage parse` failure can print the raw tail of what the child
+ * produced.
  */
 export function createRealRunTestsWithCoverage(options: {
   packageRoot: string;
   coverageDirectory: string;
 }): RunTestsWithCoverage {
-  return () => {
-    const result = Bun.spawnSync(
+  return async () => {
+    const child = Bun.spawn(
       [
         'bun',
         'test',
@@ -383,11 +403,17 @@ export function createRealRunTestsWithCoverage(options: {
       },
     );
 
+    const [stdout, stderr] = await Promise.all([
+      teeToParentAndBuffer(child.stdout, process.stdout),
+      teeToParentAndBuffer(child.stderr, process.stderr),
+    ]);
+    const exitCode = await child.exited;
+
     return {
-      exitCode: result.exitCode,
-      signalCode: result.signalCode ?? null,
-      stdout: result.stdout ? result.stdout.toString() : '',
-      stderr: result.stderr ? result.stderr.toString() : '',
+      exitCode,
+      signalCode: child.signalCode ?? null,
+      stdout,
+      stderr,
     };
   };
 }
