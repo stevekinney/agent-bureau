@@ -151,7 +151,12 @@ describe('buildPerPackageTestTypeCheckedBlocks', () => {
  */
 describe('AB-383: root-invocation test/** type-checking', () => {
   const REPO_ROOT = join(import.meta.dir, '..');
-  const FIXTURE_PATH = join(REPO_ROOT, 'packages/lifecycle/test/ab-383-fixture.test.ts');
+  // A per-run-unique filename (rather than a fixed one) so an interrupted run, or two runs
+  // sharing this worktree concurrently, can never collide on or clobber each other's fixture.
+  const FIXTURE_PATH = join(
+    REPO_ROOT,
+    `packages/lifecycle/test/ab-383-fixture-${crypto.randomUUID()}.test.ts`,
+  );
 
   afterEach(() => {
     rmSync(FIXTURE_PATH, { force: true });

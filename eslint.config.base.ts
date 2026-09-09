@@ -559,14 +559,17 @@ export function resolveTestTsconfigProject(packageRoot: string): string {
  * Every workspace package directory under `packages/*`, identified by having its own
  * `package.json` (excludes anything else that might land under `packages/`, though today
  * everything there is a real package). Used at config-load time (AB-383) to generate one
- * type-checked `test/**` block per package instead of relying on `process.cwd()`.
+ * type-checked `test/**` block per package instead of relying on `process.cwd()`. Sorted so the
+ * generated config array (and therefore lint behavior) is deterministic regardless of the
+ * filesystem's own directory-iteration order, which varies by platform.
  */
 export function listWorkspacePackageDirectories(repoRoot: string): string[] {
   const packagesRoot = join(repoRoot, 'packages');
   return readdirSync(packagesRoot, { withFileTypes: true })
     .filter((entry: Dirent) => entry.isDirectory())
     .map((entry: Dirent) => join(packagesRoot, entry.name))
-    .filter((packageDirectory: string) => existsSync(join(packageDirectory, 'package.json')));
+    .filter((packageDirectory: string) => existsSync(join(packageDirectory, 'package.json')))
+    .sort();
 }
 
 /**
