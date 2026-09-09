@@ -14584,6 +14584,92 @@ describe('bureau.eventHistory run ownership survives a process restart (AB-359)'
       await bureau.dispose();
     }
   });
+
+  it("authorizes bureau.eventHistory per-run when two principals share one session, proving resolveEventHistory's own runAttribution map — not merely the map-lookup helper — never lets one principal read the other's run (Codex P2 review finding, PR #596)", async () => {
+    // Companion to the union-merge test above. `resolvePersistedRunOwningPrincipal`'s
+    // unit test proves the MAP LOOKUP is correct for a two-entry map, and
+    // the single-run tests throughout `bureau.eventHistory authorization
+    // and deleted-aggregate (AB-313)` above prove `resolveEventHistory`'s
+    // gate correctly denies a stranger for ONE entry — but neither proves
+    // the live, in-process `runAttribution` map (populated per `createRun`
+    // dispatch, independent of the persisted `lastRunOwningPrincipals`
+    // metadata the union-merge test checks) keeps two DIFFERENT runs'
+    // entries distinct rather than one clobbering the other. That needs a
+    // real `bureau.eventHistory` call against two genuinely separate runs,
+    // which needs durable storage — `:memory:` SQLite reports
+    // `persistence: 'ephemeral'` by design (AB-92's decision: a durable
+    // guarantee must never claim ephemeral backing), so there is no
+    // disk-I/O-free way to construct this. This is deliberately its own
+    // test, not folded back into the union-merge test above: the
+    // instrumentation that motivated this issue measured a single
+    // session-persistence SQLite write at 400ms-3.5s even in isolation on
+    // this shared box, so keeping this to exactly two runs and the four
+    // eventHistory reads — no session-metadata drain, no extra polling —
+    // is the minimum real disk I/O this specific coverage needs.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-owner-recovery-union-auth-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+      });
+
+      try {
+        const sessionId = 'shared-session-auth';
+        const runOne = await bureau.createRun({
+          message: 'First, as alice',
+          sessionId,
+          principal: 'alice',
+        });
+        await waitForRunState(bureau, runOne.id);
+
+        const runTwo = await bureau.createRun({
+          message: 'Second, as bob',
+          sessionId,
+          principal: 'bob',
+        });
+        await waitForRunState(bureau, runTwo.id);
+
+        const asAliceOnRunOne = await bureau.eventHistory(
+          { kind: 'run', id: runOne.id },
+          { principal: 'alice' },
+        );
+        if ('outcome' in asAliceOnRunOne) throw new Error('expected a page for alice on run one');
+        const asBobOnRunTwo = await bureau.eventHistory(
+          { kind: 'run', id: runTwo.id },
+          { principal: 'bob' },
+        );
+        if ('outcome' in asBobOnRunTwo) throw new Error('expected a page for bob on run two');
+
+        // Neither principal is authorized against the OTHER run — this is
+        // the specific "last write wins" failure mode Codex's review named:
+        // if `runAttribution` (or the gate reading it) ever collapsed to a
+        // single session-wide entry instead of one per run id, one of
+        // these two would wrongly return a page instead of `not-found`.
+        const asAliceOnRunTwo = await bureau.eventHistory(
+          { kind: 'run', id: runTwo.id },
+          { principal: 'alice' },
+        );
+        expect(asAliceOnRunTwo).toEqual({ outcome: 'not-found' });
+        const asBobOnRunOne = await bureau.eventHistory(
+          { kind: 'run', id: runOne.id },
+          { principal: 'bob' },
+        );
+        expect(asBobOnRunOne).toEqual({ outcome: 'not-found' });
+      } finally {
+        await bureau.dispose();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () => {
@@ -16492,10 +16578,10 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     ]);
 
     const runtime = createManualRuntimeServices();
-    // As with AB-370's sibling test below, the bureau-level `runtime`
-    // option alone does not reach `Action.timestamp` — `createStore` must
-    // be built against the SAME manual runtime and passed in explicitly.
-    const store = createStore({ runtime });
+    // AB-387 fixed `createBureau` to always build its internal store from
+    // this SAME `runtime` when no `store` option is supplied, so passing
+    // `runtime` alone is now enough for `Action.timestamp` to read from
+    // it — no separate pre-built `store` needed here.
     const bureau = await createBureau({
       agents: {},
       generate,
@@ -16503,7 +16589,6 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       persistence: textValueStore(new MemoryStorage()),
       stopWhen: stopWhen.noToolCalls(),
       runtime,
-      store,
     });
 
     try {
