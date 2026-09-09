@@ -946,6 +946,40 @@ export function createSessionStore(
     ): Promise<AgentSession | undefined> {
       const refreshActivity = options?.refreshActivity ?? true;
       const attachments = options?.outbox ?? [];
+      // AB-391 (Codex P2 review finding, PR #601, "Validate attachments
+      // before committing malformed outbox entries"): `options.outbox` is
+      // this method's own public interface, so — per this monorepo's
+      // "validate malformed input at the boundary that owns the contract"
+      // convention — a malformed entry is rejected HERE, before
+      // `commit()`'s `conditionalBatch` ever runs, rather than allowed to
+      // commit and fail later. An untyped caller (plain JavaScript, or a
+      // cast past `JSONValue`) can pass `payload: undefined` — the type
+      // system's own `JSONValue` already forbids this, but nothing at
+      // runtime did. `JSON.stringify` silently OMITS a key whose value is
+      // `undefined` (or a function/symbol — `JSON.stringify(payload) ===
+      // undefined` catches those too), so `commit()`'s
+      // `JSON.stringify(entry)` would durably commit a `session.attachment`
+      // entry missing its `payload` field entirely — and the session body
+      // and outbox ordinal commit successfully alongside it. Every LATER
+      // `outbox.pending()` call then throws on that stored entry
+      // (`parseOutboxEntry` requires `payload`), permanently blocking
+      // delivery of this and every subsequent outbox entry until an
+      // operator repairs storage by hand — a one-bad-caller failure with
+      // no path to self-heal. Rejecting synchronously here, before any
+      // commit, means a malformed attachment never reaches durable storage
+      // at all.
+      for (const attachment of attachments) {
+        if (typeof attachment.namespace !== 'string' || attachment.namespace === '') {
+          throw new TypeError(
+            `SessionStore.update(): options.outbox entry has an invalid namespace (expected a non-empty string, got ${JSON.stringify(attachment.namespace)}).`,
+          );
+        }
+        if (attachment.payload === undefined || JSON.stringify(attachment.payload) === undefined) {
+          throw new TypeError(
+            `SessionStore.update(): options.outbox entry for namespace "${attachment.namespace}" has a payload that is not JSON-serializable.`,
+          );
+        }
+      }
       // The updater is caller code and may itself use this store. Keep it out
       // of the local mutation queue so an asynchronous updater cannot wait on
       // an operation queued behind itself. Conditional commits still provide

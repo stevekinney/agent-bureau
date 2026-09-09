@@ -524,6 +524,75 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
+    it('retries with a fresh key when the derived audit key collides with an UNRELATED existing record, rather than overwriting it (Codex P1 review finding, PR #601, "Guard the audit record key against cross-instance collisions")', async () => {
+      // `key` is derived from `sequence` (a LOCAL per-instance counter) and
+      // `timestampMs`/`runId` — two `AuditTrail` instances booting from the
+      // same persisted floor before either has written anything can
+      // independently allocate the SAME `sequence` for the SAME
+      // `runId`/`timestampMs`. Simulated here by seeding a record directly
+      // at the EXACT key `initialSequence: 0` would derive for the
+      // `record()` call below, standing in for "a peer already wrote an
+      // unrelated fact at this key."
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-collide' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await trail.record({
+        runId: 'run-collide',
+        type: 'review.tool-approval.approved',
+        detail: {},
+        timestampMs: 1000,
+        dedupeKey: 'session.attachment:session-collide:1',
+      });
+
+      // The seeded record survives untouched, AND the new record landed —
+      // at a DIFFERENT key (a fresh, retried sequence), never overwriting
+      // the collision.
+      const records = await trail.query({ runId: 'run-collide' });
+      expect(records).toHaveLength(2);
+      expect(records.map((record) => record.type).sort()).toEqual([
+        'review.tool-approval.approved',
+        'tool.started',
+      ]);
+
+      // The marker names the record that actually landed for THIS
+      // dedupeKey, not the collided-with key.
+      const markerValue = await kv.get('audit-dedupe:v1:session.attachment:session-collide:1');
+      const approvedRecordKey = records.find(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(markerValue).not.toBe('audit:v1:0000000000001000:000000000000:run-collide');
+      expect(approvedRecordKey?.sequence).not.toBe(0);
+
+      trail.dispose();
+    });
+
+    it('rejects a dedupeKey write once every retry attempt keeps colliding, rather than looping forever', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // One seeded record for every sequence the retry loop will try
+      // (the initial attempt plus 3 retries) — every attempt collides.
+      for (let sequence = 0; sequence <= 3; sequence += 1) {
+        await seedRecord(kv, makeRecord(sequence, { timestampMs: 1000, runId: 'run-exhausted' }));
+      }
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await expect(
+        trail.record({
+          runId: 'run-exhausted',
+          type: 'review.tool-approval.approved',
+          detail: {},
+          timestampMs: 1000,
+          dedupeKey: 'session.attachment:session-exhausted:1',
+        }),
+      ).rejects.toThrow('Exhausted retries resolving an audit-record key collision');
+
+      trail.dispose();
+    });
+
     it('two DIFFERENT dedupeKeys for the same runId/type both persist their own record', async () => {
       const kv = textValueStore(new MemoryStorage());
       const { bureau } = createStubBureau();
@@ -2362,6 +2431,54 @@ describe('createAuditTrail', () => {
       const prunedRecords = await trail.query({ type: 'audit.pruned' });
       expect(prunedRecords).toHaveLength(1);
       expect(prunedRecords[0]?.detail).toEqual({ count: seedCount, cutoffMs: 5000, partial: true });
+
+      trail.dispose();
+    });
+
+    it('stops reconciling and aborts the pass (writing a partial summary) when a periodic lease renewal during marker reconciliation loses its CAS (Codex P2 review finding, PR #601, "Renew the prune lease during marker reconciliation")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+      // Orphaned markers — each names a record key that does not exist —
+      // exactly one periodic-renewal boundary's worth. The delete loop
+      // above has only ONE candidate, never reaching its OWN 200-per-
+      // renewal boundary, so this is deliberately the FIRST periodic
+      // renewal this pass performs, isolating it to reconciliation.
+      const orphanCount = 200;
+      for (let i = 0; i < orphanCount; i += 1) {
+        await kv.set(
+          `audit-dedupe:v1:orphan-${i}`,
+          `audit:v1:0000000000000500:000000000000:run-gone-${i}`,
+        );
+      }
+
+      let callIndex = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...kv,
+        async conditionalBatch(conditions, operations) {
+          callIndex += 1;
+          const isLeaseSet = operations.some(
+            (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
+          );
+          // Call 1: acquisition. Call 2: renewal before the delete loop.
+          // Call 3: the first periodic renewal, reached during marker
+          // reconciliation.
+          if (isLeaseSet && callIndex === 3) return false;
+          return kv.conditionalBatch(conditions, operations);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
+
+      await expect(trail.prune(5000)).rejects.toThrow(
+        'lost the prune lease during dedupe-marker reconciliation',
+      );
+
+      // The one real record still got deleted, and its summary still
+      // landed (partial), even though reconciliation was cut short.
+      const prunedRecords = await trail.query({ type: 'audit.pruned' });
+      expect(prunedRecords).toHaveLength(1);
+      expect(prunedRecords[0]?.detail).toEqual({ count: 1, cutoffMs: 5000, partial: true });
 
       trail.dispose();
     });

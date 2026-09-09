@@ -637,6 +637,8 @@ between the two can no longer lose the audit record — see
 `packages/bureau/README.md`'s "Review-transition audit records ride the
 outbox" section.
 
+`update()` validates every `options.outbox` entry synchronously, before its `conditionalBatch` runs (Codex P2 review finding, PR #601, "Validate attachments before committing malformed outbox entries"): `namespace` must be a non-empty string and `payload` must be defined and JSON-serializable, or it throws `TypeError` immediately. This is the boundary that owns the contract — an untyped caller (or a value cast past `JSONValue`) passing `payload: undefined` would otherwise commit successfully (the session body and outbox ordinal both land), since `JSON.stringify` silently drops an `undefined`-valued key rather than erroring, but every LATER `outbox.pending()` call would then throw on that stored entry (`parseOutboxEntry` requires `payload`) — permanently blocking delivery of it and everything queued behind it, with no self-healing path short of manual storage repair.
+
 **Claim lease (AB-390):** `pending()` alone claims nothing — it is safe to
 call repeatedly and concurrently from multiple processes sharing one
 backend, but two processes both draining the SAME still-unacknowledged entry

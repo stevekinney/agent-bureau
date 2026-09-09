@@ -1011,6 +1011,10 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     },
   ): Promise<void> {
     if (!kv) return Promise.resolve();
+    // Narrowed once, right after the guard above, so the nested
+    // `attemptDeduplicatedWrite` closure below keeps `kv` typed non-null
+    // without repeating the check.
+    const store = kv;
     if (!writeOptions?.bypassAbortCheck && signal?.aborted) {
       // AB-391: a `dedupeKey` caller opted into this call's promise
       // REJECTING on a genuine failure (see `dedupeKey`'s own doc
@@ -1082,38 +1086,77 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // fire-and-forget schedule/session out-of-band write does.
     if (writeOptions?.dedupeKey !== undefined) {
       const markerKey = `${DEDUPE_MARKER_PREFIX}${writeOptions.dedupeKey}`;
-      const conditionalWrite = kv.conditionalBatch(
-        [{ key: markerKey, expectedValue: null }],
-        [
-          { type: 'set', key: markerKey, value: key },
-          { type: 'set', key, value: JSON.stringify(record) },
-        ],
-      );
+      // AB-391 (Codex P1 review finding, PR #601, "Guard the audit record
+      // key against cross-instance collisions"): `key` is derived from
+      // `sequence`, a LOCAL per-instance counter seeded from a scan at
+      // boot (`computeInitialAuditSequence`) — two `AuditTrail` instances
+      // booting from the same persisted floor, before either has written
+      // anything, can independently allocate the SAME `sequence` for the
+      // SAME `runId`/`timestampMs` (the exact `dedupeKey` scenario this
+      // mechanism exists to support: two Bureau processes racing to
+      // record different attachments for the same still-pending review).
+      // The original single-attempt batch only fenced on `markerKey`, so
+      // two DIFFERENT dedupeKeys colliding on the SAME derived `key` would
+      // both commit — the second silently overwriting the first's record
+      // at that key, permanently losing it even though both dedupe
+      // markers survive. Fencing on the audit `key` too (a second
+      // precondition) turns that silent overwrite into a detected
+      // collision: `committed === false` with the marker still absent
+      // means the KEY collided, not the dedupeKey, so mint a fresh
+      // `sequence`/`key` and retry — bounded, since an unresolvable
+      // collision must fail loudly rather than loop forever.
+      const attemptDeduplicatedWrite = async (
+        attemptKey: string,
+        attemptRecord: AuditRecord,
+        attemptsRemaining: number,
+      ): Promise<void> => {
+        const committed = await store.conditionalBatch(
+          [
+            { key: markerKey, expectedValue: null },
+            { key: attemptKey, expectedValue: null },
+          ],
+          [
+            { type: 'set', key: markerKey, value: attemptKey },
+            { type: 'set', key: attemptKey, value: JSON.stringify(attemptRecord) },
+          ],
+        );
+        if (committed) return;
+        // `committed === false` — distinguish WHICH precondition failed:
+        // the marker (benign — this exact fact was already recorded, by
+        // this call or a peer's) or the key (a collision with an
+        // UNRELATED record, needing a fresh key).
+        if (await store.has(markerKey)) return;
+        if (attemptsRemaining <= 0) {
+          throw new Error(
+            `[audit-trail] Exhausted retries resolving an audit-record key collision for dedupeKey "${writeOptions.dedupeKey}".`,
+          );
+        }
+        const nextSequence = allocateSequence();
+        const nextKey = encodeKey(attemptRecord.timestampMs, nextSequence, attemptRecord.runId);
+        const nextRecord: AuditRecord = { ...attemptRecord, sequence: nextSequence };
+        await attemptDeduplicatedWrite(nextKey, nextRecord, attemptsRemaining - 1);
+      };
+      const dedupedWrite = attemptDeduplicatedWrite(key, record, 3);
       // AB-391 (Codex P2 review finding, PR #601, "Track deduplicated audit
       // writes before returning"): unlike every other write path in this
-      // function, this branch used to return `conditionalWrite` directly
+      // function, this branch used to return its write promise directly
       // without ever calling `trackWrite` — a caller that started this call
       // and then, without awaiting it, called `query({ runId })`,
       // `runtime.deferred.drain()`, or `dispose()` could miss the in-flight
       // write (a query racing ahead of it) or have storage torn down while
       // `conditionalBatch` was still running. Tracked here via a
       // NEVER-REJECTING derivative — mirroring the `strict` path just below
-      // — while the REJECTING `conditionalWrite` itself is still what this
-      // function returns to the `dedupeKey` caller, which needs to observe
-      // a genuine failure (see this branch's own doc comment above).
+      // — while the REJECTING promise itself is still what this function
+      // returns to the `dedupeKey` caller, which needs to observe a
+      // genuine failure (see this branch's own doc comment above).
       trackWrite(
-        conditionalWrite.then(
+        dedupedWrite.then(
           () => undefined,
           () => undefined,
         ),
         entry.runId,
       );
-      return conditionalWrite.then((committed) => {
-        // `committed === false` means the marker already existed — this
-        // exact fact was already recorded, by this call or a peer's.
-        // Nothing further to do; this is success, not a skipped write.
-        void committed;
-      });
+      return dedupedWrite;
     }
 
     const rawWrite = kv.set(key, JSON.stringify(record));
@@ -1631,15 +1674,44 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // deletions are deliberately never added to `prunedCount` — that count,
     // and the `audit.pruned` summary it feeds, describe audit RECORDS
     // pruned, not markers.
-    const reconcileOrphanedDedupeMarkers = async (): Promise<void> => {
+    // AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
+    // declared here (rather than at its original site further below, next
+    // to the delete loop it was written for) so `reconcileOrphanedDedupeMarkers`
+    // can share it too (AB-391, Codex P2 review finding, PR #601, "Renew
+    // the prune lease during marker reconciliation") — one cadence for
+    // every unbounded loop this pass runs.
+    const RENEW_EVERY_N_DELETES = 200;
+
+    // AB-391 (Codex P2 review finding, PR #601, "Renew the prune lease
+    // during marker reconciliation"): this loop, like the record-delete
+    // loop further below, can run long enough on a trail with many
+    // markers to outlast the lease's TTL — without renewal, another
+    // instance could steal the lease mid-reconciliation, and this pass
+    // would carry on regardless (never re-checking), risking two
+    // instances both writing summaries, or this pass later blindly
+    // clearing the NEWER holder's own `PRUNE_INTENT_KEY`. Returns `false`
+    // the moment a renewal loses its CAS, mirroring the delete loop's own
+    // "abort, do not proceed" contract — the caller decides what "abort"
+    // means for its own point in the pass (see both call sites below).
+    const reconcileOrphanedDedupeMarkers = async (): Promise<boolean> => {
       try {
         const markerKeys = await kv.list(DEDUPE_MARKER_PREFIX);
+        let reconciledCount = 0;
         for (const markerKey of markerKeys) {
           const recordKey = await kv.get(markerKey);
           if (recordKey === null) continue;
           if (await kv.has(recordKey)) continue;
           await kv.delete(markerKey);
+          reconciledCount += 1;
+          if (
+            leaseToken !== undefined &&
+            reconciledCount % RENEW_EVERY_N_DELETES === 0 &&
+            !(await renewPruneLease(leaseToken))
+          ) {
+            return false;
+          }
         }
+        return true;
       } catch (error: unknown) {
         diagnose({
           level: 'error',
@@ -1647,13 +1719,16 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
           message: '[audit-trail] Failed to reconcile orphaned dedupe markers during a prune pass:',
           cause: error,
         });
+        return true;
       }
     };
 
     // Nothing qualified — deliberately no `audit.pruned` record and no
     // floor update, so a pass that prunes nothing does not itself grow
     // the trail it exists to bound. Marker reconciliation still runs,
-    // independent of that guarantee.
+    // independent of that guarantee. A lost lease here means nothing else
+    // to protect — no `PRUNE_INTENT_KEY` has been written yet — so this
+    // simply stops rather than reporting an error.
     if (candidates.length === 0) {
       await reconcileOrphanedDedupeMarkers();
       return { prunedCount: 0, cutoffMs };
@@ -1738,11 +1813,11 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // reconstruct what this pass actually removed.
     //
     // AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
-    // also renewed periodically DURING a large delete loop (every 200
-    // deletions) — the same TTL-refresh rationale as the renewal above,
-    // for a pass whose delete phase alone is long enough to approach the
-    // lease's TTL.
-    const RENEW_EVERY_N_DELETES = 200;
+    // also renewed periodically DURING a large delete loop (every
+    // `RENEW_EVERY_N_DELETES` deletions, declared above — shared with
+    // `reconcileOrphanedDedupeMarkers`'s own periodic renewal — the same
+    // TTL-refresh rationale as the renewal above, for a pass whose delete
+    // phase alone is long enough to approach the lease's TTL.
     let prunedCount = 0;
     let deleteError: Error | undefined;
     for (const candidate of candidates) {
@@ -1777,8 +1852,22 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
     // See `reconcileOrphanedDedupeMarkers`'s own doc comment above — called
     // again here (not just from the early-return branch) so a marker for a
-    // record THIS pass's own delete loop just removed is also caught.
-    await reconcileOrphanedDedupeMarkers();
+    // record THIS pass's own delete loop just removed is also caught. Only
+    // when the delete loop above did not already lose the lease — that
+    // failure already stops this pass; running reconciliation against a
+    // lease this pass no longer holds would just risk the same collision
+    // its own renewal exists to prevent.
+    if (deleteError === undefined && !(await reconcileOrphanedDedupeMarkers())) {
+      // AB-391 (Codex P2 review finding, PR #601, "Renew the prune lease
+      // during marker reconciliation"): mirrors the delete loop's own
+      // "Abort pruning when lease renewal loses its CAS" handling
+      // (AB-388, Codex review, PR #597) — the watermark and any deletions
+      // already committed stay durable; only the summary write below is
+      // skipped this pass, exactly as a lost lease mid-delete-loop does.
+      deleteError = new Error(
+        'Aborting audit-trail prune pass: lost the prune lease during dedupe-marker reconciliation',
+      );
+    }
 
     // AB-388 (Codex review, PR #597, "Skip summaries when no deletion
     // committed"): if the very FIRST candidate's `kv.delete()` rejects,

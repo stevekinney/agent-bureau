@@ -5,6 +5,7 @@ import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import { SessionOutboxAppendedEvent } from '../events';
+import type { JSONValue } from '../types';
 import {
   createSessionStore,
   SessionConflictError,
@@ -1914,6 +1915,40 @@ describe('SessionStore outbox attachments (AB-391)', () => {
       }),
     );
     expect(store.outbox.pending()).rejects.toThrow(/expected a "payload"/);
+  });
+
+  it('rejects update() synchronously when an outbox attachment has an undefined payload, before anything commits (Codex P2 review finding, PR #601, "Validate attachments before committing malformed outbox entries")', async () => {
+    // An untyped caller (or a cast past `JSONValue`) can pass `payload:
+    // undefined` — `JSON.stringify` would silently OMIT that key from the
+    // committed entry, and every later `outbox.pending()` call would then
+    // throw on it forever (the malformed-entry test above, but self-
+    // inflicted at write time instead of injected by hand afterward).
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await expect(
+      store.update(
+        'undefined-payload-attachment',
+        (existing) => existing ?? makeSession({ id: 'undefined-payload-attachment' }),
+        {
+          outbox: [{ namespace: 'audit-record', payload: undefined as unknown as JSONValue }],
+        },
+      ),
+    ).rejects.toThrow(TypeError);
+
+    // Nothing committed — not the session body, not the outbox ordinal.
+    expect(await store.load('undefined-payload-attachment')).toBeUndefined();
+    expect(await store.outbox.pending()).toHaveLength(0);
+  });
+
+  it('rejects update() synchronously when an outbox attachment has an empty namespace', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await expect(
+      store.update(
+        'empty-namespace-attachment',
+        (existing) => existing ?? makeSession({ id: 'empty-namespace-attachment' }),
+        { outbox: [{ namespace: '', payload: { n: 1 } }] },
+      ),
+    ).rejects.toThrow(TypeError);
+    expect(await store.load('empty-namespace-attachment')).toBeUndefined();
   });
 });
 
