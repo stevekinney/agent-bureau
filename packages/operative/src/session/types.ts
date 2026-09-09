@@ -127,6 +127,28 @@ export type SessionOutboxEntry =
       readonly committedAtMs: number;
       /** See {@link SessionOutboxClaim}. Absent means unclaimed. */
       readonly claim?: SessionOutboxClaim;
+    }
+  | {
+      readonly ordinal: number;
+      /**
+       * AB-391: a caller-supplied fact riding the SAME `conditionalBatch` as
+       * an `update()` commit, for a caller (Bureau's audit trail) whose own
+       * durable write must be coupled to a session-store commit it does not
+       * own — session-agnostic on purpose: `namespace`/`payload` are opaque
+       * to this store, interpreted only by whichever `SessionOutboxEntry`
+       * consumer recognizes the namespace it appended.
+       */
+      readonly kind: 'session.attachment';
+      readonly sessionId: string;
+      readonly incarnation: string;
+      /** Caller-chosen identifier for what kind of fact this attachment carries. */
+      readonly namespace: string;
+      /** Caller-chosen payload, opaque to this store. */
+      readonly payload: JSONValue;
+      /** See the `'session.created' | 'session.saved'` variant's own doc comment. */
+      readonly committedAtMs: number;
+      /** See {@link SessionOutboxClaim}. Absent means unclaimed. */
+      readonly claim?: SessionOutboxClaim;
     };
 
 /**
@@ -172,7 +194,21 @@ export interface SessionStore {
     updater: (
       session: AgentSession | undefined,
     ) => AgentSession | undefined | Promise<AgentSession | undefined>,
-    options?: { refreshActivity?: boolean },
+    options?: {
+      refreshActivity?: boolean;
+      /**
+       * AB-391: extra `SessionOutboxEntry` facts (`kind: 'session.attachment'`)
+       * to append in the SAME `conditionalBatch` as this update's own body,
+       * summary-index, and outbox-ordinal writes — consecutive ordinals
+       * immediately after this commit's own entry. A caller couples its own
+       * durable write to this session commit by draining these alongside the
+       * session lifecycle entries this store already appends, rather than
+       * writing its own fact in a separate, uncoupled call that a crash
+       * between the two could lose. Ignored (no entries appended) when the
+       * updater returns `undefined` (nothing committed).
+       */
+      outbox?: readonly { namespace: string; payload: JSONValue }[];
+    },
   ): Promise<AgentSession | undefined>;
 
   /** Load a session by id. Returns undefined when no session exists. */

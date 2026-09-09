@@ -275,7 +275,7 @@ export interface DurableEventHistory {
   /**
    * AB-389 — whether a durable record for `owner`/`kind` carrying the
    * given `dedupeKey` has already been committed. Built for the session
-   * outbox drain (`create-bureau.ts`'s `drainSessionOutbox`), which must
+   * outbox drain (`create-bureau.ts`'s `drainOutbox`), which must
    * not acknowledge (permanently remove) an outbox entry unless the
    * durable write it triggered actually succeeded: awaiting
    * `DurableEventProducer.waitForActiveWrites` alone only proves the write

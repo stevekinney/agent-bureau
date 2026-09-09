@@ -1820,6 +1820,103 @@ describe('SessionStore commit outbox (AB-389)', () => {
   });
 });
 
+describe('SessionStore outbox attachments (AB-391)', () => {
+  it('appends a session.attachment entry, at the ordinal right after the primary entry, in the same update() commit', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.update(
+      'attachment-session',
+      (existing) => existing ?? makeSession({ id: 'attachment-session' }),
+      {
+        outbox: [
+          {
+            namespace: 'audit-record',
+            payload: { runId: 'r1', type: 'review.tool-approval.approved' },
+          },
+        ],
+      },
+    );
+
+    const pending = await store.outbox.pending();
+    expect(pending).toHaveLength(2);
+    expect(pending[0]?.kind).toBe('session.created');
+    expect(pending[0]?.ordinal).toBe(1);
+    const attachment = pending[1];
+    if (attachment?.kind !== 'session.attachment') {
+      throw new Error('expected a session.attachment outbox entry');
+    }
+    expect(attachment.ordinal).toBe(2);
+    expect(attachment.sessionId).toBe('attachment-session');
+    expect(attachment.namespace).toBe('audit-record');
+    expect(attachment.payload).toEqual({ runId: 'r1', type: 'review.tool-approval.approved' });
+    expect(attachment.committedAtMs).toBe(pending[0]!.committedAtMs);
+  });
+
+  it('appends multiple attachments at consecutive ordinals and advances the shared ordinal counter past all of them', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.update(
+      'multi-attachment',
+      (existing) => existing ?? makeSession({ id: 'multi-attachment' }),
+      {
+        outbox: [
+          { namespace: 'audit-record', payload: { n: 1 } },
+          { namespace: 'audit-record', payload: { n: 2 } },
+        ],
+      },
+    );
+    const pending = await store.outbox.pending();
+    expect(pending.map((entry) => entry.ordinal)).toEqual([1, 2, 3]);
+
+    await store.save(makeSession({ id: 'after-multi-attachment' }));
+    const nextPending = await store.outbox.pending();
+    expect(nextPending.at(-1)?.ordinal).toBe(4);
+  });
+
+  it('appends no attachment entry when the updater declines to commit', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const result = await store.update('never-committed', () => undefined, {
+      outbox: [{ namespace: 'audit-record', payload: { n: 1 } }],
+    });
+    expect(result).toBeUndefined();
+    expect(await store.outbox.pending()).toHaveLength(0);
+  });
+
+  it('fails loudly on a stored session.attachment entry missing its namespace or payload', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    await store.update(
+      'malformed-attachment',
+      (existing) => existing ?? makeSession({ id: 'malformed-attachment' }),
+      { outbox: [{ namespace: 'audit-record', payload: { n: 1 } }] },
+    );
+    const [, attachment] = await store.outbox.pending();
+
+    await rawStore.set(
+      `agent-session-outbox:v1:entry:${String(attachment!.ordinal).padStart(20, '0')}`,
+      JSON.stringify({
+        ordinal: attachment!.ordinal,
+        kind: 'session.attachment',
+        sessionId: 'malformed-attachment',
+        incarnation: 'x',
+        committedAtMs: 0,
+      }),
+    );
+    expect(store.outbox.pending()).rejects.toThrow(/expected a string "namespace"/);
+
+    await rawStore.set(
+      `agent-session-outbox:v1:entry:${String(attachment!.ordinal).padStart(20, '0')}`,
+      JSON.stringify({
+        ordinal: attachment!.ordinal,
+        kind: 'session.attachment',
+        sessionId: 'malformed-attachment',
+        incarnation: 'x',
+        namespace: 'audit-record',
+        committedAtMs: 0,
+      }),
+    );
+    expect(store.outbox.pending()).rejects.toThrow(/expected a "payload"/);
+  });
+});
+
 describe('SessionStore outbox claim lease (AB-390)', () => {
   it('claims an unclaimed entry and refuses the same claim to a different owner while the lease is live', async () => {
     const runtime = createManualRuntimeServices();

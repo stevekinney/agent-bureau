@@ -17851,7 +17851,7 @@ describe('AB-389 — session commit outbox', () => {
   it('drains a session outbox entry exactly once when the durable maintenance pass and the post-commit trigger overlap', async () => {
     // The coordinator ruling's own "no event is recorded twice when the
     // drain loop and the post-commit drain overlap" acceptance criterion.
-    // `drainSessionOutbox` is single-flighted — this test fires both
+    // `drainOutbox` is single-flighted — this test fires both
     // triggers for the SAME commit and asserts exactly one durable record
     // results, not two. SQLite, not memory: `bureau.eventHistory()` is
     // unsupported over an ephemeral backend.
@@ -18278,6 +18278,128 @@ describe('AB-389 — session commit outbox', () => {
   });
 });
 
+describe('AB-391 — review-transition audit records ride the session outbox', () => {
+  it('boot recovery drains a session.attachment outbox entry left pending by a crash, recording the audit trail entry exactly once (SQLite)', async () => {
+    // Simulates a review decision whose durable review-store commit landed
+    // (the `session.attachment` outbox entry this issue couples to it) but
+    // whose corresponding audit-trail write never ran — the exact crash
+    // window between the two the coordinator ruling closes. Committed
+    // through a STANDALONE `SessionStore`, with no `Bureau` alive to drain
+    // it, mirroring the AB-389 crash test above.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-391-crash-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const storage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const runtime = createManualRuntimeServices();
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+
+    const standaloneSessionStore = createSessionStore(kv, { runtime });
+    const session = createAgentSession({
+      id: 'ab-391-crash-recovery-session',
+      agentName: 'triage',
+      conversationHistory: createConversationHistory({ id: 'ab-391-crash-recovery-session' }),
+    });
+    await standaloneSessionStore.save(session);
+
+    const reviewAuditPayload = {
+      runId: 'ab-391-crash-run',
+      type: 'review.tool-approval.approved',
+      detail: { review: { id: 'approval:ab-391-crash-run:call-1' }, decision: 'approve' },
+      principal: 'api-key:crash-reviewer',
+    };
+    await standaloneSessionStore.update(session.id, (existing) => existing, {
+      outbox: [{ namespace: 'audit-record', payload: reviewAuditPayload }],
+    });
+
+    const pendingBeforeRestart = await standaloneSessionStore.outbox.pending();
+    expect(pendingBeforeRestart.map((entry) => entry.kind)).toEqual([
+      'session.created',
+      'session.saved',
+      'session.attachment',
+    ]);
+
+    // "Restart": a fresh Bureau over the SAME storage. Boot recovery drains
+    // the outbox — including the attachment — before `waitForRecovery()`
+    // resolves.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage,
+      runtime,
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+
+      const records = await bureau.auditTrail!.query({ runId: reviewAuditPayload.runId });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.type).toBe(reviewAuditPayload.type);
+      expect(records[0]?.principal).toBe(reviewAuditPayload.principal);
+      expect(records[0]?.detail).toEqual(reviewAuditPayload.detail);
+
+      const recoveredSessionStore = bureau.sessionStore;
+      if (!recoveredSessionStore) throw new Error('expected a configured session store');
+      expect(await recoveredSessionStore.outbox.pending()).toHaveLength(0);
+
+      // Running maintenance again must not duplicate the already-recorded
+      // fact — the idempotency guard `drainOutboxAttachmentEntry` checks
+      // before writing.
+      await bureau.runDurableMaintenance();
+      const recordsAfterSecondPass = await bureau.auditTrail!.query({
+        runId: reviewAuditPayload.runId,
+      });
+      expect(recordsAfterSecondPass).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('resolveReview appends the decision audit record atomically with the review-resolution commit and getReview reconstructs it immediately, with no bureau restart', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'ab-391-live-call', name: 'charge-card', arguments: { cents: 500 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-live-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:ab-391-reviewer',
+      });
+      expect(outcome.decision).toBe('approve');
+
+      // Reconstructed from the audit trail with no further drain trigger —
+      // `resolveReview` itself drains the outbox before returning.
+      const resolved = await bureau.getReview(review.id);
+      expect(resolved?.status).toBe('approved');
+
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
 describe('AB-390 — outbox claim lease', () => {
   it('two Bureau instances over one backend running maintenance drains against one pending entry both dispatch it, but every listener observes it exactly once', async () => {
     // The coordinator ruling's own scenario: TWO SEPARATE `Bureau`
@@ -18560,7 +18682,7 @@ describe('AB-390 — outbox claim lease', () => {
     // Gated on the audit write already being in flight — never a raw call
     // count — so this targets ONLY the renewal timer's own `claim()` call
     // made WHILE the entry is held "in flight" behind that write, never
-    // `drainSessionOutboxPass`'s own initial claim (made before the audit
+    // `drainOutboxPass`'s own initial claim (made before the audit
     // write starts) or `pending()`'s unrelated reads of the same key.
     let failOutboxEntryGetOnceAuditWriteBlocks = false;
     const persistence = createTextStoreProxy(backingStore, {
@@ -18877,7 +18999,7 @@ describe('AB-390 — outbox claim lease', () => {
 
   it('shutdown awaits a retry drain that already started before the retry timer was cleared (Codex P2 review finding, PR #599, "Await retry drains that have already fired during shutdown")', async () => {
     // The retry timer's callback can start running (calling
-    // `drainSessionOutbox()`, which sets `sessionOutboxDrainInFlight`
+    // `drainOutbox()`, which sets `outboxDrainInFlight`
     // synchronously) before `dispose()` reaches the point where it clears
     // that timer — `clearTimeout` cannot un-fire a callback that already
     // started. Without also awaiting the in-flight drain, `dispose()` would
@@ -18940,7 +19062,7 @@ describe('AB-390 — outbox claim lease', () => {
 
       // Advancing the clock fires the armed retry timer's callback
       // SYNCHRONOUSLY within this call (per `ManualRuntimeServices.advance`'s
-      // own contract) — `sessionOutboxDrainInFlight` is set before this
+      // own contract) — `outboxDrainInFlight` is set before this
       // `await` resolves, but the drain itself (several of its own awaited
       // storage calls) is not yet complete.
       await runtime.advance(LEASE_MS + 1);
@@ -19067,7 +19189,7 @@ describe('AB-390 — outbox claim lease', () => {
     // entry). Advancing the clock past entry one's expiry fires that retry
     // — the resulting drain reclaims and completes entry one, THEN reaches
     // entry two, finds the SECOND live peer's claim, and calls
-    // `scheduleSessionOutboxRetry` a second time — precisely the call this
+    // `scheduleOutboxRetry` a second time — precisely the call this
     // fix must refuse once shutdown has begun, since `dispose()` below is
     // invoked before that second drain has necessarily finished.
     const databasePath = join(
@@ -19150,11 +19272,11 @@ describe('AB-390 — outbox claim lease', () => {
       // Dispose immediately, with no further await letting that drain
       // settle on its own first — this is the exact window the finding
       // describes: shutdown's own timer-clear runs, then its await on
-      // `sessionOutboxDrainInFlight` overlaps the drain calling
-      // `scheduleSessionOutboxRetry` again for entry two.
+      // `outboxDrainInFlight` overlaps the drain calling
+      // `scheduleOutboxRetry` again for entry two.
       await bureau.dispose();
 
-      // The retry-triggered drain's own second `scheduleSessionOutboxRetry`
+      // The retry-triggered drain's own second `scheduleOutboxRetry`
       // call for entry two must have been REFUSED once shutdown closed
       // admission — no additional `setTimeout` call armed during (or after)
       // `dispose()` beyond whatever had already been armed before it.

@@ -463,6 +463,25 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
         committedAtMs,
         ...(claim ? { claim } : {}),
       };
+    case 'session.attachment':
+      if (typeof record['namespace'] !== 'string') {
+        return fail(
+          `expected a string "namespace" for kind "session.attachment", got ${JSON.stringify(record['namespace'])}`,
+        );
+      }
+      if (!('payload' in record)) {
+        return fail('expected a "payload" for kind "session.attachment"');
+      }
+      return {
+        ordinal,
+        kind: 'session.attachment',
+        sessionId,
+        incarnation,
+        namespace: record['namespace'],
+        payload: record['payload'] as JSONValue,
+        committedAtMs,
+        ...(claim ? { claim } : {}),
+      };
     default:
       return fail(`unrecognized "kind" ${JSON.stringify(record['kind'])}`);
   }
@@ -640,6 +659,10 @@ export function createSessionStore(
     expectedSummaryValue: string | null,
     currentSummaries: Map<string, SessionSummary>,
     expectedOrdinalValue: string | null,
+    // AB-391 — extra `'session.attachment'` entries a caller (`update()`'s
+    // own `options.outbox`) asked to append in this SAME batch. Empty for
+    // `save()`, which has no such option.
+    attachments: readonly { namespace: string; payload: JSONValue }[] = [],
   ): Promise<AgentSession | undefined> {
     // AB-384 — resolved from `current` (the live body this attempt read
     // BEFORE merging in the caller's candidate), never from
@@ -698,6 +721,20 @@ export function createSessionStore(
       incarnation,
       committedAtMs: runtime.clock.now(),
     };
+    // AB-391 — each attachment gets the next consecutive ordinal after the
+    // primary entry above, all appended in this SAME batch; the ordinal
+    // counter is advanced past every one of them so the next commit (by any
+    // caller) never reuses one.
+    const attachmentEntries: SessionOutboxEntry[] = attachments.map((attachment, index) => ({
+      ordinal: nextOrdinal + 1 + index,
+      kind: 'session.attachment',
+      sessionId: next.id,
+      incarnation,
+      namespace: attachment.namespace,
+      payload: attachment.payload,
+      committedAtMs: outboxEntry.committedAtMs,
+    }));
+    const finalOrdinal = nextOrdinal + attachmentEntries.length;
     const committed = await store.conditionalBatch(
       [
         { key: bodyKey, expectedValue },
@@ -711,14 +748,21 @@ export function createSessionStore(
           key: SUMMARY_INDEX_KEY,
           value: serializeSummaryIndex(new Map(currentSummaries).set(next.id, toSummary(next))),
         },
-        { type: 'set', key: OUTBOX_ORDINAL_KEY, value: String(nextOrdinal) },
+        { type: 'set', key: OUTBOX_ORDINAL_KEY, value: String(finalOrdinal) },
         { type: 'set', key: outboxEntryKey(nextOrdinal), value: JSON.stringify(outboxEntry) },
+        ...attachmentEntries.map((entry) => ({
+          type: 'set' as const,
+          key: outboxEntryKey(entry.ordinal),
+          value: JSON.stringify(entry),
+        })),
       ],
     );
     if (!committed) return undefined;
     // Best-effort drain trigger (see `SessionOutboxAppendedEvent`'s own doc
     // comment) — dispatched AFTER the batch above has already durably
-    // committed the outbox entry it names, never before.
+    // committed the outbox entry it names, never before. One dispatch is
+    // enough to wake a drain loop that scans every pending entry via
+    // `pending()`, regardless of how many ordinals this commit produced.
     events.dispatch(new SessionOutboxAppendedEvent(nextOrdinal));
     return next;
   }
@@ -895,9 +939,13 @@ export function createSessionStore(
       updater: (
         session: AgentSession | undefined,
       ) => AgentSession | undefined | Promise<AgentSession | undefined>,
-      options?: { refreshActivity?: boolean },
+      options?: {
+        refreshActivity?: boolean;
+        outbox?: readonly { namespace: string; payload: JSONValue }[];
+      },
     ): Promise<AgentSession | undefined> {
       const refreshActivity = options?.refreshActivity ?? true;
+      const attachments = options?.outbox ?? [];
       // The updater is caller code and may itself use this store. Keep it out
       // of the local mutation queue so an asynchronous updater cannot wait on
       // an operation queued behind itself. Conditional commits still provide
@@ -941,6 +989,7 @@ export function createSessionStore(
           summaryRaw,
           await summariesForMutation(summaryRaw),
           ordinalRaw,
+          attachments,
         );
         if (committed) {
           return committed;

@@ -305,6 +305,15 @@ export interface AuditTrail {
     type: string;
     detail: unknown;
     principal?: string;
+    /**
+     * AB-391: the true commit time of the fact this record describes, for a
+     * caller replaying a previously-appended `session.attachment` outbox
+     * entry (`create-bureau.ts`'s `drainOutbox`) long after that entry was
+     * committed — a delayed drain, or a replay after a process restart.
+     * Defaults to `runtime.clock.now()`, matching every direct (non-replay)
+     * caller.
+     */
+    timestampMs?: number;
   }): Promise<void>;
   /**
    * AB-388: delete every durable record whose `timestampMs` is strictly
@@ -1293,7 +1302,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
    * pathologically skewed clock on another instance remains a known,
    * accepted residual, consistent with this codebase's existing
    * cross-process residuals (see `create-bureau.ts`'s own
-   * `drainSessionOutbox` doc comment for an analogous ACCEPTED RESIDUAL).
+   * `drainOutbox` doc comment for an analogous ACCEPTED RESIDUAL).
    *
    * AB-388 (Codex review, PR #597, "Abort pruning when lease renewal
    * loses its CAS"): returns whether THIS pass still holds the lease
@@ -1704,8 +1713,9 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       type: string;
       detail: unknown;
       principal?: string;
+      timestampMs?: number;
     }): Promise<void> {
-      await writeOutOfBandRecord(entry);
+      await writeOutOfBandRecord(entry, { timestampMs: entry.timestampMs });
     },
 
     prune(
