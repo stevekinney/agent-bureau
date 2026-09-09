@@ -2041,6 +2041,43 @@ describe('createDurableEventProducer()', () => {
     await producer.dispose();
   });
 
+  it('redispatching the SAME SessionDeletedEvent after a failed write retries and succeeds, rather than being dropped forever (Codex P2 review finding, PR #580, "Allow retries after a failed deletion write")', async () => {
+    // Marking an event as handled BEFORE its write even started would
+    // permanently block a legitimate retry of the same object once a
+    // transient storage failure recovers. The event must only be
+    // remembered on SUCCESS.
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    let attempt = 0;
+    const { history, calls } = createRecordingHistory(async () => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('storage boom (transient)');
+    });
+    const diagnostics: BureauDiagnostic[] = [];
+    const producer = createDurableEventProducer(bureau, history, runtime, (diagnostic) =>
+      diagnostics.push(diagnostic),
+    );
+
+    const event = new SessionDeletedEvent('sess-1');
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+
+    expect(
+      diagnostics.some((diagnostic) =>
+        diagnostic.message.includes('Failed to record durable event "session.deleted"'),
+      ),
+    ).toBe(true);
+
+    // The SAME event object, redispatched after the failed write settled —
+    // storage has since recovered.
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+
+    expect(calls.filter((call) => call.kind === 'session.deleted')).toHaveLength(2);
+
+    await producer.dispose();
+  });
+
   it('refuses to start a new session.deleted record once the owner-issued signal aborts', async () => {
     const runtime = createManualRuntimeServices();
     const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();

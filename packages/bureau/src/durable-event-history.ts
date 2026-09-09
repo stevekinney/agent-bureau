@@ -1065,10 +1065,19 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
     const owner: DurableEventOwner = { kind: 'session', id: event.sessionId };
     const ownerKey = encodeOwner(owner);
     if (pendingSessionDeletionWrites.has(ownerKey)) return;
-    recordedDeletionEvents.add(event);
     trackWrite(ownerKey, () => {
       const write = history.record(owner, 'session.deleted', { sessionId: event.sessionId }).then(
-        () => undefined,
+        () => {
+          // Only remember this event as handled on SUCCESS (Codex review
+          // finding, PR #580, "Allow retries after a failed deletion
+          // write"): marking it before the write even started would
+          // permanently block a legitimate retry of the SAME event object
+          // after a transient storage failure recovers — the in-flight map
+          // above already prevents a genuinely concurrent duplicate from
+          // starting a second write while this one is pending, so nothing
+          // is lost by waiting for success here.
+          recordedDeletionEvents.add(event);
+        },
         (error: unknown) => {
           diagnose({
             level: 'error',
