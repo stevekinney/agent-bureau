@@ -104,6 +104,7 @@ import { type AuditTrail, createAuditTrail } from './audit-trail';
 import {
   createDurableEventHistory,
   createDurableEventProducer,
+  deletionMarkerKindFor,
   type DurableEventHistory,
   type DurableEventHistoryPageOptions,
   type DurableEventHistorySubscribeOptions,
@@ -7056,13 +7057,41 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return page; // a DurableEventGap
     }
 
-    // AB-385 — independent of `options.since`/`options.limit`: a scan over
-    // the ENTIRE retained feed for this owner's own deletion marker, not
-    // merely the one page just fetched above. See `latestDeletionMarker`'s
-    // own doc comment (`durable-event-history.ts`) for why the requested
-    // page's events are still returned verbatim below; only this
-    // classification changes.
-    const hasDeletionMarker = (await history.latestDeletionMarker(owner)) !== undefined;
+    // AB-385 — evidence-based, independent of `options.since`/`options.limit`.
+    // `pageHasDeletionMarker` is the ORIGINAL AB-313 check (does the page
+    // just fetched contain the marker); `latestDeletionMarker` widens it to
+    // the ENTIRE retained feed, not merely this one page. Both are
+    // consulted, deliberately OR'd together rather than the independent
+    // scan alone replacing the page check (Codex review, PR #591,
+    // "Preserve deletion evidence already returned by the page"): retention
+    // can advance between `history.page()` resolving above and
+    // `latestDeletionMarker()` running here, aging the marker below the
+    // feed's floor in the span between the two calls — `latestDeletionMarker`
+    // would then no longer see it, even though `page.events` (a snapshot
+    // taken a moment earlier, while the marker was still retained) still
+    // carries it. Regressing to an ordinary-page classification under that
+    // race would be strictly worse than AB-313's original page-only
+    // detection ever was.
+    const deletionMarkerKind = deletionMarkerKindFor(owner.kind);
+    const pageHasDeletionMarker =
+      deletionMarkerKind !== undefined &&
+      page.events.some((event) => event.kind === deletionMarkerKind);
+    // Scan-avoidance (Codex review, PR #591, "Avoid replaying the entire
+    // fleet for every history page"): `latestDeletionMarker`'s full-feed
+    // scan is skipped whenever the page already fetched above PROVES the
+    // owner's complete retained history — no `since` cursor (nothing before
+    // the beginning was excluded) and `hasMore: false` (nothing after this
+    // page remains) — because in that case `pageHasDeletionMarker` above is
+    // already the complete, exact answer; the independent scan could not
+    // possibly find a marker sitting outside the page's own window if there
+    // IS no "outside" for this call. Every other call (a `since` cursor, a
+    // truncated `hasMore: true` page, or a fresh, still-empty owner where
+    // both are true but a fast internal/trusted answer is fine) still pays
+    // for the independent scan.
+    const pageProvesCompleteHistory = options?.since === undefined && !page.hasMore;
+    const hasDeletionMarker =
+      pageHasDeletionMarker ||
+      (!pageProvesCompleteHistory && (await history.latestDeletionMarker(owner)) !== undefined);
 
     // Only load the live session record post-page when it can actually
     // change the outcome: either a `principal` needs reauthorizing against

@@ -375,12 +375,15 @@ function encodeOwner(owner: DurableEventOwner): string {
 /**
  * The durable event `kind` this module's own deletion-marker writers record
  * for each owner kind that has a deletion concept — `undefined` for
- * `schedule`, which has none. Shared by {@link DurableEventHistory.page}'s
- * gap-aware readers is NOT this function's job (they never needed it); this
- * is used only by {@link DurableEventHistory.latestDeletionMarker} (AB-385)
- * and by `Bureau.eventHistory`'s own former page-scoped check it replaces.
+ * `schedule`, which has none. Used by
+ * {@link DurableEventHistory.latestDeletionMarker} (AB-385) and exported so
+ * `create-bureau.ts`'s `resolveEventHistory` can check the SAME kind
+ * against its own already-fetched `page.events` (the race-safety and
+ * scan-avoidance optimizations documented on `latestDeletionMarker` and
+ * `resolveEventHistory` respectively) without a second, divergent literal
+ * mapping.
  */
-function deletionMarkerKindFor(ownerKind: DurableEventOwner['kind']): string | undefined {
+export function deletionMarkerKindFor(ownerKind: DurableEventOwner['kind']): string | undefined {
   switch (ownerKind) {
     case 'session':
       return 'session.deleted';
@@ -741,9 +744,22 @@ export function createDurableEventHistory(
     // `workflowId`) means a corrupt or unsupported-schema-version record for
     // some OTHER kind, or for a different owner entirely, is never even
     // decoded here.
+    //
+    // "Highest sequence wins" is enforced EXPLICITLY by comparing
+    // `envelope.sequence` (Copilot review, PR #591, "track the highest
+    // envelope.sequence explicitly and skip decoding older candidates") —
+    // never by assuming `feed.replay()` yields envelopes in increasing
+    // order and letting the last match win by iteration position alone.
+    // `feed.replay()` does document strictly increasing sequence order
+    // today, but this comparison makes that an explicit invariant of THIS
+    // function rather than an implicit one it would silently mis-answer if
+    // that ordering guarantee ever changed. The comparison also runs before
+    // decoding, so an older candidate is never decoded at all once a
+    // newer, already-decoded match exists.
     for await (const envelope of feed.replay({})) {
       if (envelope.workflowId !== targetWorkflowId) continue;
       if (envelope.kind !== markerKind) continue;
+      if (latest !== undefined && envelope.sequence <= latest.sequence) continue;
       try {
         latest = toDurableEventEnvelope(envelope, owner);
       } catch (error) {

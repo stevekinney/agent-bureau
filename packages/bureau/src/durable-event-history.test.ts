@@ -483,12 +483,17 @@ describe('createDurableEventHistory', () => {
       const history = createDurableEventHistory(storage, runtime);
       const owner = { kind: 'run' as const, id: 'run-1' };
 
-      await history.record(owner, 'run.completed', {});
+      await history.record(owner, 'run.started', {});
       const marker = await history.record(owner, 'run.removed', {});
+      await history.record(owner, 'run.completed', {});
 
       const truncatedPage = await history.page(owner, { limit: 1 });
       if ('outcome' in truncatedPage) throw new Error('expected a page, got a gap');
       expect(truncatedPage.events.map((event) => event.kind)).not.toContain('run.removed');
+
+      const afterMarkerPage = await history.page(owner, { since: marker.cursor });
+      if ('outcome' in afterMarkerPage) throw new Error('expected a page, got a gap');
+      expect(afterMarkerPage.events.map((event) => event.kind)).not.toContain('run.removed');
 
       const found = await history.latestDeletionMarker(owner);
       expect(found).toEqual(marker);
