@@ -5547,6 +5547,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * is visible to both reads below, closing the window where a pass could
    * otherwise prune an audit record whose durable-event counterpart was
    * still mid-append.
+   *
+   * ACCEPTED RESIDUAL (Codex review, PR #597, "Coordinate pruning with
+   * writers in every Bureau instance"): this only awaits THIS process's
+   * own `durableEventProducerInstance` — when two Bureau processes share
+   * one persistent backend and a DIFFERENT process has already committed
+   * an audit record whose matching durable-event append is still
+   * in-flight over there, this local wait observes nothing and the
+   * following floor/owner-set snapshots can still omit that pending
+   * event. The cross-process prune LEASE this same round of fixes adds
+   * (`audit-trail.ts`) serializes destructive PRUNE PASSES across
+   * processes; it does not extend to coordinating with each process's own
+   * independent WRITE path, which would need a durable, cross-process
+   * write-in-flight marker — a materially larger primitive than a prune
+   * lease. This is the same class of residual `create-bureau.ts`'s own
+   * `drainSessionOutbox` doc comment already accepts for a different
+   * cross-process race (multiple maintenance ticks observing the same
+   * unacknowledged outbox entry before either acknowledges it) — closing
+   * it fully is out of scope here and left as a follow-up.
    */
   async function pruneAuditTrail(): Promise<void> {
     if (!auditTrailInstance) return;

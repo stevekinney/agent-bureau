@@ -1352,12 +1352,22 @@ describe('createAuditTrail', () => {
       // Includes the pass's own `audit.pruned` summary record, written at
       // "now" (the real clock, since this test supplies no manual
       // runtime) — strictly after every seeded fixture timestamp, so it
-      // is never itself a candidate for this same pass's cutoff.
-      expect(remaining.map((r) => r.runId).sort()).toEqual([
-        'bureau:audit-retention',
-        'run-at-cutoff',
-        'run-new',
-      ]);
+      // is never itself a candidate for this same pass's cutoff. Its
+      // `runId` is `bureau:audit-retention:<leaseToken>` (Codex review,
+      // PR #597, "Give prune summaries cross-instance-unique keys") — the
+      // token itself is a fresh, unpredictable identifier from the
+      // (real, non-manual) runtime here, so this checks the fixed prefix
+      // rather than an exact match.
+      const summaryRunIds = remaining
+        .map((r) => r.runId)
+        .filter((runId) => runId.startsWith('bureau:audit-retention'));
+      expect(summaryRunIds).toHaveLength(1);
+      expect(
+        remaining
+          .map((r) => r.runId)
+          .filter((runId) => !runId.startsWith('bureau:audit-retention'))
+          .sort(),
+      ).toEqual(['run-at-cutoff', 'run-new']);
 
       const auditPrunedRecords = await trail.query({ type: 'audit.pruned' });
       expect(auditPrunedRecords).toHaveLength(1);
@@ -1970,6 +1980,39 @@ describe('createAuditTrail', () => {
       await seedRecord(kv, makeRecord(1, { timestampMs: 1000, runId: 'run-old-2' }));
       const second = await trail.prune(5000);
       expect(second?.prunedCount).toBe(1);
+
+      trail.dispose();
+    });
+
+    it('renews its own lease periodically during a large delete loop (every 200 deletions), rather than letting it age toward the TTL untouched', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const seedCount = 401; // crosses the 200-deletion renewal boundary twice
+      for (let i = 0; i < seedCount; i += 1) {
+        await seedRecord(kv, makeRecord(i, { timestampMs: 1000, runId: `run-old-${i}` }));
+      }
+
+      let renewCount = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...kv,
+        async conditionalBatch(conditions, operations) {
+          const isLeaseRenewal = operations.some(
+            (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
+          );
+          if (isLeaseRenewal) renewCount += 1;
+          return kv.conditionalBatch(conditions, operations);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: seedCount });
+
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(seedCount);
+      // One `conditionalBatch` set for the initial acquisition, one for
+      // the renewal right before the delete loop starts, and two periodic
+      // renewals (after the 200th and 400th deletions) — the release at
+      // the end is a `delete` operation, not counted here.
+      expect(renewCount).toBe(4);
 
       trail.dispose();
     });

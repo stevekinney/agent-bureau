@@ -1162,7 +1162,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     if (!acquired) return undefined;
 
     try {
-      return await runPrunePassLocked(cutoffMs, protectRunId);
+      return await runPrunePassLocked(cutoffMs, protectRunId, leaseToken);
     } finally {
       await releasePruneLease(leaseToken);
     }
@@ -1243,9 +1243,59 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     );
   }
 
+  /**
+   * AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
+   * standard lease-renewal — extends THIS pass's own lease with a fresh
+   * `acquiredAtMs`, but ONLY if the lease still names `token` (a CAS
+   * precondition on the exact current value, mirroring
+   * {@link releasePruneLease}'s own token check). Called right before the
+   * potentially-slow delete loop below, so a pass whose listing/decoding
+   * phase alone already consumed a meaningful fraction of
+   * {@link PRUNE_LEASE_TTL_MS} gets a fresh full TTL for the deletes and
+   * summary write that remain — a pass that is still genuinely running
+   * (not crashed) is never preempted mid-flight by a sibling instance's
+   * own stale-lease takeover.
+   *
+   * This still assumes every instance's clock is reasonably synchronized
+   * (the same assumption {@link acquirePruneLease}'s own staleness check
+   * already makes) — a lease is a lightweight, best-effort coordination
+   * primitive here, not a fenced, monotonic-counter-backed lock; a
+   * pathologically skewed clock on another instance remains a known,
+   * accepted residual, consistent with this codebase's existing
+   * cross-process residuals (see `create-bureau.ts`'s own
+   * `drainSessionOutbox` doc comment for an analogous ACCEPTED RESIDUAL).
+   * Renewal failure (lease already lost) is silently tolerated here —
+   * the caller does not re-verify per delete, so this narrows the race
+   * window without needing a conditional variant of `kv.delete()`, which
+   * `TextValueStore` does not expose.
+   */
+  async function renewPruneLease(token: string): Promise<void> {
+    if (!kv) return;
+    const existingRaw = await kv.get(PRUNE_LEASE_KEY);
+    if (existingRaw === null) return;
+    let existing: unknown;
+    try {
+      existing = JSON.parse(existingRaw);
+    } catch {
+      return;
+    }
+    if (!isPruneLeaseValue(existing) || existing.token !== token) return;
+    await kv.conditionalBatch(
+      [{ key: PRUNE_LEASE_KEY, expectedValue: existingRaw }],
+      [
+        {
+          type: 'set',
+          key: PRUNE_LEASE_KEY,
+          value: JSON.stringify({ acquiredAtMs: runtime.clock.now(), token }),
+        },
+      ],
+    );
+  }
+
   async function runPrunePassLocked(
     cutoffMs: number,
     protectRunId?: (runId: string) => boolean,
+    leaseToken?: string,
   ): Promise<AuditPruneResult | undefined> {
     if (!kv) return undefined;
 
@@ -1338,6 +1388,16 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       }
     }
 
+    // AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
+    // renewed HERE, right before the potentially-slow delete loop — the
+    // listing/decoding phase above (candidate collection, floor read) can
+    // itself consume a meaningful fraction of the lease's TTL for a large
+    // trail, so this gives the deletes and summary write that remain a
+    // fresh full TTL rather than racing whatever budget was left over.
+    if (leaseToken !== undefined) {
+      await renewPruneLease(leaseToken);
+    }
+
     // Only NOW, after the watermark durably reflects every sequence this
     // pass is about to remove, actually delete the qualifying records.
     //
@@ -1352,12 +1412,22 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // permanently gone with no `audit.pruned` evidence naming them, and a
     // retry would only see the remaining keys — no future summary could
     // reconstruct what this pass actually removed.
+    //
+    // AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
+    // also renewed periodically DURING a large delete loop (every 200
+    // deletions) — the same TTL-refresh rationale as the renewal above,
+    // for a pass whose delete phase alone is long enough to approach the
+    // lease's TTL.
+    const RENEW_EVERY_N_DELETES = 200;
     let prunedCount = 0;
     let deleteError: Error | undefined;
     for (const candidate of candidates) {
       try {
         await kv.delete(candidate.key);
         prunedCount += 1;
+        if (leaseToken !== undefined && prunedCount % RENEW_EVERY_N_DELETES === 0) {
+          await renewPruneLease(leaseToken);
+        }
       } catch (error: unknown) {
         // Normalized to a real `Error` here (never re-thrown as `unknown`)
         // so the eventual `throw deleteError` below satisfies
@@ -1368,38 +1438,67 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       }
     }
 
-    // Out-of-band, through the same shared-sequence-counter path every
-    // other manual write in this file uses — this record's own
-    // `sequence` is allocated from the SAME counter `computeInitialAuditSequence`
-    // seeded, so it never collides with a surviving or future record.
-    // Attributed to a synthetic, non-run owner (mirrors the
-    // `schedule:<id>`/`session:<id>` convention above) since a retention
-    // pass belongs to no single run.
-    //
-    // `bypassAbortCheck` (Codex review PR #597, "Finish the prune summary
-    // after shutdown begins"): this pass was already admitted (passed the
-    // `signal?.aborted` check above) before starting — if `shutdown()`
-    // aborts the shared signal while the deletions above were still
-    // running, this summary write must still land; the deletions already
-    // happened, so losing the summary would report success with no
-    // corresponding audit evidence. `strict` (Codex review PR #597,
-    // "Propagate failures to persist the prune summary") makes a write
-    // failure here reject this pass, rather than the best-effort swallow
-    // every other out-of-band caller relies on — reporting success after
-    // permanently deleting records without the promised evidence would be
-    // worse than surfacing the failure to whatever called `prune()`.
-    await writeOutOfBandRecord(
-      {
-        runId: 'bureau:audit-retention',
-        type: 'audit.pruned',
-        detail: {
-          count: prunedCount,
-          cutoffMs,
-          ...(deleteError !== undefined ? { partial: true } : {}),
+    // AB-388 (Codex review, PR #597, "Skip summaries when no deletion
+    // committed"): if the very FIRST candidate's `kv.delete()` rejects,
+    // `prunedCount` stays `0` — this must be treated the same as the
+    // "nothing qualified" early return above and write no summary. A
+    // zero-progress pass under automatic maintenance (e.g. a persistent
+    // delete-path outage) must not add a fresh zero-count `audit.pruned`
+    // record on every tick while retaining every original record — that
+    // violates the documented "a pass that prunes nothing writes no
+    // summary" guarantee and would itself grow the trail unboundedly. The
+    // delete failure is still surfaced via the `throw` below either way;
+    // only the summary write is skipped.
+    if (prunedCount > 0) {
+      // Out-of-band, through the same shared-sequence-counter path every
+      // other manual write in this file uses — this record's own
+      // `sequence` is allocated from the SAME counter `computeInitialAuditSequence`
+      // seeded, so it never collides with a surviving or future record.
+      // Attributed to a synthetic, non-run owner (mirrors the
+      // `schedule:<id>`/`session:<id>` convention above) since a retention
+      // pass belongs to no single run.
+      //
+      // AB-388 (Codex review, PR #597, "Give prune summaries
+      // cross-instance-unique keys"): the owner also embeds THIS pass's
+      // own `leaseToken` — two `AuditTrail` instances over the same
+      // shared store can each start their own local `sequence` counter
+      // from the same value (e.g. both booting before either has ever
+      // written), so a bare constant owner risks two SEQUENTIAL passes
+      // (never concurrent ones — the lease already prevents that)
+      // producing the identical encoded key at the same millisecond, with
+      // the later summary silently overwriting the earlier one.
+      // `leaseToken` (`runtime.identifiers.next(...)`) is unique per
+      // pass, closing that gap the same way `encodeKey`'s own doc comment
+      // already relies on a unique `runId` to guarantee global uniqueness.
+      //
+      // `bypassAbortCheck` (Codex review PR #597, "Finish the prune summary
+      // after shutdown begins"): this pass was already admitted (passed the
+      // `signal?.aborted` check above) before starting — if `shutdown()`
+      // aborts the shared signal while the deletions above were still
+      // running, this summary write must still land; the deletions already
+      // happened, so losing the summary would report success with no
+      // corresponding audit evidence. `strict` (Codex review PR #597,
+      // "Propagate failures to persist the prune summary") makes a write
+      // failure here reject this pass, rather than the best-effort swallow
+      // every other out-of-band caller relies on — reporting success after
+      // permanently deleting records without the promised evidence would be
+      // worse than surfacing the failure to whatever called `prune()`.
+      await writeOutOfBandRecord(
+        {
+          runId:
+            leaseToken !== undefined
+              ? `bureau:audit-retention:${leaseToken}`
+              : 'bureau:audit-retention',
+          type: 'audit.pruned',
+          detail: {
+            count: prunedCount,
+            cutoffMs,
+            ...(deleteError !== undefined ? { partial: true } : {}),
+          },
         },
-      },
-      { strict: true, bypassAbortCheck: true },
-    );
+        { strict: true, bypassAbortCheck: true },
+      );
+    }
 
     // Surfaced only AFTER the partial summary above has been durably
     // written — a caller (`pruneAuditTrail`'s `runDurableMaintenance`
