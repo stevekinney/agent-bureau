@@ -202,17 +202,40 @@ export function formatFailureReason(input: {
   }, signal ${input.signal ?? 'none'}): ${input.detail}`;
 }
 
+function tailLines(text: string, maxLines: number): string[] {
+  const trimmed = text.replace(/\n+$/, '');
+  return trimmed.length > 0 ? trimmed.split('\n').slice(-maxLines) : [];
+}
+
 /**
- * The raw tail of the child's combined stdout/stderr, printed when a
- * passing test run's coverage table cannot be parsed (AB-386) so the
- * original output survives even though it was captured rather than
- * inherited (see `createRealRunTestsWithCoverage`'s comment on why).
+ * The raw tail of the child's stdout and stderr, printed when a passing
+ * test run's coverage table cannot be parsed (AB-386) so the original
+ * output survives even though it was captured rather than inherited (see
+ * `createRealRunTestsWithCoverage`'s comment on why). Reported as two
+ * separately labeled sections rather than one concatenated block: stdout
+ * and stderr interleave arbitrarily and neither is guaranteed to end on a
+ * line boundary, so joining them directly could merge the tail of one
+ * stream into the head of the other on the same line.
  */
 export function formatOutputTail(child: ChildProcessResult, maxLines = 40): string {
-  const combined = `${child.stdout}${child.stderr}`.replace(/\n+$/, '');
-  const lines = combined.length > 0 ? combined.split('\n') : [];
-  const tail = lines.slice(-maxLines).join('\n');
-  return `--- child output tail (last ${Math.min(maxLines, lines.length)} line(s)) ---\n${tail}`;
+  const stdoutTail = tailLines(child.stdout, maxLines);
+  const stderrTail = tailLines(child.stderr, maxLines);
+  const sections: string[] = [];
+
+  if (stdoutTail.length > 0) {
+    sections.push(
+      `--- child stdout tail (last ${stdoutTail.length} line(s)) ---\n${stdoutTail.join('\n')}`,
+    );
+  }
+  if (stderrTail.length > 0) {
+    sections.push(
+      `--- child stderr tail (last ${stderrTail.length} line(s)) ---\n${stderrTail.join('\n')}`,
+    );
+  }
+
+  return sections.length > 0
+    ? sections.join('\n')
+    : '--- child output tail (no output captured) ---';
 }
 
 export type CoverageCheckOptions = SourceFileContext & {

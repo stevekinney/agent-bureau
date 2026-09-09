@@ -84,14 +84,26 @@ describe('formatFailureReason', () => {
 });
 
 describe('formatOutputTail', () => {
-  test('joins stdout and stderr and keeps only the last lines', () => {
+  test('reports stdout and stderr as separately labeled sections, each keeping only its own last lines', () => {
     const child = createChildResult({
       stdout: 'line 1\nline 2\n',
       stderr: 'line 3\n',
     });
 
-    expect(formatOutputTail(child, 2)).toBe(
-      '--- child output tail (last 2 line(s)) ---\nline 2\nline 3',
+    expect(formatOutputTail(child, 1)).toBe(
+      '--- child stdout tail (last 1 line(s)) ---\nline 2\n--- child stderr tail (last 1 line(s)) ---\nline 3',
+    );
+  });
+
+  test('omits a section for a stream that produced no output', () => {
+    const child = createChildResult({ stdout: 'only stdout\n', stderr: '' });
+
+    expect(formatOutputTail(child)).toBe('--- child stdout tail (last 1 line(s)) ---\nonly stdout');
+  });
+
+  test('reports no output captured when both streams are empty', () => {
+    expect(formatOutputTail(createChildResult())).toBe(
+      '--- child output tail (no output captured) ---',
     );
   });
 });
@@ -277,7 +289,7 @@ describe('runCoverageCheck', () => {
     expect(exitCode).toBe(1);
     expect(errors).toEqual([
       '✖ example: coverage check failed at stage "coverage parse" (exit 0, signal none): ENOENT: no such file or directory',
-      '--- child output tail (last 1 line(s)) ---\n1108 pass, 0 fail',
+      '--- child stdout tail (last 1 line(s)) ---\n1108 pass, 0 fail',
     ]);
   });
 
@@ -302,7 +314,7 @@ describe('runCoverageCheck', () => {
     expect(exitCode).toBe(1);
     expect(errors).toEqual([
       '✖ example: coverage check failed at stage "coverage parse" (exit 0, signal none): Malformed lcov record: could not parse "FNF" from "FNF:garbage"',
-      '--- child output tail (last 1 line(s)) ---\n1108 pass, 0 fail',
+      '--- child stdout tail (last 1 line(s)) ---\n1108 pass, 0 fail',
     ]);
   });
 
