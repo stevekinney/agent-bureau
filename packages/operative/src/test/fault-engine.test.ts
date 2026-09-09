@@ -54,6 +54,13 @@ function createRecordingStore() {
       calls.push({ verb: 'query' });
       return [...data.values()].filter(predicate);
     },
+    // AB-391: added alongside the original four verbs so a test can target
+    // `storage:conditionalBatch` specifically — see `wrapStorage`'s own
+    // doc comment on why this verb was added to the fault vocabulary.
+    async conditionalBatch(): Promise<boolean> {
+      calls.push({ verb: 'conditionalBatch' });
+      return true;
+    },
   };
 }
 
@@ -713,6 +720,26 @@ describe('createFaultEngine', () => {
       await wrapped.set('key-1', 'value');
       expect(store.data.get('key-1')).toBe('value');
       expect(wrapped.get('key-1')).rejects.toThrow('get is down');
+    });
+
+    it('a conditionalBatch-only fault fires on conditionalBatch and never on set (AB-391: FaultOperation gained this verb alongside the original four)', async () => {
+      const runtime = createManualRuntimeServices();
+      const store = createRecordingStore();
+      const plan: FaultPlan = [
+        {
+          id: 'conditional-batch-only',
+          boundary: 'before-work',
+          operation: 'storage:conditionalBatch',
+          occurrence: { kind: 'every' },
+          effect: { kind: 'reject-before-work', error: new Error('conditionalBatch is down') },
+        },
+      ];
+      const engine = createFaultEngine(plan, runtime);
+      const wrapped = engine.wrapStorage(store);
+
+      await wrapped.set('key-1', 'value');
+      expect(store.data.get('key-1')).toBe('value');
+      expect(wrapped.conditionalBatch()).rejects.toThrow('conditionalBatch is down');
     });
   });
 

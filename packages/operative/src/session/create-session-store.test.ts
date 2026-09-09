@@ -5,6 +5,7 @@ import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import { SessionOutboxAppendedEvent } from '../events';
+import type { JSONValue } from '../types';
 import {
   createSessionStore,
   SessionConflictError,
@@ -1817,6 +1818,175 @@ describe('SessionStore commit outbox (AB-389)', () => {
     const [entry] = await store.outbox.pending();
     expect(entry?.committedAtMs).toBe(commitTime);
     expect(entry?.committedAtMs).not.toBe(runtime.clock.now());
+  });
+});
+
+describe('SessionStore outbox attachments (AB-391)', () => {
+  it('appends a session.attachment entry, at the ordinal right after the primary entry, in the same update() commit', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.update(
+      'attachment-session',
+      (existing) => existing ?? makeSession({ id: 'attachment-session' }),
+      {
+        outbox: [
+          {
+            namespace: 'audit-record',
+            payload: { runId: 'r1', type: 'review.tool-approval.approved' },
+          },
+        ],
+      },
+    );
+
+    const pending = await store.outbox.pending();
+    expect(pending).toHaveLength(2);
+    expect(pending[0]?.kind).toBe('session.created');
+    expect(pending[0]?.ordinal).toBe(1);
+    const attachment = pending[1];
+    if (attachment?.kind !== 'session.attachment') {
+      throw new Error('expected a session.attachment outbox entry');
+    }
+    expect(attachment.ordinal).toBe(2);
+    expect(attachment.sessionId).toBe('attachment-session');
+    expect(attachment.namespace).toBe('audit-record');
+    expect(attachment.payload).toEqual({ runId: 'r1', type: 'review.tool-approval.approved' });
+    expect(attachment.committedAtMs).toBe(pending[0]!.committedAtMs);
+  });
+
+  it('appends multiple attachments at consecutive ordinals and advances the shared ordinal counter past all of them', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.update(
+      'multi-attachment',
+      (existing) => existing ?? makeSession({ id: 'multi-attachment' }),
+      {
+        outbox: [
+          { namespace: 'audit-record', payload: { n: 1 } },
+          { namespace: 'audit-record', payload: { n: 2 } },
+        ],
+      },
+    );
+    const pending = await store.outbox.pending();
+    expect(pending.map((entry) => entry.ordinal)).toEqual([1, 2, 3]);
+
+    await store.save(makeSession({ id: 'after-multi-attachment' }));
+    const nextPending = await store.outbox.pending();
+    expect(nextPending.at(-1)?.ordinal).toBe(4);
+  });
+
+  it('appends no attachment entry when the updater declines to commit', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const result = await store.update('never-committed', () => undefined, {
+      outbox: [{ namespace: 'audit-record', payload: { n: 1 } }],
+    });
+    expect(result).toBeUndefined();
+    expect(await store.outbox.pending()).toHaveLength(0);
+  });
+
+  it('fails loudly on a stored session.attachment entry missing its namespace or payload', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    await store.update(
+      'malformed-attachment',
+      (existing) => existing ?? makeSession({ id: 'malformed-attachment' }),
+      { outbox: [{ namespace: 'audit-record', payload: { n: 1 } }] },
+    );
+    const [, attachment] = await store.outbox.pending();
+
+    await rawStore.set(
+      `agent-session-outbox:v1:entry:${String(attachment!.ordinal).padStart(20, '0')}`,
+      JSON.stringify({
+        ordinal: attachment!.ordinal,
+        kind: 'session.attachment',
+        sessionId: 'malformed-attachment',
+        incarnation: 'x',
+        committedAtMs: 0,
+      }),
+    );
+    expect(store.outbox.pending()).rejects.toThrow(/expected a string "namespace"/);
+
+    await rawStore.set(
+      `agent-session-outbox:v1:entry:${String(attachment!.ordinal).padStart(20, '0')}`,
+      JSON.stringify({
+        ordinal: attachment!.ordinal,
+        kind: 'session.attachment',
+        sessionId: 'malformed-attachment',
+        incarnation: 'x',
+        namespace: 'audit-record',
+        committedAtMs: 0,
+      }),
+    );
+    expect(store.outbox.pending()).rejects.toThrow(/expected a "payload"/);
+  });
+
+  it('rejects update() synchronously when an outbox attachment has an undefined payload, before anything commits (Codex P2 review finding, PR #601, "Validate attachments before committing malformed outbox entries")', async () => {
+    // An untyped caller (or a cast past `JSONValue`) can pass `payload:
+    // undefined` — `JSON.stringify` would silently OMIT that key from the
+    // committed entry, and every later `outbox.pending()` call would then
+    // throw on it forever (the malformed-entry test above, but self-
+    // inflicted at write time instead of injected by hand afterward).
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await expect(
+      store.update(
+        'undefined-payload-attachment',
+        (existing) => existing ?? makeSession({ id: 'undefined-payload-attachment' }),
+        {
+          outbox: [{ namespace: 'audit-record', payload: undefined as unknown as JSONValue }],
+        },
+      ),
+    ).rejects.toThrow(TypeError);
+
+    // Nothing committed — not the session body, not the outbox ordinal.
+    expect(await store.load('undefined-payload-attachment')).toBeUndefined();
+    expect(await store.outbox.pending()).toHaveLength(0);
+  });
+
+  it('rejects update() synchronously when an outbox attachment has an empty namespace', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await expect(
+      store.update(
+        'empty-namespace-attachment',
+        (existing) => existing ?? makeSession({ id: 'empty-namespace-attachment' }),
+        { outbox: [{ namespace: '', payload: { n: 1 } }] },
+      ),
+    ).rejects.toThrow(TypeError);
+    expect(await store.load('empty-namespace-attachment')).toBeUndefined();
+  });
+
+  it('commits the ORIGINAL validated attachment payload even when the updater mutates the caller\'s own attachment object afterward (Codex P2 review finding, PR #601, "Snapshot attachments before invoking the updater")', async () => {
+    // `options.outbox` is validated once, before the retry loop, against
+    // the SAME objects the caller passed in. `updater` is caller code,
+    // awaited inside that loop — it can mutate one of those same objects
+    // (setting `payload` to `undefined`, say) after it passed validation
+    // but before `commit()` serializes it. Without a snapshot, `commit()`
+    // would durably write a `session.attachment` entry missing `payload`
+    // entirely (`JSON.stringify` silently omits an `undefined` value),
+    // permanently blocking every later `outbox.pending()` call on that
+    // entry.
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const attachment: { namespace: string; payload: JSONValue } = {
+      namespace: 'audit-record',
+      payload: { original: true },
+    };
+    await store.update(
+      'snapshot-attachment-session',
+      (existing) => {
+        // Mutate the caller-owned attachment object AFTER `update()`'s own
+        // validation already ran against it, but BEFORE `commit()` below
+        // serializes it.
+        (attachment as { payload: unknown }).payload = undefined;
+        return existing ?? makeSession({ id: 'snapshot-attachment-session' });
+      },
+      { outbox: [attachment] },
+    );
+
+    const pending = await store.outbox.pending();
+    const entry = pending.find((candidate) => candidate.kind === 'session.attachment');
+    if (entry?.kind !== 'session.attachment') {
+      throw new Error('expected a session.attachment outbox entry');
+    }
+    // The committed entry carries the ORIGINAL validated payload, not the
+    // mutated (now-`undefined`) one — and, critically, is still a valid
+    // entry a later `outbox.pending()` call can parse without throwing.
+    expect(entry.payload).toEqual({ original: true });
   });
 });
 

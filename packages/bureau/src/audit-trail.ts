@@ -305,6 +305,42 @@ export interface AuditTrail {
     type: string;
     detail: unknown;
     principal?: string;
+    /**
+     * AB-391: the true commit time of the fact this record describes, for a
+     * caller replaying a previously-appended `session.attachment` outbox
+     * entry (`create-bureau.ts`'s `drainOutbox`) long after that entry was
+     * committed — a delayed drain, or a replay after a process restart.
+     * Defaults to `runtime.clock.now()`, matching every direct (non-replay)
+     * caller.
+     */
+    timestampMs?: number;
+    /**
+     * AB-391 (Codex review finding, PR #601, "Make attachment replay
+     * deduplication atomic"): when provided, this write is dedupe-guarded
+     * by an atomic storage-level compare-and-swap on a marker key derived
+     * from `dedupeKey` — mirroring {@link DurableEventRecordOptions.dedupeKey}
+     * (`durable-event-history.ts`) — rather than this trail's own
+     * `sequence`, which always mints a fresh value and so can never by
+     * itself prevent two callers racing to record the identical fact (this
+     * is exactly the case `create-bureau.ts`'s outbox attachment replay
+     * needs: two Bureau processes both reclaiming the same outbox entry
+     * after a lease renewal race must never BOTH durably record it). A
+     * caller supplying `dedupeKey` gets the ATOMICITY, and also opts into
+     * this call's returned promise REJECTING on a genuine storage failure
+     * (unlike the default best-effort `record()` path, which never
+     * rejects) — the caller is expected to leave its own outer unit of
+     * work (an outbox entry) unacknowledged and retry on that rejection,
+     * exactly the "leave it pending" contract the read-before/verify-after
+     * pattern this replaces used to provide, just without the race. This
+     * REJECTS on an already-aborted shutdown signal too, rather than
+     * silently resolving the way every other out-of-band write does post-
+     * shutdown — a silent no-op here would be indistinguishable from
+     * "already recorded" to a caller like `drainOutboxAttachmentEntry`,
+     * which would then acknowledge an entry whose fact was never actually
+     * written, reintroducing the exact durable-record loss this issue
+     * exists to close (just at shutdown instead of a crash).
+     */
+    dedupeKey?: string;
   }): Promise<void>;
   /**
    * AB-388: delete every durable record whose `timestampMs` is strictly
@@ -685,6 +721,17 @@ const PREFIX = 'audit:v1:';
 const PRUNE_FLOOR_KEY = 'audit-retention:v1:highest-pruned-sequence';
 
 /**
+ * AB-391 (Codex review finding, PR #601, "Make attachment replay
+ * deduplication atomic"): the reserved key prefix for
+ * {@link AuditTrail.record}'s `dedupeKey` marker — mirrors
+ * `durable-event-history.ts`'s own `DEDUPE_MARKER_PREFIX`. Deliberately NOT
+ * under {@link PREFIX}, same reason as {@link PRUNE_FLOOR_KEY}: every
+ * `PREFIX`-scoped scan in this file must never encounter one of these
+ * markers and misread it as a malformed `AuditRecord`.
+ */
+const DEDUPE_MARKER_PREFIX = 'audit-dedupe:v1:';
+
+/**
  * AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
  * with deletions"): a durable RECORD OF INTENT, written alongside
  * {@link PRUNE_FLOOR_KEY} before this pass deletes anything, and cleared
@@ -843,7 +890,9 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
   // Every write kicked off by the listener or by `record()`, so `dispose()`
   // can await terminal state deterministically (AB-207) rather than leaving
-  // an in-flight `kv.set` unobserved.
+  // an in-flight write (a plain `kv.set`, or the key-fenced
+  // `conditionalBatch` every writer in this file uses as of AB-391)
+  // unobserved.
   const activeWrites = new Set<Promise<void>>();
   // AB-228 (Codex P2 review finding, PR #566, "Avoid blocking every audit
   // query on unrelated writes"): `query()` needs read-your-writes against
@@ -897,12 +946,80 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   // factory runs) so a fresh process resumes above anything a prior process
   // lifetime already persisted rather than reissuing a value. Each call
   // returns the next value and advances the counter — called synchronously,
-  // at the moment a write is DISPATCHED (before its `kv.set` starts), so the
-  // assigned value reflects true call order regardless of which write's
-  // fire-and-forget `kv.set` promise happens to settle first.
+  // at the moment a write is DISPATCHED (before its underlying storage call
+  // starts), so the assigned value reflects true call order regardless of
+  // which write's fire-and-forget promise happens to settle first. Also
+  // called again, mid-flight, by `attemptKeyFencedWrite`'s own retry on a
+  // key collision — each retry mints a genuinely fresh sequence/key rather
+  // than reusing the one that just collided.
   let nextSequence = auditTrailOptions?.initialSequence ?? 0;
   function allocateSequence(): number {
     return nextSequence++;
+  }
+
+  // AB-391 (Codex P1 review findings, PR #601, "Guard the audit record key
+  // against cross-instance collisions" and "Fence ordinary writes against
+  // deduplicated audit keys"): shared by EVERY writer in this file — the
+  // action-stream listener immediately below, and every out-of-band write
+  // in `writeOutOfBandRecord` further down (`record()`, the schedule-
+  // definition listeners, `sessionDeletedListener`). `key` is derived from
+  // `sequence`, a LOCAL per-instance counter seeded from a scan at boot —
+  // two `AuditTrail` instances booting from the same persisted floor,
+  // before either has written anything, can independently allocate the
+  // SAME `sequence` for the SAME `runId`/`timestampMs`, so any two writers
+  // (dedupe-guarded or ordinary, action-stream or out-of-band) can collide
+  // on the same derived key. A plain `kv.set` has no precondition at all
+  // and would silently let the second writer overwrite the first — for a
+  // `dedupeKey` write specifically, that overwrite is permanent and
+  // undetectable, since the surviving marker makes a later replay treat
+  // the record as already durably recorded. Fencing every write (with an
+  // OPTIONAL `markerKey` for the dedupe case) on the key itself turns a
+  // silent overwrite into a detected collision: `committed === false` with
+  // the marker absent (or no marker at all) means the KEY collided with an
+  // unrelated record, so mint a fresh `sequence`/`key` and retry — bounded,
+  // since an unresolvable collision must fail loudly (or, for a
+  // best-effort caller, drop loudly) rather than loop forever. Takes
+  // `store` explicitly (rather than closing over `kv`) so every call site
+  // can narrow `kv` non-null however it needs to before calling in.
+  async function attemptKeyFencedWrite(
+    store: ConditionalTextValueStore,
+    attemptKey: string,
+    attemptRecord: AuditRecord,
+    markerKey: string | undefined,
+    attemptsRemaining: number,
+  ): Promise<void> {
+    const preconditions = markerKey
+      ? [
+          { key: markerKey, expectedValue: null },
+          { key: attemptKey, expectedValue: null },
+        ]
+      : [{ key: attemptKey, expectedValue: null }];
+    const operations = markerKey
+      ? [
+          { type: 'set' as const, key: markerKey, value: attemptKey },
+          { type: 'set' as const, key: attemptKey, value: JSON.stringify(attemptRecord) },
+        ]
+      : [{ type: 'set' as const, key: attemptKey, value: JSON.stringify(attemptRecord) }];
+    const committed = await store.conditionalBatch(preconditions, operations);
+    if (committed) return;
+    // `committed === false` — distinguish WHICH precondition failed: the
+    // marker (benign — this exact fact was already recorded, by this call
+    // or a peer's) or the key (a collision with an UNRELATED record,
+    // needing a fresh key). Writes with no marker have only the key
+    // precondition, so any failure here is always a key collision.
+    if (markerKey && (await store.has(markerKey))) return;
+    if (attemptsRemaining <= 0) {
+      const target = markerKey
+        ? `dedupeKey "${markerKey.slice(DEDUPE_MARKER_PREFIX.length)}"`
+        : `run "${attemptRecord.runId}"`;
+      throw new Error(
+        `[audit-trail] Exhausted retries resolving an audit-record key collision for ${target}.`,
+      );
+    }
+    const nextSequence = allocateSequence();
+    const nextKey = encodeKey(attemptRecord.timestampMs, nextSequence, attemptRecord.runId);
+    const nextRecord: AuditRecord = { ...attemptRecord, sequence: nextSequence };
+    await attemptKeyFencedWrite(store, nextKey, nextRecord, markerKey, attemptsRemaining - 1);
   }
 
   // Subscribe to the bureau's action stream. The bureau re-emits every
@@ -912,6 +1029,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     const { action } = event;
     if (!auditEventSet.has(action.type)) return;
     if (!kv) return;
+    const store = kv;
     // AB-207: once the owner-issued signal aborts (Bureau's shutdown() has
     // begun), refuse new writes — a write already in flight (tracked below)
     // still runs to completion and `dispose()` still awaits it.
@@ -940,9 +1058,12 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // Fire-and-forget from the run's perspective: a write failure must never
     // crash the run, so nothing here is awaited inline. Tracked in
     // `activeWrites` so `dispose()` can await it (AB-207) instead of racing
-    // storage closure against a write still in flight.
+    // storage closure against a write still in flight. AB-391: routed
+    // through the SAME key-fenced, collision-retry path as every other
+    // writer in this file (see `attemptKeyFencedWrite`'s own doc comment) —
+    // this was the last remaining plain `kv.set` write.
     trackWrite(
-      kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
+      attemptKeyFencedWrite(store, key, record, undefined, 3).catch((error: unknown) => {
         diagnose({
           level: 'error',
           scope: 'audit-trail',
@@ -987,10 +1108,43 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       detail: unknown;
       principal?: string;
     },
-    writeOptions?: { strict?: boolean; bypassAbortCheck?: boolean; timestampMs?: number },
+    writeOptions?: {
+      strict?: boolean;
+      bypassAbortCheck?: boolean;
+      timestampMs?: number;
+      dedupeKey?: string;
+    },
   ): Promise<void> {
     if (!kv) return Promise.resolve();
-    if (!writeOptions?.bypassAbortCheck && signal?.aborted) return Promise.resolve();
+    // Narrowed once, right after the guard above, so every call below
+    // keeps `kv` typed non-null without repeating the check. `attemptKeyFencedWrite`
+    // (defined once, above, shared with the action-stream listener) takes
+    // it explicitly as `store`.
+    const store = kv;
+    if (!writeOptions?.bypassAbortCheck && signal?.aborted) {
+      // AB-391: a `dedupeKey` caller opted into this call's promise
+      // REJECTING on a genuine failure (see `dedupeKey`'s own doc
+      // comment) so it can leave its own outer unit of work — an outbox
+      // entry — unacknowledged and retry later. Resolving silently here,
+      // the way every OTHER out-of-band write does post-shutdown, would
+      // let `drainOutboxAttachmentEntry` acknowledge an entry whose audit
+      // write never actually happened: a late `SessionOutboxAppendedEvent`
+      // trigger (that listener carries no admission check of its own) can
+      // still reach this function after `shutdown()` aborts `signal`,
+      // and a silent no-write-no-error resolve here is indistinguishable
+      // from "already recorded, nothing to do" to that caller — exactly
+      // the durable-record loss this issue exists to close, just moved to
+      // a shutdown race instead of a crash. Every other caller (no
+      // `dedupeKey`) keeps the original silent-resolve behavior.
+      if (writeOptions?.dedupeKey !== undefined) {
+        return Promise.reject(
+          new Error(
+            `[audit-trail] Refusing dedupeKey-guarded write for "${writeOptions.dedupeKey}": the audit trail's shutdown signal is already aborted.`,
+          ),
+        );
+      }
+      return Promise.resolve();
+    }
 
     // AB-388: `writeOptions.timestampMs` lets the schedule-definition and
     // session-deletion listeners below stamp with the shared
@@ -1000,6 +1154,31 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // directly; `record()` and `prune()`'s summary have no event to share a
     // reading with) keeps the original per-write clock reading.
     const timestampMs = writeOptions?.timestampMs ?? runtime.clock.now();
+    // AB-391 (Codex P2 review finding, PR #601, "Reject invalid replay
+    // timestamps before formatting"): a caller-supplied `timestampMs` (the
+    // public `record()` option, or an `eventTimestamp` resolver reading) is
+    // typed `number`, which permits `NaN`, `Infinity`/`-Infinity`, or a
+    // finite value outside `Date`'s supported range. Forwarding any of
+    // those straight to `new Date(timestampMs).toISOString()` below throws
+    // — for the default best-effort path that breaks the documented
+    // never-rejects contract, and for a `dedupeKey`-guarded replay it fails
+    // identically on every retry, leaving the outbox entry pending forever
+    // with no way to self-heal. Caught here, before any write begins, and
+    // handled the same way every other caller-input validation boundary in
+    // this file does: a `strict`/`dedupeKey` write rejects with a clear
+    // error (mirroring the shutdown-abort rejection above); every other
+    // caller gets the default best-effort drop-and-diagnose.
+    if (!Number.isFinite(timestampMs) || Number.isNaN(new Date(timestampMs).getTime())) {
+      // `JSON.stringify` prints `null` for NaN/Infinity, which is exactly
+      // the confusing value this diagnostic exists to surface — `String()`
+      // prints "NaN"/"Infinity"/"-Infinity" as written.
+      const message = `[audit-trail] Refusing to record an audit entry with an invalid timestampMs (${String(timestampMs)}) for run "${entry.runId}".`;
+      if (writeOptions?.strict || writeOptions?.dedupeKey !== undefined) {
+        return Promise.reject(new Error(message));
+      }
+      diagnose({ level: 'error', scope: 'audit-trail', message });
+      return Promise.resolve();
+    }
     const sequence = allocateSequence();
 
     const record: AuditRecord = {
@@ -1013,7 +1192,75 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     };
 
     const key = encodeKey(timestampMs, sequence, entry.runId);
-    const rawWrite = kv.set(key, JSON.stringify(record));
+
+    // AB-391 (Codex review finding, PR #601, "Make attachment replay
+    // deduplication atomic"): `dedupeKey` routes this write through an
+    // atomic storage-level compare-and-swap instead of a plain `kv.set` —
+    // two callers racing to record the SAME `dedupeKey` (two Bureau
+    // processes both believing they hold the claim on one outbox entry
+    // after a lease-renewal race) can never both durably write, unlike a
+    // plain `kv.set` under a freshly minted `sequence`, which has no
+    // precondition at all. `conditionalBatch`'s own atomicity guarantee
+    // (the SAME guarantee `durable-event-history.ts`'s `dedupeKey` and
+    // this codebase's session outbox `claim()` both already rely on) means
+    // a caller that gets `committed: true` back knows the write already
+    // durably landed — no separate read-your-writes query needed. A
+    // caller that gets `committed: false` back knows a DIFFERENT writer
+    // (an earlier attempt by this same caller, or a peer) already recorded
+    // this exact fact; this function treats that as a successful no-op,
+    // never a duplicate write. This path REJECTS on a genuine storage
+    // failure — deliberately, unlike the default best-effort path below —
+    // because the one caller that supplies `dedupeKey`
+    // (`create-bureau.ts`'s `drainOutboxAttachmentEntry`) needs to know a
+    // write failed so it can leave its own outbox entry pending for a
+    // later retry, rather than silently swallowing it the way a
+    // fire-and-forget schedule/session out-of-band write does.
+    if (writeOptions?.dedupeKey !== undefined) {
+      const markerKey = `${DEDUPE_MARKER_PREFIX}${writeOptions.dedupeKey}`;
+      // See `attemptKeyFencedWrite`'s own doc comment above for the
+      // key-collision fencing this shares with the ordinary write path
+      // below.
+      const dedupedWrite = attemptKeyFencedWrite(store, key, record, markerKey, 3);
+      // AB-391 (Codex P2 review finding, PR #601, "Track deduplicated audit
+      // writes before returning"): unlike every other write path in this
+      // function, this branch used to return its write promise directly
+      // without ever calling `trackWrite` — a caller that started this call
+      // and then, without awaiting it, called `query({ runId })`,
+      // `runtime.deferred.drain()`, or `dispose()` could miss the in-flight
+      // write (a query racing ahead of it) or have storage torn down while
+      // `conditionalBatch` was still running. Tracked here via a
+      // NEVER-REJECTING derivative — mirroring the `strict` path just below
+      // — while the REJECTING promise itself is still what this function
+      // returns to the `dedupeKey` caller, which needs to observe a
+      // genuine failure (see this branch's own doc comment above).
+      trackWrite(
+        dedupedWrite.then(
+          () => undefined,
+          () => undefined,
+        ),
+        entry.runId,
+      );
+      return dedupedWrite;
+    }
+
+    // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+    // against deduplicated audit keys"): the collision fence above only
+    // protects a `dedupeKey`-guarded write from ANOTHER `dedupeKey`-guarded
+    // write racing on the same derived `key` — this ordinary path used to
+    // call the unconditional `kv.set(key, ...)` regardless, which can still
+    // silently overwrite a record a `dedupeKey` write already committed
+    // (two AuditTrail instances sharing the same sequence floor derive the
+    // same key for the same run/timestamp) while that write's dedupe
+    // marker survives untouched. A later replay then reads the marker as
+    // proof the fact was already recorded and never rewrites it —
+    // permanently losing the review audit while looking successful. Every
+    // ordinary write now goes through the SAME key-fenced, collision-retry
+    // path as a `dedupeKey` write (with no marker key of its own, so the
+    // fence is solely "is this exact key already occupied") — best-effort
+    // callers still never reject: retry exhaustion here degrades to
+    // diagnose-and-drop below, exactly like any other storage failure,
+    // rather than looping forever or silently overwriting.
+    const rawWrite = attemptKeyFencedWrite(store, key, record, undefined, 3);
 
     // Best-effort observability path: never rejects. This is what gets
     // tracked in `activeWrites`/`activeWritesByRunId` — `dispose()` awaits
@@ -1324,7 +1571,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
    * pathologically skewed clock on another instance remains a known,
    * accepted residual, consistent with this codebase's existing
    * cross-process residuals (see `create-bureau.ts`'s own
-   * `drainSessionOutbox` doc comment for an analogous ACCEPTED RESIDUAL).
+   * `drainOutbox` doc comment for an analogous ACCEPTED RESIDUAL).
    *
    * AB-388 (Codex review, PR #597, "Abort pruning when lease renewal
    * loses its CAS"): returns whether THIS pass still holds the lease
@@ -1509,10 +1756,104 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       candidates.push({ key, sequence: decoded.sequence, runId: decoded.runId });
     }
 
+    // AB-391 (Codex P2 review finding, PR #601, "Prune dedupe markers with
+    // expired audit records"): every `record({ dedupeKey })` write
+    // (`writeOutOfBandRecord`'s `dedupeKey` branch) leaves a permanent
+    // `audit-dedupe:v1:<dedupeKey>` marker behind — nothing else in this
+    // file ever deletes one, so without this, retention bounds the audit
+    // records themselves but not this marker family, which grows forever.
+    // RECONCILIATION, not a filter over this pass's own `candidates`: a
+    // marker's value is the key of the record it guards, so a marker whose
+    // named record no longer exists is orphaned regardless of whether THIS
+    // pass's delete loop below just removed that record, or an EARLIER
+    // pass crashed between deleting the record and deleting its marker —
+    // the latter could never be found again by matching against this
+    // pass's own candidate list, since an already-deleted record is gone
+    // from the `kv.list(PREFIX)` scan above and so never becomes a
+    // candidate a second time. Called from BOTH the "nothing qualified"
+    // early return just below AND after the delete loop further down —
+    // an orphan from an earlier pass can be the only work a pass has to do,
+    // so this must not be skipped just because `candidates` is empty here.
+    // Listing every marker every call matches this function's own existing
+    // cost profile (it already lists every `PREFIX` audit-record key every
+    // call, regardless of the retention floor). Best-effort and isolated in
+    // its own try/catch: a marker-cleanup failure must never turn an
+    // otherwise-successful record prune into a rejected pass, and marker
+    // deletions are deliberately never added to `prunedCount` — that count,
+    // and the `audit.pruned` summary it feeds, describe audit RECORDS
+    // pruned, not markers.
+    // AB-393 (Codex review, PR #600, "Renew the prune lease before
+    // deleting after async checks"): `RENEW_INTERVAL_MS` — a THIRD of the
+    // lease TTL — is declared here (rather than at its original site
+    // further below, next to the delete loop it was written for) so
+    // `reconcileOrphanedDedupeMarkers` can share the SAME elapsed-time
+    // renewal cadence (AB-391, Codex P2 review finding, PR #601, "Renew
+    // the prune lease during marker reconciliation") — one clock, one
+    // interval, for every unbounded loop this pass runs, rather than a
+    // count-based cadence that (as AB-393's own doc comment on the delete
+    // loop below explains) says nothing about actual wall-clock time when
+    // per-iteration work can itself be slow.
+    const RENEW_INTERVAL_MS = PRUNE_LEASE_TTL_MS / 3;
+
+    // AB-391 (Codex P2 review finding, PR #601, "Renew the prune lease
+    // during marker reconciliation"): this loop, like the record-delete
+    // loop further below, can run long enough on a trail with many
+    // markers to outlast the lease's TTL — without renewal, another
+    // instance could steal the lease mid-reconciliation, and this pass
+    // would carry on regardless (never re-checking), risking two
+    // instances both writing summaries, or this pass later blindly
+    // clearing the NEWER holder's own `PRUNE_INTENT_KEY`. Renewal is
+    // keyed off ELAPSED TIME since this call's own last successful
+    // renewal (`lastRenewalAtMs`, seeded fresh on EVERY call — this
+    // function can run before the delete loop's own lease-renewal clock
+    // even exists, from the "nothing qualified" early return below),
+    // matching AB-393's own rationale for the delete loop: a fixed marker
+    // count says nothing about how long a single `kv.get`/`kv.has` pair
+    // actually took. Returns `false` the moment a renewal loses its CAS,
+    // mirroring the delete loop's own "abort, do not proceed" contract —
+    // the caller decides what "abort" means for its own point in the
+    // pass (see both call sites below).
+    const reconcileOrphanedDedupeMarkers = async (): Promise<boolean> => {
+      try {
+        const markerKeys = await kv.list(DEDUPE_MARKER_PREFIX);
+        let lastRenewalAtMs = runtime.clock.now();
+        for (const markerKey of markerKeys) {
+          if (
+            leaseToken !== undefined &&
+            runtime.clock.now() - lastRenewalAtMs >= RENEW_INTERVAL_MS
+          ) {
+            if (!(await renewPruneLease(leaseToken))) {
+              return false;
+            }
+            lastRenewalAtMs = runtime.clock.now();
+          }
+          const recordKey = await kv.get(markerKey);
+          if (recordKey === null) continue;
+          if (await kv.has(recordKey)) continue;
+          await kv.delete(markerKey);
+        }
+        return true;
+      } catch (error: unknown) {
+        diagnose({
+          level: 'error',
+          scope: 'audit-trail',
+          message: '[audit-trail] Failed to reconcile orphaned dedupe markers during a prune pass:',
+          cause: error,
+        });
+        return true;
+      }
+    };
+
     // Nothing qualified — deliberately no `audit.pruned` record and no
     // floor update, so a pass that prunes nothing does not itself grow
-    // the trail it exists to bound.
-    if (candidates.length === 0) return { prunedCount: 0, cutoffMs };
+    // the trail it exists to bound. Marker reconciliation still runs,
+    // independent of that guarantee. A lost lease here means nothing else
+    // to protect — no `PRUNE_INTENT_KEY` has been written yet — so this
+    // simply stops rather than reporting an error.
+    if (candidates.length === 0) {
+      await reconcileOrphanedDedupeMarkers();
+      return { prunedCount: 0, cutoffMs };
+    }
 
     let highestPrunedSequence = -1;
     for (const candidate of candidates) {
@@ -1651,10 +1992,11 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // Checking elapsed time directly closes both: it doesn't matter how
     // many candidates were examined or how many were deleted, only how
     // long it has actually been since the lease was last confirmed held.
-    // Renewed at a THIRD of the TTL, not the whole TTL, so a check that
-    // fires right at the boundary still leaves real margin before the
-    // lease could actually expire.
-    const RENEW_INTERVAL_MS = PRUNE_LEASE_TTL_MS / 3;
+    // Renewed at a THIRD of the TTL (`RENEW_INTERVAL_MS`, declared above
+    // — hoisted, AB-391, Codex P2 review finding PR #601, so
+    // `reconcileOrphanedDedupeMarkers` can share the same interval), not
+    // the whole TTL, so a check that fires right at the boundary still
+    // leaves real margin before the lease could actually expire.
     let prunedCount = 0;
     let deleteError: Error | undefined;
     // AB-393 (Codex review, PR #600, "Preserve the successor's intent
@@ -1733,6 +2075,25 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         deleteError = error instanceof Error ? error : new Error(serializeUnknownError(error));
         break;
       }
+    }
+
+    // See `reconcileOrphanedDedupeMarkers`'s own doc comment above — called
+    // again here (not just from the early-return branch) so a marker for a
+    // record THIS pass's own delete loop just removed is also caught. Only
+    // when the delete loop above did not already lose the lease — that
+    // failure already stops this pass; running reconciliation against a
+    // lease this pass no longer holds would just risk the same collision
+    // its own renewal exists to prevent.
+    if (deleteError === undefined && !(await reconcileOrphanedDedupeMarkers())) {
+      // AB-391 (Codex P2 review finding, PR #601, "Renew the prune lease
+      // during marker reconciliation"): mirrors the delete loop's own
+      // "Abort pruning when lease renewal loses its CAS" handling
+      // (AB-388, Codex review, PR #597) — the watermark and any deletions
+      // already committed stay durable; only the summary write below is
+      // skipped this pass, exactly as a lost lease mid-delete-loop does.
+      deleteError = new Error(
+        'Aborting audit-trail prune pass: lost the prune lease during dedupe-marker reconciliation',
+      );
     }
 
     // AB-388 (Codex review, PR #597, "Skip summaries when no deletion
@@ -1865,8 +2226,13 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       type: string;
       detail: unknown;
       principal?: string;
+      timestampMs?: number;
+      dedupeKey?: string;
     }): Promise<void> {
-      await writeOutOfBandRecord(entry);
+      await writeOutOfBandRecord(entry, {
+        timestampMs: entry.timestampMs,
+        dedupeKey: entry.dedupeKey,
+      });
     },
 
     prune(

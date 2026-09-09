@@ -615,9 +615,29 @@ event itself. A caller that needs the actual `session.created`/`session.saved`/
 `session.deleted` facts must drain `outbox.pending()`, `claim()` each entry it
 intends to replay, replay it as the matching event, and acknowledge it only
 once that replay's own durable write has settled — Bureau's own drain loop
-(`drainSessionOutbox` in `create-bureau.ts`) does exactly this, run on the
-runtime clock inside the durable maintenance pass, right after each commit,
-and during boot recovery before serving reads.
+(`drainOutbox` in `create-bureau.ts`, generalized as of AB-391 to also
+replay `session.attachment` entries) does exactly this, run on the runtime
+clock inside the durable maintenance pass, right after each commit, and
+during boot recovery before serving reads.
+
+**Caller-supplied attachments (AB-391):** `update(id, updater, { outbox })`
+accepts a fourth `SessionOutboxEntry` variant a caller couples its own
+durable write to this commit with: `{ ordinal, kind: 'session.attachment',
+sessionId, incarnation, namespace, payload, committedAtMs }`, where
+`namespace`/`payload` are opaque to this store — interpreted only by
+whichever consumer recognizes the namespace it appended. `options.outbox`
+is a list of `{ namespace, payload }` pairs appended in the SAME
+`conditionalBatch` as the update's own body/summary/ordinal writes, at
+consecutive ordinals immediately after the update's own `session.created`/
+`session.saved` entry — never appended, and no ordinal consumed, when the
+updater declines to commit (returns `undefined`). Bureau uses this to
+couple a review-transition audit record to the session-store commit that
+resolves the review, under the `'audit-record'` namespace, so a crash
+between the two can no longer lose the audit record — see
+`packages/bureau/README.md`'s "Review-transition audit records ride the
+outbox" section.
+
+`update()` validates every `options.outbox` entry synchronously, before its `conditionalBatch` runs (Codex P2 review finding, PR #601, "Validate attachments before committing malformed outbox entries"): `namespace` must be a non-empty string and `payload` must be defined and JSON-serializable, or it throws `TypeError` immediately. This is the boundary that owns the contract — an untyped caller (or a value cast past `JSONValue`) passing `payload: undefined` would otherwise commit successfully (the session body and outbox ordinal both land), since `JSON.stringify` silently drops an `undefined`-valued key rather than erroring, but every LATER `outbox.pending()` call would then throw on that stored entry (`parseOutboxEntry` requires `payload`) — permanently blocking delivery of it and everything queued behind it, with no self-healing path short of manual storage repair. Validated attachments are then snapshotted (a JSON round-trip, which doubles as the serializability check) before `updater` runs (Codex P2 review finding, PR #601, "Snapshot attachments before invoking the updater") — `updater` is caller code, awaited across this method's own retry loop, and could otherwise mutate one of the SAME attachment objects (setting `payload` to `undefined`, say) after it passed validation but before `commit()` serializes it; the snapshot means only the validated values a caller actually gets back can ever be what commits.
 
 **Claim lease (AB-390):** `pending()` alone claims nothing — it is safe to
 call repeatedly and concurrently from multiple processes sharing one

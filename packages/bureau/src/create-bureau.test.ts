@@ -9912,6 +9912,65 @@ describe('createBureau review queue (AB-20)', () => {
 
     bureau.dispose();
   });
+
+  it('deleteRun prunes that run\'s entries out of the sibling resolvedReviewDecisions map too (Codex P2 review finding, PR #601, "Prune decision identities with resolved review IDs")', async () => {
+    // `resolvedReviewDecisions` (AB-391) is a sibling map to
+    // `resolvedReviewIds`, keyed by the exact same review ids — pruning one
+    // without the other leaves stale decision/principal/reason data behind
+    // forever for a deleted run on a long-lived session.
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'call-prune-decisions', name: 'charge-card', arguments: { cents: 500 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('prune-decisions-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      await bureau.resolveReview({
+        id: review.id,
+        decision: 'deny',
+        principal: 'api-key:prune-decisions-reviewer',
+        reason: 'pruning coverage',
+      });
+
+      const sessionBeforeDelete = await bureau.getSession(run.sessionId);
+      expect(sessionBeforeDelete?.metadata['resolvedReviewIds']).toContain(review.id);
+      expect(sessionBeforeDelete?.metadata['resolvedReviewDecisions']).toHaveProperty(review.id);
+
+      await bureau.deleteRun(run.id);
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        const decisions = session?.metadata['resolvedReviewDecisions'];
+        const hasStaleDecision =
+          typeof decisions === 'object' &&
+          decisions !== null &&
+          !Array.isArray(decisions) &&
+          Object.prototype.hasOwnProperty.call(decisions, review.id);
+        return !hasStaleDecision;
+      });
+
+      const sessionAfterDelete = await bureau.getSession(run.sessionId);
+      expect(sessionAfterDelete?.metadata['resolvedReviewIds'] ?? []).not.toContain(review.id);
+      expect(sessionAfterDelete?.metadata['resolvedReviewDecisions']).not.toHaveProperty(review.id);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });
 
 describe('createBureau review lifecycle (AB-46)', () => {
@@ -17975,7 +18034,7 @@ describe('AB-389 — session commit outbox', () => {
   it('drains a session outbox entry exactly once when the durable maintenance pass and the post-commit trigger overlap', async () => {
     // The coordinator ruling's own "no event is recorded twice when the
     // drain loop and the post-commit drain overlap" acceptance criterion.
-    // `drainSessionOutbox` is single-flighted — this test fires both
+    // `drainOutbox` is single-flighted — this test fires both
     // triggers for the SAME commit and asserts exactly one durable record
     // results, not two. SQLite, not memory: `bureau.eventHistory()` is
     // unsupported over an ephemeral backend.
@@ -18204,6 +18263,20 @@ describe('AB-389 — session commit outbox', () => {
         }
         return backingStore.set(key, value);
       },
+      // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+      // against deduplicated audit keys"): the session-deletion listener's
+      // out-of-band `session.deleted` audit record now commits through
+      // `conditionalBatch`'s key-collision fence rather than a plain
+      // `set` — mirrored here so this injected failure still reaches it.
+      conditionalBatch: async (conditions, operations) => {
+        if (
+          failAuditWrites &&
+          operations.some((operation) => operation.key.startsWith('audit:v1:'))
+        ) {
+          throw new Error('injected audit-trail write failure');
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
     });
     const runtime = createManualRuntimeServices();
     const diagnostics: string[] = [];
@@ -18398,6 +18471,732 @@ describe('AB-389 — session commit outbox', () => {
     } finally {
       await bureauA.dispose();
       await bureauB.dispose();
+    }
+  });
+});
+
+describe('AB-391 — review-transition audit records ride the session outbox', () => {
+  it('boot recovery drains a session.attachment outbox entry left pending by a crash, recording the audit trail entry exactly once (SQLite)', async () => {
+    // Simulates a review decision whose durable review-store commit landed
+    // (the `session.attachment` outbox entry this issue couples to it) but
+    // whose corresponding audit-trail write never ran — the exact crash
+    // window between the two the coordinator ruling closes. Committed
+    // through a STANDALONE `SessionStore`, with no `Bureau` alive to drain
+    // it, mirroring the AB-389 crash test above.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-391-crash-recovery-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const storage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    const runtime = createManualRuntimeServices();
+    const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
+
+    const standaloneSessionStore = createSessionStore(kv, { runtime });
+    const session = createAgentSession({
+      id: 'ab-391-crash-recovery-session',
+      agentName: 'triage',
+      conversationHistory: createConversationHistory({ id: 'ab-391-crash-recovery-session' }),
+    });
+    await standaloneSessionStore.save(session);
+
+    const reviewAuditPayload = {
+      runId: 'ab-391-crash-run',
+      type: 'review.tool-approval.approved',
+      detail: { review: { id: 'approval:ab-391-crash-run:call-1' }, decision: 'approve' },
+      principal: 'api-key:crash-reviewer',
+    };
+    await standaloneSessionStore.update(session.id, (existing) => existing, {
+      outbox: [{ namespace: 'audit-record', payload: reviewAuditPayload }],
+    });
+
+    const pendingBeforeRestart = await standaloneSessionStore.outbox.pending();
+    expect(pendingBeforeRestart.map((entry) => entry.kind)).toEqual([
+      'session.created',
+      'session.saved',
+      'session.attachment',
+    ]);
+
+    // "Restart": a fresh Bureau over the SAME storage. Boot recovery drains
+    // the outbox — including the attachment — before `waitForRecovery()`
+    // resolves.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage,
+      runtime,
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+
+      const records = await bureau.auditTrail!.query({ runId: reviewAuditPayload.runId });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.type).toBe(reviewAuditPayload.type);
+      expect(records[0]?.principal).toBe(reviewAuditPayload.principal);
+      expect(records[0]?.detail).toEqual(reviewAuditPayload.detail);
+
+      const recoveredSessionStore = bureau.sessionStore;
+      if (!recoveredSessionStore) throw new Error('expected a configured session store');
+      expect(await recoveredSessionStore.outbox.pending()).toHaveLength(0);
+
+      // Running maintenance again must not duplicate the already-recorded
+      // fact — the idempotency guard `drainOutboxAttachmentEntry` checks
+      // before writing.
+      await bureau.runDurableMaintenance();
+      const recordsAfterSecondPass = await bureau.auditTrail!.query({
+        runId: reviewAuditPayload.runId,
+      });
+      expect(recordsAfterSecondPass).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('resolveReview appends the decision audit record atomically with the review-resolution commit and getReview reconstructs it immediately, with no bureau restart', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'ab-391-live-call', name: 'charge-card', arguments: { cents: 500 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-live-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:ab-391-reviewer',
+      });
+      expect(outcome.decision).toBe('approve');
+
+      // Reconstructed from the audit trail with no further drain trigger —
+      // `resolveReview` itself drains the outbox before returning.
+      const resolved = await bureau.getReview(review.id);
+      expect(resolved?.status).toBe('approved');
+
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('leaves an unrecognized session.attachment namespace pending and UNCLAIMED, and stops the drain pass there rather than reordering past it (Codex P1 review finding, PR #601, "Stop before later ordinals when an attachment is unknown")', async () => {
+    // `SessionStore.update({ outbox })` is explicitly session-agnostic — a
+    // namespace this bureau does not recognize might still be meaningful to
+    // a different consumer that has not drained it yet. Acknowledging
+    // (permanently removing) it would silently discard that fact, and
+    // claiming it would starve that other consumer for as long as this
+    // bureau keeps renewing the claim on every maintenance tick — so this
+    // bureau never claims it at all. `SessionStore.outbox`'s own contract
+    // requires replay "exactly once, in ordinal order" (a STORE-WIDE
+    // ordinal), so this pass must also stop here rather than drain a LATER
+    // ordinal first — the earlier Copilot-review fix's "skip and keep
+    // going" behavior itself reordered past a still-pending fact, which is
+    // exactly what this test now guards against.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const firstSession = createAgentSession({
+        id: 'ab-391-unknown-namespace-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-unknown-namespace-session' }),
+      });
+      await sessionStore.save(firstSession);
+      // Ordinals 1–3: session.created, session.saved, session.attachment
+      // (the unrecognized namespace).
+      await sessionStore.update(firstSession.id, (existing) => existing, {
+        outbox: [{ namespace: 'future-consumer-fact', payload: { anything: true } }],
+      });
+      // Ordinal 4: a LATER entry this bureau fully recognizes.
+      const secondSession = createAgentSession({
+        id: 'ab-391-later-ordinal-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-later-ordinal-session' }),
+      });
+      await sessionStore.save(secondSession);
+
+      // Every commit above fires the best-effort drain trigger, so ordinals
+      // 1/2/4 may already be drained by the time this line runs — this
+      // test's actual claim is about the FINAL, settled state after an
+      // explicit maintenance pass, not the transient state in between.
+      await bureau.runDurableMaintenance();
+
+      const pendingAfterDrain = await sessionStore.outbox.pending();
+      // Ordinal 3 (the unrecognized namespace) is still pending — never
+      // dropped — and UNCLAIMED, so a different consumer could take it
+      // immediately. Ordinal 4 stays pending too: the pass stops AT the
+      // unrecognized ordinal rather than reordering past it, preserving
+      // `SessionStore.outbox`'s exactly-once-in-ordinal-order contract.
+      expect(pendingAfterDrain.map((entry) => entry.ordinal)).toEqual([3, 4]);
+      const attachment = pendingAfterDrain[0];
+      if (attachment?.kind !== 'session.attachment') {
+        throw new Error('expected a session.attachment outbox entry');
+      }
+      expect(attachment.namespace).toBe('future-consumer-fact');
+      expect(attachment.claim).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('acknowledges a session.attachment entry under the recognized namespace whose payload is malformed, without replaying it', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const session = createAgentSession({
+        id: 'ab-391-malformed-payload-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-malformed-payload-session' }),
+      });
+      await sessionStore.save(session);
+      // Missing `principal` — fails `isReviewAuditAttachmentPayload`.
+      await sessionStore.update(session.id, (existing) => existing, {
+        outbox: [
+          {
+            namespace: 'audit-record',
+            payload: {
+              runId: 'ab-391-malformed-run',
+              type: 'review.tool-approval.approved',
+              detail: {},
+            },
+          },
+        ],
+      });
+
+      await bureau.runDurableMaintenance();
+
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+      const records = await bureau.auditTrail!.query({ runId: 'ab-391-malformed-run' });
+      expect(records).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('the dedupeKey-guarded attachment write stays correct behind 500+ earlier same-runId/type records (Copilot review finding, PR #601, superseded by the atomic dedupeKey fix)', async () => {
+    // Copilot originally flagged that a read-before-write existence check
+    // scoped by `AuditTrail.query()`'s default `limit: 500` could miss the
+    // target record behind enough earlier same-`runId`/`type` history and
+    // duplicate the write. The fix that shipped goes further than
+    // rescoping that query (Codex flagged the read-then-write pattern
+    // itself as racy across processes — see the "Make attachment replay
+    // deduplication atomic" tests below): the attachment write now goes
+    // through `AuditTrail.record`'s atomic `dedupeKey`, which does not
+    // query existing history at all. This test keeps the original
+    // volume scenario as a regression guard for that superseded bug.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const runId = 'ab-391-dedup-limit-run';
+      const type = 'review.tool-approval.approved';
+      const floodCount = 500;
+      for (let index = 0; index < floodCount; index += 1) {
+        await bureau.auditTrail!.record({
+          runId,
+          type,
+          detail: { flood: index },
+          principal: 'api-key:flood',
+          timestampMs: 1_000 + index,
+        });
+      }
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const session = createAgentSession({
+        id: 'ab-391-dedup-limit-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-dedup-limit-session' }),
+      });
+      await sessionStore.save(session);
+      const targetPayload = {
+        runId,
+        type,
+        detail: { review: { id: `approval:${runId}:call-1` }, decision: 'approve' },
+        principal: 'api-key:limit-reviewer',
+      };
+      await sessionStore.update(session.id, (existing) => existing, {
+        outbox: [{ namespace: 'audit-record', payload: targetPayload }],
+      });
+
+      await bureau.runDurableMaintenance();
+
+      // The entry must be acknowledged — the atomic `dedupeKey` write
+      // landed regardless of how much unrelated same-runId/type history
+      // preceded it.
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+
+      const allMatching = await bureau.auditTrail!.query({ runId, type, limit: floodCount + 10 });
+      const targetRecords = allMatching.filter(
+        (record) => JSON.stringify(record.detail) === JSON.stringify(targetPayload.detail),
+      );
+      expect(targetRecords).toHaveLength(1);
+      expect(allMatching).toHaveLength(floodCount + 1);
+
+      // A second maintenance pass (nothing left pending) must not duplicate
+      // the record either.
+      await bureau.runDurableMaintenance();
+      const afterSecondPass = await bureau.auditTrail!.query({
+        runId,
+        type,
+        limit: floodCount + 10,
+      });
+      expect(afterSecondPass).toHaveLength(floodCount + 1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a review decision whose session vanished before the resolution commit still records an audit entry via the direct fallback write (Codex review finding, PR #601, "Detect when the resolution update appends nothing")', async () => {
+    // Simulates the session disappearing between this review being read
+    // and `persistReviewResolution`'s `sessionStore.update()` call —
+    // e.g. a concurrent caller deleting it through the exposed
+    // `bureau.sessionStore`. The updater returns `undefined` (nothing
+    // committed: neither the resolution NOR the coupled audit-record
+    // outbox attachment), so `persistReviewResolutionWithRetry` must
+    // report `false`, and `recordReviewDecision` must fall back to its
+    // own direct write — otherwise a successfully returned review
+    // decision would have no durable audit record at all.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'ab-391-vanish-call', name: 'charge-card', arguments: { cents: 500 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-vanish-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const deleted = await sessionStore.delete(review.sessionId);
+      expect(deleted).toBe(true);
+
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:vanish-reviewer',
+      });
+      expect(outcome.decision).toBe('approve');
+
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
+      expect(approvedRecords[0]?.principal).toBe('api-key:vanish-reviewer');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('isolates a post-commit outbox drain failure from resolveReview — the decision result and live event still land, and the audit record recovers on a later drain (Codex review finding, PR #601, "Isolate post-commit drain failures from review resolution")', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    let failAuditDedupeWriteOnce = false;
+    const persistence = createTextStoreProxy(backing, {
+      conditionalBatch: (conditions, operations) => {
+        const touchesAuditDedupe = conditions.some((condition) =>
+          condition.key.startsWith('audit-dedupe:v1:'),
+        );
+        if (touchesAuditDedupe && failAuditDedupeWriteOnce) {
+          failAuditDedupeWriteOnce = false;
+          return Promise.reject(new Error('storage unavailable during drain'));
+        }
+        return backing.conditionalBatch(conditions, operations);
+      },
+    });
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'ab-391-drain-fail-call', name: 'charge-card', arguments: { cents: 700 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-drain-fail-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      failAuditDedupeWriteOnce = true;
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:drain-fail-reviewer',
+      });
+      // The decision result must land even though the post-commit drain
+      // failed — the resolution itself already committed successfully.
+      expect(outcome.decision).toBe('approve');
+      expect(
+        diagnostics.some((message) => message.includes('Post-commit outbox drain failed')),
+      ).toBe(true);
+
+      // The audit record is not yet visible — the failed drain left the
+      // attachment pending rather than losing it.
+      const recordsBeforeRecovery = await bureau.auditTrail!.query({ runId: run.id });
+      expect(
+        recordsBeforeRecovery.filter((record) => record.type === 'review.tool-approval.approved'),
+      ).toHaveLength(0);
+
+      // A later drain (no longer failing) recovers it — exactly once.
+      await bureau.runDurableMaintenance();
+      const recordsAfterRecovery = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = recordsAfterRecovery.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('does not append a duplicate audit outbox entry when a review-resolution commit lands durably but the write call itself still rejects (Codex P1 review finding, PR #601, "Avoid reattaching audits after an ambiguous commit")', async () => {
+    // Simulates the fault-engine's own `fail-after-commit` boundary: the
+    // underlying `conditionalBatch` genuinely commits (the resolution AND
+    // its coupled `session.attachment` audit outbox entry both land), but
+    // the call back to `persistReviewResolution` still rejects — a lost
+    // acknowledgement. Without the fix, `persistReviewResolutionWithRetry`
+    // would call `persistReviewResolution` again, appending a SECOND,
+    // distinct `session.attachment` entry (a fresh ordinal — the
+    // `dedupeKey` mechanism has no way to know the two entries name the
+    // same underlying decision), producing two audit records for one
+    // review resolution once both drained.
+    const backing = textValueStore(new MemoryStorage());
+    let failOnceAfterRealCommit = false;
+    const persistence = createTextStoreProxy(backing, {
+      conditionalBatch: async (conditions, operations) => {
+        const isReviewResolutionCommit = operations.some(
+          (operation) =>
+            operation.type === 'set' && operation.value.includes('"namespace":"audit-record"'),
+        );
+        const committed = await backing.conditionalBatch(conditions, operations);
+        if (isReviewResolutionCommit && committed && failOnceAfterRealCommit) {
+          failOnceAfterRealCommit = false;
+          throw new Error('ambiguous failure: acknowledgement lost after a durable commit');
+        }
+        return committed;
+      },
+    });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'ab-391-ambiguous-call', name: 'charge-card', arguments: { cents: 500 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-ambiguous-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      failOnceAfterRealCommit = true;
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:ambiguous-reviewer',
+      });
+      // The retry recognized the review as already resolved and reported
+      // success without attempting a second commit.
+      expect(outcome.decision).toBe('approve');
+      expect(failOnceAfterRealCommit).toBe(false);
+
+      await bureau.runDurableMaintenance();
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('throws CONFLICT, dispatches no live event, and keeps the durable audit trail truthful when a DIFFERENT resolver already won the same review (Codex P1 review finding, PR #601, "Distinguish concurrent resolvers from commit retries")', async () => {
+    // Simulates the scenario the ambiguous-commit fix's OWN early-return
+    // could not distinguish from a self-retry: some OTHER commit — a
+    // second Bureau instance sharing this session store, or a foreign
+    // resolver of any kind — already durably recorded a DIFFERENT decision
+    // for this exact reviewId before this call's own commit runs.
+    // Committed directly through `bureau.sessionStore.update()` (not
+    // through `bureau.resolveReview()`), mirroring the standalone-store
+    // pattern the AB-390/AB-391 crash-recovery tests above use to commit
+    // "from outside" this bureau's own request path.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'ab-391-conflict-call', name: 'charge-card', arguments: { cents: 900 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-conflict-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      const approved: string[] = [];
+      const denied: string[] = [];
+      bureau.addEventListener('review.approved', (event) => approved.push(event.reviewId));
+      bureau.addEventListener('review.denied', (event) => denied.push(event.reviewId));
+
+      if (!bureau.sessionStore) throw new Error('Expected a configured session store');
+      await bureau.sessionStore.update(
+        review.sessionId,
+        (session) => {
+          if (!session) return session;
+          return {
+            ...session,
+            metadata: {
+              ...session.metadata,
+              resolvedReviewIds: [review.id],
+              resolvedReviewDecisions: {
+                [review.id]: {
+                  decision: 'deny',
+                  principal: 'api-key:foreign-resolver',
+                  reason: 'a different resolver already denied this',
+                },
+              },
+            },
+          };
+        },
+        {
+          outbox: [
+            {
+              namespace: 'audit-record',
+              payload: {
+                runId: run.id,
+                type: 'review.tool-approval.denied',
+                detail: {
+                  reviewId: review.id,
+                  decision: 'deny',
+                  reason: 'a different resolver already denied this',
+                },
+                principal: 'api-key:foreign-resolver',
+              },
+            },
+          ],
+        },
+      );
+
+      const error = await bureau
+        .resolveReview({
+          id: review.id,
+          decision: 'approve',
+          principal: 'api-key:conflicting-reviewer',
+        })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      expect((error as BureauError).message).toContain('deny');
+
+      // No live event for the decision that never actually landed, and
+      // none for the foreign one either — that decision was committed
+      // directly through the session store, not through this bureau's own
+      // `resolveReview`/`recordReviewDecision` path, so it dispatches no
+      // live event of its own; only the durable audit trail speaks for it.
+      expect(approved).toEqual([]);
+      expect(denied).toEqual([]);
+
+      await bureau.runDurableMaintenance();
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      const deniedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.denied',
+      );
+      // The sole durable record reflects the resolution that actually won
+      // — never a second, fabricated "approved" record for the caller
+      // whose commit was correctly refused.
+      expect(approvedRecords).toHaveLength(0);
+      expect(deniedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('fences a losing resolver BEFORE its irreversible action runs — the tool never executes when a different decision already won (Codex P1 review finding, PR #601, "Fence concurrent resolutions before performing the action")', async () => {
+    // Same foreign-decision setup as the test above, but this one proves
+    // the fix actually closes the gap Codex flagged: the PRIOR fix
+    // (`persistReviewResolution`'s own conflict detection) only ran AFTER
+    // `resumeApproval` — so a losing `approve` call could execute the tool
+    // before ever discovering a foreign `deny` already won. `charges` is a
+    // shared array the toolbox's `execute` pushes into; an empty array
+    // after the CONFLICT proves the tool call was never admitted.
+    const charges: number[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'ab-391-fence-call', name: 'charge-card', arguments: { cents: 750 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-fence-secret', charges),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      if (!bureau.sessionStore) throw new Error('Expected a configured session store');
+      await bureau.sessionStore.update(
+        review.sessionId,
+        (session) => {
+          if (!session) return session;
+          return {
+            ...session,
+            metadata: {
+              ...session.metadata,
+              resolvedReviewIds: [review.id],
+              resolvedReviewDecisions: {
+                [review.id]: {
+                  decision: 'deny',
+                  principal: 'api-key:foreign-fence-resolver',
+                  reason: 'a different resolver already denied this',
+                },
+              },
+            },
+          };
+        },
+        {
+          outbox: [
+            {
+              namespace: 'audit-record',
+              payload: {
+                runId: run.id,
+                type: 'review.tool-approval.denied',
+                detail: {
+                  reviewId: review.id,
+                  decision: 'deny',
+                  reason: 'a different resolver already denied this',
+                },
+                principal: 'api-key:foreign-fence-resolver',
+              },
+            },
+          ],
+        },
+      );
+
+      const error = await bureau
+        .resolveReview({
+          id: review.id,
+          decision: 'approve',
+          principal: 'api-key:losing-fence-reviewer',
+        })
+        .then(
+          () => undefined,
+          (rejection: unknown) => rejection,
+        );
+
+      expect(error).toBeInstanceOf(BureauError);
+      expect((error as BureauError).code).toBe('CONFLICT');
+      // The tool never ran: the fence rejected before `resumeApproval` (and
+      // therefore before tool execution) ever started.
+      expect(charges).toEqual([]);
+      // Two direct consequences of the fence rejecting BEFORE
+      // `persistApprovalResolutionStartedWithRetry`/`resumeApproval` ever
+      // ran: the crash-recovery marker was never written, and the
+      // review's original approval token is still the one on file — a
+      // losing call that had actually reached `resumeApproval` and gotten
+      // re-gated would have persisted a REPLACEMENT override with a
+      // different token instead.
+      const persistedSession = await bureau.getSession(review.sessionId);
+      expect(persistedSession?.metadata['approvalResolutionStartedIds'] ?? []).not.toContain(
+        review.id,
+      );
+      if (review.kind !== 'tool-approval') throw new Error('expected a tool-approval review');
+      const originalApprovalToken = review.approval.approvalToken;
+      if (originalApprovalToken === undefined) {
+        throw new Error('expected the review to carry a signed approval token');
+      }
+      expect(persistedApprovalToken(persistedSession, review.id)).toBe(originalApprovalToken);
+    } finally {
+      await bureau.dispose();
     }
   });
 });
@@ -18604,6 +19403,20 @@ describe('AB-390 — outbox claim lease', () => {
         }
         return backingStore.set(key, value);
       },
+      // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+      // against deduplicated audit keys"): the session-deletion listener's
+      // out-of-band `session.deleted` audit record now commits through
+      // `conditionalBatch`'s key-collision fence rather than a plain
+      // `set` — mirrored here so this write still gates as intended.
+      conditionalBatch: async (conditions, operations) => {
+        if (operations.some((operation) => operation.key.startsWith('audit:v1:'))) {
+          auditWriteStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseAuditWrite = resolve;
+          });
+        }
+        return backingStore.conditionalBatch(conditions, operations);
+      },
     });
     const runtime = createManualRuntimeServices();
     const bureau = await createBureau({
@@ -18684,7 +19497,7 @@ describe('AB-390 — outbox claim lease', () => {
     // Gated on the audit write already being in flight — never a raw call
     // count — so this targets ONLY the renewal timer's own `claim()` call
     // made WHILE the entry is held "in flight" behind that write, never
-    // `drainSessionOutboxPass`'s own initial claim (made before the audit
+    // `drainOutboxPass`'s own initial claim (made before the audit
     // write starts) or `pending()`'s unrelated reads of the same key.
     let failOutboxEntryGetOnceAuditWriteBlocks = false;
     const persistence = createTextStoreProxy(backingStore, {
@@ -18696,6 +19509,20 @@ describe('AB-390 — outbox claim lease', () => {
           });
         }
         return backingStore.set(key, value);
+      },
+      // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+      // against deduplicated audit keys"): the session-deletion listener's
+      // out-of-band `session.deleted` audit record now commits through
+      // `conditionalBatch`'s key-collision fence rather than a plain
+      // `set` — mirrored here so this write still gates as intended.
+      conditionalBatch: async (conditions, operations) => {
+        if (operations.some((operation) => operation.key.startsWith('audit:v1:'))) {
+          auditWriteStarted = true;
+          await new Promise<void>((resolve) => {
+            releaseAuditWrite = resolve;
+          });
+        }
+        return backingStore.conditionalBatch(conditions, operations);
       },
       get: async (key) => {
         if (
@@ -19001,7 +19828,7 @@ describe('AB-390 — outbox claim lease', () => {
 
   it('shutdown awaits a retry drain that already started before the retry timer was cleared (Codex P2 review finding, PR #599, "Await retry drains that have already fired during shutdown")', async () => {
     // The retry timer's callback can start running (calling
-    // `drainSessionOutbox()`, which sets `sessionOutboxDrainInFlight`
+    // `drainOutbox()`, which sets `outboxDrainInFlight`
     // synchronously) before `dispose()` reaches the point where it clears
     // that timer — `clearTimeout` cannot un-fire a callback that already
     // started. Without also awaiting the in-flight drain, `dispose()` would
@@ -19064,7 +19891,7 @@ describe('AB-390 — outbox claim lease', () => {
 
       // Advancing the clock fires the armed retry timer's callback
       // SYNCHRONOUSLY within this call (per `ManualRuntimeServices.advance`'s
-      // own contract) — `sessionOutboxDrainInFlight` is set before this
+      // own contract) — `outboxDrainInFlight` is set before this
       // `await` resolves, but the drain itself (several of its own awaited
       // storage calls) is not yet complete.
       await runtime.advance(LEASE_MS + 1);
@@ -19191,7 +20018,7 @@ describe('AB-390 — outbox claim lease', () => {
     // entry). Advancing the clock past entry one's expiry fires that retry
     // — the resulting drain reclaims and completes entry one, THEN reaches
     // entry two, finds the SECOND live peer's claim, and calls
-    // `scheduleSessionOutboxRetry` a second time — precisely the call this
+    // `scheduleOutboxRetry` a second time — precisely the call this
     // fix must refuse once shutdown has begun, since `dispose()` below is
     // invoked before that second drain has necessarily finished.
     const databasePath = join(
@@ -19274,11 +20101,11 @@ describe('AB-390 — outbox claim lease', () => {
       // Dispose immediately, with no further await letting that drain
       // settle on its own first — this is the exact window the finding
       // describes: shutdown's own timer-clear runs, then its await on
-      // `sessionOutboxDrainInFlight` overlaps the drain calling
-      // `scheduleSessionOutboxRetry` again for entry two.
+      // `outboxDrainInFlight` overlaps the drain calling
+      // `scheduleOutboxRetry` again for entry two.
       await bureau.dispose();
 
-      // The retry-triggered drain's own second `scheduleSessionOutboxRetry`
+      // The retry-triggered drain's own second `scheduleOutboxRetry`
       // call for entry two must have been REFUSED once shutdown closed
       // admission — no additional `setTimeout` call armed during (or after)
       // `dispose()` beyond whatever had already been armed before it.

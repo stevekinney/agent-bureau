@@ -1450,7 +1450,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // `SessionCreatedEvent`/`SessionSavedEvent`/`SessionDeletedEvent`
   // directly (that fire-and-forget dispatch is exactly the KNOWN
   // LIMITATION this issue closes — see `create-session-store.ts`'s own
-  // doc comment). A missed or duplicate trigger costs nothing: `drainSessionOutbox`
+  // doc comment). A missed or duplicate trigger costs nothing: `drainOutbox`
   // (defined below) is single-flighted and idempotent, and the durable
   // maintenance pass drains unconditionally on its own cadence regardless
   // of whether this trigger ever fires.
@@ -1464,7 +1464,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // durable-event-history write.
   if (runtime.sessionStore) {
     runtime.sessionStore.events.addEventListener(SessionOutboxAppendedEvent.type, () => {
-      const drain = drainSessionOutbox().catch((error: unknown) => {
+      const drain = drainOutbox().catch((error: unknown) => {
         diagnose({
           level: 'error',
           scope: 'durable-maintenance',
@@ -2117,6 +2117,49 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     });
   }
 
+  // ── AB-391: review-transition audit records ride the session outbox ──
+  //
+  // A review transition (`resolveReview`'s approve/deny/reject decision, or
+  // `resumeApproval`'s re-gate `superseded` transition) used to write its
+  // durable audit record via a separate, fire-and-forget
+  // `auditTrailInstance.record()` call AFTER the session-store commit that
+  // makes the transition itself durable (`persistReviewResolutionWithRetry`/
+  // `persistPendingApprovalOverrideWithRetry`). A crash between the two lost
+  // the audit record forever: the session commit already marks the review
+  // resolved, so nothing ever retries the write.
+  //
+  // The fix mirrors AB-389/AB-390's session commit outbox: the review
+  // transition's audit payload rides the SAME `conditionalBatch` as the
+  // session-store commit, as a `SessionOutboxEntry` of kind
+  // `'session.attachment'` (namespace `'audit-record'`) — see
+  // `SessionStore.update()`'s own `options.outbox` doc comment
+  // (`@lostgradient/operative`). `drainOutbox` (this file, generalized from
+  // the session-only `drainSessionOutbox`) replays it into the real audit
+  // trail exactly once, in the same ordinal order as every other outbox
+  // entry for that session, whether that happens promptly (this bureau is
+  // still alive) or after a restart.
+  type ReviewAuditAttachment = { runId: string; type: string; detail: unknown; principal: string };
+  const REVIEW_AUDIT_OUTBOX_NAMESPACE = 'audit-record';
+  function reviewAuditOutboxAttachment(
+    attachment: ReviewAuditAttachment | undefined,
+  ): readonly { namespace: string; payload: JSONValue }[] {
+    if (!attachment) return [];
+    return [
+      {
+        namespace: REVIEW_AUDIT_OUTBOX_NAMESPACE,
+        // `attachment.detail` is typed `unknown` to match `AuditTrail.record()`'s
+        // own `detail` field (a `PendingReview` snapshot plus decision/reason
+        // strings) — every existing out-of-band audit write already assumes
+        // this shape is JSON-safe and passes it straight to `JSON.stringify`
+        // with no further serialization (`writeOutOfBandRecord`), so this
+        // cast asserts nothing new; it only carries that same, already-relied-
+        // on assumption across the `SessionOutboxEntry.payload: JSONValue`
+        // boundary.
+        payload: attachment as unknown as JSONValue,
+      },
+    ];
+  }
+
   async function persistPendingApprovalOverride(
     sessionId: string,
     reviewId: string,
@@ -2342,69 +2385,209 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     reviewId: string,
     removePendingApproval: boolean,
     runId: string,
-  ): Promise<void> {
-    if (!runtime.sessionStore) return;
-    await runtime.sessionStore.update(sessionId, (session) => {
-      if (!session) return session;
-      const currentResolved = session.metadata['resolvedReviewIds'];
-      const resolvedReviewIds: string[] = [];
-      if (Array.isArray(currentResolved)) {
-        for (const id of currentResolved) {
-          if (typeof id === 'string') resolvedReviewIds.push(id);
+    // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+    // resolvers from commit retries"): this call's OWN decision identity,
+    // persisted alongside `resolvedReviewIds` (as `resolvedReviewDecisions`)
+    // so a later attempt that finds `reviewId` already resolved can tell
+    // apart two cases that both look identical from `resolvedReviewIds`
+    // alone: THIS SAME caller's own retry after an ambiguous commit (the
+    // persisted decision matches), versus a DIFFERENT resolver's genuinely
+    // different decision having already won a race (two Bureau instances
+    // sharing a session store, both resolving the same still-pending
+    // review). See the `resolvedReviewIds.includes(reviewId)` branch below.
+    decision: 'approve' | 'deny' | 'reject',
+    principal: string,
+    reason: string | undefined,
+    // AB-391: the decision's audit payload, appended as a `session.attachment`
+    // outbox entry in the SAME `conditionalBatch` as this function's own
+    // `sessionStore.update()` commit below — see `reviewAuditOutboxAttachment`.
+    // Unlike this function, `persistPendingApprovalOverride` (the
+    // tool-approval re-gate path) takes no such parameter: its commit writes
+    // the REPLACEMENT approval, and coupling the superseded review's own
+    // audit payload — which embeds its now-revoked ORIGINAL approval token —
+    // into that same batch would put both tokens in one commit, a real
+    // behavioral difference (see `recordReviewStatusTransition`'s own doc
+    // comment on the `superseded` branch).
+    auditAttachment?: ReviewAuditAttachment,
+    // AB-391 (Codex review finding, PR #601, "Detect when the resolution
+    // update appends nothing"): returns whether the `sessionStore.update()`
+    // call below actually committed — `false` when the updater returned
+    // `undefined` (e.g. the session was concurrently deleted between this
+    // review being read and this call running), in which case NEITHER the
+    // resolution NOR the coupled `auditAttachment` outbox entry was
+    // appended. A caller that ignored this return and unconditionally
+    // treated the audit record as "already appended" would suppress the
+    // fallback direct write in `recordReviewDecision` for a decision that
+    // in fact recorded no durable audit trace at all.
+  ): Promise<boolean> {
+    if (!runtime.sessionStore) return false;
+    // AB-391 (Codex P1 review finding, PR #601, "Avoid reattaching audits
+    // after an ambiguous commit"): set by the updater below when this
+    // `reviewId` is ALREADY present in the session's `resolvedReviewIds` —
+    // meaning some earlier commit already durably landed this exact
+    // decision (and its coupled audit attachment), most likely because a
+    // prior call's `conditionalBatch` committed but the call back still
+    // rejected (the fault-engine test helper's own `fail-after-commit`
+    // boundary names exactly this ambiguous outcome: a lost
+    // acknowledgement). The updater returns `undefined` in that case so
+    // `sessionStore.update()` never calls `commit()` at all — no re-commit,
+    // no second `session.attachment` outbox entry at a fresh ordinal (which
+    // would carry a distinct `dedupeKey` from the one the earlier commit
+    // already wrote, so the `dedupeKey` guard alone could not have caught
+    // it). Detected HERE, inside the updater, rather than via a separate
+    // read-then-decide check before retrying: the updater already reads the
+    // CAS-fresh session body on every attempt (including a fresh call from
+    // `persistReviewResolutionWithRetry`'s cleanup-pending retry path, not
+    // just an in-loop retry of THIS call), so this is the one place that
+    // sees every attempt's live state without an extra read.
+    let alreadyLanded = false;
+    let conflictingDecision: { decision?: string; principal?: string; reason?: string } | undefined;
+    const committed = await runtime.sessionStore.update(
+      sessionId,
+      (session) => {
+        if (!session) return session;
+        const currentResolved = session.metadata['resolvedReviewIds'];
+        const resolvedReviewIds: string[] = [];
+        if (Array.isArray(currentResolved)) {
+          for (const id of currentResolved) {
+            if (typeof id === 'string') resolvedReviewIds.push(id);
+          }
         }
-      }
-      const currentPending = session.metadata['pendingApprovalOverrides'];
-      let pendingApprovalOverrides = currentPending;
-      if (
-        removePendingApproval &&
-        typeof currentPending === 'object' &&
-        currentPending !== null &&
-        !Array.isArray(currentPending)
-      ) {
-        const { [reviewId]: _removed, ...remaining } = currentPending as Record<string, JSONValue>;
-        pendingApprovalOverrides = remaining;
-      }
-      const run = store.getRun(runId);
-      let hasRemainingReviews = false;
-      for (const review of listPendingReviews()) {
-        if (review.runId !== runId) continue;
-        hasRemainingReviews = true;
-        break;
-      }
-      let lastRequestAuthorities = session.metadata['lastRequestAuthorities'];
-      if (
-        run &&
-        run.status !== 'running' &&
-        !hasRemainingReviews &&
-        typeof lastRequestAuthorities === 'object' &&
-        lastRequestAuthorities !== null &&
-        !Array.isArray(lastRequestAuthorities)
-      ) {
-        const { [runId]: _removed, ...remainingAuthorities } = lastRequestAuthorities as Record<
-          string,
-          JSONValue
-        >;
-        lastRequestAuthorities = remainingAuthorities;
-      }
-      return {
-        ...session,
-        metadata: {
-          ...session.metadata,
-          approvalResolutionStartedIds: Array.isArray(
-            session.metadata['approvalResolutionStartedIds'],
-          )
-            ? omitStringValue(session.metadata['approvalResolutionStartedIds'], reviewId)
-            : [],
-          resolvedReviewIds: resolvedReviewIds.includes(reviewId)
-            ? resolvedReviewIds
-            : [...resolvedReviewIds, reviewId],
-          ...(removePendingApproval ? { pendingApprovalOverrides } : {}),
-          ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
-            ? { lastRequestAuthorities }
-            : {}),
-        },
-      };
-    });
+        if (resolvedReviewIds.includes(reviewId)) {
+          // AB-391 (Codex P1 review finding, PR #601, "Distinguish
+          // concurrent resolvers from commit retries"): `resolvedReviewIds`
+          // alone cannot tell this call's own ambiguous-commit retry apart
+          // from a DIFFERENT resolver's already-won, genuinely different
+          // decision — both look identical here. Compare against the
+          // persisted decision identity instead. A resolution recorded
+          // before this field existed (`prior === undefined`) is treated as
+          // benign/own-retry, matching this fix's own backward-compatible
+          // default.
+          const currentDecisionsRaw = session.metadata['resolvedReviewDecisions'];
+          const currentDecisions: Record<string, JSONValue> =
+            typeof currentDecisionsRaw === 'object' &&
+            currentDecisionsRaw !== null &&
+            !Array.isArray(currentDecisionsRaw)
+              ? (currentDecisionsRaw as Record<string, JSONValue>)
+              : {};
+          const priorRaw = currentDecisions[reviewId];
+          const prior =
+            typeof priorRaw === 'object' && priorRaw !== null && !Array.isArray(priorRaw)
+              ? (priorRaw as Record<string, JSONValue>)
+              : undefined;
+          if (prior !== undefined) {
+            const priorDecision =
+              typeof prior['decision'] === 'string' ? prior['decision'] : undefined;
+            const priorPrincipal =
+              typeof prior['principal'] === 'string' ? prior['principal'] : undefined;
+            const priorReason = typeof prior['reason'] === 'string' ? prior['reason'] : undefined;
+            const isSameDecision =
+              priorDecision === decision && priorPrincipal === principal && priorReason === reason;
+            if (!isSameDecision) {
+              conflictingDecision = {
+                ...(priorDecision !== undefined ? { decision: priorDecision } : {}),
+                ...(priorPrincipal !== undefined ? { principal: priorPrincipal } : {}),
+                ...(priorReason !== undefined ? { reason: priorReason } : {}),
+              };
+              return undefined;
+            }
+          }
+          alreadyLanded = true;
+          return undefined;
+        }
+        const currentPending = session.metadata['pendingApprovalOverrides'];
+        let pendingApprovalOverrides = currentPending;
+        if (
+          removePendingApproval &&
+          typeof currentPending === 'object' &&
+          currentPending !== null &&
+          !Array.isArray(currentPending)
+        ) {
+          const { [reviewId]: _removed, ...remaining } = currentPending as Record<
+            string,
+            JSONValue
+          >;
+          pendingApprovalOverrides = remaining;
+        }
+        const run = store.getRun(runId);
+        let hasRemainingReviews = false;
+        for (const review of listPendingReviews()) {
+          if (review.runId !== runId) continue;
+          hasRemainingReviews = true;
+          break;
+        }
+        let lastRequestAuthorities = session.metadata['lastRequestAuthorities'];
+        if (
+          run &&
+          run.status !== 'running' &&
+          !hasRemainingReviews &&
+          typeof lastRequestAuthorities === 'object' &&
+          lastRequestAuthorities !== null &&
+          !Array.isArray(lastRequestAuthorities)
+        ) {
+          const { [runId]: _removed, ...remainingAuthorities } = lastRequestAuthorities as Record<
+            string,
+            JSONValue
+          >;
+          lastRequestAuthorities = remainingAuthorities;
+        }
+        return {
+          ...session,
+          metadata: {
+            ...session.metadata,
+            approvalResolutionStartedIds: Array.isArray(
+              session.metadata['approvalResolutionStartedIds'],
+            )
+              ? omitStringValue(session.metadata['approvalResolutionStartedIds'], reviewId)
+              : [],
+            // `resolvedReviewIds` is guaranteed to NOT already include
+            // `reviewId` here — the `alreadyLanded`/`conflictingDecision`
+            // early returns above handle that case before this object is
+            // ever built.
+            resolvedReviewIds: [...resolvedReviewIds, reviewId],
+            // AB-391: this call's own decision identity, persisted so a
+            // LATER attempt that finds `reviewId` already resolved can
+            // compare against it — see the `resolvedReviewIds.includes`
+            // branch above.
+            resolvedReviewDecisions: {
+              ...(typeof session.metadata['resolvedReviewDecisions'] === 'object' &&
+              session.metadata['resolvedReviewDecisions'] !== null &&
+              !Array.isArray(session.metadata['resolvedReviewDecisions'])
+                ? session.metadata['resolvedReviewDecisions']
+                : {}),
+              [reviewId]: {
+                decision,
+                principal,
+                ...(reason !== undefined ? { reason } : {}),
+              },
+            },
+            ...(removePendingApproval ? { pendingApprovalOverrides } : {}),
+            ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
+              ? { lastRequestAuthorities }
+              : {}),
+          },
+        };
+      },
+      { outbox: reviewAuditOutboxAttachment(auditAttachment) },
+    );
+    if (conflictingDecision) {
+      // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+      // resolvers from commit retries"): a DIFFERENT resolver's decision
+      // already durably won this review — this call made no partial
+      // commitment of its own (the updater returned `undefined` before
+      // building any candidate object), so reporting a fabricated success
+      // here (the pre-fix behavior) would return a result, and dispatch a
+      // live event, contradicting the sole durable audit record. Mirrors
+      // the existing `reviewResolutionCleanupPending` CONFLICT shape
+      // (`resolveReview`'s own "already resolved" throw) rather than
+      // inventing a new error shape for the same underlying situation.
+      throw new BureauError(
+        `Review "${reviewId}" was already resolved as "${conflictingDecision.decision ?? 'unknown'}" by a different resolver`,
+        'CONFLICT',
+      );
+    }
+    if (alreadyLanded) return true;
+    return committed !== undefined;
   }
 
   async function persistReviewResolutionWithRetry(
@@ -2412,13 +2595,38 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     reviewId: string,
     removePendingApproval: boolean,
     runId: string,
-  ): Promise<void> {
+    decision: 'approve' | 'deny' | 'reject',
+    principal: string,
+    reason: string | undefined,
+    auditAttachment?: ReviewAuditAttachment,
+    // AB-391: see `persistReviewResolution`'s own doc comment on this
+    // return value, including its `alreadyLanded` handling of an ambiguous
+    // prior commit — that check runs on EVERY call to
+    // `persistReviewResolution` below, including a retry in this loop AND a
+    // wholly separate later call from the `reviewResolutionCleanupPending`
+    // path, so this loop itself needs no extra ambiguous-commit handling of
+    // its own.
+  ): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
       try {
-        await persistReviewResolution(sessionId, reviewId, removePendingApproval, runId);
-        return;
+        return await persistReviewResolution(
+          sessionId,
+          reviewId,
+          removePendingApproval,
+          runId,
+          decision,
+          principal,
+          reason,
+          auditAttachment,
+        );
       } catch (error) {
+        // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+        // resolvers from commit retries"): a genuine CONFLICT — a DIFFERENT
+        // resolver's decision already durably won — is not transient, so
+        // retrying would only re-throw the identical CONFLICT again. Fail
+        // fast instead of burning the remaining attempts and their sleeps.
+        if (error instanceof BureauError && error.code === 'CONFLICT') throw error;
         lastError = error;
         if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
           await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
@@ -2436,18 +2644,34 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     await runtime.sessionStore.update(sessionId, (session) => {
       if (!session) return session;
       const current = session.metadata['resolvedReviewIds'];
-      if (!Array.isArray(current)) return session;
+      const currentDecisions = session.metadata['resolvedReviewDecisions'];
+      const hasDecisions =
+        typeof currentDecisions === 'object' &&
+        currentDecisions !== null &&
+        !Array.isArray(currentDecisions);
+      if (!Array.isArray(current) && !hasDecisions) return session;
       const remainingReviewIds: string[] = [];
-      for (const id of current) {
-        if (typeof id === 'string' && !id.startsWith(reviewIdPrefix)) {
-          remainingReviewIds.push(id);
+      if (Array.isArray(current)) {
+        for (const id of current) {
+          if (typeof id === 'string' && !id.startsWith(reviewIdPrefix)) {
+            remainingReviewIds.push(id);
+          }
         }
       }
+      // AB-391 (Codex P2 review finding, PR #601, "Prune decision identities
+      // with resolved review IDs"): `resolvedReviewDecisions` is a sibling
+      // map keyed by the same review ids as `resolvedReviewIds` — pruning
+      // one without the other leaves stale decision/principal/reason data
+      // for deleted runs behind forever in a long-lived session.
+      const remainingDecisions = hasDecisions
+        ? omitKeysWithPrefix(currentDecisions as Record<string, JSONValue>, reviewIdPrefix)
+        : currentDecisions;
       return {
         ...session,
         metadata: {
           ...session.metadata,
-          resolvedReviewIds: remainingReviewIds,
+          ...(Array.isArray(current) ? { resolvedReviewIds: remainingReviewIds } : {}),
+          ...(hasDecisions ? { resolvedReviewDecisions: remainingDecisions } : {}),
         },
       };
     });
@@ -4260,7 +4484,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // else in this pass, so a crash between a commit and its own drain
     // (the post-commit trigger never fired, or fired but the process died
     // before the durable write settled) is caught up before this bureau
-    // serves reads. `drainSessionOutbox()` is a no-op when there is no
+    // serves reads. `drainOutbox()` is a no-op when there is no
     // session store or no durable event history to drain into, so this
     // runs unconditionally, ahead of the `!runtime.durable` early return
     // below (a kv-only session store with no durable engine still has an
@@ -4276,7 +4500,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // durable run for the lifetime of this Bureau over an unrelated
     // subsystem's failure.
     try {
-      await drainSessionOutbox();
+      await drainOutbox();
     } catch (error) {
       diagnose({
         level: 'error',
@@ -5259,20 +5483,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // claims nothing (see its own doc comment), but every entry this drain
   // replays is now claimed first via `outbox.claim()`, a compare-and-swap
   // on the entry's own `claim` field keyed by THIS bureau instance's own
-  // `sessionOutboxDrainOwner` id and `runtimeServices.clock.now()`. Two
+  // `outboxDrainOwner` id and `runtimeServices.clock.now()`. Two
   // bureau processes whose maintenance ticks (or simultaneous boot
   // recoveries) both observe the same still-unacknowledged entry can no
   // longer both dispatch it: only the one whose `claim()` call wins the CAS
   // proceeds, and `acknowledge()` itself re-verifies that claim is still
   // held before removing the entry. A drainer that crashes between winning
   // a claim and acknowledging leaves the entry claimed but undelivered
-  // until its own `claim.until` lease lapses — `drainSessionOutboxPass`
+  // until its own `claim.until` lease lapses — `drainOutboxPass`
   // stops at the first entry it fails to claim (never skips ahead to a
   // later ordinal) so a live peer's in-order replay is never reordered by a
   // stalled one, and a later drain (this same process's own next tick, or a
   // peer's) reclaims and completes it once `until` passes.
   //
-  // `sessionOutboxDrainOwner` is minted once per bureau instance (not per
+  // `outboxDrainOwner` is minted once per bureau instance (not per
   // drain pass) so a renewed claim from a LATER pass in this same process
   // is recognized as "the owner I already am", never treated as a foreign
   // claim — see `SessionStore.outbox.claim()`'s own doc comment on why
@@ -5294,7 +5518,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // regardless of injected determinism, never serialized into any
   // reproduction artifact, run report, or other reproducible-output
   // surface this codebase's determinism guarantees actually cover.
-  const sessionOutboxDrainOwner = `${runtimeServices.identifiers.next('session-outbox-drainer')}:${generateSessionOutboxDrainOwnerSuffix()}`;
+  const outboxDrainOwner = `${runtimeServices.identifiers.next('session-outbox-drainer')}:${generateSessionOutboxDrainOwnerSuffix()}`;
   // How long a claim protects an entry from being reclaimed by a different
   // drainer. Long enough to comfortably cover one pass's durable-write wait
   // (`waitForActiveWrites`) under ordinary load; short enough that a
@@ -5302,11 +5526,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // `BureauOptions` knob for the same reason `AUTOMATIC_RUN_OWNERSHIP_PRUNE_INTERVAL_MS`
   // above is not one — the issue's acceptance criteria name no configurable
   // lease duration.
-  const SESSION_OUTBOX_CLAIM_LEASE_MS = 30_000;
+  const OUTBOX_CLAIM_LEASE_MS = 30_000;
   // How often the renewal timer (below) extends an in-progress claim.
   // Comfortably shorter than the lease itself so a renewal always lands
   // well before the PRIOR grant would expire, even under one slow tick.
-  const SESSION_OUTBOX_CLAIM_RENEWAL_INTERVAL_MS = Math.floor(SESSION_OUTBOX_CLAIM_LEASE_MS / 3);
+  const OUTBOX_CLAIM_RENEWAL_INTERVAL_MS = Math.floor(OUTBOX_CLAIM_LEASE_MS / 3);
   // Codex P1 review finding, PR #599, "Schedule a retry when a live claim
   // blocks recovery": when this drainer loses a `claim()` to a peer whose
   // lease has not yet expired, the ONLY built-in retry today is whichever
@@ -5322,10 +5546,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // `RuntimeTimeoutHandle` is `unknown` (lifecycle's own opaque-handle
   // type, see `automaticRunOwnershipPruneTimer` below for the same note),
   // so it cannot be distinguished from `undefined` by type alone —
-  // `sessionOutboxRetryTimerArmedForMs`'s own `undefined`/set state is the
+  // `outboxRetryTimerArmedForMs`'s own `undefined`/set state is the
   // single source of truth for whether this handle holds a live timer.
-  let sessionOutboxRetryTimerHandle: RuntimeTimeoutHandle;
-  let sessionOutboxRetryTimerArmedForMs: number | undefined;
+  let outboxRetryTimerHandle: RuntimeTimeoutHandle;
+  let outboxRetryTimerArmedForMs: number | undefined;
   // Codex P1 review finding, PR #599, "Cap retry delays before passing them
   // to setTimeout": `atMs` comes from a WINNING peer's own `claim.until` —
   // which this bureau does not control (`outbox.claim()` is a public
@@ -5339,9 +5563,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // delay and re-checking the remaining time on each capped fire closes
   // this without ever passing an out-of-range delay to a real timer.
   const MAXIMUM_SETTIMEOUT_DELAY_MS = 2_147_483_647;
-  function scheduleSessionOutboxRetry(atMs: number): void {
+  function scheduleOutboxRetry(atMs: number): void {
     // Codex P2 review finding, PR #599, "Clear retry timers armed by the
-    // drain awaited at shutdown": shutdown's own `sessionOutboxDrainInFlight`
+    // drain awaited at shutdown": shutdown's own `outboxDrainInFlight`
     // await (below) can let an in-flight drain reach a peer-owned entry and
     // call back into this function AFTER shutdown already cleared any
     // PRIOR retry timer but BEFORE that await resolves — arming a NEW timer
@@ -5351,33 +5575,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // checking it here closes retry admission for the rest of shutdown
     // rather than requiring shutdown to clear the timer a second time.
     if (maintenanceAdmissionClosed) return;
-    if (
-      sessionOutboxRetryTimerArmedForMs !== undefined &&
-      sessionOutboxRetryTimerArmedForMs <= atMs
-    ) {
+    if (outboxRetryTimerArmedForMs !== undefined && outboxRetryTimerArmedForMs <= atMs) {
       // An earlier (or equal) retry is already armed — it covers this
       // case too, since a fresh drain pass re-evaluates from scratch.
       return;
     }
-    if (sessionOutboxRetryTimerArmedForMs !== undefined) {
-      runtimeServices.timers.clearTimeout(sessionOutboxRetryTimerHandle);
+    if (outboxRetryTimerArmedForMs !== undefined) {
+      runtimeServices.timers.clearTimeout(outboxRetryTimerHandle);
     }
-    sessionOutboxRetryTimerArmedForMs = atMs;
+    outboxRetryTimerArmedForMs = atMs;
     const remainingMs = Math.max(0, atMs - runtimeServices.clock.now());
     const delayMs = Math.min(remainingMs, MAXIMUM_SETTIMEOUT_DELAY_MS);
-    sessionOutboxRetryTimerHandle = runtimeServices.timers.setTimeout(() => {
+    outboxRetryTimerHandle = runtimeServices.timers.setTimeout(() => {
       // The delay above may have been CAPPED rather than the real
       // remaining wait — if `atMs` has not actually arrived yet, this fire
       // is early: re-arm for the (now shorter) remaining time instead of
-      // draining prematurely. `sessionOutboxRetryTimerArmedForMs` is
+      // draining prematurely. `outboxRetryTimerArmedForMs` is
       // cleared first so the re-arm below is not refused as a no-op by
       // this same function's own "earlier retry already armed" guard.
-      sessionOutboxRetryTimerArmedForMs = undefined;
+      outboxRetryTimerArmedForMs = undefined;
       if (runtimeServices.clock.now() < atMs) {
-        scheduleSessionOutboxRetry(atMs);
+        scheduleOutboxRetry(atMs);
         return;
       }
-      drainSessionOutbox().catch((error: unknown) => {
+      drainOutbox().catch((error: unknown) => {
         diagnose({
           level: 'error',
           scope: 'durable-maintenance',
@@ -5386,12 +5607,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
     }, delayMs);
   }
-  let sessionOutboxDrainInFlight: Promise<void> | undefined;
+  let outboxDrainInFlight: Promise<void> | undefined;
   // AB-389 (Codex P2 review finding, PR #598, "Re-run the drain when a
   // commit joins its completion edge"): a commit's trigger can arrive
   // exactly when an in-flight drain's last `pending()` call has already
   // returned empty and is about to return — that trigger's call below
-  // joins `sessionOutboxDrainInFlight` (a promise already committed to
+  // joins `outboxDrainInFlight` (a promise already committed to
   // resolving), so its own newly-appended entry would otherwise sit
   // undrained until a later, unrelated trigger or maintenance tick (and
   // `performDeleteSession`'s own explicit await would return without the
@@ -5400,11 +5621,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // in-flight drain itself right after its own pending-loop exits but
   // before it actually returns: any join that happens in that narrow
   // window forces one more full pass rather than being silently dropped.
-  let sessionOutboxDrainRerunRequested = false;
-  async function drainSessionOutbox(): Promise<void> {
-    if (sessionOutboxDrainInFlight) {
-      sessionOutboxDrainRerunRequested = true;
-      return sessionOutboxDrainInFlight;
+  let outboxDrainRerunRequested = false;
+  async function drainOutbox(): Promise<void> {
+    if (outboxDrainInFlight) {
+      outboxDrainRerunRequested = true;
+      return outboxDrainInFlight;
     }
     // AB-389 (Codex P2 review finding, PR #598, "Recheck rerun requests
     // after the drain promise resolves"): the in-flight guard is cleared
@@ -5414,9 +5635,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // That extra layer used to introduce a real gap: the do-while exiting
     // (this promise settling) and the CALLER's `await drain` resuming to
     // run its own `finally` are two different microtask turns, and a
-    // joiner's `drainSessionOutbox()` call landing in between would see
-    // `sessionOutboxDrainInFlight` still set, join this ALREADY-SETTLING
-    // promise, and set `sessionOutboxDrainRerunRequested` — a flag nothing
+    // joiner's `drainOutbox()` call landing in between would see
+    // `outboxDrainInFlight` still set, join this ALREADY-SETTLING
+    // promise, and set `outboxDrainRerunRequested` — a flag nothing
     // would ever check again, since the do-while had already exited. With
     // the guard cleared here instead, there is no such gap: everything
     // from the do-while's condition evaluating false through this
@@ -5425,7 +5646,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // execute in between — it can only ever land during the single
     // `await` inside the loop, which the do-while's own re-check already
     // catches.
-    sessionOutboxDrainInFlight = (async (): Promise<void> => {
+    outboxDrainInFlight = (async (): Promise<void> => {
       try {
         const outboxSessionStore = runtime.sessionStore;
         // Draining and dispatching happens whenever there is a session
@@ -5447,23 +5668,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         if (!outboxSessionStore) return;
         const producer = durableEventProducerInstance;
         do {
-          sessionOutboxDrainRerunRequested = false;
+          outboxDrainRerunRequested = false;
           // Loop until one full pass finds nothing pending — an entry
           // appended by a commit that lands WHILE this pass is draining is
           // picked up by THIS pass rather than left for the next trigger.
-          await drainSessionOutboxPass(outboxSessionStore, producer);
+          await drainOutboxPass(outboxSessionStore, producer);
           // Re-checked with no `await` between the pass above returning
           // and this read, so a join that set the flag at any point up to
           // and including this exact moment is observed.
-        } while (sessionOutboxDrainRerunRequested);
+        } while (outboxDrainRerunRequested);
       } finally {
-        sessionOutboxDrainInFlight = undefined;
+        outboxDrainInFlight = undefined;
       }
     })();
-    await sessionOutboxDrainInFlight;
+    await outboxDrainInFlight;
   }
 
-  async function drainSessionOutboxPass(
+  async function drainOutboxPass(
     outboxSessionStore: SessionStore,
     producer: DurableEventProducer | undefined,
   ): Promise<void> {
@@ -5471,8 +5692,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       const pending: readonly SessionOutboxEntry[] = await outboxSessionStore.outbox.pending();
       if (pending.length === 0) return;
       for (const entry of pending) {
+        // AB-391 (Codex P1 review finding, PR #601, "Stop before later
+        // ordinals when an attachment is unknown"): `SessionStore.outbox`'s
+        // own contract (`packages/operative/src/session/types.ts`) requires
+        // replay "exactly once, in ordinal order" — a STORE-WIDE ordinal,
+        // never a per-session one. An entry under a `session.attachment`
+        // namespace THIS bureau version does not recognize may still be
+        // meaningful to a different consumer (a future bureau version, or
+        // a peer instance running one) that has not drained it yet, so it
+        // is left pending rather than dropped — but letting this pass
+        // advance PAST it to a later ordinal (the prior fix's `continue`)
+        // breaks that same ordinal-order contract: a later `session.saved`
+        // or `session.deleted` could reach durable history before an
+        // earlier fact a peer's own consumer has not replayed yet. Stopping
+        // the WHOLE pass here — exactly like the claim-contention branch
+        // below — is the only way to leave an entry pending without also
+        // reordering everything after it. A later trigger (this process's
+        // own next tick, or a peer's) gets a fresh look at it.
+        if (
+          entry.kind === 'session.attachment' &&
+          entry.namespace !== REVIEW_AUDIT_OUTBOX_NAMESPACE
+        ) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Unrecognized session.attachment outbox entry namespace "${entry.namespace}" (ordinal ${entry.ordinal}); stopping this drain pass here, leaving it and every later ordinal pending, rather than dropping it or reordering past it, in case a different consumer recognizes it.`,
+          });
+          return;
+        }
         // AB-390 — claim before replaying. A peer (this process's own
-        // overlapping pass is impossible: `drainSessionOutbox` is
+        // overlapping pass is impossible: `drainOutbox` is
         // single-flighted above; "peer" here means a DIFFERENT bureau
         // process sharing this backend) may already hold an unexpired
         // claim on this exact entry. Stopping the WHOLE pass here, rather
@@ -5483,8 +5732,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // process's own next tick, or the peer finishing its own drain —
         // picks up where this pass stopped.
         const attempt = await outboxSessionStore.outbox.claim(entry.ordinal, {
-          owner: sessionOutboxDrainOwner,
-          until: runtimeServices.clock.now() + SESSION_OUTBOX_CLAIM_LEASE_MS,
+          owner: outboxDrainOwner,
+          until: runtimeServices.clock.now() + OUTBOX_CLAIM_LEASE_MS,
         });
         if (!attempt.claimed) {
           // Codex P1 review finding, PR #599, "Schedule a retry when a
@@ -5497,7 +5746,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // lease. Wake this bureau's drain right when that lease is due
           // to expire, rather than depending on whichever unrelated
           // trigger happens to fire next.
-          if (attempt.lease) scheduleSessionOutboxRetry(attempt.lease.until);
+          if (attempt.lease) scheduleOutboxRetry(attempt.lease.until);
           return;
         }
         const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
@@ -5511,14 +5760,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // discovers the lost claim at `acknowledge()` — recreating the
         // exact duplicate-delivery hazard this lease exists to close.
         // This timer renews the lease every
-        // `SESSION_OUTBOX_CLAIM_RENEWAL_INTERVAL_MS` for as long as this
+        // `OUTBOX_CLAIM_RENEWAL_INTERVAL_MS` for as long as this
         // drainer is still actively working the entry, and is always
         // cleared in `finally` — including on every early `return` below.
         const renewalTimerHandle = runtimeServices.timers.setInterval(() => {
           outboxSessionStore.outbox
             .claim(entry.ordinal, {
-              owner: sessionOutboxDrainOwner,
-              until: runtimeServices.clock.now() + SESSION_OUTBOX_CLAIM_LEASE_MS,
+              owner: outboxDrainOwner,
+              until: runtimeServices.clock.now() + OUTBOX_CLAIM_LEASE_MS,
             })
             .catch((error: unknown) => {
               diagnose({
@@ -5527,10 +5776,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                 message: `[bureau] Failed to renew the claim on session outbox entry ${entry.ordinal} while replaying it: ${serializeUnknownError(error)}`,
               });
             });
-        }, SESSION_OUTBOX_CLAIM_RENEWAL_INTERVAL_MS);
+        }, OUTBOX_CLAIM_RENEWAL_INTERVAL_MS);
         let outcome: 'stop' | 'continue';
         try {
-          outcome = await drainSessionOutboxEntry(entry, owner, outboxSessionStore, producer);
+          outcome = await drainOutboxEntry(entry, owner, outboxSessionStore, producer);
         } finally {
           runtimeServices.timers.clearInterval(renewalTimerHandle);
         }
@@ -5597,7 +5846,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * independent WRITE path, which would need a durable, cross-process
    * write-in-flight marker — a materially larger primitive than a prune
    * lease. This is the same class of residual `create-bureau.ts`'s own
-   * `drainSessionOutbox` doc comment already accepts for a different
+   * `drainOutbox` doc comment already accepts for a different
    * cross-process race (multiple maintenance ticks observing the same
    * unacknowledged outbox entry before either acknowledges it) — closing
    * it fully is out of scope here and left as a follow-up.
@@ -5802,20 +6051,121 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   let maintenanceAdmissionClosed = false;
 
   // AB-390 — the claim-then-replay-then-acknowledge sequence for ONE
-  // outbox entry, extracted so `drainSessionOutboxPass` can wrap it in
+  // outbox entry, extracted so `drainOutboxPass` can wrap it in
   // the renewal-timer `try`/`finally` above without duplicating a return
   // path per verification step. Returns `'stop'` for every case that used
-  // to `return` directly out of `drainSessionOutboxPass` itself (the
+  // to `return` directly out of `drainOutboxPass` itself (the
   // caller propagates that into its OWN `return`, so "stop this entry"
   // and "stop the whole pass" remain exactly the same observable behavior
   // they were before this was split out) and `'continue'` once this
   // entry is fully acknowledged.
-  async function drainSessionOutboxEntry(
+  /**
+   * AB-391: narrows a `session.attachment` entry's opaque `JSONValue`
+   * payload to the shape {@link buildReviewDecisionAuditRecord} produces —
+   * the only payload shape this bureau ever appends under
+   * {@link REVIEW_AUDIT_OUTBOX_NAMESPACE}.
+   */
+  function isReviewAuditAttachmentPayload(
+    value: unknown,
+  ): value is { runId: string; type: string; detail: unknown; principal: string } {
+    if (typeof value !== 'object' || value === null) return false;
+    const record = value as Record<string, unknown>;
+    return (
+      typeof record['runId'] === 'string' &&
+      typeof record['type'] === 'string' &&
+      'detail' in record &&
+      typeof record['principal'] === 'string'
+    );
+  }
+
+  /**
+   * AB-391: replays one `session.attachment` outbox entry — the durable
+   * write this bureau's own review-transition code coupled to a
+   * session-store commit (see the "review-transition audit records ride
+   * the session outbox" section above) — into the real audit trail, then
+   * acknowledges it.
+   *
+   * Idempotency is `AuditTrail.record`'s own `dedupeKey` — an atomic
+   * storage-level compare-and-swap keyed by THIS entry's `sessionId` and
+   * `ordinal` (Codex review finding, PR #601, "Make attachment replay
+   * deduplication atomic": a read-before-write existence check, no matter
+   * how it is scoped, has a race window between the read and the write
+   * that two Bureau processes both reclaiming this entry after a lease
+   * renewal race can land in, each seeing "not yet recorded" and each
+   * durably writing — `dedupeKey` closes that window at the storage layer
+   * rather than trying to narrow it in application code). A rejection
+   * from `record()` here (a genuine storage failure, since `dedupeKey`
+   * opts into propagating failures rather than swallowing them — see its
+   * own doc comment) propagates out of this function uncaught, leaving
+   * the entry claimed-but-unacknowledged for a later drain to retry,
+   * exactly the "leave it pending" behavior a failed write always had.
+   *
+   * Only ever called for a `REVIEW_AUDIT_OUTBOX_NAMESPACE` entry —
+   * `drainOutboxPass` stops the whole pass at (and never claims) any other
+   * `session.attachment` namespace before reaching this function, so
+   * there is no "unrecognized namespace" branch here to duplicate that
+   * check.
+   */
+  async function drainOutboxAttachmentEntry(
+    entry: Extract<SessionOutboxEntry, { kind: 'session.attachment' }>,
+    outboxSessionStore: SessionStore,
+  ): Promise<'stop' | 'continue'> {
+    const acknowledge = async (): Promise<'stop' | 'continue'> => {
+      const acknowledged = await outboxSessionStore.outbox.acknowledge(
+        entry.ordinal,
+        outboxDrainOwner,
+      );
+      if (!acknowledged) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-maintenance',
+          message: `[bureau] Lost the claim on outbox entry ${entry.ordinal} (session.attachment for session "${entry.sessionId}") before acknowledging it; a different drainer reclaimed and will retire it.`,
+        });
+        return 'stop';
+      }
+      return 'continue';
+    };
+
+    // `REVIEW_AUDIT_OUTBOX_NAMESPACE` IS this bureau's own — this code is
+    // the only writer of it, via `reviewAuditOutboxAttachment`, which
+    // always produces the shape `isReviewAuditAttachmentPayload` checks
+    // for. A payload under this namespace that fails that check is
+    // corruption from THIS write path (or a hand-edited/fuzzed record),
+    // not a forward-compatibility gap a future consumer could resolve —
+    // there is no future version of this same namespace to defer to, so
+    // dropping it (rather than leaving it to jam every future pass) is
+    // the correct call.
+    if (!isReviewAuditAttachmentPayload(entry.payload)) {
+      diagnose({
+        level: 'error',
+        scope: 'durable-maintenance',
+        message: `[bureau] Malformed audit-record outbox entry payload (ordinal ${entry.ordinal}); acknowledging without replay.`,
+      });
+      return acknowledge();
+    }
+    const payload = entry.payload;
+    if (auditTrailInstance) {
+      await auditTrailInstance.record({
+        runId: payload.runId,
+        type: payload.type,
+        detail: payload.detail,
+        principal: payload.principal,
+        timestampMs: entry.committedAtMs,
+        dedupeKey: `session.attachment:${entry.sessionId}:${entry.ordinal}`,
+      });
+    }
+    return acknowledge();
+  }
+
+  async function drainOutboxEntry(
     entry: SessionOutboxEntry,
     owner: DurableEventOwner,
     outboxSessionStore: SessionStore,
     producer: DurableEventProducer | undefined,
   ): Promise<'stop' | 'continue'> {
+    if (entry.kind === 'session.attachment') {
+      return drainOutboxAttachmentEntry(entry, outboxSessionStore);
+    }
     // AB-389 (Codex P2 review finding, PR #598, "Isolate subscriber
     // exceptions while draining the outbox"): `emitter.dispatch()`
     // fans out to two kinds of listener — `addEventListener`-registered
@@ -5960,7 +6310,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
     const acknowledged = await outboxSessionStore.outbox.acknowledge(
       entry.ordinal,
-      sessionOutboxDrainOwner,
+      outboxDrainOwner,
     );
     // AB-390 — a `false` here means a different owner reclaimed this
     // entry between this pass's `claim()` above and this point (this
@@ -5989,7 +6339,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // AB-388 (Codex review, PR #597, "Isolate audit pruning from engine
     // maintenance failures"): a rejected `engine.runMaintenance()` (e.g. a
     // transient storage error) used to exit this function BEFORE any of
-    // `pruneStaleRunOwnership()`/`drainSessionOutbox()`/`pruneAuditTrail()`
+    // `pruneStaleRunOwnership()`/`drainOutbox()`/`pruneAuditTrail()`
     // ran, even though the sub-passes below are already isolated from EACH
     // OTHER by their own try/catch — a failed alarm silently also skipped
     // the others. The engine failure is captured here, every sub-pass
@@ -6024,7 +6374,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         });
       }
       try {
-        await drainSessionOutbox();
+        await drainOutbox();
       } catch (error: unknown) {
         diagnose({
           level: 'error',
@@ -6172,7 +6522,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     automaticRunOwnershipPruneTimerStarted = true;
     automaticRunOwnershipPruneTimer = runtimeServices.timers.setInterval(() => {
       if (automaticRunOwnershipPruneCurrentPass) return;
-      // AB-389 — `drainSessionOutbox()` rides this SAME timer, tracked by
+      // AB-389 — `drainOutbox()` rides this SAME timer, tracked by
       // the SAME in-flight guard: the coordinator ruling requires the
       // session outbox drain to run "on the runtime clock inside the
       // durable maintenance pass," and — like `pruneStaleRunOwnership`
@@ -6204,7 +6554,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           });
         }
         try {
-          await drainSessionOutbox();
+          await drainOutbox();
         } catch (error: unknown) {
           diagnose({
             level: 'error',
@@ -6382,7 +6732,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // incarnation the old overload existed to obtain — in the SAME
       // `conditionalBatch` as the removal, and dispatches only the
       // best-effort `SessionOutboxAppendedEvent` drain trigger this bureau
-      // already listens for. `drainSessionOutbox` (below) replays the entry
+      // already listens for. `drainOutbox` (below) replays the entry
       // as a fresh `SessionDeletedEvent` onto this SAME emitter, in ordinal
       // order against every other pending entry, once its own durable
       // write has settled — never before, and never merely because this
@@ -6393,7 +6743,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // AB-389 — drain right here, before anything below that can stall
       // (a genuinely stuck run's terminal await further down must never
       // block this durable fact from landing): this is the ONE call site
-      // that can call `drainSessionOutbox()` directly rather than relying
+      // that can call `drainOutbox()` directly rather than relying
       // solely on the best-effort trigger, since it already knows a commit
       // just happened. Gated on `removedLiveRecord` — "immediately after
       // EACH COMMIT" means no commit, no direct drain: the losing side of
@@ -6403,13 +6753,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // claims an entry exclusively — see this function's own doc comment
       // below on the residual this leaves, for the maintenance-timer and
       // boot-recovery drain paths specifically, which are NOT gated on
-      // having personally committed anything). `drainSessionOutbox` is
+      // having personally committed anything). `drainOutbox` is
       // idempotent and single-flighted regardless, so this never duplicates
       // work the trigger (fired synchronously inside `sessionStore.delete`
       // above, for the SAME winning call) might also be running.
       if (removedLiveRecord) {
         try {
-          await drainSessionOutbox();
+          await drainOutbox();
         } catch (error) {
           // Same isolation as `recoverDurableRuns`'s own drain call: the
           // session removal above already committed — a drain failure
@@ -6846,19 +7196,56 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         }
         resolvingReviewIds.add(input.id);
         try {
-          await persistReviewResolutionWithRetry(
+          const cleanupAuditAttachment = buildReviewDecisionAuditRecord(
+            cleanup.review,
+            cleanup.decision,
+            cleanup.principal,
+            cleanup.reason,
+          );
+          const cleanupAuditAppended = await persistReviewResolutionWithRetry(
             cleanup.sessionId,
             input.id,
             cleanup.kind === 'tool-approval',
             cleanup.runId,
+            cleanup.decision,
+            cleanup.principal,
+            cleanup.reason,
+            cleanupAuditAttachment,
           );
           reviewResolutionCleanupPending.delete(input.id);
           releaseTerminalRunReviewState(cleanup.runId);
+          if (cleanupAuditAppended) {
+            // AB-391: the audit record above was appended in the SAME
+            // commit as the resolution just persisted — replay it into the
+            // real audit trail now, while this bureau is alive, rather
+            // than leaving it for a later maintenance tick.
+            //
+            // Codex review finding, PR #601, "Isolate post-commit drain
+            // failures from review resolution": the resolution commit
+            // above has ALREADY succeeded — a transient failure in this
+            // best-effort drain (a claim contention, a query error) must
+            // never abort this call before it dispatches the live
+            // ReviewApprovedEvent/ReviewDeniedEvent/ReviewRejectedEvent
+            // below or returns its result. A failed drain here leaves the
+            // attachment claimed-but-unacknowledged for a LATER drain
+            // (this bureau's own next maintenance tick, or boot recovery
+            // after a restart) to replay — it is never lost, only delayed.
+            try {
+              await drainOutbox();
+            } catch (error) {
+              diagnose({
+                level: 'error',
+                scope: 'durable-maintenance',
+                message: `[bureau] Post-commit outbox drain failed after resolving review "${input.id}" from the cleanup-retry path; the audit record remains pending for a later drain: ${serializeUnknownError(error)}`,
+              });
+            }
+          }
           await recordReviewDecision(
             cleanup.review,
             cleanup.decision,
             cleanup.principal,
             cleanup.reason,
+            { auditAlreadyAppended: cleanupAuditAppended },
           );
           return {
             id: input.id,
@@ -6879,6 +7266,64 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       throw new BureauError(`Review with id "${review.id}" is already being resolved`, 'CONFLICT');
     }
     resolvingReviewIds.add(review.id);
+
+    try {
+      // AB-391 (Codex P1 review finding, PR #601, "Fence concurrent
+      // resolutions before performing the action"): everything below this
+      // point — `resumeApproval`, `revokeApproval`, and the
+      // `signalSession` calls that deliver an approve/deny/reject decision
+      // — is an IRREVERSIBLE side effect: a tool can execute, an approval
+      // binding is revoked, or a parked run resumes. `persistReviewResolution`
+      // already detects a DIFFERENT resolver's already-won decision (see
+      // its own doc comment), but it only runs AFTER all of that, once this
+      // call is persisting its OWN decision. Two Bureau instances sharing a
+      // session store, both resolving the same still-pending review with
+      // DIFFERENT decisions, would otherwise let the LOSING call's
+      // irreversible action run before it ever discovers it lost — an
+      // approve could execute a tool even though the durable winner is a
+      // deny. Checked here, before any action, so a losing call fails
+      // before doing anything irreversible. This is a plain read
+      // (`SessionStore.load`), not an atomic claim — a genuinely
+      // simultaneous pair, neither yet committed, can still both pass this
+      // check and both act; closing that residual window needs a durable,
+      // pre-action claim, tracked as a follow-up (see this issue's PR
+      // body). This check only ever fences a DIFFERENT decision — the
+      // same-decision retry case is untouched, exactly as
+      // `persistReviewResolution`'s own `alreadyLanded` handling already
+      // covers it.
+      const existingSession = await runtime.sessionStore?.load(review.sessionId);
+      const existingDecisionsRaw = existingSession?.metadata['resolvedReviewDecisions'];
+      const existingDecisions: Record<string, JSONValue> =
+        typeof existingDecisionsRaw === 'object' &&
+        existingDecisionsRaw !== null &&
+        !Array.isArray(existingDecisionsRaw)
+          ? (existingDecisionsRaw as Record<string, JSONValue>)
+          : {};
+      const priorRaw = existingDecisions[review.id];
+      const prior =
+        typeof priorRaw === 'object' && priorRaw !== null && !Array.isArray(priorRaw)
+          ? (priorRaw as Record<string, JSONValue>)
+          : undefined;
+      if (prior !== undefined) {
+        const priorDecision = typeof prior['decision'] === 'string' ? prior['decision'] : undefined;
+        const priorPrincipal =
+          typeof prior['principal'] === 'string' ? prior['principal'] : undefined;
+        const priorReason = typeof prior['reason'] === 'string' ? prior['reason'] : undefined;
+        const isSameDecision =
+          priorDecision === input.decision &&
+          priorPrincipal === input.principal &&
+          priorReason === input.reason;
+        if (!isSameDecision) {
+          throw new BureauError(
+            `Review "${review.id}" was already resolved as "${priorDecision ?? 'unknown'}" by a different resolver`,
+            'CONFLICT',
+          );
+        }
+      }
+    } catch (error) {
+      resolvingReviewIds.delete(review.id);
+      throw error;
+    }
 
     let result: unknown;
     let keepPending = false;
@@ -6965,6 +7410,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
               // the same review id as a fresh `'pending'` entry (read live
               // from `pendingApprovalOverrides` by `listPendingReviews()`,
               // not written here).
+              //
+              // AB-391: `superseded` is deliberately NOT coupled to the
+              // override write above through the outbox — the issue's own
+              // "review transitions" list (`requested`/`resolved`/
+              // `rejected`/`canceled`) never names it, and bundling it into
+              // the SAME `conditionalBatch` as the replacement override
+              // write would embed the ORIGINAL review (with its now-revoked
+              // approval token) alongside the REPLACEMENT token in one
+              // commit — a real, observable difference from every other
+              // transition this issue closes, not just an implementation
+              // detail. Keeps writing directly, exactly as before.
               await recordReviewStatusTransition(review, 'superseded', 'system:supersession');
             }
             keepPending = true;
@@ -7044,6 +7500,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
 
     resolvingReviewIds.delete(review.id);
+    // AB-391: `false` for the `keepPending` re-gate branch above — nothing
+    // is persisted there, so `recordReviewDecision` below keeps writing the
+    // audit record directly, exactly as it always has.
+    let auditAlreadyAppended = false;
     if (!keepPending) {
       resolvedReviewIds.add(review.id);
       if (review.kind === 'tool-approval') {
@@ -7056,30 +7516,79 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           terminalReviewSessions.delete(review.runId);
         }
       }
+      const auditAttachment = buildReviewDecisionAuditRecord(
+        review,
+        input.decision,
+        input.principal,
+        input.reason,
+      );
       try {
-        await persistReviewResolutionWithRetry(
+        auditAlreadyAppended = await persistReviewResolutionWithRetry(
           review.sessionId,
           review.id,
           review.kind === 'tool-approval',
           review.runId,
+          input.decision,
+          input.principal,
+          input.reason,
+          auditAttachment,
         );
       } catch (error) {
-        reviewResolutionCleanupPending.set(review.id, {
-          sessionId: review.sessionId,
-          runId: review.runId,
-          kind: review.kind,
-          decision: input.decision,
-          review,
-          principal: input.principal,
-          ...(input.reason !== undefined ? { reason: input.reason } : {}),
-        });
+        // AB-391 (Codex P1 review finding, PR #601, "Distinguish concurrent
+        // resolvers from commit retries"): a genuine CONFLICT here means a
+        // DIFFERENT resolver's decision already durably won this review —
+        // THIS call's own attempt made no partial commitment (the updater
+        // returned `undefined` before building any candidate object), so
+        // there is nothing to clean up and nothing for a future retry to
+        // ever successfully complete: registering `reviewResolutionCleanupPending`
+        // for it would only make every future call for this id re-throw the
+        // identical CONFLICT via the cleanup branch above, forever. Rethrow
+        // directly instead — every OTHER rejection here (a transient
+        // storage failure, genuinely ambiguous) still registers cleanup as
+        // before, since `resumeApproval` above may already have run and its
+        // audit trace must not be lost.
+        if (!(error instanceof BureauError && error.code === 'CONFLICT')) {
+          reviewResolutionCleanupPending.set(review.id, {
+            sessionId: review.sessionId,
+            runId: review.runId,
+            kind: review.kind,
+            decision: input.decision,
+            review,
+            principal: input.principal,
+            ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          });
+        }
         resolvingReviewIds.delete(review.id);
         throw error;
       }
       releaseTerminalRunReviewState(review.runId);
+      if (auditAlreadyAppended) {
+        // AB-391: replay the just-appended audit record promptly, while
+        // this bureau is alive, rather than leaving it for a later
+        // trigger.
+        //
+        // Codex review finding, PR #601, "Isolate post-commit drain
+        // failures from review resolution": the resolution commit above
+        // has ALREADY succeeded — a transient failure in this best-effort
+        // drain must never abort `resolveReview` before it dispatches the
+        // live event below or returns its result. A failed drain leaves
+        // the attachment claimed-but-unacknowledged for a later drain (a
+        // maintenance tick, or boot recovery) to replay.
+        try {
+          await drainOutbox();
+        } catch (error) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Post-commit outbox drain failed after resolving review "${review.id}"; the audit record remains pending for a later drain: ${serializeUnknownError(error)}`,
+          });
+        }
+      }
     }
 
-    await recordReviewDecision(review, input.decision, input.principal, input.reason);
+    await recordReviewDecision(review, input.decision, input.principal, input.reason, {
+      auditAlreadyAppended,
+    });
 
     return {
       id: review.id,
@@ -7112,26 +7621,54 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return runtime.baseToolbox.listGrants(filter);
   }
 
-  async function recordReviewDecision(
+  /**
+   * AB-391: builds the exact `AuditTrail.record()` payload a review
+   * transition's durable write needs, WITHOUT writing it — used both to
+   * append it as a `session.attachment` outbox entry (coupled to the
+   * preceding session-store commit) and, for a path with no such commit to
+   * couple to, to write it directly. Kept as one function so the two paths
+   * can never drift on shape.
+   */
+  function buildReviewDecisionAuditRecord(
     review: PendingReview,
     decision: 'approve' | 'deny' | 'reject',
     principal: string,
     reason?: string,
-  ): Promise<void> {
+  ): ReviewAuditAttachment {
     const decisionSuffix =
       decision === 'approve' ? 'approved' : decision === 'reject' ? 'rejected' : 'denied';
-    const decisionType = `review.${review.kind}.${decisionSuffix}`;
-
-    await auditTrailInstance?.record({
+    return {
       runId: review.runId,
-      type: decisionType,
+      type: `review.${review.kind}.${decisionSuffix}`,
       detail: {
         review,
         decision,
         ...(reason !== undefined ? { reason } : {}),
       },
       principal,
-    });
+    };
+  }
+
+  async function recordReviewDecision(
+    review: PendingReview,
+    decision: 'approve' | 'deny' | 'reject',
+    principal: string,
+    reason?: string,
+    // AB-391: `true` when the caller already appended this decision's audit
+    // record as a `session.attachment` outbox entry (via
+    // `persistReviewResolutionWithRetry`'s `auditAttachment` parameter) and
+    // has drained it — the durable write already happened, or is pending a
+    // later drain, so writing it again here would duplicate it. `false`
+    // (the default) is the ONLY path with no preceding session-store commit
+    // to couple to (`resolveReview`'s `keepPending` re-gate branch), where
+    // the direct write below remains correct exactly as it always was.
+    options?: { auditAlreadyAppended?: boolean },
+  ): Promise<void> {
+    if (!options?.auditAlreadyAppended) {
+      await auditTrailInstance?.record(
+        buildReviewDecisionAuditRecord(review, decision, principal, reason),
+      );
+    }
 
     // AB-224: the live counterpart of the durable write above — dispatched
     // alongside it, never instead of it, closing the live-side gap AB-87's
@@ -7199,6 +7736,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     status: Exclude<ReviewStatus, 'pending' | 'approved' | 'denied' | 'rejected'>,
     principal: string,
   ): Promise<void> {
+    // AB-391: `expired` (`sweepExpiredReviews`), `revoked`/`canceled`
+    // (`revokePendingApprovalsForRun`), and `superseded` (`resolveReview`'s
+    // re-gate branch) each have no preceding session-store commit this
+    // durable write could be coupled to via the outbox — see
+    // `recordReviewDecision`'s own doc comment for the transitions that DO.
+    // This keeps writing directly, exactly as before.
     await auditTrailInstance?.record({
       runId: review.runId,
       type: `review.${review.kind}.${status}`,
@@ -7611,7 +8154,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // AB-389 (Codex P1 review finding, PR #598, "Await the chained drain
       // before aborting its producers"): this await MUST happen BEFORE
       // `backgroundShutdownController.abort()` below, not after — the pass
-      // this awaits chains `drainSessionOutbox()` onto `pruneStaleRunOwnership()`
+      // this awaits chains `drainOutbox()` onto `pruneStaleRunOwnership()`
       // (see the interval callback's own doc comment), and every session
       // lifecycle listener `createDurableEventProducer` registers checks
       // `signal?.aborted` and returns immediately once that shared signal
@@ -7636,21 +8179,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // last lost a claim to a still-live peer) must not fire after
       // shutdown: a retry drain running post-teardown would race the very
       // cleanup this shutdown sequence exists to make orderly.
-      if (sessionOutboxRetryTimerArmedForMs !== undefined) {
-        runtimeServices.timers.clearTimeout(sessionOutboxRetryTimerHandle);
-        sessionOutboxRetryTimerArmedForMs = undefined;
+      if (outboxRetryTimerArmedForMs !== undefined) {
+        runtimeServices.timers.clearTimeout(outboxRetryTimerHandle);
+        outboxRetryTimerArmedForMs = undefined;
       }
       // Codex P2 review finding, PR #599, "Await retry drains that have
       // already fired during shutdown": `clearTimeout` above only prevents
       // a NOT-YET-FIRED retry timer from firing — it cannot un-fire one
       // whose callback already started (armed, then fired, in the window
       // before this shutdown sequence reached this line) and is still
-      // running its own `drainSessionOutbox()` call. Without this await,
+      // running its own `drainOutbox()` call. Without this await,
       // shutdown would proceed to abort producers and dispose durable
       // event history storage while that drain is still dispatching
       // events or reading/writing storage concurrently with teardown.
-      if (sessionOutboxDrainInFlight) {
-        await sessionOutboxDrainInFlight;
+      if (outboxDrainInFlight) {
+        await outboxDrainInFlight;
       }
       if (automaticRunOwnershipPruneCurrentPass) {
         await automaticRunOwnershipPruneCurrentPass;
@@ -8538,7 +9081,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // own drain call below is then a no-op empty pass) and closes the gap
   // on the deferred one.
   try {
-    await drainSessionOutbox();
+    await drainOutbox();
   } catch (error) {
     diagnose({
       level: 'error',

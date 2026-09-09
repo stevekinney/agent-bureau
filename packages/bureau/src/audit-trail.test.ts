@@ -108,6 +108,21 @@ function createControllableKv(): {
       await gate;
       await base.set(key, value);
     },
+    // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+    // against deduplicated audit keys"): the out-of-band `record()` path
+    // now commits through `conditionalBatch`'s key-collision fence rather
+    // than a plain `set` — gated identically (and counted on the SAME
+    // counter) so a caller simulating a slow/in-flight write via this kv
+    // still observes it regardless of which write path a given caller
+    // takes.
+    async conditionalBatch(
+      preconditions: Parameters<typeof base.conditionalBatch>[0],
+      operations: Parameters<typeof base.conditionalBatch>[1],
+    ) {
+      setCallCount += 1;
+      await gate;
+      return base.conditionalBatch(preconditions, operations);
+    },
   };
   return { kv, release, setCallCount: () => setCallCount };
 }
@@ -308,6 +323,39 @@ describe('createAuditTrail', () => {
     trail.dispose();
   });
 
+  it('the action-stream listener also retries with a fresh key on collision, rather than silently overwriting an existing record (Codex P1 review finding, PR #601, "Fence ordinary writes against deduplicated audit keys")', async () => {
+    // The action-stream listener is the LAST writer in this file that used
+    // a plain, unconditional `kv.set` — this proves it now shares the same
+    // key-fenced, collision-retry path (`attemptKeyFencedWrite`) as
+    // `record()`'s own ordinary and `dedupeKey` paths above, rather than
+    // being able to silently overwrite a record either of those already
+    // committed at a colliding key.
+    const kv = textValueStore(new MemoryStorage());
+    await seedRecord(kv, makeRecord(0, { timestampMs: 5000, runId: 'run-listener-collide' }));
+
+    const { bureau, emit } = createStubBureau();
+    const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+    const action: Action = {
+      type: 'tool.started',
+      timestamp: 5000,
+      sequence: 1,
+      runId: 'run-listener-collide',
+      detail: null,
+    };
+    emit(new ActionEvent(action));
+    await yieldToPortableEventLoop();
+
+    // The seeded record survives untouched, AND the sunk action landed at
+    // a DIFFERENT key — never overwriting the collision.
+    const records = await trail.query({ runId: 'run-listener-collide' });
+    expect(records).toHaveLength(2);
+    const sunkRecord = records.find((record) => record.actionSequence === 1);
+    expect(sunkRecord?.sequence).not.toBe(0);
+
+    trail.dispose();
+  });
+
   it('sinks run.tripwire action events into the kv store (regression PRRT_kwDORvupsc6PxCXU)', async () => {
     // Before the fix, AUDIT_EVENT_TYPES only had 'run.completed' / 'run.error'
     // / 'run.aborted' for run-lifecycle events, so a guardrail tripwire halt
@@ -478,6 +526,279 @@ describe('createAuditTrail', () => {
     trail.dispose();
   });
 
+  describe('record() dedupeKey (AB-391, Codex review finding, PR #601, "Make attachment replay deduplication atomic")', () => {
+    it('a second record() call with the SAME dedupeKey is a no-op — no second record is written', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const entry = {
+        runId: 'run-dedupe-1',
+        type: 'review.tool-approval.approved',
+        detail: { decision: 'approve' },
+        principal: 'api-key:reviewer-1',
+        dedupeKey: 'session.attachment:session-1:3',
+      };
+      await trail.record(entry);
+      await trail.record(entry);
+
+      const records = await trail.query({ runId: 'run-dedupe-1' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('two CONCURRENT record() calls with the SAME dedupeKey — simulating two Bureau processes racing after a lease renewal failure — still produce exactly one record', async () => {
+      // The exact race Codex's finding described: a read-before-write
+      // existence check has a window between the read and the write that
+      // two concurrent callers can both pass through before either writes.
+      // `dedupeKey`'s atomic compare-and-swap has no such window — both
+      // calls START before either COMPLETES, and only one can win the
+      // underlying `conditionalBatch`.
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const entry = {
+        runId: 'run-dedupe-race',
+        type: 'review.tool-approval.approved',
+        detail: { decision: 'approve' },
+        principal: 'api-key:reviewer-1',
+        dedupeKey: 'session.attachment:session-race:7',
+      };
+      await Promise.all([trail.record(entry), trail.record(entry)]);
+
+      const records = await trail.query({ runId: 'run-dedupe-race' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('retries with a fresh key when the derived audit key collides with an UNRELATED existing record, rather than overwriting it (Codex P1 review finding, PR #601, "Guard the audit record key against cross-instance collisions")', async () => {
+      // `key` is derived from `sequence` (a LOCAL per-instance counter) and
+      // `timestampMs`/`runId` — two `AuditTrail` instances booting from the
+      // same persisted floor before either has written anything can
+      // independently allocate the SAME `sequence` for the SAME
+      // `runId`/`timestampMs`. Simulated here by seeding a record directly
+      // at the EXACT key `initialSequence: 0` would derive for the
+      // `record()` call below, standing in for "a peer already wrote an
+      // unrelated fact at this key."
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-collide' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await trail.record({
+        runId: 'run-collide',
+        type: 'review.tool-approval.approved',
+        detail: {},
+        timestampMs: 1000,
+        dedupeKey: 'session.attachment:session-collide:1',
+      });
+
+      // The seeded record survives untouched, AND the new record landed —
+      // at a DIFFERENT key (a fresh, retried sequence), never overwriting
+      // the collision.
+      const records = await trail.query({ runId: 'run-collide' });
+      expect(records).toHaveLength(2);
+      expect(records.map((record) => record.type).sort()).toEqual([
+        'review.tool-approval.approved',
+        'tool.started',
+      ]);
+
+      // The marker names the record that actually landed for THIS
+      // dedupeKey, not the collided-with key.
+      const markerValue = await kv.get('audit-dedupe:v1:session.attachment:session-collide:1');
+      const approvedRecordKey = records.find(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(markerValue).not.toBe('audit:v1:0000000000001000:000000000000:run-collide');
+      expect(approvedRecordKey?.sequence).not.toBe(0);
+
+      trail.dispose();
+    });
+
+    it('rejects a dedupeKey write once every retry attempt keeps colliding, rather than looping forever', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // One seeded record for every sequence the retry loop will try
+      // (the initial attempt plus 3 retries) — every attempt collides.
+      for (let sequence = 0; sequence <= 3; sequence += 1) {
+        await seedRecord(kv, makeRecord(sequence, { timestampMs: 1000, runId: 'run-exhausted' }));
+      }
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await expect(
+        trail.record({
+          runId: 'run-exhausted',
+          type: 'review.tool-approval.approved',
+          detail: {},
+          timestampMs: 1000,
+          dedupeKey: 'session.attachment:session-exhausted:1',
+        }),
+      ).rejects.toThrow('Exhausted retries resolving an audit-record key collision');
+
+      trail.dispose();
+    });
+
+    it('an ORDINARY (non-dedupeKey) record() also retries with a fresh key on collision, rather than silently overwriting an existing record (Codex P1 review finding, PR #601, "Fence ordinary writes against deduplicated audit keys")', async () => {
+      // The collision fence above only protected a `dedupeKey` write from
+      // ANOTHER `dedupeKey` write racing on the same derived key. An
+      // ordinary write used to go through a plain, unconditional `kv.set`
+      // regardless — so it could still silently overwrite a record a
+      // `dedupeKey` write (or another ordinary write) already committed at
+      // the same key, permanently losing it if that write's dedupe marker
+      // survives (a later replay reads the marker as proof the fact was
+      // already recorded and never rewrites it). Simulated here exactly
+      // like the dedupeKey collision test above: seed a record directly at
+      // the key `initialSequence: 0` would derive, then make an ORDINARY
+      // write collide with it.
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-ordinary-collide' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await trail.record({
+        runId: 'run-ordinary-collide',
+        type: 'review.tool-approval.approved',
+        detail: {},
+        timestampMs: 1000,
+      });
+
+      // The seeded record survives untouched, AND the new record landed at
+      // a DIFFERENT key — never overwriting the collision.
+      const records = await trail.query({ runId: 'run-ordinary-collide' });
+      expect(records).toHaveLength(2);
+      expect(records.map((record) => record.type).sort()).toEqual([
+        'review.tool-approval.approved',
+        'tool.started',
+      ]);
+      const approvedRecord = records.find(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecord?.sequence).not.toBe(0);
+
+      trail.dispose();
+    });
+
+    it('diagnoses and drops an ORDINARY record() once every key-collision retry attempt keeps colliding, rather than rejecting the never-rejects contract', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      for (let sequence = 0; sequence <= 3; sequence += 1) {
+        await seedRecord(
+          kv,
+          makeRecord(sequence, { timestampMs: 1000, runId: 'run-ordinary-exhausted' }),
+        );
+      }
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await expect(
+        trail.record({
+          runId: 'run-ordinary-exhausted',
+          type: 'review.tool-approval.approved',
+          detail: {},
+          timestampMs: 1000,
+        }),
+      ).resolves.toBeUndefined();
+
+      // The 4 seeded records survive untouched; the ordinary write itself
+      // was dropped (diagnosed) after exhausting its retries, never
+      // rejecting its caller.
+      const records = await trail.query({ runId: 'run-ordinary-exhausted' });
+      expect(records).toHaveLength(4);
+
+      trail.dispose();
+    });
+
+    it('two DIFFERENT dedupeKeys for the same runId/type both persist their own record', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      await trail.record({
+        runId: 'run-dedupe-2',
+        type: 'review.tool-approval.approved',
+        detail: { call: 1 },
+        dedupeKey: 'session.attachment:session-2:1',
+      });
+      await trail.record({
+        runId: 'run-dedupe-2',
+        type: 'review.tool-approval.approved',
+        detail: { call: 2 },
+        dedupeKey: 'session.attachment:session-2:2',
+      });
+
+      const records = await trail.query({ runId: 'run-dedupe-2' });
+      expect(records).toHaveLength(2);
+      trail.dispose();
+    });
+
+    it('propagates a genuine storage failure from a dedupeKey write, unlike the default best-effort record() path', async () => {
+      const backing = textValueStore(new MemoryStorage());
+      const failingKv: typeof backing = {
+        ...backing,
+        conditionalBatch: () => Promise.reject(new Error('storage unavailable')),
+      };
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, failingKv);
+
+      await expect(
+        trail.record({
+          runId: 'run-dedupe-failure',
+          type: 'review.tool-approval.approved',
+          detail: {},
+          dedupeKey: 'session.attachment:session-failure:1',
+        }),
+      ).rejects.toThrow('storage unavailable');
+      trail.dispose();
+    });
+
+    it('tracks a dedupeKey-guarded write so dispose() awaits it and query() observes it, even though the caller never awaits record() (Codex P2 review finding, PR #601, "Track deduplicated audit writes before returning")', async () => {
+      const backing = textValueStore(new MemoryStorage());
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      const gatedKv: typeof backing = {
+        ...backing,
+        async conditionalBatch(conditions, operations) {
+          await gate;
+          return backing.conditionalBatch(conditions, operations);
+        },
+      };
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, gatedKv);
+
+      // Deliberately not awaited — the caller fires-and-forgets, exactly
+      // like `drainOutboxAttachmentEntry`'s own call site in
+      // `create-bureau.ts` does before its OWN `await` a few lines down.
+      void trail.record({
+        runId: 'run-dedupe-tracked',
+        type: 'review.tool-approval.approved',
+        detail: {},
+        dedupeKey: 'session.attachment:session-tracked:1',
+      });
+
+      let disposed = false;
+      const disposal = trail.dispose().then(() => {
+        disposed = true;
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(disposed).toBe(false);
+
+      releaseGate();
+      await disposal;
+      expect(disposed).toBe(true);
+
+      const records = await trail.query({ runId: 'run-dedupe-tracked' });
+      expect(records).toHaveLength(1);
+    });
+  });
+
   it('record() and the live action-event listener never collide on key/sequence', async () => {
     const kv = textValueStore(new MemoryStorage());
     const { bureau, emit } = createStubBureau();
@@ -540,6 +861,14 @@ describe('createAuditTrail', () => {
       return {
         ...kv,
         set: async () => {
+          throw new Error('disk full');
+        },
+        // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+        // against deduplicated audit keys"): the out-of-band `record()`
+        // path below now writes through `conditionalBatch`'s key-collision
+        // fence rather than a plain `kv.set` — failing only `set` no longer
+        // exercises a persistence failure for that path.
+        conditionalBatch: async () => {
           throw new Error('disk full');
         },
       };
@@ -805,6 +1134,87 @@ describe('createAuditTrail', () => {
       });
 
       const records = await trail.query({ runId: 'run-record-after-abort' });
+      expect(records).toHaveLength(0);
+      await trail.dispose();
+    });
+
+    it('a dedupeKey-guarded record() REJECTS (rather than silently no-op resolving) once the owner-issued signal aborts', async () => {
+      // AB-391: unlike the default best-effort path above, a caller that
+      // supplied `dedupeKey` opted into knowing whether its write actually
+      // happened — a silent resolve here would be indistinguishable from
+      // "already recorded" to `create-bureau.ts`'s `drainOutboxAttachmentEntry`,
+      // which would then acknowledge (permanently remove) an outbox entry
+      // whose fact was never durably written, reintroducing the exact
+      // record loss this issue exists to close (via a shutdown race
+      // instead of a crash, since a late `SessionOutboxAppendedEvent`
+      // trigger has no admission check of its own).
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const controller = new AbortController();
+      const trail = createAuditTrail(bureau, kv, undefined, { signal: controller.signal });
+
+      controller.abort();
+      await expect(
+        trail.record({
+          runId: 'run-dedupe-after-abort',
+          type: 'review.tool-approval.approved',
+          detail: null,
+          dedupeKey: 'session.attachment:session-after-abort:1',
+        }),
+      ).rejects.toThrow(/shutdown signal is already aborted/);
+
+      const records = await trail.query({ runId: 'run-dedupe-after-abort' });
+      expect(records).toHaveLength(0);
+      await trail.dispose();
+    });
+
+    it('drops a best-effort record() with an invalid timestampMs (diagnose and drop) instead of rejecting the never-rejects contract (Codex P2 review finding, PR #601, "Reject invalid replay timestamps before formatting")', async () => {
+      // `timestampMs` is typed `number`, which permits NaN, Infinity, or a
+      // value outside `Date`'s range — forwarding any of those straight to
+      // `new Date(timestampMs).toISOString()` throws. The default
+      // best-effort `record()` path documents a never-rejects contract, so
+      // an invalid timestamp must diagnose and drop, exactly like any other
+      // malformed-input rejection at this boundary, not silently break that
+      // contract.
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      await expect(
+        trail.record({
+          runId: 'run-invalid-timestamp',
+          type: 'review.tool-approval.approved',
+          detail: null,
+          timestampMs: Number.NaN,
+        }),
+      ).resolves.toBeUndefined();
+
+      const records = await trail.query({ runId: 'run-invalid-timestamp' });
+      expect(records).toHaveLength(0);
+      await trail.dispose();
+    });
+
+    it('rejects a dedupeKey-guarded record() with an invalid timestampMs before any write begins', async () => {
+      // A `dedupeKey` caller (the outbox attachment replay) needs to know
+      // synchronously that its write never happened, so it can leave its
+      // own outbox entry pending for a later retry rather than treating a
+      // silent drop as success and acknowledging (permanently removing) an
+      // entry whose audit fact was never recorded.
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      await expect(
+        trail.record({
+          runId: 'run-invalid-timestamp-dedupe',
+          type: 'review.tool-approval.approved',
+          detail: null,
+          timestampMs: Number.POSITIVE_INFINITY,
+          dedupeKey: 'session.attachment:invalid-timestamp-session:1',
+        }),
+      ).rejects.toThrow(/invalid timestampMs/);
+
+      const records = await trail.query({ runId: 'run-invalid-timestamp-dedupe' });
       expect(records).toHaveLength(0);
       await trail.dispose();
     });
@@ -1722,6 +2132,20 @@ describe('createAuditTrail', () => {
           }
           await base.set(key, value);
         },
+        // AB-391 (Codex P1 review finding, PR #601, "Fence ordinary writes
+        // against deduplicated audit keys"): the summary write below is a
+        // `strict` out-of-band `record()` call, which now commits through
+        // `conditionalBatch`'s key-collision fence rather than a plain
+        // `set` — mirrored here so the isolated failure still reaches it.
+        async conditionalBatch(
+          preconditions: Parameters<typeof base.conditionalBatch>[0],
+          operations: Parameters<typeof base.conditionalBatch>[1],
+        ) {
+          if (operations.some((operation) => operation.key.includes('bureau:audit-retention'))) {
+            throw new Error('backend rejected the summary write');
+          }
+          return base.conditionalBatch(preconditions, operations);
+        },
       };
 
       const { bureau } = createStubBureau();
@@ -1733,6 +2157,142 @@ describe('createAuditTrail', () => {
       // failure must propagate rather than be swallowed: the caller needs
       // to know evidence is missing for a mutation that already occurred.
       expect(await base.get('audit:v1:0000000000001000:000000000000:run-old')).toBeNull();
+
+      trail.dispose();
+    });
+
+    it('prunes the dedupe marker paired with a record it just deleted (Codex P2 review finding, PR #601, "Prune dedupe markers with expired audit records")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      await trail.record({
+        runId: 'run-dedupe-prune',
+        type: 'review.tool-approval.approved',
+        detail: {},
+        timestampMs: 1000,
+        dedupeKey: 'session.attachment:session-prune:1',
+      });
+
+      expect(await kv.list('audit-dedupe:v1:')).toHaveLength(1);
+
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(1);
+
+      // The record is gone, and so is the marker that guarded it — without
+      // this, the marker would be the one thing retention never bounds.
+      expect(await trail.query({ runId: 'run-dedupe-prune' })).toHaveLength(0);
+      expect(await kv.list('audit-dedupe:v1:')).toHaveLength(0);
+
+      trail.dispose();
+    });
+
+    it('reconciles an ORPHANED dedupe marker (one naming a record already gone) even when this pass prunes nothing new — proving this is reconciliation, not just "clean up what this pass deleted"', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
+
+      // Simulates an earlier pass crashing between deleting the record and
+      // deleting its marker: the marker survives, naming a record key that
+      // no longer exists, and nothing seeded this pass is itself prunable.
+      await kv.set(
+        'audit-dedupe:v1:orphaned-key',
+        'audit:v1:0000000000000500:000000000000:run-gone',
+      );
+      await seedRecord(kv, makeRecord(5, { timestampMs: 9000, runId: 'run-new' }));
+
+      const result = await trail.prune(1000);
+      // No record qualified for THIS pass's cutoff — the documented
+      // "prunes nothing writes no summary" guarantee still holds; marker
+      // reconciliation runs independently of it.
+      expect(result).toEqual({ prunedCount: 0, cutoffMs: 1000 });
+
+      expect(await kv.list('audit-dedupe:v1:')).toHaveLength(0);
+      const survivors = await trail.query();
+      expect(survivors.map((r) => r.runId)).toEqual(['run-new']);
+
+      trail.dispose();
+    });
+
+    it('successfully renews its lease based on elapsed time partway through reconciliation, then continues to reconcile the remaining markers — not a fixed marker count', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await kv.set('audit-dedupe:v1:orphan-1', 'audit:v1:0000000000000500:000000000000:run-gone-1');
+      await kv.set('audit-dedupe:v1:orphan-2', 'audit:v1:0000000000000500:000000000000:run-gone-2');
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
+
+      let renewCount = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...kv,
+        async conditionalBatch(conditions, operations) {
+          const isLeaseRenewal = operations.some(
+            (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
+          );
+          if (isLeaseRenewal) renewCount += 1;
+          return kv.conditionalBatch(conditions, operations);
+        },
+        async get(key: string) {
+          const value = await kv.get(key);
+          if (key.startsWith('audit-dedupe:v1:')) {
+            runtime.setTime(runtime.clock.now() + 350_000);
+          }
+          return value;
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 0 }, runtime);
+
+      const result = await trail.prune(1000);
+      expect(result).toEqual({ prunedCount: 0, cutoffMs: 1000 });
+
+      // Both orphans were reconciled — the renewal check between them
+      // succeeded and reconciliation carried on, rather than stopping at
+      // the first marker the way a lost renewal would.
+      expect(await kv.list('audit-dedupe:v1:')).toHaveLength(0);
+      // Acquisition + at least one successful periodic renewal reached by
+      // elapsed time (this pass's own delete loop never runs — nothing
+      // qualified — so every renewal call here is reconciliation's own).
+      expect(renewCount).toBeGreaterThanOrEqual(2);
+
+      trail.dispose();
+    });
+
+    it('isolates a dedupe-marker reconciliation failure from an otherwise-successful record prune', async () => {
+      const base = textValueStore(new MemoryStorage());
+      await seedRecord(base, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+
+      const failingKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        list: (prefix: string) => {
+          if (prefix === 'audit-dedupe:v1:') {
+            return Promise.reject(new Error('backend rejected the marker listing'));
+          }
+          return base.list(prefix);
+        },
+      };
+
+      const diagnostics: string[] = [];
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(
+        bureau,
+        failingKv,
+        (diagnostic) => diagnostics.push(diagnostic.message),
+        { initialSequence: 1 },
+      );
+
+      // The record prune itself still succeeds and still writes its
+      // summary — a marker-reconciliation failure must never turn an
+      // otherwise-successful pass into a rejected one.
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(1);
+      expect(await base.get('audit:v1:0000000000001000:000000000000:run-old')).toBeNull();
+      expect(
+        diagnostics.some((message) =>
+          message.includes('Failed to reconcile orphaned dedupe markers'),
+        ),
+      ).toBe(true);
 
       trail.dispose();
     });
@@ -2357,6 +2917,71 @@ describe('createAuditTrail', () => {
       const intentRaw = await kv.get('audit-retention:v1:prune-intent');
       expect(intentRaw).not.toBeNull();
       expect(JSON.parse(intentRaw ?? '')).toEqual({ count: 999, cutoffMs: 123_456 });
+
+      trail.dispose();
+    });
+
+    it('stops reconciling and aborts the pass (writing a partial summary) when a periodic (elapsed-time-driven) lease renewal during marker reconciliation loses its CAS (Codex P2 review finding, PR #601, "Renew the prune lease during marker reconciliation")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+      // Two orphaned markers — each names a record key that does not
+      // exist. The delete loop above has only ONE real candidate and
+      // never advances the clock on its own delete, so it makes no
+      // periodic renewal call of its own; reconciliation's renewal check
+      // (elapsed time, same `RENEW_INTERVAL_MS` cadence as the delete
+      // loop, not a fixed marker count — mirroring AB-393's own
+      // elapsed-time rationale for the delete loop) is exercised in
+      // isolation.
+      await kv.set('audit-dedupe:v1:orphan-1', 'audit:v1:0000000000000500:000000000000:run-gone-1');
+      await kv.set('audit-dedupe:v1:orphan-2', 'audit:v1:0000000000000500:000000000000:run-gone-2');
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
+
+      let callIndex = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...kv,
+        async conditionalBatch(conditions, operations) {
+          callIndex += 1;
+          const isLeaseSet = operations.some(
+            (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
+          );
+          // Call 1: acquisition. Call 2: renewal before the delete loop.
+          // Call 3: the first periodic renewal, reached during marker
+          // reconciliation once simulated wall-clock time (advanced
+          // below, once per marker examined) crosses the renewal
+          // interval.
+          if (isLeaseSet && callIndex === 3) return false;
+          return kv.conditionalBatch(conditions, operations);
+        },
+        // Stands in for each marker's real lookup time — reconciliation's
+        // own renewal check runs based on the CLOCK, not a marker count,
+        // so advancing time here (rather than a real timer) is what
+        // deterministically crosses the interval after the FIRST marker.
+        async get(key: string) {
+          const value = await kv.get(key);
+          if (key.startsWith('audit-dedupe:v1:')) {
+            runtime.setTime(runtime.clock.now() + 350_000);
+          }
+          return value;
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 }, runtime);
+
+      await expect(trail.prune(5000)).rejects.toThrow(
+        'lost the prune lease during dedupe-marker reconciliation',
+      );
+
+      // The one real record still got deleted, and its summary still
+      // landed (partial), even though reconciliation was cut short — the
+      // FIRST marker (processed before the failed renewal check ahead of
+      // the SECOND) was still reconciled away.
+      const prunedRecords = await trail.query({ type: 'audit.pruned' });
+      expect(prunedRecords).toHaveLength(1);
+      expect(prunedRecords[0]?.detail).toEqual({ count: 1, cutoffMs: 5000, partial: true });
+      expect(await kv.get('audit-dedupe:v1:orphan-1')).toBeNull();
 
       trail.dispose();
     });
