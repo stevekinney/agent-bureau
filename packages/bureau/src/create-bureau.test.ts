@@ -14511,19 +14511,55 @@ describe('bureau.eventHistory run ownership survives a process restart (AB-359)'
   });
 
   it('records TWO concurrent runs on the same session as separate entries, keyed by their own runId, without either clobbering the other (AB-285-style union-merge)', async () => {
-    const databasePath = join(
-      tmpdir(),
-      `bureau-event-history-owner-recovery-union-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
-    );
+    // AB-373: this used to run both runs against a real SQLite file
+    // (`storage: { type: 'sqlite', path }`) so the later assertions below
+    // could also exercise `bureau.eventHistory`'s principal gate, which
+    // only exists over non-ephemeral storage. Instrumented with
+    // `performance.now()` timing around each step: `createBureau` and
+    // `createRun` were both consistently fast (single-digit to low-double-
+    // digit milliseconds), but the real SQLite write behind session
+    // persistence spent anywhere from ~400ms to multiple SECONDS per run
+    // even on an otherwise-idle-looking shell — this machine runs dozens
+    // of concurrent agent worktrees, so "isolated" here still means
+    // sharing real disk I/O and CPU scheduling with all of them. That
+    // latency is a real property of contended disk I/O on this shared
+    // box, not a bug in the polling helpers (`waitForRunCompletion` itself
+    // is bounded, macrotask-yield-based, and settles in 1-2 attempts once
+    // the run is actually done) — but it made the test's total wall time
+    // scale directly with machine load, exactly the "wall-clock
+    // assumption" this issue exists to remove. Swapping to LMDB (weft's
+    // other durable backend) was measured too and was WORSE under the
+    // same load (thousands of poll attempts, outright timeout), so
+    // trading one persistent backend for another does not fix this.
+    //
+    // The AB-285 regression this test guards is entirely about session
+    // metadata attribution — `lastRunOwningPrincipals` recording BOTH
+    // runs' principals without one clobbering the other — which needs no
+    // persistence at all. Per this issue's coordinator ruling, that
+    // assertion now runs against ephemeral in-memory storage, which
+    // removes the disk I/O (and its load-proportional latency) entirely.
+    // `bureau.eventHistory`'s principal gate for two different principals
+    // sharing one session is consequently not re-checked HERE — it
+    // requires durable storage to exist at all. What that check would
+    // have exercised — that the gate resolves the RIGHT principal out of
+    // a two-entry `lastRunOwningPrincipals` map rather than "last write
+    // wins" — is covered directly, with no persistence and no added
+    // latency, by `resolvePersistedRunOwningPrincipal`'s own unit test
+    // above ("returns the persisted principal for a well-formed entry",
+    // `describe('resolvePersistedRunOwningPrincipal (AB-359)')`), which
+    // feeds it the exact same two-run, two-principal map this test builds
+    // and asserts the per-run lookup returns the matching principal, not
+    // the other one. This test's own assertion below proves the map gets
+    // BOTH entries in the first place; that unit test proves a reader
+    // resolves the right one out of it.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
 
     try {
-      const bureau = await createBureau({
-        agents: {},
-        generate: createMockGenerate('Done.'),
-        toolbox: createEmptyToolbox(),
-        storage: { type: 'sqlite', path: databasePath },
-      });
-
       const sessionId = 'shared-session';
       const runOne = await bureau.createRun({
         message: 'First, as alice',
@@ -14544,35 +14580,8 @@ describe('bureau.eventHistory run ownership survives a process restart (AB-359)'
         [runOne.id]: 'alice',
         [runTwo.id]: 'bob',
       });
-
-      const asAliceOnRunOne = await bureau.eventHistory(
-        { kind: 'run', id: runOne.id },
-        { principal: 'alice' },
-      );
-      if ('outcome' in asAliceOnRunOne) throw new Error('expected a page for alice on run one');
-      const asBobOnRunTwo = await bureau.eventHistory(
-        { kind: 'run', id: runTwo.id },
-        { principal: 'bob' },
-      );
-      if ('outcome' in asBobOnRunTwo) throw new Error('expected a page for bob on run two');
-
-      // Neither principal is authorized against the OTHER run.
-      const asAliceOnRunTwo = await bureau.eventHistory(
-        { kind: 'run', id: runTwo.id },
-        { principal: 'alice' },
-      );
-      expect(asAliceOnRunTwo).toEqual({ outcome: 'not-found' });
-      const asBobOnRunOne = await bureau.eventHistory(
-        { kind: 'run', id: runOne.id },
-        { principal: 'bob' },
-      );
-      expect(asBobOnRunOne).toEqual({ outcome: 'not-found' });
-
-      await bureau.shutdown();
     } finally {
-      await rm(databasePath, { force: true });
-      await rm(`${databasePath}-wal`, { force: true });
-      await rm(`${databasePath}-shm`, { force: true });
+      await bureau.dispose();
     }
   });
 });
@@ -16448,18 +16457,22 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     // releases this paused run, let alone before it resumes its step loop
     // and eventually reaches its own `run.completed`.
     //
-    // Verified empirically (not assumed): releasing a paused run and
-    // letting it resume through a further tool call and generate step
-    // takes real, measurable time even with everything in-process and no
-    // real I/O — comfortably enough to cross a millisecond boundary on
-    // this machine. `AuditRecord`'s primary sort key is timestamp
-    // (`encodeKey`), so the deletion's genuinely earlier timestamp sorts
-    // it before the run's later terminal action; `writeOutOfBandRecord`'s
-    // huge manual sequence only matters as a SAME-millisecond tie-break,
-    // and doesn't apply here since these two do not tie. This actually
-    // recovers a MORE truthful chronology than the prior round's, not a
-    // less truthful one: the session record really was deleted before
-    // this run went on to finish.
+    // AB-373: this used to rely on real, measurable wall-clock time
+    // elapsing between the dispatch and the released run's eventual
+    // terminal action to land the two records in genuinely different
+    // milliseconds — true on a quiet machine, but a machine under load (or
+    // a fast, quiet CI runner where the whole resumption finishes inside
+    // one millisecond) can just as easily produce a tie either way, and a
+    // tie exercises AB-370's sequence tie-break instead of the timestamp
+    // ordering this test is named for. A manual clock makes the "genuinely
+    // different milliseconds" case deterministic instead of probabilistic:
+    // hold the run paused until the deletion's `sessionStore.delete` has
+    // already committed and dispatched `session.deleted` (observed here as
+    // the session becoming unreadable, the same signal the "recreated
+    // session" test above polls for), advance the virtual clock by one
+    // millisecond, and only then release the paused run — so its eventual
+    // `run.completed` is timestamped strictly after the deletion no matter
+    // how fast or slow the real machine is.
     let releaseTool: (() => void) | undefined;
     const toolGate = new Promise<void>((resolve) => {
       releaseTool = resolve;
@@ -16478,12 +16491,19 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       { content: 'done', toolCalls: [] },
     ]);
 
+    const runtime = createManualRuntimeServices();
+    // As with AB-370's sibling test below, the bureau-level `runtime`
+    // option alone does not reach `Action.timestamp` — `createStore` must
+    // be built against the SAME manual runtime and passed in explicitly.
+    const store = createStore({ runtime });
     const bureau = await createBureau({
       agents: {},
       generate,
       toolbox: createToolbox([nextTool]),
       persistence: textValueStore(new MemoryStorage()),
       stopWhen: stopWhen.noToolCalls(),
+      runtime,
+      store,
     });
 
     try {
@@ -16496,9 +16516,24 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
         requestedValue: { target: 'pause' },
       });
       expect(pause.outcome).toBe('accepted');
+
+      // Deletion commits and dispatches `session.deleted` immediately, but
+      // its returned promise stays pending — the tool gate below is still
+      // held, so the paused run this deletion releases cannot yet reach
+      // its own terminal action.
+      const deletion = bureau.deleteSession(sessionId);
+      await pollUntil(async () => (await bureau.getSession(sessionId)) === undefined);
+
+      // The deletion's `session.deleted` record now carries the clock's
+      // current reading. Advance before releasing the paused run, so
+      // everything from here on — the tool's return, the next generate
+      // step, and the run's own `run.completed` — is timestamped one
+      // whole millisecond later, deterministically, regardless of how
+      // quickly this process actually schedules those microtasks.
+      await runtime.advance(1);
       releaseTool!();
 
-      await bureau.deleteSession(sessionId);
+      await deletion;
       await waitForRunCompletion(bureau, run.id);
 
       const allRecords = await bureau.auditTrail!.query({ limit: 1000 });
@@ -16510,6 +16545,15 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
       );
       expect(runTerminalIndex).toBeGreaterThanOrEqual(0);
       expect(sessionDeletedIndex).toBeGreaterThanOrEqual(0);
+      // The two records genuinely land in different milliseconds — proves
+      // the timestamp-ordering path, not AB-370's same-millisecond
+      // sequence tie-break.
+      const sessionDeletedRecord = allRecords[sessionDeletedIndex];
+      const runTerminalRecord = allRecords[runTerminalIndex];
+      if (!sessionDeletedRecord || !runTerminalRecord) {
+        throw new Error('expected both records to be present in the query result');
+      }
+      expect(sessionDeletedRecord.timestampMs).toBeLessThan(runTerminalRecord.timestampMs);
       expect(sessionDeletedIndex).toBeLessThan(runTerminalIndex);
     } finally {
       await bureau.dispose();
