@@ -367,6 +367,34 @@ export interface DurableEventHistory {
    */
   retainedRunOwnerIds(): Promise<RetainedRunOwnerSnapshot | undefined>;
   /**
+   * Like {@link retainedRunOwnerIds}, but NEVER returns `undefined` at
+   * floor 0 — it scans and returns the real (possibly empty) owner set
+   * regardless of the current retention floor.
+   *
+   * AB-388 (Codex review, PR #597, "Scan retained run owners at floor
+   * zero"): `retainedRunOwnerIds()`'s floor-0 `undefined` is the RIGHT
+   * answer for its one existing caller, `pruneStaleRunOwnership`, which
+   * uses the returned set to decide what is prune-ELIGIBLE — an empty
+   * set there would indistinguishably read as "everything is eligible,"
+   * so floor 0 (nothing retired yet, nothing eligible) must return
+   * `undefined` instead of an empty set for that caller specifically (see
+   * that function's own doc comment above).
+   *
+   * `Bureau.pruneAuditTrail`'s `protectRunId` consumer has the OPPOSITE
+   * polarity: the returned set says what to PROTECT, and a small or empty
+   * real set is never ambiguous with "protect everything." Reusing
+   * `retainedRunOwnerIds()` there made a retained run's OWN audit records
+   * (e.g. an earlier `tool.result`/`step.completed` write than that run's
+   * later terminal durable event) prunable whenever the fleet feed floor
+   * happened to still be 0 — the floor-0 "nothing has been retired"
+   * escape hatch silently dropped ALL owner-based protection instead of
+   * computing the real (and at floor 0, complete) set that a full
+   * `feed.replay()` already gives for free. This function is that same
+   * scan, called unconditionally, so `pruneAuditTrail` gets accurate
+   * per-run protection at every floor value including 0.
+   */
+  retainedRunOwnerIdsForAuditRetention(): Promise<RetainedRunOwnerSnapshot>;
+  /**
    * Cheaply extends a {@link RetainedRunOwnerSnapshot} to reflect any
    * durable event appended to the feed since it was taken, WITHOUT
    * rescanning the records the snapshot already walked.
@@ -958,6 +986,16 @@ export function createDurableEventHistory(
     return scanRunOwnerIdsFrom(new Set(), undefined);
   }
 
+  function retainedRunOwnerIdsForAuditRetention(): Promise<RetainedRunOwnerSnapshot> {
+    // No floor-0 short-circuit (see this function's own doc comment on
+    // the interface): `pruneAuditTrail`'s `protectRunId` consumer needs
+    // the real owner set at every floor value, including 0, where the
+    // real set is simply "every owner the feed has ever retained" — no
+    // different in cost from the floor>0 case, since `scanRunOwnerIdsFrom`
+    // already walks exactly the currently-retained window either way.
+    return scanRunOwnerIdsFrom(new Set(), undefined);
+  }
+
   async function refreshRetainedRunOwnerIds(
     snapshot: RetainedRunOwnerSnapshot,
   ): Promise<RetainedRunOwnerSnapshot> {
@@ -1062,6 +1100,7 @@ export function createDurableEventHistory(
     page,
     subscribeEventHistory,
     retainedRunOwnerIds,
+    retainedRunOwnerIdsForAuditRetention,
     refreshRetainedRunOwnerIds,
     latestDeletionMarker,
     retentionFloorTimestamp,

@@ -5579,7 +5579,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     const effectiveCutoff =
       floorTimestamp !== undefined ? Math.min(cutoff, floorTimestamp) : cutoff;
 
-    const retainedRunOwners = await eventHistoryInstance?.retainedRunOwnerIds();
+    // AB-388 (Codex review, PR #597, "Scan retained run owners at floor
+    // zero"): uses `retainedRunOwnerIdsForAuditRetention()`, not
+    // `retainedRunOwnerIds()` — the latter deliberately returns
+    // `undefined` at floor 0 for `pruneStaleRunOwnership`'s own eligibility
+    // check (see that function's doc comment), which would silently drop
+    // ALL owner-based protection here whenever the fleet feed floor
+    // happens to still be 0, letting a still-retained run's earlier audit
+    // records (e.g. a `tool.result` write earlier than that run's own
+    // later terminal durable event) be pruned by timestamp alone. See
+    // `retainedRunOwnerIdsForAuditRetention`'s own doc comment
+    // (`durable-event-history.ts`) for why this consumer's polarity makes
+    // the real set safe to use at every floor value.
+    const retainedRunOwners = await eventHistoryInstance?.retainedRunOwnerIdsForAuditRetention();
     const protectRunId = retainedRunOwners
       ? (runId: string) => retainedRunOwners.ownerIds.has(runId)
       : undefined;
@@ -5627,8 +5639,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // this function's own re-thrown `engineMaintenanceError`) before backend
   // teardown, alongside the automatic timer's own await.
   const manualDurableMaintenancePasses = new Set<Promise<void>>();
+  // AB-388 (Codex review, PR #597, "Fence maintenance admission once
+  // shutdown starts"): closed SYNCHRONOUSLY (no `await` in between) as the
+  // very first step of the "stop background work" section of `shutdown()`
+  // below, strictly BEFORE that section takes its `manualDurableMaintenancePasses`
+  // snapshot. Without this, a `runDurableMaintenance()` call arriving after
+  // the snapshot but before `backgroundShutdownController.abort()` (e.g.
+  // during the automatic pass's own await, which yields control) could add
+  // itself to the set too late to be captured by that snapshot, and still
+  // be listing/deleting/writing a summary when backend teardown proceeds.
+  // Checked (and set) with no `await` between the check and the
+  // registration below, so no admitted call can slip in between the flag
+  // flipping and the snapshot being taken — ordinary JS single-threaded
+  // synchronous-until-the-first-`await` semantics, not a real lock.
+  let maintenanceAdmissionClosed = false;
 
   async function runDurableMaintenance(now?: number): Promise<true | undefined> {
+    if (maintenanceAdmissionClosed) {
+      throw new BureauError('Cannot run durable maintenance: bureau is shutting down', 'CONFLICT');
+    }
     const hasDurableEngine = Boolean(runtime.durable);
     // AB-388 (Codex review, PR #597, "Isolate audit pruning from engine
     // maintenance failures"): a rejected `engine.runMaintenance()` (e.g. a
@@ -7266,6 +7295,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // a later drain (the safety net a redelivery relies on generally),
       // but there is no reason to manufacture that residual here when
       // simply awaiting first avoids it entirely.
+      //
+      // AB-388 (Codex review, PR #597, "Fence maintenance admission once
+      // shutdown starts"): closed HERE, synchronously, before anything
+      // below this line awaits — see `maintenanceAdmissionClosed`'s own
+      // doc comment for why the ordering matters.
+      maintenanceAdmissionClosed = true;
       if (automaticRunOwnershipPruneTimerStarted) {
         runtimeServices.timers.clearInterval(automaticRunOwnershipPruneTimer);
         automaticRunOwnershipPruneTimerStarted = false;

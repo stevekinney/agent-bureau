@@ -15964,6 +15964,80 @@ describe('Bureau durable audit trail retention (AB-388)', () => {
     }
   });
 
+  it('protects a still-retained run\'s own earlier audit record even while the fleet feed retention floor is still 0 (Codex review, PR #597, "Scan retained run owners at floor zero")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-floor-zero-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime,
+        durableBackgroundTasks: 'manual',
+        auditRetention: { olderThan: 2_500_000 },
+      });
+
+      try {
+        // The identifier sequence is deterministic (Codex review, PR #597
+        // context: "gives two independent runtimes distinct paths despite
+        // each identifier sequence starting at 1"), so the FIRST run this
+        // bureau ever creates is predictable before it exists — letting
+        // this test seed an out-of-band audit record for that run's id
+        // BEFORE the run's own durable event ever lands, at the clock's
+        // starting reading (`t0`).
+        const predictedRunId = `${runtime.identifierPrefix}-run-1`;
+        await bureau.auditTrail?.record({
+          runId: predictedRunId,
+          type: 'seeded.early-marker',
+          detail: { note: "earlier than the run's own durable event" },
+        });
+
+        // Advance well past `olderThan` before the run's own durable event
+        // is ever recorded, so that event's `emittedAtMs` (`t1`) lands far
+        // after the seeded record's own `t0`.
+        await runtime.advance(1_000_000);
+
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        expect(run.id).toBe(predictedRunId);
+        await waitForRunCompletion(bureau, run.id);
+        await runtime.deferred.drain();
+
+        // The fleet feed's retention floor has never advanced (nothing has
+        // ever been retired) — `retentionFloorTimestamp()` therefore
+        // returns this run's own `t1`, the earliest (and only) durable
+        // envelope currently in the feed. Advancing further and choosing
+        // `olderThan` so the cutoff lands strictly between `t0` and `t1`
+        // means the seeded record is prunable BY TIMESTAMP ALONE (its `t0`
+        // is before the cutoff), while the run's own natural audit records
+        // (all stamped `t1`) are not. Only `protectRunId` — which AB-388's
+        // fix now computes even at floor 0 via
+        // `retainedRunOwnerIdsForAuditRetention()` — can save the seeded
+        // record, since this run's own id is still a durable-feed owner.
+        await runtime.advance(2_000_000);
+
+        const before = await bureau.auditTrail?.query({ runId: predictedRunId });
+        expect(before?.some((record) => record.type === 'seeded.early-marker')).toBe(true);
+
+        await bureau.runDurableMaintenance();
+
+        const after = await bureau.auditTrail?.query({ runId: predictedRunId });
+        expect(after?.some((record) => record.type === 'seeded.early-marker')).toBe(true);
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('under the default automatic maintenance profile, prunes on its own timer — never requiring an explicit runDurableMaintenance() call', async () => {
     const databasePath = join(
       tmpdir(),

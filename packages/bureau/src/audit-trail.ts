@@ -654,6 +654,36 @@ const PREFIX = 'audit:v1:';
 const PRUNE_FLOOR_KEY = 'audit-retention:v1:highest-pruned-sequence';
 
 /**
+ * AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+ * with deletions"): a durable RECORD OF INTENT, written alongside
+ * {@link PRUNE_FLOOR_KEY} before this pass deletes anything, and cleared
+ * only after the pass's own `audit.pruned` summary has been durably
+ * written. If the process terminates after some `kv.delete()` calls have
+ * already committed but before the summary lands, this key survives —
+ * the deleted records themselves carry no evidence of their own removal
+ * once gone, but this intent record does, letting the NEXT pass emit the
+ * missing summary on this pass's behalf before doing any new work of its
+ * own. Deliberately NOT under {@link PREFIX}, for the same reason
+ * {@link PRUNE_FLOOR_KEY} is not.
+ */
+const PRUNE_INTENT_KEY = 'audit-retention:v1:prune-intent';
+
+/** The shape persisted at {@link PRUNE_INTENT_KEY}. */
+interface PruneIntentValue {
+  readonly count: number;
+  readonly cutoffMs: number;
+}
+
+function isPruneIntentValue(value: unknown): value is PruneIntentValue {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { count?: unknown }).count === 'number' &&
+    typeof (value as { cutoffMs?: unknown }).cutoffMs === 'number'
+  );
+}
+
+/**
  * AB-388 (Codex review, PR #597, "Coordinate pruning across shared-store
  * instances"): `prunePassQueue` only serializes `prune()` calls made
  * WITHIN one `createAuditTrail()` instance — two Bureau PROCESSES sharing
@@ -1264,23 +1294,29 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
    * accepted residual, consistent with this codebase's existing
    * cross-process residuals (see `create-bureau.ts`'s own
    * `drainSessionOutbox` doc comment for an analogous ACCEPTED RESIDUAL).
-   * Renewal failure (lease already lost) is silently tolerated here —
-   * the caller does not re-verify per delete, so this narrows the race
-   * window without needing a conditional variant of `kv.delete()`, which
-   * `TextValueStore` does not expose.
+   *
+   * AB-388 (Codex review, PR #597, "Abort pruning when lease renewal
+   * loses its CAS"): returns whether THIS pass still holds the lease
+   * after the call, rather than silently tolerating a lost renewal — a
+   * `false` return (the token no longer matches, the lease key is gone,
+   * or the `conditionalBatch` itself lost its CAS to a concurrent
+   * takeover) means another instance now owns the lease, and every
+   * caller MUST abort the pass immediately rather than continue deleting
+   * candidates that instance could be deleting or has already deleted,
+   * or racing its own watermark/summary writes.
    */
-  async function renewPruneLease(token: string): Promise<void> {
-    if (!kv) return;
+  async function renewPruneLease(token: string): Promise<boolean> {
+    if (!kv) return true;
     const existingRaw = await kv.get(PRUNE_LEASE_KEY);
-    if (existingRaw === null) return;
+    if (existingRaw === null) return false;
     let existing: unknown;
     try {
       existing = JSON.parse(existingRaw);
     } catch {
-      return;
+      return false;
     }
-    if (!isPruneLeaseValue(existing) || existing.token !== token) return;
-    await kv.conditionalBatch(
+    if (!isPruneLeaseValue(existing) || existing.token !== token) return false;
+    return kv.conditionalBatch(
       [{ key: PRUNE_LEASE_KEY, expectedValue: existingRaw }],
       [
         {
@@ -1292,12 +1328,55 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     );
   }
 
+  /**
+   * AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+   * with deletions"): recovers a pass whose deletions committed but whose
+   * `audit.pruned` summary never landed — a crash between the two. Reads
+   * {@link PRUNE_INTENT_KEY}; if present, emits the missing summary from
+   * the intent's own recorded `count`/`cutoffMs` (the deleted records
+   * themselves are long gone by now and carry no evidence of their own
+   * removal — the intent is the only surviving account of what happened),
+   * then clears the intent key. Called at the very start of every pass,
+   * BEFORE that pass does any new listing or deleting of its own, so a
+   * missed summary is reconciled at the first opportunity rather than
+   * waiting for some unrelated future trigger.
+   */
+  async function reconcileOrphanedPruneIntent(): Promise<void> {
+    if (!kv) return;
+    const raw = await kv.get(PRUNE_INTENT_KEY);
+    if (raw === null) return;
+    let intent: unknown;
+    try {
+      intent = JSON.parse(raw);
+    } catch {
+      // Malformed intent record — nothing recoverable from it; clear it
+      // so it does not block every future pass forever.
+      await kv.delete(PRUNE_INTENT_KEY);
+      return;
+    }
+    if (!isPruneIntentValue(intent)) {
+      await kv.delete(PRUNE_INTENT_KEY);
+      return;
+    }
+    await writeOutOfBandRecord(
+      {
+        runId: 'bureau:audit-retention',
+        type: 'audit.pruned',
+        detail: { count: intent.count, cutoffMs: intent.cutoffMs, recovered: true },
+      },
+      { strict: true, bypassAbortCheck: true },
+    );
+    await kv.delete(PRUNE_INTENT_KEY);
+  }
+
   async function runPrunePassLocked(
     cutoffMs: number,
     protectRunId?: (runId: string) => boolean,
     leaseToken?: string,
   ): Promise<AuditPruneResult | undefined> {
     if (!kv) return undefined;
+
+    await reconcileOrphanedPruneIntent();
 
     // AB-388: list once, then judge each key against `cutoffMs` from the
     // KEY alone via `parsePruneCandidateFromKey` wherever possible — no
@@ -1394,9 +1473,35 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // itself consume a meaningful fraction of the lease's TTL for a large
     // trail, so this gives the deletes and summary write that remain a
     // fresh full TTL rather than racing whatever budget was left over.
-    if (leaseToken !== undefined) {
-      await renewPruneLease(leaseToken);
+    //
+    // AB-388 (Codex review, PR #597, "Abort pruning when lease renewal
+    // loses its CAS"): a `false` return means another instance now holds
+    // the lease — abort BEFORE the delete loop below even starts, rather
+    // than proceeding to delete candidates that instance could be
+    // deleting (or has already deleted) concurrently. The watermark write
+    // just above already landed durably, so aborting here loses nothing
+    // — the NEXT pass (this instance's retry, or the new holder's own
+    // pass) simply re-lists and re-deletes the same still-present keys.
+    if (leaseToken !== undefined && !(await renewPruneLease(leaseToken))) {
+      throw new Error(
+        'Aborting audit-trail prune pass: lost the prune lease before the delete phase',
+      );
     }
+
+    // AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+    // with deletions"): declares this pass's intent to delete UP TO
+    // `candidates.length` records under `cutoffMs`, right before the
+    // delete loop below actually starts — never before the lease-renewal
+    // check above, which can still abort with NOTHING deleted; writing
+    // the intent before that check would falsely claim deletions that
+    // never happened. See `PRUNE_INTENT_KEY`'s own doc comment for why
+    // this exists and `reconcileOrphanedPruneIntent`'s own doc comment
+    // for why `count` here is an upper bound, not a guarantee, for the
+    // one case this recovers: a process that terminates mid-delete-loop
+    // with no code left to run to record what actually committed.
+    // Cleared once THIS pass's own summary write below lands, whether
+    // that summary reports a full or partial `prunedCount`.
+    await kv.set(PRUNE_INTENT_KEY, JSON.stringify({ count: candidates.length, cutoffMs }));
 
     // Only NOW, after the watermark durably reflects every sequence this
     // pass is about to remove, actually delete the qualifying records.
@@ -1425,8 +1530,21 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       try {
         await kv.delete(candidate.key);
         prunedCount += 1;
-        if (leaseToken !== undefined && prunedCount % RENEW_EVERY_N_DELETES === 0) {
-          await renewPruneLease(leaseToken);
+        if (
+          leaseToken !== undefined &&
+          prunedCount % RENEW_EVERY_N_DELETES === 0 &&
+          !(await renewPruneLease(leaseToken))
+        ) {
+          // AB-388 (Codex review, PR #597, "Abort pruning when lease
+          // renewal loses its CAS"): treated exactly like a `kv.delete()`
+          // failure below — stop deleting further candidates immediately,
+          // but still let the partial summary write (further down) record
+          // what THIS pass already committed before another instance took
+          // over the lease.
+          deleteError = new Error(
+            'Aborting audit-trail prune pass: lost the prune lease mid-delete',
+          );
+          break;
         }
       } catch (error: unknown) {
         // Normalized to a real `Error` here (never re-thrown as `unknown`)
@@ -1499,6 +1617,17 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         { strict: true, bypassAbortCheck: true },
       );
     }
+
+    // AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+    // with deletions"): reaching this line means either the summary above
+    // was durably written, or there was nothing to summarize
+    // (`prunedCount === 0`) — either way THIS pass's own outcome is now
+    // fully accounted for, so the intent recorded before the delete loop
+    // no longer needs recovering. A `strict` `writeOutOfBandRecord`
+    // failure above throws out of this function before reaching here,
+    // deliberately leaving the intent in place for the NEXT pass's
+    // `reconcileOrphanedPruneIntent` to recover.
+    await kv.delete(PRUNE_INTENT_KEY);
 
     // Surfaced only AFTER the partial summary above has been durably
     // written — a caller (`pruneAuditTrail`'s `runDurableMaintenance`

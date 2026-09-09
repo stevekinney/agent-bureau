@@ -805,6 +805,58 @@ describe('createDurableEventHistory', () => {
     });
   });
 
+  describe('retainedRunOwnerIdsForAuditRetention() (AB-388, Codex review, PR #597, "Scan retained run owners at floor zero")', () => {
+    it('returns the real owner set at floor 0, unlike retainedRunOwnerIds()', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      await history.record(owner, 'run.started', {});
+      await history.record(owner, 'run.completed', {});
+
+      // Floor is still 0 — nothing has ever been retired.
+      expect(await history.retainedRunOwnerIds()).toBeUndefined();
+
+      const retained = await history.retainedRunOwnerIdsForAuditRetention();
+      expect(retained.ownerIds).toEqual(new Set(['run-1']));
+
+      await history.dispose();
+    });
+
+    it('still excludes a run whose every event has been retired past the floor', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const stale = { kind: 'run' as const, id: 'run-stale' };
+      const survivor = { kind: 'run' as const, id: 'run-survivor' };
+
+      await history.record(stale, 'run.started', {}); // sequence 0
+      await history.record(stale, 'run.completed', {}); // sequence 1
+      await history.record(survivor, 'run.started', {}); // sequence 2
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 2 });
+      adminFeed.dispose();
+
+      const retained = await history.retainedRunOwnerIdsForAuditRetention();
+      expect(retained.ownerIds).toEqual(new Set(['run-survivor']));
+
+      await history.dispose();
+    });
+
+    it('returns an empty set, not undefined, for a fleet feed with no run owners at all', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      const retained = await history.retainedRunOwnerIdsForAuditRetention();
+      expect(retained.ownerIds).toEqual(new Set());
+
+      await history.dispose();
+    });
+  });
+
   describe('retentionFloorTimestamp() (AB-388)', () => {
     it('protects a retained record even while the retention floor is still 0 — a floor of 0 means nothing has ever been retired, not "prune everything" (Codex review, PR #597)', async () => {
       const storage = await createMemoryStorage();
@@ -1874,6 +1926,9 @@ function createRecordingHistory(
       throw new Error('unused by createDurableEventProducer');
     },
     retainedRunOwnerIds() {
+      throw new Error('unused by createDurableEventProducer');
+    },
+    retainedRunOwnerIdsForAuditRetention() {
       throw new Error('unused by createDurableEventProducer');
     },
     refreshRetainedRunOwnerIds() {
