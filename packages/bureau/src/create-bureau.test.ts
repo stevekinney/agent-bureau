@@ -18398,6 +18398,185 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
       await bureau.dispose();
     }
   });
+
+  it('leaves an unrecognized session.attachment namespace pending and UNCLAIMED, and still drains a later ordinal past it in the same pass (Copilot review finding, PR #601)', async () => {
+    // `SessionStore.update({ outbox })` is explicitly session-agnostic — a
+    // namespace this bureau does not recognize might still be meaningful to
+    // a different consumer that has not drained it yet. Acknowledging
+    // (permanently removing) it would silently discard that fact, and
+    // claiming it would starve that other consumer for as long as this
+    // bureau keeps renewing the claim on every maintenance tick — so this
+    // bureau never claims it at all, and the drain pass moves on to later
+    // ordinals rather than looping on it forever.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const firstSession = createAgentSession({
+        id: 'ab-391-unknown-namespace-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-unknown-namespace-session' }),
+      });
+      await sessionStore.save(firstSession);
+      // Ordinals 1–3: session.created, session.saved, session.attachment
+      // (the unrecognized namespace).
+      await sessionStore.update(firstSession.id, (existing) => existing, {
+        outbox: [{ namespace: 'future-consumer-fact', payload: { anything: true } }],
+      });
+      // Ordinal 4: a LATER entry this bureau fully recognizes.
+      const secondSession = createAgentSession({
+        id: 'ab-391-later-ordinal-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-later-ordinal-session' }),
+      });
+      await sessionStore.save(secondSession);
+
+      // Every commit above fires the best-effort drain trigger, so ordinals
+      // 1/2/4 may already be drained by the time this line runs — this
+      // test's actual claim is about the FINAL, settled state after an
+      // explicit maintenance pass, not the transient state in between.
+      await bureau.runDurableMaintenance();
+
+      const pendingAfterDrain = await sessionStore.outbox.pending();
+      // Ordinal 3 (the unrecognized namespace) is still pending — never
+      // dropped — and UNCLAIMED, so a different consumer could take it
+      // immediately. Ordinals 1, 2, and 4 all drained past it.
+      expect(pendingAfterDrain.map((entry) => entry.ordinal)).toEqual([3]);
+      const attachment = pendingAfterDrain[0];
+      if (attachment?.kind !== 'session.attachment') {
+        throw new Error('expected a session.attachment outbox entry');
+      }
+      expect(attachment.namespace).toBe('future-consumer-fact');
+      expect(attachment.claim).toBeUndefined();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('acknowledges a session.attachment entry under the recognized namespace whose payload is malformed, without replaying it', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const session = createAgentSession({
+        id: 'ab-391-malformed-payload-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-malformed-payload-session' }),
+      });
+      await sessionStore.save(session);
+      // Missing `principal` — fails `isReviewAuditAttachmentPayload`.
+      await sessionStore.update(session.id, (existing) => existing, {
+        outbox: [
+          {
+            namespace: 'audit-record',
+            payload: {
+              runId: 'ab-391-malformed-run',
+              type: 'review.tool-approval.approved',
+              detail: {},
+            },
+          },
+        ],
+      });
+
+      await bureau.runDurableMaintenance();
+
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+      const records = await bureau.auditTrail!.query({ runId: 'ab-391-malformed-run' });
+      expect(records).toHaveLength(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('scopes the dedup query with `since` so a re-drained attachment is found (and not duplicated) behind 500+ earlier same-runId/type records (Copilot review finding, PR #601)', async () => {
+    // `AuditTrail.query()` defaults to `limit: 500` and stops collecting
+    // once it hits that many MATCHING records, scanned in chronological
+    // order. Without `since: entry.committedAtMs` scoping the dedup
+    // lookup, 500+ earlier records sharing this entry's exact `runId`/
+    // `type` (an unlikely but real volume for a long-lived run) would fill
+    // that limit before the scan ever reached this entry's own timestamp —
+    // both the pre-write "already recorded?" check and the post-write
+    // "did it actually land?" verification would then wrongly report "not
+    // found", the latter making this drain treat its own successful write
+    // as a failure and retry it forever, duplicating the record on every
+    // pass.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const runId = 'ab-391-dedup-limit-run';
+      const type = 'review.tool-approval.approved';
+      const floodCount = 500;
+      for (let index = 0; index < floodCount; index += 1) {
+        await bureau.auditTrail!.record({
+          runId,
+          type,
+          detail: { flood: index },
+          principal: 'api-key:flood',
+          timestampMs: 1_000 + index,
+        });
+      }
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const session = createAgentSession({
+        id: 'ab-391-dedup-limit-session',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({ id: 'ab-391-dedup-limit-session' }),
+      });
+      await sessionStore.save(session);
+      const targetPayload = {
+        runId,
+        type,
+        detail: { review: { id: `approval:${runId}:call-1` }, decision: 'approve' },
+        principal: 'api-key:limit-reviewer',
+      };
+      await sessionStore.update(session.id, (existing) => existing, {
+        outbox: [{ namespace: 'audit-record', payload: targetPayload }],
+      });
+
+      await bureau.runDurableMaintenance();
+
+      // The entry must be acknowledged — the fix's `since`-scoped
+      // verification query found the write it just made.
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+
+      const allMatching = await bureau.auditTrail!.query({ runId, type, limit: floodCount + 10 });
+      const targetRecords = allMatching.filter(
+        (record) => JSON.stringify(record.detail) === JSON.stringify(targetPayload.detail),
+      );
+      expect(targetRecords).toHaveLength(1);
+      expect(allMatching).toHaveLength(floodCount + 1);
+
+      // A second maintenance pass (nothing left pending) must not duplicate
+      // the record either.
+      await bureau.runDurableMaintenance();
+      const afterSecondPass = await bureau.auditTrail!.query({
+        runId,
+        type,
+        limit: floodCount + 10,
+      });
+      expect(afterSecondPass).toHaveLength(floodCount + 1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });
 
 describe('AB-390 — outbox claim lease', () => {

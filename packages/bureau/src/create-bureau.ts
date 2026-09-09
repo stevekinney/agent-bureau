@@ -5533,10 +5533,47 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     outboxSessionStore: SessionStore,
     producer: DurableEventProducer | undefined,
   ): Promise<void> {
+    // AB-391: ordinals this SAME pass has already decided to leave pending
+    // under an unrecognized `session.attachment` namespace (see below) —
+    // this pass never claims them, and filters them out of every
+    // subsequent `pending()` read for the REST of this pass, so this loop
+    // still makes progress on later ordinals instead of re-observing the
+    // same entry on every iteration forever. Scoped to one pass (not
+    // persisted across calls): a LATER pass — this bureau's own next
+    // maintenance tick, or a peer's, potentially running an upgraded
+    // version that recognizes the namespace — gets a fresh look at it,
+    // with no claim of ours ever standing in the way.
+    const skippedOrdinalsThisPass = new Set<number>();
     for (;;) {
       const pending: readonly SessionOutboxEntry[] = await outboxSessionStore.outbox.pending();
-      if (pending.length === 0) return;
-      for (const entry of pending) {
+      const remaining = pending.filter((entry) => !skippedOrdinalsThisPass.has(entry.ordinal));
+      if (remaining.length === 0) return;
+      for (const entry of remaining) {
+        // AB-391: `SessionStore.update({ outbox })` is explicitly
+        // session-agnostic (see its own doc comment) — a `session.attachment`
+        // namespace THIS bureau version does not recognize may still be
+        // meaningful to a different consumer (a future bureau version, or
+        // a peer instance running one) that has not drained it yet.
+        // Checked BEFORE `claim()` below, deliberately (review finding, PR
+        // #601): claiming an entry this bureau is never going to
+        // acknowledge would extend its lease on every maintenance tick (a
+        // same-owner `claim()` renews, per AB-390's own doc comment on
+        // `outbox.claim()`), starving a DIFFERENT consumer that DOES
+        // recognize the namespace for as long as this process keeps
+        // ticking — never claiming it at all means that consumer can take
+        // it immediately, on its own next drain.
+        if (
+          entry.kind === 'session.attachment' &&
+          entry.namespace !== REVIEW_AUDIT_OUTBOX_NAMESPACE
+        ) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Unrecognized session.attachment outbox entry namespace "${entry.namespace}" (ordinal ${entry.ordinal}); leaving it pending, unclaimed, rather than dropping it, in case a different consumer recognizes it.`,
+          });
+          skippedOrdinalsThisPass.add(entry.ordinal);
+          continue;
+        }
         // AB-390 — claim before replaying. A peer (this process's own
         // overlapping pass is impossible: `drainOutbox` is
         // single-flighted above; "peer" here means a DIFFERENT bureau
@@ -5823,6 +5860,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * the same entry) and a duplicate `audit:v1:` record — `record()` always
    * mints a fresh key from a fresh `sequence`, so writing twice is never
    * safe to rely on a downstream dedupe for.
+   *
+   * Only ever called for a `REVIEW_AUDIT_OUTBOX_NAMESPACE` entry —
+   * `drainOutboxPass` filters out (and never claims) any other
+   * `session.attachment` namespace before reaching this function, so
+   * there is no "unrecognized namespace" branch here to duplicate that
+   * check.
    */
   async function drainOutboxAttachmentEntry(
     entry: Extract<SessionOutboxEntry, { kind: 'session.attachment' }>,
@@ -5844,14 +5887,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       return 'continue';
     };
 
-    if (entry.namespace !== REVIEW_AUDIT_OUTBOX_NAMESPACE) {
-      diagnose({
-        level: 'error',
-        scope: 'durable-maintenance',
-        message: `[bureau] Unrecognized session.attachment outbox entry namespace "${entry.namespace}" (ordinal ${entry.ordinal}); acknowledging without replay.`,
-      });
-      return acknowledge();
-    }
+    // `REVIEW_AUDIT_OUTBOX_NAMESPACE` IS this bureau's own — this code is
+    // the only writer of it, via `reviewAuditOutboxAttachment`, which
+    // always produces the shape `isReviewAuditAttachmentPayload` checks
+    // for. A payload under this namespace that fails that check is
+    // corruption from THIS write path (or a hand-edited/fuzzed record),
+    // not a forward-compatibility gap a future consumer could resolve —
+    // there is no future version of this same namespace to defer to, so
+    // dropping it (rather than leaving it to jam every future pass) is
+    // the correct call.
     if (!isReviewAuditAttachmentPayload(entry.payload)) {
       diagnose({
         level: 'error',
@@ -5865,7 +5909,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       const matches = (record: AuditRecord): boolean =>
         record.timestampMs === entry.committedAtMs &&
         JSON.stringify(record.detail) === JSON.stringify(payload.detail);
-      const existing = await auditTrailInstance.query({ runId: payload.runId, type: payload.type });
+      // Codex/Copilot review finding, PR #601: scoping this dedup query
+      // to records `since: entry.committedAtMs` keeps it correct
+      // regardless of `query()`'s default `limit: 500` — without `since`,
+      // 500 EARLIER records of this exact `runId`/`type` (however
+      // unlikely for a per-review decision type) would fill the limit
+      // before the scan ever reached this entry's own timestamp, and this
+      // check would then write a duplicate rather than find the record it
+      // is looking for. `since` is inclusive of the exact millisecond
+      // (`record.timestampMs < since` is what `query()` excludes on), so
+      // the target record itself is never filtered out.
+      const existing = await auditTrailInstance.query({
+        runId: payload.runId,
+        type: payload.type,
+        since: entry.committedAtMs,
+      });
       if (!existing.some(matches)) {
         await auditTrailInstance.record({
           runId: payload.runId,
@@ -5877,6 +5935,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         const verified = await auditTrailInstance.query({
           runId: payload.runId,
           type: payload.type,
+          since: entry.committedAtMs,
         });
         if (!verified.some(matches)) {
           diagnose({
