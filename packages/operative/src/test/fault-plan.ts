@@ -34,10 +34,14 @@ export type FaultOperation =
   | 'generate'
   | `tool:${string}`
   | `hook:${'before-model' | 'after-model' | 'before-tool' | 'after-tool'}`
-  // AB-92 AC8 fixes this arm's SHAPE (`storage:${verb}`), not a closed set
-  // of verbs — `conditionalBatch` added (AB-391) because a writer this
-  // fault engine needs to reach (the audit trail's key-fenced writes)
-  // started calling it alongside `get`/`set`/`delete`/`query`.
+  // AB-92's ratified vocabulary named exactly `get`/`set`/`delete`/`query`
+  // here — the four `ConditionalTextValueStore` verbs a writer this fault
+  // engine needed to reach called at the time. `conditionalBatch` is
+  // extended onto that list (AB-391), not a re-litigation of AB-92's own
+  // ruling: it names the SAME store's fifth verb, needed for the SAME
+  // reason (a writer the engine must be able to target started calling
+  // it) that put the original four here, and every existing entry keeps
+  // meaning exactly what it did before the extension.
   | `storage:${'get' | 'set' | 'delete' | 'query' | 'conditionalBatch'}`
   | 'signal'
   | 'transport'
