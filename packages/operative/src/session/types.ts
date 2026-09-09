@@ -74,11 +74,18 @@ export interface SessionStore {
   load(id: string): Promise<AgentSession | undefined>;
 
   /**
-   * Delete a session by id. No-op if the session does not exist. Rejects with
-   * SessionConflictError when repeated conflicts prevent removing its body and
-   * summary atomically, so a live summary is never silently left behind.
+   * Delete a session by id, atomically (a single delete-and-count operation,
+   * never a separate existence check followed by a delete). Resolves `true`
+   * only when this call itself removed a live record; resolves `false` when
+   * there was nothing to remove, whether the session never existed or another
+   * call already deleted it. Two Bureau processes sharing one persistent
+   * store can race this call for the same id — the `boolean` return is how a
+   * caller tells which of them actually won, without a process-local guard
+   * (AB-371). Rejects with SessionConflictError when repeated conflicts
+   * prevent removing its body and summary atomically, so a live summary is
+   * never silently left behind.
    */
-  delete(id: string): Promise<void>;
+  delete(id: string): Promise<boolean>;
 
   /** List sessions with optional filtering, pagination, and sorting. */
   list(options?: SessionListOptions): Promise<SessionSummary[]>;

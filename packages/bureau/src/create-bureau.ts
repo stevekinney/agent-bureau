@@ -5227,47 +5227,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // AB-228 (Codex P2 review finding, PR #566): two concurrent
   // `deleteSession(id)` calls can both observe a truthy `session` from
   // their own `sessionStore.load(id)` before either has actually deleted
-  // it — `SessionStore.delete` is an idempotent no-op for an
-  // already-removed id, not a signal of who "won" — so both would
-  // otherwise reach the unconditional `SessionDeletedEvent` dispatch
-  // below, producing two durable `session.deleted` records (and notifying
-  // subscribers twice) for one real deletion. Coalescing concurrent calls
-  // for the same id onto a single in-flight promise makes exactly one of
-  // them actually run `performDeleteSession` (and its single dispatch);
-  // every other concurrent caller awaits that same result instead of
-  // starting a second, redundant run. A call that arrives strictly AFTER
-  // the first has already settled (id reused, or genuinely deleting again)
-  // is unaffected — the map entry is cleared in `finally`, so it starts a
-  // fresh `performDeleteSession` and gets the normal "already gone, no
-  // session to dispatch for" behavior.
+  // it. Coalescing concurrent calls for the same id onto a single
+  // in-flight promise makes exactly one of them actually run
+  // `performDeleteSession`; every other concurrent caller within THIS
+  // process awaits that same result instead of starting a second,
+  // redundant run. A call that arrives strictly AFTER the first has
+  // already settled (id reused, or genuinely deleting again) is
+  // unaffected — the map entry is cleared in `finally`, so it starts a
+  // fresh `performDeleteSession`. This in-flight map is a process-local
+  // fast path only, not the source of truth for whether a durable
+  // `session.deleted` record and notification should be produced: two
+  // separate BUREAU PROCESSES sharing one persistent backend under the
+  // supported `durableOwnership: { ownership: 'workflow-lease' }`
+  // configuration do not share this map and can both reach
+  // `performDeleteSession` for the same id at the same moment.
   //
-  // KNOWN LIMITATION (Codex follow-up review finding, PR #566): this map
-  // is process-local, so it does NOT coordinate two separate BUREAU
-  // PROCESSES sharing one persistent backend under the supported
-  // `durableOwnership: { ownership: 'workflow-lease' }` configuration
-  // (`types.ts`'s own doc comment) — two processes can each observe a
-  // truthy session before either commits its deletion. The winner signal
-  // actually exists inside `SessionStore.delete`'s own `runMutation` loop
-  // (it reads whether the body was present when its write committed) —
-  // it is just not surfaced to the caller today. The honest fix is
-  // returning that signal from `SessionStore.delete()` itself, which is
-  // `@lostgradient/operative`'s own published contract, not bureau's —
-  // out of this `packages/bureau`-only child's boundary, and a real
-  // reason, not a jurisdictional one: a bureau-side workaround (e.g. a
-  // second conditional tombstone key layered over the store's own
-  // mutation) would be exactly the kind of shim this repo's conventions
-  // reject, on top of needing its own cleanup for session-id reuse. Two
-  // processes independently deleting the SAME session id at the SAME
-  // moment is an unusual operational pattern (unlike the single-process
-  // race above, which ordinary concurrent API callers can trigger
-  // routinely); until that operative-side contract exists, that specific
-  // case can still produce a duplicate durable `session.deleted` record
-  // and a duplicate notification — the session record itself is still
-  // correctly deleted either way; the duplication is confined to the
-  // dispatch and the audit rows, matching this same code path's
-  // pre-existing (not introduced by this fix) double-write of
-  // `revokePendingApprovalsForRun`'s own `review.revoked` records under
-  // the identical cross-process race.
+  // AB-371: that cross-process race is resolved by `SessionStore.delete`
+  // itself, whose contract now resolves `boolean` — `true` only for the
+  // call whose own atomic delete-and-count actually removed a live
+  // record, `false` for every other caller (already gone, or never
+  // existed). `performDeleteSession` dispatches `SessionDeletedEvent` (and
+  // so the durable audit record it feeds) only when `sessionStore.delete`
+  // returns `true`, so exactly one of the two racing processes produces
+  // the record and the notification, regardless of what either observed
+  // from its own `sessionStore.load(id)` beforehand. The other cleanup in
+  // this function (revoking approvals, aborting or releasing this
+  // process's own live runs, discarding this process's steering gate)
+  // still runs unconditionally for whichever process actually holds a
+  // truthy `session` from its own load — each process only knows about
+  // its own in-memory run state, so that cleanup could never be skipped
+  // just because a peer process happened to win the durable delete.
   // AB-228 (Codex follow-up review finding, PR #566): the coalescing slot
   // above is released as soon as `sessionStore.delete(id)` itself commits
   // (`onStoreDeletionCommitted` below), NOT when the whole function
@@ -5366,7 +5355,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         if (!isPaused) abortRun(runId);
       }
 
-      await sessionStore.delete(id);
+      const removedLiveRecord = await sessionStore.delete(id);
       onStoreDeletionCommitted();
 
       // AB-228 (Codex P1 + follow-up review findings, PR #566): the durable
@@ -5374,12 +5363,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // it — this is the emission point. Dispatched on the bureau-level
       // emitter (not via `store.recordAction`, which silently no-ops for
       // any runId not currently `store.runs`, and a deleted session may
-      // own zero live runs) exactly once, only for a session that
-      // genuinely existed — the no-such-session path below (`session` was
-      // already `undefined`) dispatches nothing, since nothing was
-      // actually deleted. `audit-trail.ts`'s dedicated
+      // own zero live runs). `audit-trail.ts`'s dedicated
       // `sessionDeletedListener` mirrors the schedule-definition listeners'
       // `writeOutOfBandRecord` path to turn this into a durable record.
+      //
+      // AB-371: gated on `removedLiveRecord`, not merely on reaching this
+      // branch — `sessionStore.delete`'s atomic `boolean` return is `true`
+      // only for whichever caller's own delete-and-count actually removed
+      // the record. Two Bureau processes racing this same id under a
+      // shared persistent store can both observe a truthy `session` from
+      // their own `sessionStore.load(id)` above and both reach this line;
+      // only the one `sessionStore.delete` call that genuinely won emits
+      // this event, so exactly one durable `session.deleted` record and
+      // one notification result from one real deletion, with no
+      // process-local coordination required across the two processes.
       //
       // Dispatched HERE — immediately after `sessionStore.delete` commits,
       // NOT after the later `Promise.allSettled(runTerminals)` wait — this
@@ -5424,7 +5421,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // same "schema-version field" this issue's own out-of-scope section
       // already assigns to whoever ships the next audit-record schema
       // change, not this fix.
-      emitter.dispatch(new SessionDeletedEvent(id));
+      if (removedLiveRecord) emitter.dispatch(new SessionDeletedEvent(id));
 
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,

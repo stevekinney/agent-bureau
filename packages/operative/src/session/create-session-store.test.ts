@@ -587,7 +587,7 @@ describe('createSessionStore', () => {
     ).toEqual(['legacy writer']);
   });
 
-  it('delete removes a session', async () => {
+  it('delete removes a session and resolves true', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
     const session = makeSession({});
@@ -595,26 +595,57 @@ describe('createSessionStore', () => {
     await store.save(session);
     expect(await store.load(session.id)).toBeDefined();
 
-    await store.delete(session.id);
+    expect(await store.delete(session.id)).toBe(true);
     expect(await store.load(session.id)).toBeUndefined();
     expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(false);
   });
 
-  it('delete is a no-op for nonexistent session', async () => {
+  it('delete resolves false and is a no-op for a nonexistent session', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
-    // Should not throw
-    await store.delete('nonexistent');
+    expect(await store.delete('nonexistent')).toBe(false);
   });
 
-  it('delete cleans up an orphan summary when the session body is missing', async () => {
+  it('delete resolves false for a session already removed by a prior call', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({});
+    await store.save(session);
+
+    expect(await store.delete(session.id)).toBe(true);
+    expect(await store.delete(session.id)).toBe(false);
+  });
+
+  it('delete cleans up an orphan summary when the session body is missing, resolving false', async () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
     await rawStore.set(SUMMARY_INDEX_KEY, summaryIndexPayload('orphan-session'));
 
-    await store.delete('orphan-session');
+    expect(await store.delete('orphan-session')).toBe(false);
 
     expect(await rawStore.has('agent-session:orphan-session')).toBe(false);
     expect(await rawStore.has(SUMMARY_INDEX_KEY)).toBe(false);
+  });
+
+  it('delete resolves true when only the legacy body key holds the record', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({});
+    await seedStoredSession(rawStore, session);
+
+    expect(await store.delete(session.id)).toBe(true);
+    expect(await rawStore.has(`agent-session:${session.id}`)).toBe(false);
+  });
+
+  it('delete resolves true exactly once when two concurrent calls race for the same session', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const session = makeSession({});
+    await store.save(session);
+
+    const [first, second] = await Promise.all([store.delete(session.id), store.delete(session.id)]);
+
+    expect([first, second].filter(Boolean)).toHaveLength(1);
+    expect(await store.load(session.id)).toBeUndefined();
   });
 
   it('exists returns true for saved sessions', async () => {
