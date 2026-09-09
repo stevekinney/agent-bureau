@@ -1939,7 +1939,18 @@ export async function createRuntimeComposition(
     (options.skills?.provider as SkillsPackageProvider | undefined) ??
     (options.skills !== undefined && kv !== undefined ? createStorageSkillProvider(kv) : undefined);
 
-  const sessionStore = kv ? (dependencies.createSessionStore ?? createSessionStore)(kv) : undefined;
+  // AB-384 (Codex P2 review finding, PR #592, "Mint incarnations from the
+  // Bureau's injected runtime"): `runtimeServices` (resolved above from
+  // `options.runtime`, defaulting to the real globals) must be threaded
+  // through here — omitting it would let `createSessionStore` silently
+  // construct its OWN second default `RuntimeServices`, so every
+  // `AgentSession.incarnation` it mints would come from real
+  // `crypto.randomUUID()`/wall-clock time instead of the same injected
+  // runtime every other subsystem this composition builds already uses,
+  // breaking determinism for manual-runtime tests and fault-replay runs.
+  const sessionStore = kv
+    ? (dependencies.createSessionStore ?? createSessionStore)(kv, { runtime: runtimeServices })
+    : undefined;
   const baseToolbox: BureauToolbox = options.toolbox ?? createToolbox([], { context: {} });
   const hasSkillTools = options.skills !== undefined && options.skills.includeTools !== false;
   const fallbackToolbox: BureauToolbox =

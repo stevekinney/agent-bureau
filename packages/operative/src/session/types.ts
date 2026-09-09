@@ -47,7 +47,15 @@ export interface SessionCleanupOptions {
  * `agent-session:summary-index` key.
  */
 export interface SessionStore {
-  /** Persist a session, merging on optimistic-concurrency conflicts. */
+  /**
+   * Persist a session, merging on optimistic-concurrency conflicts. Rejects
+   * with `StaleSessionIncarnationError` (AB-384) when `session.incarnation`
+   * is nonempty and does not match the live body's current incarnation — a
+   * caller writing back a specific prior incarnation's own object after
+   * that body was deleted and the id recreated. A candidate with
+   * `incarnation: ''` (the `createAgentSession()` default) is never
+   * rejected this way.
+   */
   save(session: AgentSession): Promise<void>;
 
   /**
@@ -63,6 +71,10 @@ export interface SessionStore {
    * for example) must not reorder or resurrect an otherwise-inactive
    * session purely by touching it (AB-363, Codex review PR #568, "Avoid
    * refreshing session activity during retention pruning").
+   *
+   * Also rejects with `StaleSessionIncarnationError` (AB-384) under the
+   * same condition `save()` does, checked against the updater's own
+   * returned candidate.
    */
   update(
     id: string,

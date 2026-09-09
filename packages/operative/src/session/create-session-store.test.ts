@@ -5,7 +5,11 @@ import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import { SessionCreatedEvent, SessionSavedEvent } from '../events';
-import { createSessionStore, SessionConflictError } from './create-session-store';
+import {
+  createSessionStore,
+  SessionConflictError,
+  StaleSessionIncarnationError,
+} from './create-session-store';
 
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
 const BODY_PREFIX = 'agent-session-v2:body:';
@@ -1531,6 +1535,54 @@ describe('AgentSession.incarnation (AB-384)', () => {
     expect(created).toHaveLength(0);
     expect(saved).toHaveLength(1);
     expect(saved[0]?.incarnation).toBe(persisted!.incarnation);
+  });
+
+  it('rejects save() of a candidate naming a specific prior incarnation that no longer matches the live body (Codex P1 review finding, PR #592)', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'stale-incarnation-save' });
+
+    await store.save(session);
+    const staleWriter = (await store.load(session.id))!;
+
+    expect(await store.delete(session.id)).toBe(true);
+    await store.save(makeSession({ id: session.id }));
+    const recreated = (await store.load(session.id))!;
+    expect(recreated.incarnation).not.toBe(staleWriter.incarnation);
+
+    // `staleWriter` still names its own (now-deleted) incarnation — writing
+    // it back must fail rather than silently relabel its stale content
+    // under the RECREATED session's current incarnation.
+    expect(store.save(staleWriter)).rejects.toThrow(StaleSessionIncarnationError);
+    // The recreated session's live body is untouched by the rejected write.
+    expect((await store.load(session.id))!.incarnation).toBe(recreated.incarnation);
+  });
+
+  it('rejects update() when the updater returns a candidate naming a specific prior incarnation that no longer matches the live body (Codex P1 review finding, PR #592)', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'stale-incarnation-update' });
+
+    await store.save(session);
+    const staleWriter = (await store.load(session.id))!;
+
+    expect(await store.delete(session.id)).toBe(true);
+    await store.save(makeSession({ id: session.id }));
+
+    expect(store.update(session.id, () => staleWriter)).rejects.toThrow(
+      StaleSessionIncarnationError,
+    );
+  });
+
+  it('never rejects a candidate with incarnation "" (the createAgentSession() default), even against a live body that already has one', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'unminted-incarnation-write' });
+    await store.save(session);
+    const loaded = (await store.load(session.id))!;
+    expect(loaded.incarnation).not.toBe('');
+
+    // A fresh, never-saved AgentSession object (incarnation: '') merged onto
+    // the same id must not be treated as a stale-incarnation conflict.
+    await store.save({ ...makeSession({ id: session.id }), revision: loaded.revision });
+    expect((await store.load(session.id))!.incarnation).toBe(loaded.incarnation);
   });
 });
 

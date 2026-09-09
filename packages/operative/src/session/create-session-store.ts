@@ -35,6 +35,73 @@ export class SessionConflictError extends Error {
   }
 }
 
+/**
+ * Thrown by `save()`/`update()` (AB-384, Codex P1 review finding, PR #592,
+ * "Reject saves from a prior session incarnation") when a candidate carries
+ * a NONEMPTY `incarnation` that does not match the live body's current one.
+ * Before `incarnation` existed, `mergeSessions()`'s revision-based
+ * freshness check could already let a stale in-memory object overwrite a
+ * session id that was deleted and recreated in the meantime — that data
+ * hazard predates AB-384. What AB-384 changes is that a caller can now
+ * explicitly EXPRESS which incarnation it believes it is writing to; this
+ * error is what makes a stale write ($incarnation, from a body that no
+ * longer exists) visibly fail instead of being silently relabeled under the
+ * CURRENT incarnation, which would make genuinely stale content
+ * indistinguishable from a legitimate write to the live body.
+ *
+ * Deliberately narrow: a candidate with `incarnation: ''` (the
+ * `createAgentSession()` default, and every legacy record's default) never
+ * triggers this — only a caller that read a specific PRIOR incarnation's
+ * body and is now writing it back verbatim is rejected. No production call
+ * site in this monorepo does that (`session-handle.ts`'s own `update()`
+ * calls always build their candidate off the FRESH `existingSession`/
+ * `freshSession`/`latestSession` argument the updater itself receives,
+ * never a separately cached `AgentSession` object; its one direct `save()`
+ * call is always a brand-new forked session id with no live predecessor to
+ * conflict with) — this guards a hazard external callers or future code
+ * could introduce, not a live production hazard this issue found and fixed
+ * elsewhere.
+ */
+export class StaleSessionIncarnationError extends Error {
+  readonly code = 'StaleSessionIncarnationError';
+
+  constructor(
+    sessionId: string,
+    readonly candidateIncarnation: string,
+    readonly currentIncarnation: string,
+  ) {
+    super(
+      `Session "${sessionId}" could not be committed: candidate incarnation ` +
+        `"${candidateIncarnation}" does not match the live body's current ` +
+        `incarnation "${currentIncarnation}".`,
+    );
+    this.name = 'StaleSessionIncarnationError';
+    this.candidateIncarnation = candidateIncarnation;
+    this.currentIncarnation = currentIncarnation;
+  }
+}
+
+/**
+ * Rejects a candidate that names a specific, NONEMPTY prior incarnation
+ * that does not match the live body's current one — see
+ * `StaleSessionIncarnationError`'s own doc comment for exactly which case
+ * this is (and is not) guarding against.
+ */
+function assertMatchingIncarnation(
+  id: string,
+  candidateIncarnation: string,
+  current: AgentSession | undefined,
+): void {
+  if (
+    candidateIncarnation !== '' &&
+    current !== undefined &&
+    current.incarnation !== '' &&
+    candidateIncarnation !== current.incarnation
+  ) {
+    throw new StaleSessionIncarnationError(id, candidateIncarnation, current.incarnation);
+  }
+}
+
 /** Returns true if the value is a string that parses to a valid Date. */
 function isValidDate(value: unknown): boolean {
   return typeof value === 'string' && !isNaN(new Date(value).getTime());
@@ -328,6 +395,31 @@ export function createSessionStore(
   // emitter, the same one `SessionDeletedEvent` is dispatched directly onto.
   const events = new TypedEventTarget<OperativeEventMap>();
 
+  // KNOWN LIMITATION, not closed here (Codex P1 review finding, PR #592,
+  // "Preserve commit order when dispatching lifecycle events"): dispatch
+  // here is fire-and-forget, in-process, immediately after THIS attempt's
+  // own commit resolves — it is not transactionally coupled to that commit.
+  // Two consequences, both SHARED by every other bureau-level-emitter
+  // dispatch this codebase already ships this way (`SessionDeletedEvent` at
+  // `create-bureau.ts`'s `deleteSession`, every `schedule.*`/`review.*`
+  // dispatch — none of them couple dispatch to their own write either):
+  // (1) a crash between a commit succeeding and this dispatch running loses
+  // the `session.created`/`session.saved` fact forever, with no
+  // recovery-time producer to reconstruct it; (2) when two `SessionStore`
+  // instances (e.g. two Bureau processes) share one persistent backend,
+  // the DURABLE record order downstream reflects each instance's own
+  // dispatch-then-forward-then-record latency, not true commit order — a
+  // slower instance A's `session.created` for revision 1 can durably record
+  // AFTER a faster instance B's `session.saved` for revision 2, even though
+  // B's write necessarily happened after A's. Within ONE store instance
+  // this is not observable: `commit()`'s CAS enforces strict revision
+  // order, and each `save()`/`update()` call dispatches in its own program
+  // order immediately after its own commit resolves. Properly closing the
+  // cross-instance case needs the durable record itself to carry an
+  // authoritative sequence or revision the reading side can reorder or
+  // recover by — a schema change to `DurableEventEnvelope`, the same kind of
+  // change AB-313's own "schema-version field" language already assigns to
+  // whoever ships the next audit-record schema revision, not this issue.
   function dispatchPersistEvent(wasCreate: boolean, committed: AgentSession): void {
     events.dispatch(
       wasCreate
@@ -581,6 +673,7 @@ export function createSessionStore(
             ]);
             const { raw, key: bodyKey } = body;
             const current = parseSession(raw);
+            assertMatchingIncarnation(session.id, session.incarnation, current);
             const candidate = current ? mergeSessions(current, session) : session;
             const committed = await commit(
               candidate,
@@ -632,6 +725,7 @@ export function createSessionStore(
         if (candidate.id !== id) {
           throw new TypeError(`Session updater for "${id}" returned id "${candidate.id}".`);
         }
+        assertMatchingIncarnation(id, candidate.incarnation, current);
 
         const next = current ? mergeSessions(current, candidate) : candidate;
         const committed = await commit(

@@ -582,7 +582,17 @@ Each successful `save()`/`update()` commit dispatches on `SessionStore.events`:
 no body to describe and dispatches neither; `@lostgradient/operative`'s own
 `SessionDeletedEvent` (dispatched by consumers, not by the store itself — see
 Bureau's `deleteSession`) carries the deleted record's own `incarnation` at
-the moment of deletion instead.
+the moment of deletion instead. `delete(id, { returnIncarnation: true })`
+reports `{ removed, incarnation }` — the incarnation of the exact body
+deleted, atomically, with no separate `load()` needed (and no race a
+separate `load()` would have).
+
+`save()`/`update()` reject with `StaleSessionIncarnationError` when a
+candidate names a specific, nonempty `incarnation` that no longer matches
+the live body's current one — writing back a prior incarnation's own object
+after that body was deleted and the id recreated. A candidate with
+`incarnation: ''` (the `createAgentSession()` default) is never rejected
+this way.
 
 ```ts
 const sessions = createSessionStore(kvStore);
