@@ -1854,8 +1854,8 @@ function createRecordingHistory(
     emittedAtMs: number | undefined;
   }[] = [];
   const history: DurableEventHistory = {
-    async record(owner, kind, payload, emittedAtMs) {
-      calls.push({ owner, kind, payload, emittedAtMs });
+    async record(owner, kind, payload, options) {
+      calls.push({ owner, kind, payload, emittedAtMs: options?.emittedAtMs });
       if (recordImpl) await recordImpl(owner, kind, payload);
       return {
         kind,
@@ -2560,10 +2560,11 @@ describe('createDurableEventProducer()', () => {
         owner: { kind: 'session', id: 'sess-1' },
         kind: 'session.deleted',
         payload: { sessionId: 'sess-1', incarnation: 'incarnation-a' },
-        // AB-388: see the "records schedule.created" test's own comment —
-        // `sessionDeletedListener` now stamps via the shared `eventTimestamp`
-        // resolver too.
-        emittedAtMs: 1577836800000,
+        // AB-389: the event's own `committedAtMs` (the 4th constructor
+        // arg above, `0`) — not the shared `eventTimestamp` resolver,
+        // which only the schedule-definition listeners use (see the
+        // "records schedule.created" test's own comment).
+        emittedAtMs: 0,
       },
     ]);
 
@@ -3082,16 +3083,19 @@ describe('createDurableEventProducer()', () => {
       await producer.dispose();
     });
 
-    it('stamps session.deleted via the supplied eventTimestamp resolver', async () => {
+    it("stamps session.deleted with the event's own committedAtMs (AB-389: the session outbox entry's authoritative commit time), not the eventTimestamp resolver", async () => {
       const runtime = createManualRuntimeServices();
       const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
       const { history, calls } = createRecordingHistory();
-      const eventTimestamp = () => 777_777;
+      // A resolver that would return a DIFFERENT value proves it is never
+      // consulted for this event — see `sink()`'s own dedicated listeners
+      // above, which DO use it, for the contrast.
+      const eventTimestamp = () => 111_111;
       const producer = createDurableEventProducer(bureau, history, runtime, undefined, {
         eventTimestamp,
       });
 
-      dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+      dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 777_777));
       await runtime.deferred.drain();
 
       expect(calls).toHaveLength(1);

@@ -1746,11 +1746,18 @@ describe('createAuditTrail', () => {
       trail.dispose();
     });
 
-    it('stamps a session.deleted out-of-band record with the supplied eventTimestamp resolver reading', async () => {
+    it("stamps a session.deleted out-of-band record with the event's own committedAtMs (AB-389: the session outbox entry's authoritative commit time), not the eventTimestamp resolver", async () => {
       const kv = textValueStore(new MemoryStorage());
       const { bureau, emit } = createStubBureau();
-      const event = new SessionDeletedEvent('sess-1', 'incarnation-a');
-      const eventTimestamp = () => 999_000;
+      // `committedAtMs` (4th constructor arg) is the outbox entry's own
+      // commit time — this event may be dispatched by a REPLAYED drain
+      // long after that commit, so this listener reads `committedAtMs`
+      // directly rather than the shared `eventTimestamp` resolver (which
+      // would misdate it with a fresh clock read at dispatch time).
+      const event = new SessionDeletedEvent('sess-1', 'incarnation-a', 1, 999_000);
+      // A resolver that would return a DIFFERENT value proves it is never
+      // consulted for this event.
+      const eventTimestamp = () => 111_111;
       const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0, eventTimestamp });
 
       emit(event);
