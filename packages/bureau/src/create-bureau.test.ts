@@ -16263,6 +16263,123 @@ describe('createBureau durable audit trail — AB-228 parity gaps (toolbox loop-
     }
   });
 
+  it('AB-370: orders session.deleted before a released run own later terminal action by sequence when both land in the exact same manual-clock millisecond', async () => {
+    // The test just above proves timestamp ordering when the two records
+    // genuinely land in different milliseconds (real elapsed wall-clock
+    // time between the dispatch and the released run's eventual terminal
+    // action). This test forces the SAME-millisecond collision the prior
+    // AB-228 comment in `create-bureau.ts` named as a residual, deliberately
+    // accepted risk: a manual clock never advances on its own, so every
+    // `Action.timestamp` (the operative store draws it from this same
+    // injected `runtime.clock.now()`) and every out-of-band audit write
+    // (`writeOutOfBandRecord` draws `timestampMs` from the identical clock)
+    // share the exact same value for the whole test, with no real elapsed
+    // time to fall back on.
+    //
+    // Before AB-370, `writeOutOfBandRecord`'s `manualSequence` started near
+    // `Number.MAX_SAFE_INTEGER` — always larger than any real
+    // `action.sequence` — so `session.deleted` was FORCED to sort AFTER the
+    // run's terminal action in exactly this collision, regardless of which
+    // one was actually dispatched first. That was a fixed bias, not a
+    // measurement: `create-bureau.ts` dispatches `SessionDeletedEvent`
+    // immediately after `sessionStore.delete()` commits, then releases this
+    // paused run via `settleForDeletion()`, and only THEN does the released
+    // run resume its step loop toward its own `run.completed` — so the
+    // deletion is genuinely dispatched first. AB-370's shared, per-bureau
+    // `sequence` counter (allocated at each write's dispatch time, before
+    // either write's asynchronous `kv.set` even starts) now reflects that
+    // true call order instead of the old fixed bias.
+    let releaseTool: (() => void) | undefined;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const nextTool = createTool({
+      name: 'next',
+      description: 'continue',
+      input: z.object({}),
+      execute: async () => {
+        await toolGate;
+        return 'ok';
+      },
+    });
+    const generate = createSequentialGenerate([
+      { content: 'step 0', toolCalls: [{ name: 'next', arguments: {} }] },
+      { content: 'done', toolCalls: [] },
+    ]);
+
+    const runtime = createManualRuntimeServices();
+    // `createBureau`'s own `createStore()` call (`create-bureau.ts`) always
+    // builds the operative store with ITS OWN default (real) runtime unless
+    // a pre-built store is supplied — the bureau-level `runtime` option
+    // alone does not reach `Action.timestamp`. Passing `store` here,
+    // pre-built against the SAME manual `runtime`, is what makes the run's
+    // own action timestamps deterministic and pinned alongside the audit
+    // trail's out-of-band writes below.
+    const store = createStore({ runtime });
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createToolbox([nextTool]),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+      runtime,
+      store,
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'go', principal: 'alice' });
+      const sessionId = run.sessionId;
+      await pollUntil(() => generate.callCount === 1);
+
+      const pause = await bureau.submitSteeringCommand(sessionId, {
+        principal: 'alice',
+        requestedValue: { target: 'pause' },
+      });
+      expect(pause.outcome).toBe('accepted');
+      releaseTool!();
+
+      // Deliberately never call `runtime.advance(...)` — the clock the
+      // operative store and the audit trail both read stays pinned at the
+      // exact same value from `createRun` through the released run's own
+      // eventual terminal action.
+      await bureau.deleteSession(sessionId);
+      await waitForRunCompletion(bureau, run.id);
+
+      const allRecords = await bureau.auditTrail!.query({ limit: 1000 });
+      const runTerminal = allRecords.find(
+        (record) => record.runId === run.id && record.type === 'run.completed',
+      );
+      const sessionDeleted = allRecords.find(
+        (record) => record.runId === `session:${sessionId}` && record.type === 'session.deleted',
+      );
+      if (!runTerminal || !sessionDeleted) {
+        throw new Error('expected both a run.completed and a session.deleted audit record');
+      }
+      // Both records genuinely share a timestamp — otherwise this test
+      // isn't exercising the same-millisecond collision at all, and the
+      // primary-timestamp sort (unaffected by this fix) would decide it.
+      expect(sessionDeleted.timestampMs).toBe(runTerminal.timestampMs);
+      expect(sessionDeleted.sequence).toBeDefined();
+      expect(runTerminal.sequence).toBeDefined();
+      // True call order: the deletion was dispatched before the released
+      // run resumed and reached its own terminal action.
+      expect(sessionDeleted.sequence!).toBeLessThan(runTerminal.sequence!);
+
+      const allIndexes = await bureau.auditTrail!.query({ limit: 1000 });
+      const sessionDeletedIndex = allIndexes.findIndex(
+        (record) => record.runId === `session:${sessionId}` && record.type === 'session.deleted',
+      );
+      const runTerminalIndex = allIndexes.findIndex(
+        (record) => record.runId === run.id && record.type === 'run.completed',
+      );
+      // `query()`'s own sort must reflect the same call order, not just the
+      // raw `sequence` field values compared directly above.
+      expect(sessionDeletedIndex).toBeLessThan(runTerminalIndex);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('durably records session.deleted before waiting on any run cleanup, so a genuinely stuck run cannot block the durable audit fact (Codex P1 review finding, PR #566)', async () => {
     // Before this fix, `session.deleted` was dispatched only after
     // `Promise.allSettled(runTerminals)` resolved — an UNBOUNDED wait for

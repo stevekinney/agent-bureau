@@ -512,11 +512,17 @@ describe('GET /api/v1/audit', () => {
     const runId = 'run-dedup-test';
     const sharedTimestamp = 1_000_000;
 
-    // One event that IS in the durable trail (run.completed, seq 2).
+    // One event that IS in the durable trail (run.completed). AB-370:
+    // `sequence` is now the trail's own shared, per-bureau ordering counter
+    // (deliberately a different value, 200, than the live store's own
+    // `action.sequence`) — the dedup key the route builds reads
+    // `actionSequence` instead, which IS the live action's own `sequence`
+    // (2) this record was sunk from.
     const durableRecord: AuditRecord = {
       timestamp: new Date(sharedTimestamp).toISOString(),
       timestampMs: sharedTimestamp,
-      sequence: 2,
+      sequence: 200,
+      actionSequence: 2,
       runId,
       type: 'run.completed',
       detail: {},
@@ -661,10 +667,17 @@ describe('GET /api/v1/audit', () => {
     expect(durableRecords.length).toBeGreaterThan(0);
 
     // Every durable record should have a matching live action with the same
-    // sequence number — this is the reconciliation check.
+    // ORIGINATING action sequence — this is the reconciliation check.
+    // AB-370: `durableRecord.sequence` is the trail's own shared, per-bureau
+    // ordering counter now, not a copy of `action.sequence` — the field
+    // that still IS a copy, and correlates a durable record back to its
+    // live counterpart, is `actionSequence` (see
+    // `packages/bureau/src/audit-trail.ts`'s own `AuditRecord` doc
+    // comments, and `routes/audit.ts`'s dedup, which reads the same field).
     for (const durableRecord of durableRecords) {
+      expect(durableRecord.actionSequence).toBeDefined();
       const matchingLiveAction = liveActions.find(
-        (a) => a.sequence === durableRecord.sequence && a.type === durableRecord.type,
+        (a) => a.sequence === durableRecord.actionSequence && a.type === durableRecord.type,
       );
       expect(matchingLiveAction).toBeDefined();
       expect(matchingLiveAction?.runId).toBe(durableRecord.runId);

@@ -100,7 +100,7 @@ import {
 } from 'lifecycle';
 
 import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
-import { type AuditTrail, createAuditTrail } from './audit-trail';
+import { type AuditTrail, computeInitialAuditSequence, createAuditTrail } from './audit-trail';
 import {
   createDurableEventHistory,
   createDurableEventProducer,
@@ -5393,34 +5393,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // recovery-time producer to reconstruct it (Codex P1 review finding,
       // PR #566, "Persist deletion before waiting for run terminals").
       //
-      // Verified empirically (regression test in `create-bureau.test.ts`),
-      // dispatching this early does not reopen a same-millisecond
-      // ordering bug: it instead makes `session.deleted` sort BEFORE a
-      // released run's own later terminal action, because that run
-      // resuming its step loop after `settleForDeletion` (below) and
-      // reaching its own terminal takes real, measurable time even
-      // in-process with no real I/O — comfortably enough, on this
-      // machine, to land at a strictly LATER millisecond than this
-      // dispatch. `encodeKey`'s primary sort key is timestamp, so the
-      // genuinely earlier deletion sorts first; `writeOutOfBandRecord`'s
-      // huge manual sequence (`Number.MAX_SAFE_INTEGER`-adjacent, always
-      // larger than any real per-run `action.sequence`) only matters as a
-      // SAME-millisecond tie-break and doesn't apply when the two don't
-      // tie. This is arguably a MORE truthful chronology than the earlier
+      // This is arguably a MORE truthful chronology than the earlier
       // round's, not a less truthful one: the session record really was
-      // deleted before this run went on to finish. The residual,
-      // deliberately accepted risk is a same-millisecond collision (a
-      // faster machine, or a run releasing to an already-satisfied step
-      // with nothing left to do) — in that narrow case the huge manual
-      // sequence still forces this out-of-band record to sort AFTER the
-      // action-stream one, exactly as before this change. A single
-      // ordering source shared across the store's own per-run sequence
-      // space and this trail's process-local `manualSequence` would
-      // remove that narrow case's dependency on wall-clock timing
-      // entirely, but requires a new field on `AuditRecord` itself — the
-      // same "schema-version field" this issue's own out-of-scope section
-      // already assigns to whoever ships the next audit-record schema
-      // change, not this fix.
+      // deleted before this run — if it is still running when this
+      // dispatches — goes on to finish. AB-370 closed the residual risk the
+      // earlier round of this comment accepted here: a same-millisecond
+      // collision between this dispatch and a released run's own later
+      // terminal action used to be resolved by `writeOutOfBandRecord`'s
+      // fixed, disjoint `manualSequence` range, which forced THIS
+      // out-of-band record to sort after any action-stream record
+      // regardless of which one genuinely happened first — a bias, not a
+      // measurement. `audit-trail.ts` now draws every write's `sequence`
+      // (action-stream and out-of-band alike) from one shared, per-bureau
+      // counter allocated at dispatch time, so a same-millisecond tie
+      // between this event and a run's terminal action sorts by true call
+      // order instead: whichever of the two was actually dispatched first
+      // — this line, or the run's own `run.completed`/`run.aborted`/
+      // `run.error` — gets the lower `sequence` and sorts first, with no
+      // dependency on wall-clock granularity or real elapsed time between
+      // the two. See `create-bureau.test.ts`'s AB-370 regression coverage.
       if (removedLiveRecord) emitter.dispatch(new SessionDeletedEvent(id));
 
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
@@ -7285,6 +7276,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // settled, or settle during the awaits inside recoverDurableRuns() — are
   // captured in the durable trail rather than landing only in the live store.
   if (runtime.kv) {
+    // AB-370: seed the trail's shared sequence counter above anything a
+    // prior process lifetime already persisted, BEFORE `createAuditTrail`
+    // subscribes its listeners and starts admitting new writes — see
+    // `computeInitialAuditSequence`'s own doc comment and
+    // `AuditRecord.sequence`'s. This one `await` still lands before
+    // `recoverDurableRuns()` further down, so the "subscribed BEFORE
+    // durable run recovery" ordering above is unaffected.
+    const auditTrailInitialSequence = await computeInitialAuditSequence(runtime.kv, diagnose);
     // AB-207: threaded with the bureau-owned background-shutdown signal so
     // `shutdown()` can bound this subsystem's drain the same way it bounds
     // online-evals and the webhook notifier below.
@@ -7292,7 +7291,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       bureau,
       runtime.kv,
       diagnose,
-      { signal: backgroundShutdownController.signal },
+      { signal: backgroundShutdownController.signal, initialSequence: auditTrailInitialSequence },
       runtimeServices,
     );
   }

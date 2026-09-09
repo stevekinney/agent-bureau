@@ -165,10 +165,19 @@ export function createAuditRoutes(bureau: Bureau) {
     // AUDIT_EVENT_TYPES; non-audited event types (e.g. generate.*) are never
     // in durableRecords and must always pass through from the live store.
     const liveState = bureau.store.getState();
+    // AB-370: dedup on `actionSequence` — the originating operative-store
+    // `Action`'s own per-process `sequence`, which is what the live store's
+    // `action.sequence` below is also drawn from — NOT on `sequence`, which
+    // is now the durable trail's shared, per-bureau ordering counter and no
+    // longer equal to `action.sequence` (see `AuditRecord.actionSequence`'s
+    // own doc comment in `packages/bureau/src/audit-trail.ts`). Only
+    // records the action-stream listener wrote carry `actionSequence` at
+    // all — an out-of-band record (`session.deleted`, `schedule.*`,
+    // `review.*`) never has a live counterpart in `liveState.actions`, so
+    // it never needs a dedup key.
     const durableEventKeys = new Set(
-      durableRecords.map(
-        (r: { runId: string; type: string; sequence: number }) =>
-          `${r.runId}:${r.type}:${r.sequence}`,
+      durableRecords.flatMap((r: { runId: string; type: string; actionSequence?: number }) =>
+        r.actionSequence !== undefined ? [`${r.runId}:${r.type}:${r.actionSequence}`] : [],
       ),
     );
 
@@ -210,10 +219,18 @@ export function createAuditRoutes(bureau: Bureau) {
       });
     }
 
-    // Merge and sort chronologically (oldest first).
+    // Merge and sort chronologically (oldest first). The same-timestamp
+    // tiebreak here compares two genuinely different numbering domains — a
+    // durable record's shared `sequence` (AB-370) versus a live action's
+    // own `action.sequence` — since a durable record whose `actionSequence`
+    // matches a live one was already excluded from `liveRecords` above by
+    // the dedup pass; whichever of the two remaining records land on the
+    // same millisecond were never the same event, so this tiebreak is
+    // best-effort ordering, not an identity claim. `?? 0` covers a durable
+    // record written before `sequence` existed.
     const merged = [...durableRecords, ...liveRecords].sort((a, b) => {
       if (a.timestampMs !== b.timestampMs) return a.timestampMs - b.timestampMs;
-      return a.sequence - b.sequence;
+      return (a.sequence ?? 0) - (b.sequence ?? 0);
     });
 
     return context.json(merged.slice(0, limit), 200);
