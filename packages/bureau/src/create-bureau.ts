@@ -6862,7 +6862,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     await durableEventProducerInstance?.waitForActiveWrites(owner);
 
     const page = await history.page(owner, options);
-    if ('outcome' in page) return page; // a DurableEventGap
+    if ('outcome' in page) {
+      // AB-372 (Codex review finding, PR #580, "Reauthorize the session
+      // before returning a post-wait gap"): the pre-page check above ran
+      // BEFORE `waitForActiveWrites`, so it authorized a snapshot that is
+      // now stale by exactly the span of that wait — a session recreated
+      // for a different, unauthorized principal during the wait would
+      // otherwise ride the ALREADY-PASSED pre-page check straight through
+      // to a raw `DurableEventGap`, leaking retention metadata to a caller
+      // who should see nothing but `not-found`. Reauthorize against a
+      // fresh load, right here, before this gap ever reaches the caller —
+      // this is a second, independent check from the pre-page one above
+      // and from the post-page one below (which never runs on this
+      // branch, since a gap returns before reaching it).
+      if (owner.kind === 'session' && principal !== undefined && runtime.sessionStore) {
+        const gapSession = await runtime.sessionStore.load(owner.id);
+        if (gapSession && !isSessionAuthorityAuthorized(gapSession.metadata, principal)) {
+          return { outcome: 'not-found' };
+        }
+      }
+      return page; // a DurableEventGap
+    }
 
     const deletionMarkerKind =
       owner.kind === 'session'

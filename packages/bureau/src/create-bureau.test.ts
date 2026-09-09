@@ -13709,6 +13709,86 @@ describe('bureau.eventHistory deleted-aggregate through a real session deletion 
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('reauthorizes a fresh session snapshot before returning a post-wait gap too, not just the pre-page one (Codex P2 review finding, PR #580, "Reauthorize the session before returning a post-wait gap")', async () => {
+    // The pre-page check above now runs BEFORE `waitForActiveWrites`, so its
+    // read is stale by exactly the span of that wait — a session recreated
+    // for a different, unauthorized principal DURING the wait would
+    // otherwise ride the already-passed pre-page check straight through to
+    // a raw `DurableEventGap`. Mocking only the FIRST `sessionStore.load`
+    // call (the pre-page check) to see nothing reproduces that staleness
+    // deterministically: every subsequent, unmocked call — including the
+    // new gap-branch recheck this test targets — observes the REAL,
+    // already-recreated, unauthorized session.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-session-authz-post-wait-gap-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'alice owns this', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId: run.sessionId });
+      await runtime.deferred.drain();
+
+      const beforeGap = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      if ('outcome' in beforeGap)
+        throw new Error(`expected a page, got ${JSON.stringify(beforeGap)}`);
+      const lastEvent = beforeGap.events.at(-1);
+      if (!lastEvent) throw new Error('expected at least one durable event for this session');
+
+      const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const adminFeed = createFleetEventFeed(adminStorage);
+      await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+      adminFeed.dispose();
+      adminStorage[Symbol.dispose]();
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const loadSpy = spyOn(sessionStore, 'load').mockImplementationOnce(async () => undefined);
+
+      try {
+        // An unauthorized caller must be denied — never the gap — even
+        // though the STALE pre-page snapshot (mocked away here) saw
+        // nothing to deny against.
+        const deniedOutcome = await bureau.eventHistory(
+          { kind: 'session', id: run.sessionId },
+          { principal: 'mallory' },
+        );
+        expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+      } finally {
+        loadSpy.mockRestore();
+      }
+
+      // The actual owner still sees the real gap outcome (a fresh call
+      // this time, with no mocked read).
+      const ownerOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      expect(ownerOutcome).toMatchObject({ outcome: 'gap' });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
