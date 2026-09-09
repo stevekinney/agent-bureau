@@ -295,6 +295,33 @@ export interface DurableEventHistory {
    * one; it never causes an incorrect deletion.
    */
   refreshRetainedRunOwnerIds(snapshot: RetainedRunOwnerSnapshot): Promise<RetainedRunOwnerSnapshot>;
+  /**
+   * The owner's own latest retained deletion-marker event (`session.deleted`
+   * for a `session` owner, `run.removed` for a `run` owner), scanned across
+   * the ENTIRE retained fleet feed — independent of any `since`/`limit`
+   * window. AB-385 (coordinator ruling, 2026-09-08): `page()`'s own
+   * deleted-aggregate detection in `Bureau.eventHistory`'s
+   * `resolveEventHistory` (`create-bureau.ts`) used to scan only the single
+   * requested page, so a caller whose window paged around the marker was
+   * told the owner was live. This primitive answers "has this owner's
+   * deletion marker EVER been retained" directly, so that classification no
+   * longer depends on the caller's own pagination parameters.
+   *
+   * Returns `undefined` for a `schedule` owner (no deletion-marker concept
+   * exists for that kind) without scanning anything, and `undefined` when no
+   * matching marker is retained (never deleted, or its marker has aged out
+   * of retention). A corrupt or unsupported-schema-version record at a
+   * candidate sequence is skipped with a diagnostic, exactly like `page()`'s
+   * own per-record tolerance — one bad record never aborts this scan.
+   *
+   * "Latest" matters only in that a marker record is, at most, ever written
+   * once per incarnation of an id (`createDurableEventProducer`'s dedicated
+   * listeners); this returns the highest-sequence match the feed currently
+   * retains. Callers needing the AB-372 "is a reused id live again" override
+   * still consult the live session/run record separately — this primitive
+   * only answers whether a marker exists, not whether it is stale.
+   */
+  latestDeletionMarker(owner: DurableEventOwner): Promise<DurableEventEnvelope | undefined>;
   /** Releases the underlying `FleetEventFeed`. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -343,6 +370,28 @@ export class UnsupportedDurableEventSchemaVersionError extends Error {
 
 function encodeOwner(owner: DurableEventOwner): string {
   return `${owner.kind}:${owner.id}`;
+}
+
+/**
+ * The durable event `kind` this module's own deletion-marker writers record
+ * for each owner kind that has a deletion concept — `undefined` for
+ * `schedule`, which has none. Used by
+ * {@link DurableEventHistory.latestDeletionMarker} (AB-385) and exported so
+ * `create-bureau.ts`'s `resolveEventHistory` can check the SAME kind
+ * against its own already-fetched `page.events` (the race-safety and
+ * scan-avoidance optimizations documented on `latestDeletionMarker` and
+ * `resolveEventHistory` respectively) without a second, divergent literal
+ * mapping.
+ */
+export function deletionMarkerKindFor(ownerKind: DurableEventOwner['kind']): string | undefined {
+  switch (ownerKind) {
+    case 'session':
+      return 'session.deleted';
+    case 'run':
+      return 'run.removed';
+    case 'schedule':
+      return undefined;
+  }
 }
 
 function isStoredDurableEventPayload(value: unknown): value is StoredDurableEventPayload {
@@ -680,6 +729,52 @@ export function createDurableEventHistory(
     return scanRunOwnerIdsFrom(snapshot.ownerIds as Set<string>, snapshot.cursor);
   }
 
+  async function latestDeletionMarker(
+    owner: DurableEventOwner,
+  ): Promise<DurableEventEnvelope | undefined> {
+    const markerKind = deletionMarkerKindFor(owner.kind);
+    if (markerKind === undefined) return undefined;
+
+    const targetWorkflowId = encodeOwner(owner);
+    let latest: DurableEventEnvelope | undefined;
+    // No `fromCursor`: this must see the owner's marker no matter where it
+    // falls relative to any caller's own `since`/`limit` window (AB-385) —
+    // that independence is the entire point of this primitive. Filtering on
+    // `envelope.kind` BEFORE decoding (same ordering `page()` uses for
+    // `workflowId`) means a corrupt or unsupported-schema-version record for
+    // some OTHER kind, or for a different owner entirely, is never even
+    // decoded here.
+    //
+    // "Highest sequence wins" is enforced EXPLICITLY by comparing
+    // `envelope.sequence` (Copilot review, PR #591, "track the highest
+    // envelope.sequence explicitly and skip decoding older candidates") —
+    // never by assuming `feed.replay()` yields envelopes in increasing
+    // order and letting the last match win by iteration position alone.
+    // `feed.replay()` does document strictly increasing sequence order
+    // today, but this comparison makes that an explicit invariant of THIS
+    // function rather than an implicit one it would silently mis-answer if
+    // that ordering guarantee ever changed. The comparison also runs before
+    // decoding, so an older candidate is never decoded at all once a
+    // newer, already-decoded match exists.
+    for await (const envelope of feed.replay({})) {
+      if (envelope.workflowId !== targetWorkflowId) continue;
+      if (envelope.kind !== markerKind) continue;
+      if (latest !== undefined && envelope.sequence <= latest.sequence) continue;
+      try {
+        latest = toDurableEventEnvelope(envelope, owner);
+      } catch (error) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-event-history',
+          message: `[durable-event-history] Skipped corrupt deletion marker at sequence ${envelope.sequence} for ${owner.kind}:${owner.id}:`,
+          cause: error,
+        });
+        continue;
+      }
+    }
+    return latest;
+  }
+
   function dispose(): Promise<void> {
     feed.dispose();
     return Promise.resolve();
@@ -691,6 +786,7 @@ export function createDurableEventHistory(
     subscribeEventHistory,
     retainedRunOwnerIds,
     refreshRetainedRunOwnerIds,
+    latestDeletionMarker,
     dispose,
   };
 }
