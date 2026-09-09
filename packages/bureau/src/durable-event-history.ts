@@ -1043,6 +1043,27 @@ export function createDurableEventHistory(
     fromCursor: Cursor | undefined,
     fromTailSequence: number | undefined,
   ): Promise<RetainedRunOwnerSnapshot> {
+    // AB-393 (Codex review, PR #600, "Do not advance the tail past an
+    // unscanned first append"): captured BEFORE `feed.replay()` starts
+    // below, ONLY for a fresh scan (`fromCursor === undefined` — a
+    // refresh always already carries a real `fromTailSequence` from its
+    // own originating scan, so this fallback is unreachable there; see
+    // this function's own note further down). A genuinely new event can
+    // commit at any point AFTER this read: reading the tail again AFTER
+    // the replay below (the original, buggy shape of this fast path)
+    // could then observe THAT new event's sequence even though the
+    // replay above never walked it — recording a `tailSequence` that
+    // claims coverage the scan never actually did, with `cursor` still
+    // `undefined` and that event's owner missing from `owners`. Every
+    // LATER `refreshRetainedRunOwnerIds()` call would then see its own
+    // fresh tail reading already `<=` this falsely-advanced value and
+    // skip scanning forever, permanently losing that owner. Reading the
+    // tail BEFORE the scan instead gives a reading the replay is
+    // GUARANTEED to cover at least up to (real time only moves forward),
+    // so the worst this can do is under-report — safe to be wrong in the
+    // "rescans a bit more than strictly needed next time" direction only,
+    // never the direction that skips a scan a real new owner needs.
+    const tailBeforeScan = fromCursor === undefined ? await feed.snapshotTailSequence() : undefined;
     let cursor = fromCursor;
     let tailSequence = fromTailSequence;
     for await (const envelope of feed.replay(fromCursor === undefined ? {} : { fromCursor })) {
@@ -1064,13 +1085,15 @@ export function createDurableEventHistory(
     // (see `RetainedRunOwnerSnapshot.tailSequence`'s own doc comment for
     // that distinction and its accepted residual) leaves `tailSequence`
     // at whatever `fromTailSequence` already was — `undefined` for a
-    // fresh scan. Confirming a real reading with one
-    // `feed.snapshotTailSequence()` call gives `tailSequence` a value a
-    // LATER refresh can trust and compare against, rather than being
-    // stuck re-deciding "unknown" forever. Only runs when nothing was
-    // walked above, so it costs nothing on every OTHER call.
+    // fresh scan. Falling back to `tailBeforeScan` (rather than a FRESH
+    // `snapshotTailSequence()` read taken here, after the scan, which is
+    // exactly the race this comment block's own doc comment above
+    // documents and closes) gives `tailSequence` a value that is safe to
+    // trust: the scan above is guaranteed to have covered everything at
+    // or before it. Only runs when nothing was walked above, so it costs
+    // nothing on every OTHER call.
     if (tailSequence === undefined) {
-      tailSequence = await feed.snapshotTailSequence();
+      tailSequence = tailBeforeScan;
     }
     return { ownerIds: owners, cursor, tailSequence };
   }

@@ -1258,6 +1258,60 @@ describe('createDurableEventHistory', () => {
 
       await history.dispose();
     });
+
+    it('reads FleetEventFeed.snapshotTailSequence() BEFORE starting the replay scan on a fresh snapshot, never after (Codex review, PR #600, "Do not advance the tail past an unscanned first append") — reading it after would let a run event that commits WHILE the scan is executing be silently marked as already covered, without its owner ever being recorded', async () => {
+      const backing = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+
+      // Tracks the ORDER `KEYS.fleetEventTail()` (read by
+      // `snapshotTailSequence()`) and `KEYS.fleetEventPrefix()` (scanned
+      // by `feed.replay()`'s own `loadConsistentReplayPage`, and by
+      // `snapshotTailSequence()`'s OWN virgin-feed fallback scan — see
+      // that function's doc comment) are read in — the exact ordering
+      // this fix depends on. If the tail were instead read AFTER the
+      // replay scan (this fix's own bug, closed here), a run event
+      // committed in the gap between "the scan walked nothing" and "the
+      // tail is read" would make the returned snapshot claim a
+      // `tailSequence` covering that event while never having recorded
+      // its owner or advanced `cursor` past it — permanently hiding that
+      // owner from every LATER refresh, since a fresh
+      // `snapshotTailSequence()` reading would already read as "no new
+      // activity" against the falsely-advanced value.
+      const callOrder: string[] = [];
+      const trackedStorage = new Proxy(backing, {
+        get(target, property, receiver) {
+          if (property === 'get') {
+            return async (key: string) => {
+              if (key === KEYS.fleetEventTail()) callOrder.push('tail-read');
+              return target.get(key);
+            };
+          }
+          if (property === 'scan') {
+            return (prefix: string, options?: Parameters<Storage['scan']>[1]) => {
+              if (prefix === KEYS.fleetEventPrefix()) callOrder.push('replay-scan');
+              return target.scan(prefix, options);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const history = createDurableEventHistory(trackedStorage, runtime);
+
+      // Genuinely virgin feed — this exercises the exact fresh-scan path
+      // (`fromCursor === undefined`) this fix's own pre-scan tail read
+      // guards.
+      await history.retainedRunOwnerIdsForAuditRetention();
+
+      const firstTailRead = callOrder.indexOf('tail-read');
+      const firstReplayScan = callOrder.indexOf('replay-scan');
+      expect(firstTailRead).toBeGreaterThanOrEqual(0);
+      expect(firstReplayScan).toBeGreaterThanOrEqual(0);
+      expect(firstTailRead).toBeLessThan(firstReplayScan);
+
+      await history.dispose();
+    });
   });
 
   describe('corrupt/unrecognized record handling', () => {
