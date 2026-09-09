@@ -1140,6 +1140,47 @@ describe('createDurableEventHistory', () => {
       adminFeed.dispose();
       await history.dispose();
     });
+
+    it('issues no storage.scan() at all when nothing new has landed (AB-393, Codex review, PR #600, "Batch retained-owner refreshes instead of replaying per record") — the tail-sequence pre-check short-circuits before any feed.replay()', async () => {
+      const backing = await createMemoryStorage();
+      const { storage, scanCalls } = createScanCountingStorage(backing);
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'sacrifice' }, 'run.started', {}); // sequence 0
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {}); // sequence 1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 });
+
+      const snapshot = await history.retainedRunOwnerIds();
+      if (!snapshot) throw new Error('expected a snapshot');
+
+      // Nothing appended since the snapshot — nothing SHOULD ever call
+      // `feed.replay()`, which is the only thing in this module that
+      // calls `storage.scan()`.
+      const scanCallsBeforeRefresh = scanCalls();
+      const refreshed = await history.refreshRetainedRunOwnerIds(snapshot);
+      expect(refreshed.ownerIds).toEqual(snapshot.ownerIds);
+      expect(scanCalls()).toBe(scanCallsBeforeRefresh);
+
+      // A repeated refresh with STILL nothing new costs no scan either —
+      // this is not a one-call fluke.
+      const secondRefresh = await history.refreshRetainedRunOwnerIds(refreshed);
+      expect(secondRefresh.ownerIds).toEqual(snapshot.ownerIds);
+      expect(scanCalls()).toBe(scanCallsBeforeRefresh);
+
+      // Once something genuinely new lands, the pre-check correctly falls
+      // through to the real scan and still observes the new owner — this
+      // optimization never trades correctness for the cheap path.
+      await history.record({ kind: 'run', id: 'run-2' }, 'run.completed', {});
+      const thirdRefresh = await history.refreshRetainedRunOwnerIds(secondRefresh);
+      expect(thirdRefresh.ownerIds).toEqual(new Set(['run-1', 'run-2']));
+      expect(scanCalls()).toBeGreaterThan(scanCallsBeforeRefresh);
+
+      adminFeed.dispose();
+      await history.dispose();
+    });
   });
 
   describe('corrupt/unrecognized record handling', () => {

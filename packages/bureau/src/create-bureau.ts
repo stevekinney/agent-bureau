@@ -5619,17 +5619,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * accepted residual.
    *
    * AB-393 (Codex review, PR #600, "Avoid replaying the feed for every
-   * unprotected audit record"): the predicate below only refreshes on a
+   * unprotected audit record" / "Batch retained-owner refreshes instead
+   * of replaying per record"): the predicate below only refreshes on a
    * `'delete'`-phase call, never on a `'listing'`-phase one — bounding the
    * extra cost to one `refreshRetainedRunOwnerIds()` round trip per
    * SURVIVING candidate (the ones this pass's delete loop actually
    * reaches), not per candidate examined during listing. That round trip
-   * is real and bounded, never zero and never a full replay — see
-   * `refreshRetainedRunOwnerIds`'s own doc comment (`durable-event-
-   * history.ts`) for its cost model.
+   * is now cheap in the common case too:
+   * `refreshRetainedRunOwnerIds()` itself pre-checks
+   * `FleetEventFeed.snapshotTailSequence()` (a single `storage.get`)
+   * before ever paying for a full `feed.replay()` page load — see that
+   * function's own doc comment (`durable-event-history.ts`) for why that
+   * pre-check is sound. Under this ruling's per-candidate requirement,
+   * one bounded read per surviving candidate is the floor; coarsening it
+   * further (batching several candidates per refresh) would reopen the
+   * exact staleness window this issue exists to close and would need a
+   * fresh coordinator ruling to trade away.
    *
    * AB-393 (Codex review, PR #600, "Fence event appends through the
-   * audit-record deletion"): the predicate also re-awaits
+   * audit-record deletion" / "Fence producer admission through the audit
+   * deletion"): the predicate also re-awaits
    * `durableEventProducerInstance.waitForAllActiveWrites()` on every
    * `'delete'`-phase call, not only once at this function's own start
    * above — a producer write for a candidate can start any time after
@@ -5637,6 +5646,32 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * delete) and would otherwise still be mid-flight, invisible to the
    * `refreshRetainedRunOwnerIds` read that immediately follows, when THAT
    * candidate's own delete is reached.
+   *
+   * ACCEPTED RESIDUAL (Codex review, PR #600, "Fence producer admission
+   * through the audit deletion", round 2): the re-awaited
+   * `waitForAllActiveWrites()` above closes the window where a producer
+   * write STARTED before that wait but had not yet landed — it does NOT
+   * close a write that starts strictly AFTER that wait resolves but
+   * before `refreshRetainedRunOwnerIds()`'s own read settles, or between
+   * that read settling and the following `kv.delete()` actually
+   * executing. `waitForAllActiveWrites()` itself is explicitly a
+   * snapshot-then-await, by its own doc comment ("a write that starts
+   * AFTER this call is a NEW write this call never promised to wait
+   * for") — every check-then-act pair has some such window unless the
+   * check and the act are one atomic operation. Closing this fully would
+   * need either a primitive spanning both the fleet feed and the audit
+   * KV in one atomic operation (which does not exist here), or blocking
+   * new durable-event-producer admission for the full duration of the
+   * delete phase (a materially larger, cross-cutting change touching
+   * every run's own write path, far outside this issue's "one pull
+   * request in packages/bureau" delivery boundary). This is the same
+   * class of residual this same paragraph's own earlier revision, and
+   * `pruneStaleRunOwnership`'s doc comment above, already accept for
+   * analogous races — the coordinator ruling's ask ("re-checked per
+   * candidate immediately before each delete") is satisfied; what
+   * remains is the theoretically irreducible gap between one async check
+   * and the destructive operation it gates, narrowed from this pass's
+   * entire duration down to one async tick.
    */
   async function pruneAuditTrail(): Promise<void> {
     if (!auditTrailInstance) return;
