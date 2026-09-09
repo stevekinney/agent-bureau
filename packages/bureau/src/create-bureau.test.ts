@@ -13490,6 +13490,79 @@ describe('bureau.eventHistory deleted-aggregate through a real session deletion 
     }
   });
 
+  it('reauthorizes the POST-page session snapshot too, not just the up-front one (Codex P1 follow-up review finding, PR #580, "Reauthorize the post-page session snapshot")', async () => {
+    // The up-front `liveSession` check runs BEFORE `history.page()`. This
+    // simulates the exact race that motivates the post-page recheck: the
+    // FIRST `sessionStore.load` call (the up-front check) observes no live
+    // session — as it genuinely would for an id deleted, or recreated,
+    // strictly AFTER that read but before `page()` resolves — while every
+    // SUBSEQUENT call (the post-page recheck) sees the REAL, already-
+    // recreated, unauthorized session. Mocking only the FIRST call
+    // reproduces this deterministically, without depending on real
+    // concurrency timing.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-reused-session-post-page-reauth-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const originalRun = await bureau.createRun({ message: 'the first incarnation' });
+      const sessionId = originalRun.sessionId;
+      await waitForRunCompletion(bureau, originalRun.id);
+      await runtime.deferred.drain();
+
+      await bureau.deleteSession(sessionId);
+      await runtime.deferred.drain();
+
+      // Recreate the SAME id under a principal `mallory` is not authorized
+      // for.
+      const recreatedRun = await bureau.createRun({
+        message: 'the second incarnation',
+        sessionId,
+        principal: 'alice',
+      });
+      await waitForRunCompletion(bureau, recreatedRun.id);
+      await runtime.deferred.drain();
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const loadSpy = spyOn(sessionStore, 'load').mockImplementationOnce(async () => undefined);
+
+      try {
+        const deniedOutcome = await bureau.eventHistory(
+          { kind: 'session', id: sessionId },
+          { principal: 'mallory' },
+        );
+        expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+      } finally {
+        loadSpy.mockRestore();
+      }
+
+      // The actual owner still reads the live page (a fresh call this
+      // time, with no mocked read).
+      const allowedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: sessionId },
+        { principal: 'alice' },
+      );
+      expect('outcome' in allowedOutcome).toBe(false);
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('reauthorizes a recreated session even when the REQUESTED page omits its deletion marker entirely (Codex P1 follow-up review finding, PR #580, "Reauthorize when the requested page omits the marker")', async () => {
     // Authorization must not be nested inside "the requested page happens
     // to contain a session.deleted marker" — a `since` cursor positioned

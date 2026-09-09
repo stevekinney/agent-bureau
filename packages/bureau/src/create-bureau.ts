@@ -6884,7 +6884,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       const currentlyLive = runtime.sessionStore
         ? await runtime.sessionStore.load(owner.id)
         : undefined;
-      if (currentlyLive) return page;
+      if (currentlyLive) {
+        // AB-372 (Codex review finding, PR #580, "Reauthorize the post-page
+        // session snapshot") — `currentlyLive` can be a DIFFERENT (newer)
+        // incarnation than whatever `liveSession` authorization above
+        // checked: the up-front check ran against an id that, at that
+        // point, had no live record at all (open, by convention) — exactly
+        // the recreation race reauthorization exists to close — and this
+        // fresh snapshot is the FIRST live record either check has ever
+        // seen for it. Returning `page` on its mere truthiness, without
+        // checking ITS OWN authority metadata, would silently reopen that
+        // exact hole one line below the fix for it.
+        if (
+          principal !== undefined &&
+          !isSessionAuthorityAuthorized(currentlyLive.metadata, principal)
+        ) {
+          return { outcome: 'not-found' };
+        }
+        return page;
+      }
     }
 
     if (hasDeletionMarker) {
