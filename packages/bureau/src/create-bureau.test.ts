@@ -15811,6 +15811,604 @@ describe('bureau.runDurableMaintenance prunes stale run ownership (AB-363)', () 
   });
 });
 
+describe('Bureau durable audit trail retention (AB-388)', () => {
+  it("defaults to 'forever': no record is ever pruned, even across a maintenance pass long after every record's own timestamp", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-forever-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime,
+        durableBackgroundTasks: 'manual',
+        // `auditRetention` deliberately omitted — this test proves the
+        // default itself, not an explicit `'forever'`.
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+
+        const before = await bureau.auditTrail?.query({ runId: run.id });
+        expect(before?.length).toBeGreaterThan(0);
+
+        // Advance far past any plausible cutoff and run maintenance
+        // explicitly — with no `auditRetention` configured, this must be a
+        // complete no-op for the audit trail.
+        await runtime.advance(10_000_000_000);
+        await bureau.runDurableMaintenance();
+
+        const after = await bureau.auditTrail?.query({ runId: run.id });
+        expect(after).toEqual(before);
+
+        const prunedRecords = await bureau.auditTrail?.query({ type: 'audit.pruned' });
+        expect(prunedRecords).toEqual([]);
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('with olderThan, prunes a record past the cutoff, keeps one newer than the cutoff, keeps a record the fleet feed retention floor still protects even though it is past the cutoff, and writes exactly one audit.pruned record naming the right count', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-olderthan-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime,
+        durableBackgroundTasks: 'manual',
+        auditRetention: { olderThan: 500_000 },
+      });
+
+      try {
+        // `seedRun`'s own durable fleet events will be retired from the
+        // feed below, advancing the retention floor PAST them — this run
+        // exists only to give the floor something below it to retire.
+        const seedRun = await bureau.createRun({ message: 'seed', principal: 'alice' });
+        await waitForRunCompletion(bureau, seedRun.id);
+        await runtime.deferred.drain();
+        const seedAuditRecordsBefore = await bureau.auditTrail?.query({ runId: seedRun.id });
+        if (!seedAuditRecordsBefore || seedAuditRecordsBefore.length === 0) {
+          throw new Error('expected at least one durable audit record for the seed run');
+        }
+
+        await runtime.advance(100_000);
+
+        // `runA`'s own durable fleet event(s) become the earliest the fleet
+        // feed still retains once every seed-era event is retired below —
+        // its OWN first `emittedAtMs` becomes `retentionFloorTimestamp()`'s
+        // answer, so its audit records are protected at exactly this
+        // timestamp.
+        const runA = await bureau.createRun({ message: 'A', principal: 'bob' });
+        await waitForRunCompletion(bureau, runA.id);
+        await runtime.deferred.drain();
+        const runAAuditRecordsBefore = await bureau.auditTrail?.query({ runId: runA.id });
+        if (!runAAuditRecordsBefore || runAAuditRecordsBefore.length === 0) {
+          throw new Error('expected at least one durable audit record for run A');
+        }
+
+        // Retire everything strictly before run A's OWN first durable
+        // event — never derived from seed's own last event, which names
+        // only seed's `{ kind: 'run', id }` owner page and can sort BEFORE
+        // some other seed-era durable row under a different owner (e.g.
+        // seed's own session lifecycle row). Retaining from run A's first
+        // event instead guarantees every seed-era row, under every owner,
+        // is retired, regardless of how many rows seed produced or what
+        // order they landed in.
+        const runAPage = await bureau.eventHistory({ kind: 'run', id: runA.id });
+        if ('outcome' in runAPage) throw new Error('expected a durable page for run A');
+        const runAFirstEvent = runAPage.events[0];
+        if (!runAFirstEvent) throw new Error('expected at least one durable event for run A');
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: runAFirstEvent.sequence });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        // Advance well past `olderThan` relative to BOTH seed and run A —
+        // without the retention-floor clamp, this cutoff alone would prune
+        // run A's records too.
+        await runtime.advance(1_000_000);
+
+        const runB = await bureau.createRun({ message: 'B', principal: 'carol' });
+        await waitForRunCompletion(bureau, runB.id);
+        await runtime.deferred.drain();
+        const runBAuditRecordsBefore = await bureau.auditTrail?.query({ runId: runB.id });
+        if (!runBAuditRecordsBefore || runBAuditRecordsBefore.length === 0) {
+          throw new Error('expected at least one durable audit record for run B');
+        }
+
+        await bureau.runDurableMaintenance();
+
+        const seedAuditRecordsAfter = await bureau.auditTrail?.query({ runId: seedRun.id });
+        expect(seedAuditRecordsAfter).toEqual([]);
+
+        const runAAuditRecordsAfter = await bureau.auditTrail?.query({ runId: runA.id });
+        expect(runAAuditRecordsAfter).toEqual(runAAuditRecordsBefore);
+
+        const runBAuditRecordsAfter = await bureau.auditTrail?.query({ runId: runB.id });
+        expect(runBAuditRecordsAfter).toEqual(runBAuditRecordsBefore);
+
+        const prunedRecords = await bureau.auditTrail?.query({ type: 'audit.pruned' });
+        expect(prunedRecords).toHaveLength(1);
+        expect((prunedRecords?.[0]?.detail as { count: number; cutoffMs: number }).count).toBe(
+          seedAuditRecordsBefore.length,
+        );
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('under the default automatic maintenance profile, prunes on its own timer — never requiring an explicit runDurableMaintenance() call', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-automatic-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime,
+        auditRetention: { olderThan: 500_000 },
+        // `durableBackgroundTasks` deliberately omitted — the default
+        // 'automatic' profile is exactly what this test proves prunes on
+        // its own.
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+        const before = await bureau.auditTrail?.query({ runId: run.id });
+        if (!before || before.length === 0) {
+          throw new Error('expected at least one durable audit record for the run');
+        }
+
+        // AB-388 (Codex review, PR #597, "Preserve audit records while the
+        // fleet feed floor is zero"): `retentionFloorTimestamp()` now
+        // protects any STILL-RETAINED durable event even at floor 0 — this
+        // run's own durable events are never explicitly retired, so
+        // without retiring them, the floor clamp would protect `run`'s
+        // audit records forever regardless of `olderThan`. Retire
+        // everything up to (and including) `run`'s own last durable event
+        // so the floor advances past it before asserting a prune.
+        //
+        // The run's OWN `{ kind: 'run', id }` page is not the only durable
+        // history this run produced: completing it also durably saves the
+        // owning SESSION (`session.saved`, under `{ kind: 'session', id:
+        // run.sessionId }`), which is appended AFTER the run's own last
+        // event and so sorts to a HIGHER sequence — the same
+        // cross-owner-interleaving hazard the "with olderThan" sibling
+        // test's own comment documents (there, framed as "seed's own
+        // session lifecycle row" sorting after seed's last RUN row).
+        // Retiring only through the run's own last event leaves that later
+        // `session.saved` row retained, which pins
+        // `retentionFloorTimestamp()`'s global floor to ITS `emittedAtMs`
+        // — the same clock reading the run's own audit records carry —
+        // and the intended prune never happens. Retiring through the
+        // HIGHER of the run's and its session's own last event closes
+        // this for real, rather than coincidentally passing only when a
+        // session write happens not to outrun the run's page.
+        const runPage = await bureau.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in runPage) throw new Error('expected a durable page for the run');
+        const runLastEvent = runPage.events[runPage.events.length - 1];
+        if (!runLastEvent) throw new Error('expected at least one durable event for the run');
+        const sessionPage = await bureau.eventHistory({ kind: 'session', id: run.sessionId });
+        const sessionLastEvent =
+          !('outcome' in sessionPage) && sessionPage.events.length > 0
+            ? sessionPage.events[sessionPage.events.length - 1]
+            : undefined;
+        const lastEventSequence = sessionLastEvent
+          ? Math.max(runLastEvent.sequence, sessionLastEvent.sequence)
+          : runLastEvent.sequence;
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEventSequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        await runtime.advance(1_000_000);
+        await runtime.advance(300_000); // the automatic interval's own cadence
+
+        await waitForCondition(async () => {
+          const records = await bureau.auditTrail?.query({ runId: run.id });
+          return records?.length === 0;
+        }, 'expected the automatic maintenance timer to prune the audit trail on its own');
+
+        const prunedRecords = await bureau.auditTrail?.query({ type: 'audit.pruned' });
+        expect(prunedRecords?.length).toBeGreaterThan(0);
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it("after pruning and a restart, the next audit record's sequence is greater than every pruned one", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-restart-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtimeA = createManualRuntimeServices();
+
+    try {
+      const bureauA = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime: runtimeA,
+        durableBackgroundTasks: 'manual',
+        auditRetention: { olderThan: 500_000 },
+      });
+
+      let highestPrunedSequence = -1;
+      try {
+        const run = await bureauA.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureauA, run.id);
+
+        const beforePrune = await bureauA.auditTrail?.query({ runId: run.id });
+        if (!beforePrune || beforePrune.length === 0) {
+          throw new Error('expected at least one durable audit record for the run');
+        }
+        for (const record of beforePrune) {
+          if (typeof record.sequence === 'number' && record.sequence > highestPrunedSequence) {
+            highestPrunedSequence = record.sequence;
+          }
+        }
+        expect(highestPrunedSequence).toBeGreaterThanOrEqual(0);
+
+        // AB-388 (Codex review, PR #597, "Preserve audit records while the
+        // fleet feed floor is zero"): the floor now protects any
+        // still-retained durable event even at floor 0 — retire this run's
+        // own durable events first so the clamp no longer protects them,
+        // matching the sibling "with olderThan" test's own pattern.
+        //
+        // Also retire through the run's SESSION's own last event, not just
+        // the run's own `{ kind: 'run', id }` page — completing the run
+        // durably saves the owning session (`session.saved`) AFTER the
+        // run's own last event, sorting to a HIGHER sequence; retiring
+        // only through the run's own last event leaves that later
+        // `session.saved` row retained and pins the global floor to its
+        // `emittedAtMs` (the same clock reading the run's own audit
+        // records carry), which silently defeats this test's own prune —
+        // see the "prunes on its own timer" sibling test's identical fix.
+        const runPage = await bureauA.eventHistory({ kind: 'run', id: run.id });
+        if ('outcome' in runPage) throw new Error('expected a durable page for the run');
+        const runLastEvent = runPage.events[runPage.events.length - 1];
+        if (!runLastEvent) throw new Error('expected at least one durable event for the run');
+        const sessionPage = await bureauA.eventHistory({ kind: 'session', id: run.sessionId });
+        const sessionLastEvent =
+          !('outcome' in sessionPage) && sessionPage.events.length > 0
+            ? sessionPage.events[sessionPage.events.length - 1]
+            : undefined;
+        const lastEventSequence = sessionLastEvent
+          ? Math.max(runLastEvent.sequence, sessionLastEvent.sequence)
+          : runLastEvent.sequence;
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: lastEventSequence + 1 });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        await runtimeA.advance(1_000_000);
+        await bureauA.runDurableMaintenance();
+
+        const afterPrune = await bureauA.auditTrail?.query({ runId: run.id });
+        expect(afterPrune).toEqual([]);
+      } finally {
+        await bureauA.shutdown();
+      }
+
+      // A fresh bureau instance over the SAME sqlite file — a clean
+      // process restart, not a crash.
+      const bureauB = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        durableBackgroundTasks: 'manual',
+        auditRetention: { olderThan: 500_000 },
+      });
+
+      try {
+        const runAfterRestart = await bureauB.createRun({ message: 'B', principal: 'bob' });
+        await waitForRunCompletion(bureauB, runAfterRestart.id);
+
+        const afterRestart = await bureauB.auditTrail?.query({ runId: runAfterRestart.id });
+        if (!afterRestart || afterRestart.length === 0) {
+          throw new Error('expected at least one durable audit record for the post-restart run');
+        }
+        for (const record of afterRestart) {
+          expect(record.sequence).toBeGreaterThan(highestPrunedSequence);
+        }
+      } finally {
+        await bureauB.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('prunes the audit trail for a KV-backed bureau with NO durable engine composed, via an explicit runDurableMaintenance() call (Codex review, PR #597, "Run audit retention for KV-backed non-durable bureaus")', async () => {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      // A KV-only `persistence` value (ConditionalTextValueStore) — this
+      // gives `runtime.kv` a value (so `auditTrailInstance` is built) but
+      // NEVER gives `runtime.durable` a durable engine
+      // (`runtime-composition.ts`'s `hasKvOnlyPersistence`).
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+      runtime,
+      durableBackgroundTasks: 'manual',
+      auditRetention: { olderThan: 500_000 },
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      const before = await bureau.auditTrail?.query({ runId: run.id });
+      if (!before || before.length === 0) {
+        throw new Error('expected at least one durable audit record for the run');
+      }
+
+      // There is no durable event history for a KV-only bureau
+      // (`eventHistoryInstance` requires `runtime.durable`), so there is no
+      // retention floor to clamp against — `olderThan` alone determines
+      // the cutoff.
+      await runtime.advance(1_000_000);
+      const result = await bureau.runDurableMaintenance();
+      // Before this fix, `runDurableMaintenance()` returned `undefined`
+      // immediately for `!runtime.durable`, never reaching this pass.
+      expect(result).toBe(true);
+
+      const after = await bureau.auditTrail?.query({ runId: run.id });
+      expect(after).toEqual([]);
+
+      const prunedRecords = await bureau.auditTrail?.query({ type: 'audit.pruned' });
+      expect(prunedRecords?.length).toBeGreaterThan(0);
+    } finally {
+      await bureau.shutdown();
+    }
+  });
+
+  it('prunes the audit trail for a KV-backed bureau with NO durable engine composed, on its own automatic maintenance timer', async () => {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+      runtime,
+      auditRetention: { olderThan: 500_000 },
+      // `durableBackgroundTasks` deliberately omitted — before this fix,
+      // the automatic timer's own start condition (`runtime.durable &&
+      // ...`) never started at all for a KV-only bureau.
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      const before = await bureau.auditTrail?.query({ runId: run.id });
+      if (!before || before.length === 0) {
+        throw new Error('expected at least one durable audit record for the run');
+      }
+
+      // Advance one interval at a time, yielding a real macrotask turn
+      // between each — a KV-only bureau has no OTHER registered timer to
+      // interleave with (unlike the durable-engine sibling test above,
+      // where Weft's own maintenance interval also fires in between), so
+      // a single large `advance()` call would fire every due interval
+      // crossing SYNCHRONOUSLY in one burst. Only the FIRST of those
+      // firings actually starts a pass (the rest are skipped by the
+      // overlap guard while it's still in flight), which would otherwise
+      // permanently pin that pass's own `now()` read to the FIRST
+      // interval crossing rather than the fully advanced time. Yielding
+      // after each individual advance lets that pass fully settle first,
+      // so the NEXT interval crossing starts a fresh pass with a
+      // genuinely later `now()` — exactly how real, wall-clock-driven
+      // ticks behave in production.
+      for (let elapsed = 0; elapsed < 900_000; elapsed += 300_000) {
+        await runtime.advance(300_000);
+        await yieldToPortableEventLoop();
+      }
+
+      await waitForCondition(async () => {
+        const records = await bureau.auditTrail?.query({ runId: run.id });
+        return records?.length === 0;
+      }, 'expected the automatic maintenance timer to prune the audit trail on its own for a KV-only bureau');
+
+      const prunedRecords = await bureau.auditTrail?.query({ type: 'audit.pruned' });
+      expect(prunedRecords?.length).toBeGreaterThan(0);
+    } finally {
+      await bureau.shutdown();
+    }
+  });
+
+  it('does not start the automatic maintenance timer for a KV-only bureau with the default (\'forever\') auditRetention (Codex review, PR #597, "Start the KV-only timer only for active retention")', async () => {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+      runtime,
+      // `auditRetention` deliberately omitted (defaults to 'forever') and
+      // `durableBackgroundTasks` deliberately omitted (default
+      // 'automatic') — this KV-only bureau has NOTHING for the timer to
+      // do (no durable engine for `pruneStaleRunOwnership`, and
+      // `pruneAuditTrail` no-ops for 'forever'), so before this fix the
+      // widened `runtime.durable || runtime.kv` start condition still
+      // started a live interval that never did anything.
+      auditRetention: 'forever',
+    });
+
+    try {
+      expect(runtime.pendingTimers()).toHaveLength(0);
+    } finally {
+      await bureau.shutdown();
+    }
+  });
+
+  it('still starts the automatic maintenance timer for a KV-only bureau once auditRetention is active', async () => {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      persistence: textValueStore(new MemoryStorage()),
+      stopWhen: stopWhen.noToolCalls(),
+      runtime,
+      auditRetention: { olderThan: 500_000 },
+    });
+
+    try {
+      expect(runtime.pendingTimers().length).toBeGreaterThan(0);
+    } finally {
+      await bureau.shutdown();
+    }
+  });
+
+  it('runs pruneStaleRunOwnership and pruneAuditTrail even when engine.runMaintenance() rejects, and still propagates the engine failure (Codex review, PR #597, "Isolate audit pruning from engine maintenance failures")', async () => {
+    const probe = await createRuntimeComposition({
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+    const enginePrototype = Object.getPrototypeOf(probe.durable!.engine) as {
+      runMaintenance: (now?: number) => Promise<void>;
+    };
+    probe.durable!.engine[Symbol.dispose]?.();
+    probe.disposeStorage?.();
+    const maintenanceSpy = spyOn(enginePrototype, 'runMaintenance').mockRejectedValue(
+      new Error('engine maintenance backend unavailable'),
+    );
+
+    try {
+      const runtime = createManualRuntimeServices();
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'memory' },
+        durableExecution: true,
+        durableBackgroundTasks: 'manual',
+        runtime,
+        auditRetention: { olderThan: 500_000 },
+      });
+
+      try {
+        const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, run.id);
+        const before = await bureau.auditTrail?.query({ runId: run.id });
+        if (!before || before.length === 0) {
+          throw new Error('expected at least one durable audit record for the run');
+        }
+
+        await runtime.advance(1_000_000);
+
+        // The engine failure still surfaces to the caller...
+        await expect(bureau.runDurableMaintenance()).rejects.toThrow(
+          'engine maintenance backend unavailable',
+        );
+
+        // ...but pruneAuditTrail() still ran in the SAME call, despite the
+        // engine failing first — before this fix, the engine's rejection
+        // exited the function before either sub-pass ran.
+        const after = await bureau.auditTrail?.query({ runId: run.id });
+        expect(after).toEqual([]);
+      } finally {
+        bureau.dispose();
+      }
+    } finally {
+      maintenanceSpy.mockRestore();
+    }
+  });
+
+  it('a shutdown() started while a manual runDurableMaintenance() call is still in flight awaits it before tearing down storage (Codex review, PR #597, "Await manual pruning before storage teardown")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-shutdown-drain-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime,
+        durableBackgroundTasks: 'manual',
+        auditRetention: { olderThan: 500_000 },
+      });
+
+      const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.advance(1_000_000);
+
+      // Start a manual maintenance pass but do NOT await it before calling
+      // shutdown() — this is the exact race the fix closes: shutdown()
+      // must not dispose storage while this pass's own pruneAuditTrail()
+      // is still listing/deleting/writing its summary.
+      const maintenance = bureau.runDurableMaintenance();
+      await bureau.shutdown();
+
+      // shutdown() resolving proves it waited for the in-flight pass —
+      // if it had disposed storage first, this pass's own delete/summary
+      // write would throw against a closed backend instead of resolving.
+      await expect(maintenance).resolves.toBe(true);
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
 describe('deleteSession aborts every run it owns (AB-207)', () => {
   // The pending-approval flavor of "a run owned by the deleted session" is
   // already covered by the pre-existing "revokes pending approval on delete"

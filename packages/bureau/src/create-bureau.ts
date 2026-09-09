@@ -119,6 +119,7 @@ import {
   type DurableEventHistorySubscribeOptions,
   type DurableEventProducer,
 } from './durable-event-history';
+import { createEventTimestampResolver } from './event-timestamp';
 import {
   ActionEvent,
   BureauDisposedEvent,
@@ -1344,6 +1345,27 @@ function validateSessionInputBacklogLimit(value: number | undefined, optionName:
   }
 }
 
+/**
+ * AB-388 (Codex review, PR #597, "Reject non-finite and negative retention
+ * durations"): `BureauOptions.auditRetention`'s `{ olderThan }` form feeds
+ * `pruneAuditTrail`'s cutoff arithmetic (`now - retention.olderThan`)
+ * directly — TypeScript's `number` type permits `NaN`, `Infinity`, and
+ * negative values, none of which are safe here. `NaN` makes every
+ * `record.timestampMs >= cutoffMs` comparison in `AuditTrail.prune` false,
+ * deleting the ENTIRE trail even when a fleet retention floor exists;
+ * `-Infinity` (or any negative value large enough) moves the cutoff into
+ * the future and can remove records that were just written. Validated here
+ * (BAD_REQUEST at construction time), the same boundary
+ * `validateSessionInputBacklogLimit` above already uses for a different
+ * destructive-if-malformed option.
+ */
+function validateAuditRetentionOption(value: { olderThan: number } | 'forever' | undefined): void {
+  if (value === undefined || value === 'forever') return;
+  if (!Number.isFinite(value.olderThan) || value.olderThan < 0) {
+    toBadRequest('"options.auditRetention.olderThan" must be a finite, non-negative number');
+  }
+}
+
 export async function createBureau<const D extends AgentDefinitions = AgentDefinitions>(
   options: BureauOptions<D>,
 ): Promise<Bureau<D>> {
@@ -1361,6 +1383,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     options.sessionInput?.principalBacklogLimit,
     'principalBacklogLimit',
   );
+  validateAuditRetentionOption(options.auditRetention);
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   // AB-260 — resolve the injectable runtime-service seam exactly once,
@@ -1373,6 +1396,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // (not `runtime`) to avoid colliding with the pre-existing local `runtime`
   // below, which names the unrelated `RuntimeComposition` value.
   const runtimeServices: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
+  // AB-388: ONE resolver shared by `createAuditTrail` and
+  // `createDurableEventProducer` below — see `event-timestamp.ts`. Declared
+  // this early (well before either subsystem exists) so both constructions
+  // reference the identical instance.
+  const eventTimestamp = createEventTimestampResolver(runtimeServices);
   // AB-387 — `createStore()` must draw `Action.timestamp` from the SAME
   // resolved `runtimeServices` instance every other bureau subsystem reads,
   // not operative's own real-clock default. Without this, a bureau built
@@ -5474,13 +5502,196 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
   }
+  /**
+   * AB-388: prunes the durable audit trail per `options.auditRetention`
+   * (default `'forever'`, a no-op). References `auditTrailInstance` and
+   * `eventHistoryInstance`, both declared further down this factory
+   * function — safe because this function is only ever CALLED (from
+   * `runDurableMaintenance` below, or from the automatic-profile interval)
+   * after the whole factory body, including both of those assignments, has
+   * already run; see `pruneStaleRunOwnership`'s own forward-reference to
+   * `eventHistoryInstance` for the identical, already-established pattern.
+   *
+   * Computes the effective cutoff as `min(now - olderThan, floorTimestamp)`
+   * — never a record newer than the fleet feed's own retention floor is
+   * pruned, so audit evidence always outlives the durable events it
+   * describes, even when the operator's own `olderThan` would have allowed
+   * pruning it sooner. `floorTimestamp` is `undefined` (no clamp beyond the
+   * operator's own cutoff) when there is no durable event history at all
+   * (ephemeral bureau, or a persistent backend without one), or when
+   * `eventHistoryInstance.retentionFloorTimestamp()` itself reports no
+   * floor to protect (nothing retired from the fleet feed yet, or nothing
+   * currently retained at all).
+   *
+   * AB-388 (Codex review, PR #597, "Protect earlier audit records for
+   * retained owners"): the global `floorTimestamp` clamp above protects
+   * records at or after the EARLIEST currently-retained durable event
+   * anywhere in the fleet feed — it does NOT protect an individual run's
+   * OWN earlier audit records once that run's only retained durable event
+   * is a single, later terminal transition (`run.completed`/etc.). This
+   * function additionally asks `eventHistoryInstance.retainedRunOwnerIds()`
+   * for the full set of run ids the fleet feed still retains at least one
+   * event for, and passes a `protectRunId` predicate into `prune()` so
+   * every one of THOSE runs' audit records survive this pass regardless of
+   * `effectiveCutoff` — matching `packages/bureau/README.md`'s promise that
+   * a retained run history keeps that run's audit records.
+   *
+   * AB-388 (Codex review, PR #597, "Wait for durable event writes before
+   * reading the floor"): both `retentionFloorTimestamp()` and
+   * `retainedRunOwnerIds()` read the fleet feed's CURRENT state — a
+   * `history.record()` write already in flight (started by
+   * `durableEventProducerInstance`'s own listener for the SAME action this
+   * pruning pass is racing) has not yet landed there. Awaiting
+   * `durableEventProducerInstance.waitForAllActiveWrites()` first ensures
+   * every durable event whose corresponding audit record already committed
+   * is visible to both reads below, closing the window where a pass could
+   * otherwise prune an audit record whose durable-event counterpart was
+   * still mid-append.
+   */
+  async function pruneAuditTrail(): Promise<void> {
+    if (!auditTrailInstance) return;
+    const retention = options.auditRetention;
+    if (!retention || retention === 'forever') return;
+
+    await durableEventProducerInstance?.waitForAllActiveWrites();
+
+    const now = runtimeServices.clock.now();
+    const cutoff = now - retention.olderThan;
+    const floorTimestamp = await eventHistoryInstance?.retentionFloorTimestamp();
+    const effectiveCutoff =
+      floorTimestamp !== undefined ? Math.min(cutoff, floorTimestamp) : cutoff;
+
+    const retainedRunOwners = await eventHistoryInstance?.retainedRunOwnerIds();
+    const protectRunId = retainedRunOwners
+      ? (runId: string) => retainedRunOwners.ownerIds.has(runId)
+      : undefined;
+
+    await auditTrailInstance.prune(effectiveCutoff, { protectRunId });
+  }
+
+  /**
+   * AB-388 (Codex review, PR #597, "Run audit retention for KV-backed
+   * non-durable bureaus" / "Isolate the manual audit-retention sub-pass"):
+   * `auditTrailInstance` is built whenever `runtime.kv` exists — a
+   * persistent backend with `durableExecution: false`, or a custom KV-only
+   * `persistence` (`ConditionalTextValueStore`), both give it a `kv`
+   * without ever giving `runtime.durable` a durable engine (see
+   * `runtime-composition.ts`'s `hasKvOnlyPersistence`). Gating this whole
+   * function's body on `!runtime.durable` (the ORIGINAL shape) made a
+   * configured `auditRetention` policy unreachable for exactly that
+   * configuration — a manual host's own alarm/Cron trigger calling this
+   * got an early `undefined` and never pruned anything, growing the
+   * durable audit keys without bound. `runtime.durable.engine.runMaintenance()`
+   * is still SKIPPED when there is no durable engine (nothing to
+   * maintain), but `pruneStaleRunOwnership()`/`pruneAuditTrail()` are
+   * unconditional — both already self-guard on their own preconditions
+   * (`eventHistoryInstance`/`sessionStore` and `auditTrailInstance`
+   * respectively) and no-op harmlessly when those are absent.
+   *
+   * Each sub-pass runs under its OWN try/catch, mirroring the automatic
+   * timer's identical isolation further below: a `pruneStaleRunOwnership()`
+   * rejection (e.g. `sessionStore.list()` failing) must never prevent
+   * `pruneAuditTrail()` from running this same call — the two are
+   * documented (`packages/bureau/README.md`) as independent sub-passes,
+   * and before this fix a manual host's own call here contradicted that
+   * for exactly the case a rejection actually happens.
+   */
+  // AB-388 (Codex review, PR #597, "Await manual pruning before storage
+  // teardown"): `automaticRunOwnershipPruneCurrentPass` below only tracks
+  // the AUTOMATIC-profile timer's own tick. A caller invoking
+  // `runDurableMaintenance()` directly (the manual/serverless profile's own
+  // alarm/Cron trigger) has no equivalent tracking, so `shutdown()` could
+  // dispose storage while such a call's `pruneStaleRunOwnership()`/
+  // `pruneAuditTrail()` sub-passes were still listing, deleting, or writing
+  // a watermark/summary. Every in-flight manual call registers its pass
+  // here; `shutdown()` drains the set (`Promise.allSettled`, since a
+  // rejection is already diagnosed by each sub-pass's own try/catch, or is
+  // this function's own re-thrown `engineMaintenanceError`) before backend
+  // teardown, alongside the automatic timer's own await.
+  const manualDurableMaintenancePasses = new Set<Promise<void>>();
 
   async function runDurableMaintenance(now?: number): Promise<true | undefined> {
-    if (!runtime.durable) return undefined;
-    await runtime.durable.engine.runMaintenance(now);
-    await pruneStaleRunOwnership();
-    await drainSessionOutbox();
-    return true;
+    const hasDurableEngine = Boolean(runtime.durable);
+    // AB-388 (Codex review, PR #597, "Isolate audit pruning from engine
+    // maintenance failures"): a rejected `engine.runMaintenance()` (e.g. a
+    // transient storage error) used to exit this function BEFORE any of
+    // `pruneStaleRunOwnership()`/`drainSessionOutbox()`/`pruneAuditTrail()`
+    // ran, even though the sub-passes below are already isolated from EACH
+    // OTHER by their own try/catch — a failed alarm silently also skipped
+    // the others. The engine failure is captured here, every sub-pass
+    // still runs unconditionally, and the captured failure is re-thrown
+    // only at the end, so a caller still observes (and can alert on) the
+    // engine failure exactly as before, just no longer at the cost of
+    // skipping the other passes.
+    let engineMaintenanceError: Error | undefined;
+    let engineMaintenanceFailed = false;
+
+    const pass = (async () => {
+      if (hasDurableEngine) {
+        try {
+          await runtime.durable?.engine.runMaintenance(now);
+        } catch (error: unknown) {
+          engineMaintenanceFailed = true;
+          // Normalized to a real `Error` (never re-thrown as `unknown`) so
+          // the eventual `throw engineMaintenanceError` below satisfies
+          // `@typescript-eslint/only-throw-error`.
+          engineMaintenanceError =
+            error instanceof Error ? error : new Error(serializeUnknownError(error));
+        }
+      }
+      try {
+        await pruneStaleRunOwnership();
+      } catch (error: unknown) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-maintenance',
+          message: `[bureau] Manual run-ownership pruning pass failed: ${serializeUnknownError(error)}`,
+          cause: error,
+        });
+      }
+      try {
+        await drainSessionOutbox();
+      } catch (error: unknown) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-maintenance',
+          message: `[bureau] Manual session-outbox drain pass failed: ${serializeUnknownError(error)}`,
+          cause: error,
+        });
+      }
+      try {
+        await pruneAuditTrail();
+      } catch (error: unknown) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-maintenance',
+          message: `[bureau] Manual audit-trail pruning pass failed: ${serializeUnknownError(error)}`,
+          cause: error,
+        });
+      }
+    })();
+
+    manualDurableMaintenancePasses.add(pass);
+    try {
+      await pass;
+    } finally {
+      manualDurableMaintenancePasses.delete(pass);
+    }
+
+    if (engineMaintenanceFailed) {
+      // The `?? new Error(...)` fallback is unreachable in practice —
+      // `engineMaintenanceFailed` is only ever set alongside
+      // `engineMaintenanceError` above — but keeps this a definite `Error`
+      // for `@typescript-eslint/only-throw-error`, since the two are
+      // separate bindings the type checker cannot link.
+      throw engineMaintenanceError ?? new Error('Durable engine maintenance failed');
+    }
+    // `true` whenever there was ANY maintenance surface to drive (a durable
+    // engine, or just the KV-backed audit trail) — `undefined` only for the
+    // fully ephemeral case (no durable engine AND no audit trail), matching
+    // this function's pre-existing "nothing here" contract for a bureau
+    // with no persistence at all.
+    return hasDurableEngine || auditTrailInstance ? true : undefined;
   }
 
   // AB-363 — Codex review PR #568, "Run ownership pruning in the automatic
@@ -5549,7 +5760,41 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // would have (something to await after `runtime.advance()`) without
   // that unbounded growth.
   let automaticRunOwnershipPruneCurrentPass: Promise<void> | undefined;
-  if (runtime.durable && options.durableBackgroundTasks !== 'manual') {
+  // AB-388 (Codex review, PR #597, "Run audit retention for KV-backed
+  // non-durable bureaus"): widened from `runtime.durable` alone — a
+  // persistent backend with `durableExecution: false`, or a custom
+  // KV-only `persistence`, gives `runtime.kv` a value (and therefore later
+  // builds `auditTrailInstance`, further down this factory function)
+  // without ever giving `runtime.durable` a durable engine. Checking
+  // `runtime.kv` here rather than `auditTrailInstance` itself: that `let`
+  // binding is declared much further down this function and would throw
+  // "Cannot access before initialization" if read this early — `runtime.kv`
+  // is the exact precondition `auditTrailInstance`'s own construction
+  // gates on, so it is an equivalent, TDZ-safe proxy for "the audit trail
+  // will exist". `pruneStaleRunOwnership()` still self-guards on
+  // `eventHistoryInstance` (which DOES require `runtime.durable`) and
+  // no-ops harmlessly for a KV-only bureau — only `pruneAuditTrail()`
+  // actually does anything in that configuration.
+  //
+  // AB-388 (Codex review, PR #597, "Start the KV-only timer only for
+  // active retention"): a KV-only bureau (`runtime.kv` truthy, `runtime.durable`
+  // falsy) with no configured `options.auditRetention` (the default,
+  // `'forever'`) has NOTHING for this timer to do — `pruneStaleRunOwnership()`
+  // always no-ops without `eventHistoryInstance` (which requires
+  // `runtime.durable`), and `pruneAuditTrail()` returns immediately for a
+  // `'forever'`/omitted policy. Starting a real interval anyway meant
+  // recurring useless work AND kept the process alive (the interval handle
+  // itself) until an operator explicitly called `shutdown()`. A durable
+  // bureau (`runtime.durable` truthy) still always starts the timer
+  // regardless of `auditRetention`, since `pruneStaleRunOwnership()` has
+  // real work to do there independent of audit retention.
+  const hasActiveAuditRetention = Boolean(
+    options.auditRetention && options.auditRetention !== 'forever',
+  );
+  if (
+    (runtime.durable || (runtime.kv && hasActiveAuditRetention)) &&
+    options.durableBackgroundTasks !== 'manual'
+  ) {
     automaticRunOwnershipPruneTimerStarted = true;
     automaticRunOwnershipPruneTimer = runtimeServices.timers.setInterval(() => {
       if (automaticRunOwnershipPruneCurrentPass) return;
@@ -5566,28 +5811,47 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // design (a missed dispatch, or a process that crashes before it
       // fires, would otherwise never get a second chance until an operator
       // manually calls `runDurableMaintenance()`).
-      const pass = pruneStaleRunOwnership()
-        .catch((error: unknown) => {
+      //
+      // AB-388: the same guarded, awaited pass now also prunes the durable
+      // audit trail (`options.auditRetention`) — never a second, separate
+      // timer. Each sub-pass has its own try/catch so a failure in one
+      // (e.g. a rejected `sessionStore.list()`) never prevents the others
+      // from running this tick; each is diagnosed under its own message so
+      // all three remain distinguishable in `onDiagnostic` output.
+      const pass = (async () => {
+        try {
+          await pruneStaleRunOwnership();
+        } catch (error: unknown) {
           diagnose({
             level: 'error',
             scope: 'durable-maintenance',
             message: `[bureau] Automatic run-ownership pruning pass failed: ${serializeUnknownError(error)}`,
             cause: error,
           });
-        })
-        .then(() =>
-          drainSessionOutbox().catch((error: unknown) => {
-            diagnose({
-              level: 'error',
-              scope: 'durable-maintenance',
-              message: `[bureau] Automatic session-outbox drain pass failed: ${serializeUnknownError(error)}`,
-              cause: error,
-            });
-          }),
-        )
-        .finally(() => {
-          automaticRunOwnershipPruneCurrentPass = undefined;
-        });
+        }
+        try {
+          await drainSessionOutbox();
+        } catch (error: unknown) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Automatic session-outbox drain pass failed: ${serializeUnknownError(error)}`,
+            cause: error,
+          });
+        }
+        try {
+          await pruneAuditTrail();
+        } catch (error: unknown) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Automatic audit-trail pruning pass failed: ${serializeUnknownError(error)}`,
+            cause: error,
+          });
+        }
+      })().finally(() => {
+        automaticRunOwnershipPruneCurrentPass = undefined;
+      });
       automaticRunOwnershipPruneCurrentPass = pass;
       detachBestEffortPromise(pass);
     }, AUTOMATIC_RUN_OWNERSHIP_PRUNE_INTERVAL_MS);
@@ -6991,6 +7255,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       if (automaticRunOwnershipPruneCurrentPass) {
         await automaticRunOwnershipPruneCurrentPass;
       }
+      // AB-388: drain any manual `runDurableMaintenance()` call(s) still in
+      // flight — see `manualDurableMaintenancePasses`'s own doc comment
+      // above. `allSettled` (never `all`): a rejection here is either
+      // already diagnosed by the pass's own sub-pass try/catch, or is a
+      // re-thrown `engineMaintenanceError` the ORIGINAL caller of
+      // `runDurableMaintenance()` observes directly — `shutdown()` must
+      // still complete backend teardown either way. Drained in the SAME
+      // place, and for the SAME reason, as the automatic pass's own await
+      // just above: both must settle before the shared signal aborts and
+      // before backend teardown below.
+      if (manualDurableMaintenancePasses.size > 0) {
+        await Promise.allSettled([...manualDurableMaintenancePasses]);
+      }
       // Bureau-owned background work is stopped/awaited identically under
       // BOTH policies (2026-09-02 coordinator ruling) — abort the shared
       // signal now, AFTER runs are aborted/drained, toolbox shutdown is
@@ -7708,7 +7985,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       bureau,
       runtime.kv,
       diagnose,
-      { signal: backgroundShutdownController.signal, initialSequence: auditTrailInitialSequence },
+      {
+        signal: backgroundShutdownController.signal,
+        initialSequence: auditTrailInitialSequence,
+        eventTimestamp,
+      },
       runtimeServices,
     );
   }
@@ -7726,7 +8007,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       eventHistoryInstance,
       runtimeServices,
       diagnose,
-      { signal: backgroundShutdownController.signal },
+      { signal: backgroundShutdownController.signal, eventTimestamp },
     );
   }
 

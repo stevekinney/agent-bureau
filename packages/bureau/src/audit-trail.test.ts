@@ -15,7 +15,7 @@ import type { Action } from '@lostgradient/operative/store';
 import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
 import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import { CompletableEventTarget } from 'lifecycle';
+import { CompletableEventTarget, createManualRuntimeServices } from 'lifecycle';
 
 import { type AuditRecord, computeInitialAuditSequence, createAuditTrail } from './audit-trail';
 import { ActionEvent, type BureauEventMap } from './events';
@@ -1322,6 +1322,649 @@ describe('createAuditTrail', () => {
       // The unsafe value must be rejected — the valid record's sequence
       // (3) still wins, not `1e308 + 1` (a no-op on a float that large).
       expect(await computeInitialAuditSequence(kv)).toBe(4);
+    });
+  });
+
+  describe('AB-388 — prune()', () => {
+    it('returns undefined and prunes nothing when no kv store is configured', async () => {
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, undefined);
+      expect(await trail.prune(5000)).toBeUndefined();
+      trail.dispose();
+    });
+
+    it('deletes every record strictly before the cutoff, leaves records at or after it untouched, and writes one audit.pruned record naming the count and cutoff', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old-1' }));
+      await seedRecord(kv, makeRecord(1, { timestampMs: 2000, runId: 'run-old-2' }));
+      // Exactly at the cutoff — NOT pruned; the boundary is exclusive on
+      // the cutoff side (only strictly-older records are removed).
+      await seedRecord(kv, makeRecord(2, { timestampMs: 5000, runId: 'run-at-cutoff' }));
+      await seedRecord(kv, makeRecord(3, { timestampMs: 9000, runId: 'run-new' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 4 });
+
+      const result = await trail.prune(5000);
+      expect(result).toEqual({ prunedCount: 2, cutoffMs: 5000 });
+
+      const remaining = await trail.query();
+      // Includes the pass's own `audit.pruned` summary record, written at
+      // "now" (the real clock, since this test supplies no manual
+      // runtime) — strictly after every seeded fixture timestamp, so it
+      // is never itself a candidate for this same pass's cutoff.
+      expect(remaining.map((r) => r.runId).sort()).toEqual([
+        'bureau:audit-retention',
+        'run-at-cutoff',
+        'run-new',
+      ]);
+
+      const auditPrunedRecords = await trail.query({ type: 'audit.pruned' });
+      expect(auditPrunedRecords).toHaveLength(1);
+      expect(auditPrunedRecords[0]?.detail).toEqual({ count: 2, cutoffMs: 5000 });
+
+      trail.dispose();
+    });
+
+    it('writes no audit.pruned record and touches nothing when no record qualifies', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 9000, runId: 'run-new' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const result = await trail.prune(1000);
+      expect(result).toEqual({ prunedCount: 0, cutoffMs: 1000 });
+
+      const records = await trail.query();
+      expect(records).toHaveLength(1);
+      expect(records[0]?.runId).toBe('run-new');
+
+      trail.dispose();
+    });
+
+    it('persists the highest pruned sequence so computeInitialAuditSequence resumes above it even when every remaining record is gone', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(40, { timestampMs: 1000, runId: 'run-old-1' }));
+      await seedRecord(kv, makeRecord(41, { timestampMs: 2000, runId: 'run-old-2' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 42 });
+
+      // Prune EVERYTHING — the pass's own summary record (sequence 42)
+      // survives the cutoff since it is written after the cutoff is
+      // computed, at "now", which the test's cutoff is set safely past.
+      const result = await trail.prune(Number.MAX_SAFE_INTEGER);
+      expect(result?.prunedCount).toBe(2);
+
+      // Without the persisted floor, a naive re-scan of what remains (only
+      // the just-written `audit.pruned` record, sequence 42) would still
+      // recover 43 here by coincidence — so assert the floor mechanism
+      // directly: delete that survivor too, leaving NOTHING for a fresh
+      // scan to learn from, and prove the persisted floor alone recovers
+      // the correct watermark.
+      const survivors = await trail.query();
+      for (const record of survivors) {
+        const ts = record.timestampMs.toString().padStart(16, '0');
+        const seq = (record.sequence ?? 0).toString().padStart(12, '0');
+        await kv.delete(`audit:v1:${ts}:${seq}:${record.runId}`);
+      }
+      expect(await trail.query()).toHaveLength(0);
+
+      const nextInitialSequence = await computeInitialAuditSequence(kv);
+      expect(nextInitialSequence).toBe(42);
+
+      trail.dispose();
+    });
+
+    it("a later pass pruning a LOWER sequence than an earlier pass's persisted floor never regresses that floor", async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(10, { timestampMs: 1000, runId: 'run-a' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 21 });
+
+      // First pass prunes run-a (sequence 10) — persists floor 10.
+      await trail.prune(1500);
+
+      // A record with a LOWER sequence than the persisted floor shows up
+      // later (e.g. a legacy write straggling in) and a second pass prunes
+      // it too — the floor must stay at 10, the highest ever pruned, not
+      // regress to this pass's own lower highest (3).
+      await seedRecord(kv, makeRecord(3, { timestampMs: 500, runId: 'run-legacy' }));
+      await trail.prune(1500);
+
+      const survivors = await trail.query();
+      for (const record of survivors) {
+        const ts = record.timestampMs.toString().padStart(16, '0');
+        const seq = (record.sequence ?? 0).toString().padStart(12, '0');
+        await kv.delete(`audit:v1:${ts}:${seq}:${record.runId}`);
+      }
+
+      expect(await computeInitialAuditSequence(kv)).toBe(11);
+
+      trail.dispose();
+    });
+
+    it('prunes a well-formed key past the cutoff without ever reading its stored value (key-only fast path)', async () => {
+      // A `TextValueStore` stub whose `get()` throws on ANY call proves
+      // this key — well-formed by `encodeKey`'s own shape — is pruned
+      // through `parsePruneCandidateFromKey` alone: `kv.get` is never
+      // reached for it, only `kv.delete`.
+      const base = textValueStore(new MemoryStorage());
+      await base.set(
+        'audit:v1:0000000000001000:000000000000:run-old',
+        JSON.stringify(makeRecord(0, { timestampMs: 1000, runId: 'run-old' })),
+      );
+      const kv: ReturnType<typeof textValueStore> = {
+        ...base,
+        get(key: string) {
+          if (key === 'audit:v1:0000000000001000:000000000000:run-old') {
+            throw new Error('kv.get should never be called for a well-formed key');
+          }
+          return base.get(key);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(1);
+      expect(await base.get('audit:v1:0000000000001000:000000000000:run-old')).toBeNull();
+
+      trail.dispose();
+    });
+
+    it('falls back to reading and decoding a key the fast path cannot parse, and skips it when the stored JSON is corrupted', async () => {
+      // A non-numeric sequence segment forces the fallback
+      // (`computeInitialAuditSequence`'s tests use the identical trick for
+      // its own fast path) — the stored value at that key is then
+      // corrupted JSON, so the fallback's own decode failure is what
+      // leaves it untouched, not the key shape by itself.
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+      await kv.set('audit:v1:0000000000001500:not-a-number:run-corrupt', '{not json');
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 2 });
+
+      const result = await trail.prune(5000);
+      expect(result).toEqual({ prunedCount: 1, cutoffMs: 5000 });
+
+      // Never decoded well enough to judge, so never deleted either.
+      expect(await kv.get('audit:v1:0000000000001500:not-a-number:run-corrupt')).toBe('{not json');
+
+      trail.dispose();
+    });
+
+    it('falls back to reading and decoding a key the fast path cannot parse, and still prunes it when the decoded record is past the cutoff', async () => {
+      // Same non-numeric-sequence-segment trick as the sibling test, but
+      // this time the stored VALUE decodes fine and is genuinely past the
+      // cutoff — proving the fallback path prunes a record it can
+      // successfully decode, not just tolerates one it can't.
+      const kv = textValueStore(new MemoryStorage());
+      const legacyKey = 'audit:v1:0000000000001500:not-a-number:run-legacy';
+      await kv.set(
+        legacyKey,
+        JSON.stringify(makeRecord(7, { timestampMs: 1500, runId: 'run-legacy' })),
+      );
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 8 });
+
+      const result = await trail.prune(5000);
+      expect(result).toEqual({ prunedCount: 1, cutoffMs: 5000 });
+      expect(await kv.get(legacyKey)).toBeNull();
+
+      trail.dispose();
+    });
+
+    it('refuses to prune once the owner-issued signal has aborted', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+
+      const controller = new AbortController();
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, {
+        initialSequence: 1,
+        signal: controller.signal,
+      });
+
+      controller.abort();
+      const result = await trail.prune(Number.MAX_SAFE_INTEGER);
+      expect(result).toBeUndefined();
+
+      const records = await trail.query();
+      expect(records).toHaveLength(1);
+
+      trail.dispose();
+    });
+
+    it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+      'refuses to prune anything for a non-finite cutoffMs (%p), rather than deleting the entire trail (Codex review, PR #597, "Reject non-finite and negative retention durations")',
+      async (nonFiniteCutoff) => {
+        const kv = textValueStore(new MemoryStorage());
+        await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+
+        const { bureau } = createStubBureau();
+        const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+        const result = await trail.prune(nonFiniteCutoff);
+        expect(result).toBeUndefined();
+
+        const records = await trail.query();
+        expect(records).toHaveLength(1);
+
+        trail.dispose();
+      },
+    );
+
+    it('persists the highest-pruned-sequence watermark BEFORE deleting any qualifying record (Codex review, PR #597, "Persist the sequence watermark before deleting records")', async () => {
+      const base = textValueStore(new MemoryStorage());
+      await base.set(
+        'audit:v1:0000000000001000:000000000005:run-old',
+        JSON.stringify(makeRecord(5, { timestampMs: 1000, runId: 'run-old' })),
+      );
+      const operationLog: string[] = [];
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        async set(key: string, value: string) {
+          operationLog.push(`set:${key}`);
+          await base.set(key, value);
+        },
+        async delete(key: string) {
+          operationLog.push(`delete:${key}`);
+          await base.delete(key);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 6 });
+
+      await trail.prune(5000);
+
+      const floorSetIndex = operationLog.findIndex((entry) =>
+        entry.startsWith('set:audit-retention:v1:highest-pruned-sequence'),
+      );
+      const recordDeleteIndex = operationLog.findIndex(
+        (entry) => entry === 'delete:audit:v1:0000000000001000:000000000005:run-old',
+      );
+      expect(floorSetIndex).toBeGreaterThanOrEqual(0);
+      expect(recordDeleteIndex).toBeGreaterThanOrEqual(0);
+      expect(floorSetIndex).toBeLessThan(recordDeleteIndex);
+
+      trail.dispose();
+    });
+
+    it('skips a decoded value that is not a valid AuditRecord shape (e.g. null) rather than throwing, and still prunes a subsequent qualifying key (Codex review, PR #597, "Validate decoded records before pruning")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      // Non-numeric sequence segment forces the slow-path decode for both
+      // keys (same trick the sibling fallback tests above use).
+      await kv.set('audit:v1:0000000000001000:not-a-number:run-corrupt', JSON.stringify(null));
+      // A decoded value that HAS every required field except a wrongly-typed
+      // `sequence` (a string, not a number) — a different corruption shape
+      // than outright `null`, exercising the guard's own `sequence`-type
+      // branch specifically.
+      await kv.set(
+        'audit:v1:0000000000001200:bad-sequence-type:run-bad-sequence',
+        JSON.stringify({ ...makeRecord(0, { timestampMs: 1200 }), sequence: 'not-a-number' }),
+      );
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1500, runId: 'run-legacy' }));
+      await kv.set(
+        'audit:v1:0000000000002000:also-not-a-number:run-legacy-2',
+        JSON.stringify(makeRecord(1, { timestampMs: 2000, runId: 'run-legacy-2' })),
+      );
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 2 });
+
+      const result = await trail.prune(5000);
+
+      // Neither corrupt key throws or crashes the pass — the two genuinely
+      // valid, qualifying keys are still pruned despite sorting after them
+      // in `kv.list()`'s order.
+      expect(result?.prunedCount).toBe(2);
+      expect(await kv.get('audit:v1:0000000000001000:not-a-number:run-corrupt')).toBe(
+        JSON.stringify(null),
+      );
+      expect(
+        await kv.get('audit:v1:0000000000001200:bad-sequence-type:run-bad-sequence'),
+      ).not.toBeNull();
+      expect(await kv.get('audit:v1:0000000000002000:also-not-a-number:run-legacy-2')).toBeNull();
+
+      const remaining = await trail.query({ runId: 'run-legacy' });
+      expect(remaining).toHaveLength(0);
+
+      trail.dispose();
+    });
+
+    it('serializes two concurrent prune() calls on the same instance so they never double-count a deletion (Codex review, PR #597, "Serialize concurrent audit-pruning passes")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      // Two overlapping calls, neither awaited before the other starts —
+      // without serialization both could observe the same qualifying key
+      // via `kv.list()` before either `kv.delete()` resolves, each
+      // reporting `prunedCount: 1` for the SAME record.
+      const [first, second] = await Promise.all([trail.prune(5000), trail.prune(5000)]);
+
+      const totalPruned = (first?.prunedCount ?? 0) + (second?.prunedCount ?? 0);
+      expect(totalPruned).toBe(1);
+
+      trail.dispose();
+    });
+
+    it('still writes the pass\'s audit.pruned summary after the owner-issued signal aborts mid-pass, rather than silently swallowing it (Codex review, PR #597, "Finish the prune summary after shutdown begins")', async () => {
+      const base = textValueStore(new MemoryStorage());
+      await base.set(
+        'audit:v1:0000000000001000:000000000000:run-old',
+        JSON.stringify(makeRecord(0, { timestampMs: 1000, runId: 'run-old' })),
+      );
+
+      const controller = new AbortController();
+      // Aborts the signal the instant the first delete happens — simulating
+      // `shutdown()` beginning while this ALREADY-ADMITTED pass is still
+      // running.
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        async delete(key: string) {
+          await base.delete(key);
+          controller.abort();
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, {
+        initialSequence: 1,
+        signal: controller.signal,
+      });
+
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(1);
+
+      // `query()` doesn't consult `signal`, so the summary record — written
+      // through the abort-bypassing path — is still visible.
+      const prunedRecords = await trail.query({ type: 'audit.pruned' });
+      expect(prunedRecords).toHaveLength(1);
+
+      trail.dispose();
+    });
+
+    it('propagates a failure to persist the audit.pruned summary rather than reporting success after permanently deleting records (Codex review, PR #597, "Propagate failures to persist the prune summary")', async () => {
+      const base = textValueStore(new MemoryStorage());
+      await base.set(
+        'audit:v1:0000000000001000:000000000000:run-old',
+        JSON.stringify(makeRecord(0, { timestampMs: 1000, runId: 'run-old' })),
+      );
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        async set(key: string, value: string) {
+          // Only the pass's own out-of-band summary write targets the
+          // synthetic `bureau:audit-retention` owner — the watermark key
+          // and the seeded record's own key are unaffected, so this
+          // isolates the summary write specifically.
+          if (key.includes('bureau:audit-retention')) {
+            throw new Error('backend rejected the summary write');
+          }
+          await base.set(key, value);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
+
+      await expect(trail.prune(5000)).rejects.toThrow('backend rejected the summary write');
+
+      // The deletion itself still happened — this is exactly why the
+      // failure must propagate rather than be swallowed: the caller needs
+      // to know evidence is missing for a mutation that already occurred.
+      expect(await base.get('audit:v1:0000000000001000:000000000000:run-old')).toBeNull();
+
+      trail.dispose();
+    });
+  });
+
+  describe('AB-388 — eventTimestamp resolver (Codex review, PR #597, "Reuse event timestamps for dedicated lifecycle listeners")', () => {
+    it('stamps a schedule.paused out-of-band record with the supplied eventTimestamp resolver reading for that event instance, not an independent clock read', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const event = new SchedulePausedEvent('sched-1');
+      const eventTimestamp = () => 424242;
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0, eventTimestamp });
+
+      emit(event);
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ runId: 'schedule:sched-1' });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.timestampMs).toBe(424242);
+
+      trail.dispose();
+    });
+
+    it('stamps a session.deleted out-of-band record with the supplied eventTimestamp resolver reading', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const event = new SessionDeletedEvent('sess-1', 'incarnation-a');
+      const eventTimestamp = () => 999_000;
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0, eventTimestamp });
+
+      emit(event);
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ runId: 'session:sess-1' });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.timestampMs).toBe(999_000);
+
+      trail.dispose();
+    });
+
+    it('falls back to runtime.clock.now() when no eventTimestamp resolver is supplied, matching pre-AB-388 behavior', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau, emit } = createStubBureau();
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(424_242);
+
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 }, runtime);
+      emit(
+        new AgentScheduledEvent({
+          agentName: 'triage',
+          scheduleId: 'sched-2',
+          spec: { every: '5m' },
+        }),
+      );
+      await yieldToPortableEventLoop();
+
+      const records = await trail.query({ runId: 'schedule:sched-2' });
+      expect(records).toHaveLength(1);
+      expect(records[0]?.timestampMs).toBe(424_242);
+
+      trail.dispose();
+    });
+  });
+
+  describe('AB-388 — prune() protectRunId (Codex review, PR #597, "Protect earlier audit records for retained owners")', () => {
+    it('never prunes a record whose runId protectRunId approves, even though its timestampMs is strictly before cutoffMs (key-only fast path)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-protected' }));
+      await seedRecord(kv, makeRecord(1, { timestampMs: 1000, runId: 'run-unprotected' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 2 });
+
+      const result = await trail.prune(5000, {
+        protectRunId: (runId) => runId === 'run-protected',
+      });
+      expect(result?.prunedCount).toBe(1);
+
+      const protectedRecords = await trail.query({ runId: 'run-protected' });
+      expect(protectedRecords).toHaveLength(1);
+      const unprotectedRecords = await trail.query({ runId: 'run-unprotected' });
+      expect(unprotectedRecords).toHaveLength(0);
+
+      trail.dispose();
+    });
+
+    it('never prunes a protected runId on the slow decode-fallback path either (non-numeric sequence segment)', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const legacyKey = 'audit:v1:0000000000001000:not-a-number:run-protected';
+      await kv.set(
+        legacyKey,
+        JSON.stringify(makeRecord(0, { timestampMs: 1000, runId: 'run-protected' })),
+      );
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const result = await trail.prune(5000, {
+        protectRunId: (runId) => runId === 'run-protected',
+      });
+      expect(result?.prunedCount).toBe(0);
+      expect(await kv.get(legacyKey)).not.toBeNull();
+
+      trail.dispose();
+    });
+
+    it('safely no-ops when releasing a lease that was overwritten with malformed JSON while this pass was running, rather than throwing', async () => {
+      const base = textValueStore(new MemoryStorage());
+      await seedRecord(base, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+      let listCalls = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        async list(prefix: string) {
+          listCalls += 1;
+          // Corrupts the lease this SAME pass already acquired, right as
+          // the pass starts listing candidates — simulating a concurrent,
+          // unrelated write (or storage corruption) to that key mid-pass.
+          if (listCalls === 1) {
+            await base.set('audit-retention:v1:prune-lease', '{not json');
+          }
+          return base.list(prefix);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
+
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(1);
+
+      trail.dispose();
+    });
+  });
+
+  describe('AB-388 — record successful deletions when a later delete fails (Codex review, PR #597)', () => {
+    it('writes a partial audit.pruned summary naming only the deletions that committed, then rethrows the delete failure', async () => {
+      const base = textValueStore(new MemoryStorage());
+      await seedRecord(base, makeRecord(0, { timestampMs: 1000, runId: 'run-a' }));
+      await seedRecord(base, makeRecord(1, { timestampMs: 1000, runId: 'run-b' }));
+
+      let deleteCount = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...base,
+        async delete(key: string) {
+          deleteCount += 1;
+          if (deleteCount === 2) {
+            throw new Error('backend rejected the second delete');
+          }
+          await base.delete(key);
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 2 });
+
+      await expect(trail.prune(5000)).rejects.toThrow('backend rejected the second delete');
+
+      const prunedRecords = await trail.query({ type: 'audit.pruned' });
+      expect(prunedRecords).toHaveLength(1);
+      expect(prunedRecords[0]?.detail).toEqual({ count: 1, cutoffMs: 5000, partial: true });
+
+      trail.dispose();
+    });
+  });
+
+  describe('AB-388 — coordinate pruning across shared-store instances (Codex review, PR #597)', () => {
+    it('skips this pass entirely when another instance already holds a live prune lease on the shared kv', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+      // Simulates another Bureau process's instance currently holding the
+      // lease — acquired "now", well inside the TTL.
+      await kv.set(
+        'audit-retention:v1:prune-lease',
+        JSON.stringify({ acquiredAtMs: 1_700_000_000_000, token: 'other-instance-token' }),
+      );
+
+      const { bureau } = createStubBureau();
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(1_700_000_100_000); // just inside the lease's TTL
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 }, runtime);
+
+      const result = await trail.prune(5000);
+      expect(result).toBeUndefined();
+
+      // Nothing was touched — this pass never even started.
+      const records = await trail.query();
+      expect(records).toHaveLength(1);
+
+      trail.dispose();
+    });
+
+    it('takes over a stale lease (older than the TTL) left behind by a crashed instance, rather than blocking forever', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+      // A lease acquired long enough ago to be past PRUNE_LEASE_TTL_MS —
+      // simulating a holder that crashed before releasing it.
+      await kv.set(
+        'audit-retention:v1:prune-lease',
+        JSON.stringify({ acquiredAtMs: 1, token: 'crashed-instance-token' }),
+      );
+
+      const { bureau } = createStubBureau();
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(1_700_000_000_000); // well past PRUNE_LEASE_TTL_MS after acquiredAtMs: 1
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 }, runtime);
+
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(1);
+
+      trail.dispose();
+    });
+
+    it('treats a malformed (corrupt JSON) lease value as absent rather than blocking forever', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old' }));
+      await kv.set('audit-retention:v1:prune-lease', '{not json');
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const result = await trail.prune(5000);
+      expect(result?.prunedCount).toBe(1);
+
+      trail.dispose();
+    });
+
+    it('releases its own lease after a pass completes, so an immediately following pass is not blocked', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-old-1' }));
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 1 });
+
+      const first = await trail.prune(5000);
+      expect(first?.prunedCount).toBe(1);
+      expect(await kv.get('audit-retention:v1:prune-lease')).toBeNull();
+
+      await seedRecord(kv, makeRecord(1, { timestampMs: 1000, runId: 'run-old-2' }));
+      const second = await trail.prune(5000);
+      expect(second?.prunedCount).toBe(1);
+
+      trail.dispose();
     });
   });
 });

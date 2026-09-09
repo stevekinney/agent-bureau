@@ -805,6 +805,154 @@ describe('createDurableEventHistory', () => {
     });
   });
 
+  describe('retentionFloorTimestamp() (AB-388)', () => {
+    it('protects a retained record even while the retention floor is still 0 — a floor of 0 means nothing has ever been retired, not "prune everything" (Codex review, PR #597)', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      await history.record({ kind: 'run', id: 'run-1' }, 'run.started', {});
+      const t0 = runtime.clock.now();
+
+      // `retain()` was never called — the floor is still its initial 0 —
+      // yet the one recorded event is still currently retained and must
+      // still be protected: this must NOT read back as `undefined` (no
+      // clamp), which would let `auditRetention` delete audit records for
+      // this event while it remains fully pageable.
+      expect(await history.retentionFloorTimestamp()).toBe(t0);
+
+      await history.dispose();
+    });
+
+    it('returns undefined when the feed has never recorded anything at all', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      expect(await history.retentionFloorTimestamp()).toBeUndefined();
+
+      await history.dispose();
+    });
+
+    it('returns the minimum emittedAtMs across the retained window, not the first-by-sequence envelope, when retained events are not timestamp-monotonic', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+
+      // Simulates skewed fleet-writer clocks / a clock moving backward:
+      // sequence 0 carries a LATER emittedAtMs than sequence 1. Appended
+      // directly through the raw feed (rather than `history.record()`,
+      // which always draws from the monotonic runtime clock) so the two
+      // envelopes land out of timestamp order despite being in sequence
+      // order.
+      const rawFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await rawFeed.append({
+        kind: 'run.started',
+        workflowId: 'run:run-1',
+        emittedAtMs: 5000,
+        payload: { schemaVersion: 1, payload: {} },
+      });
+      await rawFeed.append({
+        kind: 'run.started',
+        workflowId: 'run:run-2',
+        emittedAtMs: 1000,
+        payload: { schemaVersion: 1, payload: {} },
+      });
+      rawFeed.dispose();
+
+      // The conservative minimum (1000) must win, not sequence 0's 5000 —
+      // otherwise a prune cutoff derived from 5000 could delete an audit
+      // record tied to sequence 1's still-retained, earlier-timestamped
+      // event.
+      expect(await history.retentionFloorTimestamp()).toBe(1000);
+
+      await history.dispose();
+    });
+
+    it('returns the emittedAtMs of the earliest still-retained event once the floor has advanced past an earlier one', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      await history.record(owner, 'run.started', {}); // sequence 0, at t0
+      const t0 = runtime.clock.now();
+      await runtime.advance(1000);
+      await history.record(owner, 'run.completed', {}); // sequence 1, at t0 + 1000
+      const t1 = runtime.clock.now();
+      expect(t1).toBe(t0 + 1000);
+
+      // Retire only sequence 0 — sequence 1 is now the earliest retained
+      // event, so its own emittedAtMs is the floor timestamp.
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 });
+      adminFeed.dispose();
+
+      expect(await history.retentionFloorTimestamp()).toBe(t1);
+
+      await history.dispose();
+    });
+
+    it('skips the internal fleet:gap marker retain() leaves at the head of replay, rather than reporting its emittedAtMs: 0 as the floor', async () => {
+      // A real bug this guards against: `retain()` leaves a synthetic
+      // `fleet:gap` envelope (`workflowId: undefined`, `emittedAtMs: 0`)
+      // at the head of `feed.replay({})` once anything has been retired —
+      // confirmed by direct inspection while diagnosing AB-388's own
+      // integration test. Without skipping it explicitly,
+      // `retentionFloorTimestamp()` would report `0` as the floor for
+      // EVERY retained history, which would collapse `create-bureau.ts`'s
+      // `pruneAuditTrail`'s `effectiveCutoff` to `0` and silently disable
+      // `auditRetention` pruning entirely, forever, the instant any
+      // retention had ever happened — never diagnosed, never thrown.
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      await history.record(owner, 'run.started', {}); // sequence 0
+      await runtime.advance(1000);
+      const t1 = runtime.clock.now();
+      await history.record(owner, 'run.completed', {}); // sequence 1, at t1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 1 });
+      adminFeed.dispose();
+
+      // Confirms the gap marker is genuinely present in this scenario —
+      // otherwise this test would not exercise the skip at all.
+      let sawGapMarker = false;
+      const inspectionFeed: FleetEventFeed = createFleetEventFeed(storage);
+      for await (const envelope of inspectionFeed.replay({})) {
+        if (envelope.kind === 'fleet:gap') sawGapMarker = true;
+      }
+      inspectionFeed.dispose();
+      expect(sawGapMarker).toBe(true);
+
+      expect(await history.retentionFloorTimestamp()).toBe(t1);
+      expect(await history.retentionFloorTimestamp()).not.toBe(0);
+
+      await history.dispose();
+    });
+
+    it('returns undefined once the floor has advanced past every event that ever existed — nothing currently retained needs protecting', async () => {
+      const storage = await createMemoryStorage();
+      const runtime = createManualRuntimeServices();
+      const history = createDurableEventHistory(storage, runtime);
+      const owner = { kind: 'run' as const, id: 'run-1' };
+
+      await history.record(owner, 'run.started', {}); // sequence 0
+      await history.record(owner, 'run.completed', {}); // sequence 1
+
+      const adminFeed: FleetEventFeed = createFleetEventFeed(storage);
+      await adminFeed.retain({ beforeSequence: 2 });
+      adminFeed.dispose();
+
+      expect(await history.retentionFloorTimestamp()).toBeUndefined();
+
+      await history.dispose();
+    });
+  });
+
   describe('refreshRetainedRunOwnerIds() (AB-363, Codex review PR #568)', () => {
     it("extends a snapshot with an owner whose event was appended after the snapshot's cursor", async () => {
       const storage = await createMemoryStorage();
@@ -1692,12 +1840,22 @@ function createRecordingHistory(
   recordImpl?: (owner: DurableEventOwner, kind: string, payload: unknown) => Promise<void>,
 ): {
   readonly history: DurableEventHistory;
-  readonly calls: { owner: DurableEventOwner; kind: string; payload: unknown }[];
+  readonly calls: {
+    owner: DurableEventOwner;
+    kind: string;
+    payload: unknown;
+    emittedAtMs: number | undefined;
+  }[];
 } {
-  const calls: { owner: DurableEventOwner; kind: string; payload: unknown }[] = [];
+  const calls: {
+    owner: DurableEventOwner;
+    kind: string;
+    payload: unknown;
+    emittedAtMs: number | undefined;
+  }[] = [];
   const history: DurableEventHistory = {
-    async record(owner, kind, payload) {
-      calls.push({ owner, kind, payload });
+    async record(owner, kind, payload, emittedAtMs) {
+      calls.push({ owner, kind, payload, emittedAtMs });
       if (recordImpl) await recordImpl(owner, kind, payload);
       return {
         kind,
@@ -1727,6 +1885,9 @@ function createRecordingHistory(
     wasRecorded() {
       throw new Error('unused by createDurableEventProducer');
     },
+    retentionFloorTimestamp() {
+      throw new Error('unused by createDurableEventProducer');
+    },
     dispose: async () => {},
   };
   return { history, calls };
@@ -1743,8 +1904,35 @@ describe('createDurableEventProducer()', () => {
     await runtime.deferred.drain();
 
     expect(calls).toEqual([
-      { owner: { kind: 'run', id: 'run-1' }, kind: 'run.completed', payload: { ok: true } },
+      {
+        owner: { kind: 'run', id: 'run-1' },
+        kind: 'run.completed',
+        payload: { ok: true },
+        emittedAtMs: 0,
+      },
     ]);
+
+    await producer.dispose();
+  });
+
+  it('records a run-durable action type with the originating action.timestamp as emittedAtMs, not a fresh clock read (AB-388, Codex review PR #597, "Clamp at an audit-safe timestamp boundary")', async () => {
+    const runtime = createManualRuntimeServices();
+    const { bureau, dispatchAction } = createFakeBureauEventSurface();
+    const { history, calls } = createRecordingHistory();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    // The action's own timestamp (1_000) is earlier than the clock reading
+    // at the moment this listener actually runs (5_000) — simulating the
+    // runtime clock advancing between the action being created and this
+    // producer recording it.
+    await runtime.advance(5_000);
+    dispatchAction(
+      createAction({ type: 'run.completed', runId: 'run-1', detail: {}, timestamp: 1_000 }),
+    );
+    await runtime.deferred.drain();
+
+    expect(calls[0]?.emittedAtMs).toBe(1_000);
+    expect(calls[0]?.emittedAtMs).not.toBe(runtime.clock.now());
 
     await producer.dispose();
   });
@@ -1989,6 +2177,7 @@ describe('createDurableEventProducer()', () => {
         owner: { kind: 'session', id: 'sess-A' },
         kind: 'session.created',
         payload: { sessionId: 'sess-A', agentName: 'x' },
+        emittedAtMs: 0,
       },
     ]);
 
@@ -2036,11 +2225,13 @@ describe('createDurableEventProducer()', () => {
         owner: { kind: 'run', id: 'run-1' },
         kind: 'schedule.completed',
         payload: { scheduleId: 'sched-1', runId: 'run-1' },
+        emittedAtMs: undefined,
       },
       {
         owner: { kind: 'run', id: 'run-2' },
         kind: 'schedule.failed',
         payload: { scheduleId: 'sched-2', runId: 'run-2' },
+        emittedAtMs: undefined,
       },
     ]);
 
@@ -2073,6 +2264,13 @@ describe('createDurableEventProducer()', () => {
           spec: { cron: '* * * * *' },
           sessionId: 'sess-1',
         },
+        // AB-388: no longer `undefined` — the shared `eventTimestamp`
+        // resolver (`event-timestamp.ts`) now stamps this dedicated
+        // listener's `sink()` call with a real clock reading, so it can
+        // never diverge from `createAuditTrail`'s own record for the same
+        // event. `createManualRuntimeServices()`'s manual clock is fixed,
+        // so this is deterministic.
+        emittedAtMs: 1577836800000,
       },
     ]);
 
@@ -2099,6 +2297,8 @@ describe('createDurableEventProducer()', () => {
       owner: { kind: 'schedule', id: 'sched-1' },
       kind: 'schedule.created',
       payload: { scheduleId: 'sched-1', agentName: 'triage', spec: { every: '5m' } },
+      // AB-388: see the sibling test's own comment above.
+      emittedAtMs: 1577836800000,
     });
     expect(calls[0]?.payload).not.toHaveProperty('sessionId');
 
@@ -2119,6 +2319,8 @@ describe('createDurableEventProducer()', () => {
         owner: { kind: 'schedule', id: 'sched-1' },
         kind: 'schedule.paused',
         payload: { scheduleId: 'sched-1' },
+        // AB-388: see the "records schedule.created" test's own comment.
+        emittedAtMs: 1577836800000,
       },
     ]);
 
@@ -2139,6 +2341,8 @@ describe('createDurableEventProducer()', () => {
         owner: { kind: 'schedule', id: 'sched-1' },
         kind: 'schedule.resumed',
         payload: { scheduleId: 'sched-1' },
+        // AB-388: see the "records schedule.created" test's own comment.
+        emittedAtMs: 1577836800000,
       },
     ]);
 
@@ -2159,6 +2363,8 @@ describe('createDurableEventProducer()', () => {
         owner: { kind: 'schedule', id: 'sched-1' },
         kind: 'schedule.cancelled',
         payload: { scheduleId: 'sched-1' },
+        // AB-388: see the "records schedule.created" test's own comment.
+        emittedAtMs: 1577836800000,
       },
     ]);
 
@@ -2228,6 +2434,7 @@ describe('createDurableEventProducer()', () => {
           principal: 'operator-a',
           kind: 'tool-approval',
         },
+        emittedAtMs: undefined,
       },
       {
         owner: { kind: 'run', id: 'run-1' },
@@ -2238,6 +2445,7 @@ describe('createDurableEventProducer()', () => {
           principal: 'operator-b',
           kind: 'tool-approval',
         },
+        emittedAtMs: undefined,
       },
       {
         owner: { kind: 'run', id: 'run-1' },
@@ -2248,6 +2456,7 @@ describe('createDurableEventProducer()', () => {
           principal: 'operator-c',
           kind: 'tool-approval',
         },
+        emittedAtMs: undefined,
       },
       {
         owner: { kind: 'run', id: 'run-1' },
@@ -2258,6 +2467,7 @@ describe('createDurableEventProducer()', () => {
           principal: 'system:expiry-sweep',
           kind: 'tool-approval',
         },
+        emittedAtMs: undefined,
       },
       {
         owner: { kind: 'run', id: 'run-1' },
@@ -2268,6 +2478,7 @@ describe('createDurableEventProducer()', () => {
           principal: 'system:run-deletion',
           kind: 'tool-approval',
         },
+        emittedAtMs: undefined,
       },
       {
         owner: { kind: 'run', id: 'run-1' },
@@ -2278,6 +2489,7 @@ describe('createDurableEventProducer()', () => {
           principal: 'system:run-abort',
           kind: 'human-wait',
         },
+        emittedAtMs: undefined,
       },
       {
         owner: { kind: 'run', id: 'run-1' },
@@ -2288,6 +2500,7 @@ describe('createDurableEventProducer()', () => {
           principal: 'system:supersession',
           kind: 'tool-approval',
         },
+        emittedAtMs: undefined,
       },
     ]);
 
@@ -2347,6 +2560,10 @@ describe('createDurableEventProducer()', () => {
         owner: { kind: 'session', id: 'sess-1' },
         kind: 'session.deleted',
         payload: { sessionId: 'sess-1', incarnation: 'incarnation-a' },
+        // AB-388: see the "records schedule.created" test's own comment —
+        // `sessionDeletedListener` now stamps via the shared `eventTimestamp`
+        // resolver too.
+        emittedAtMs: 1577836800000,
       },
     ]);
 
@@ -2844,5 +3061,88 @@ describe('createDurableEventProducer()', () => {
     await runtime.deferred.drain();
 
     expect(calls).toEqual([]);
+  });
+
+  describe('AB-388 — eventTimestamp resolver (Codex review, PR #597, "Reuse event timestamps for dedicated lifecycle listeners")', () => {
+    it('stamps schedule.paused via the supplied eventTimestamp resolver instead of runtime.clock.now()', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchSchedulePaused } = createFakeBureauEventSurface();
+      const { history, calls } = createRecordingHistory();
+      const eventTimestamp = () => 555_555;
+      const producer = createDurableEventProducer(bureau, history, runtime, undefined, {
+        eventTimestamp,
+      });
+
+      dispatchSchedulePaused(new SchedulePausedEvent('sched-1'));
+      await runtime.deferred.drain();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.emittedAtMs).toBe(555_555);
+
+      await producer.dispose();
+    });
+
+    it('stamps session.deleted via the supplied eventTimestamp resolver', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+      const { history, calls } = createRecordingHistory();
+      const eventTimestamp = () => 777_777;
+      const producer = createDurableEventProducer(bureau, history, runtime, undefined, {
+        eventTimestamp,
+      });
+
+      dispatchSessionDeleted(new SessionDeletedEvent('sess-1', 'incarnation-a'));
+      await runtime.deferred.drain();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.emittedAtMs).toBe(777_777);
+
+      await producer.dispose();
+    });
+  });
+
+  describe('AB-388 — waitForAllActiveWrites (Codex review, PR #597, "Wait for durable event writes before reading the floor")', () => {
+    it('resolves immediately when nothing is in flight', async () => {
+      const runtime = createManualRuntimeServices();
+      const { bureau } = createFakeBureauEventSurface();
+      const { history } = createRecordingHistory();
+      const producer = createDurableEventProducer(bureau, history, runtime);
+
+      await expect(producer.waitForAllActiveWrites()).resolves.toBeUndefined();
+
+      await producer.dispose();
+    });
+
+    it('awaits every write currently in flight across every owner, not just one', async () => {
+      const runtime = createManualRuntimeServices();
+      let releaseWrites!: () => void;
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrites = resolve;
+      });
+      const { bureau, dispatchSchedulePaused, dispatchScheduleResumed } =
+        createFakeBureauEventSurface();
+      const { history } = createRecordingHistory(async () => {
+        await writeGate;
+      });
+      const producer = createDurableEventProducer(bureau, history, runtime);
+
+      dispatchSchedulePaused(new SchedulePausedEvent('sched-1'));
+      dispatchScheduleResumed(new ScheduleResumedEvent('sched-2'));
+
+      let settled = false;
+      const waited = producer.waitForAllActiveWrites().then(() => {
+        settled = true;
+      });
+
+      // Still gated — neither owner's write has settled yet.
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      releaseWrites();
+      await waited;
+      expect(settled).toBe(true);
+
+      await producer.dispose();
+    });
   });
 });

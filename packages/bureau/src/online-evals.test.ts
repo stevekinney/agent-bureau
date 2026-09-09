@@ -82,6 +82,9 @@ function createStubAuditTrail(): { auditTrail: AuditTrail; records: Record<strin
     async query() {
       return [];
     },
+    async prune() {
+      return undefined;
+    },
     async dispose() {},
   };
   return { auditTrail, records };
@@ -747,6 +750,9 @@ describe('createOnlineEvalSampler', () => {
       },
       async query() {
         return [];
+      },
+      async prune() {
+        return undefined;
       },
       async dispose() {},
     };
