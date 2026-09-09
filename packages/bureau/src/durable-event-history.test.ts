@@ -1885,6 +1885,36 @@ describe('createDurableEventProducer()', () => {
     await producer.dispose();
   });
 
+  it('dispatching the literal SAME SessionDeletedEvent object twice, AFTER the first write has settled, still produces exactly one durable record (Codex P2 review findings, PR #580, "Remember/Deduplicate a SessionDeletedEvent after its write settles")', async () => {
+    // The in-flight-by-owner map alone only protects a duplicate dispatch
+    // arriving WHILE the first write is pending — its entry is gone once
+    // that write settles. A literal replay of the SAME event object after
+    // settlement must still be dropped; the sibling "session id legitimately
+    // reused" test below proves the opposite case — two DIFFERENT event
+    // objects for the same id — still produces two records, which is why
+    // this dedup is keyed on object identity, not owner.
+    const runtime = createManualRuntimeServices();
+    const storage = await createMemoryStorage();
+    const history = createDurableEventHistory(storage, runtime);
+    const { bureau, dispatchSessionDeleted } = createFakeBureauEventSurface();
+    const producer = createDurableEventProducer(bureau, history, runtime);
+
+    const event = new SessionDeletedEvent('sess-1');
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+    // The first write has fully settled; this is the literal SAME object,
+    // not a new incarnation's deletion.
+    dispatchSessionDeleted(event);
+    await runtime.deferred.drain();
+
+    const page = await history.page({ kind: 'session', id: 'sess-1' });
+    if ('outcome' in page) throw new Error('expected a page, got a gap');
+    expect(page.events.map((pageEvent) => pageEvent.kind)).toEqual(['session.deleted']);
+
+    await producer.dispose();
+    await history.dispose();
+  });
+
   it('a session id legitimately reused after deletion gets its own session.deleted record when it is deleted again (Codex P1 review finding, PR #580)', async () => {
     // Before this fix, idempotency was a read-then-write check against the
     // owner's OWN durable history: a session recreated with the same id

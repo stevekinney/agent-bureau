@@ -846,6 +846,26 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // accepted limitation.
   const pendingSessionDeletionWrites = new Map<string, Promise<void>>();
 
+  // AB-372 (Codex review findings, PR #580, "Remember handled deletion
+  // events after writes settle" / "Deduplicate a SessionDeletedEvent after
+  // its write settles"): the in-flight map above only de-dupes a duplicate
+  // dispatch that arrives WHILE the first write is still pending — once
+  // that write settles, its entry is removed, so the SAME event OBJECT
+  // dispatched again afterward (a literal replay, as opposed to a genuinely
+  // later, distinct deletion) would be treated as new and write a second
+  // record. That is a real gap against this issue's own acceptance
+  // criterion, phrased in terms of "the same `SessionDeletedEvent`," not
+  // "the same owner." A `WeakSet` keyed on event OBJECT IDENTITY closes it
+  // without reintroducing the read-then-write idempotency check already
+  // rejected above: two DIFFERENT `SessionDeletedEvent` instances for the
+  // same session id (the reused-id case) are never confused with each
+  // other, however this map's per-object membership persists indefinitely
+  // (no session id cardinality bound applies — a `WeakSet` holds no strong
+  // reference, so an event object is only ever retained by whatever else in
+  // the process is still holding it, typically nothing once dispatch
+  // finishes).
+  const recordedDeletionEvents = new WeakSet<SessionDeletedEvent>();
+
   const actionListener = (event: ActionEvent): void => {
     const { action } = event;
     if (signal?.aborted) return;
@@ -997,6 +1017,14 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // for the same owner (it checks only for PRESENCE via `.some(...)`,
   // never exactly one).
   //
+  // The in-flight map alone does NOT close a literal replay of the SAME
+  // event object once its write has already settled (Codex review findings,
+  // PR #580, "Remember/Deduplicate a SessionDeletedEvent after its write
+  // settles") — that entry is gone by then, so the replay would look
+  // identical to a genuinely later, distinct deletion. `recordedDeletionEvents`
+  // (the `WeakSet` above) closes that specific case by object identity,
+  // independent of and checked before the in-flight map.
+  //
   // Routed through `trackWrite` (not `sink()`, which always writes,
   // unconditionally) so `hasActiveWrite(owner)` reports `true` for this
   // owner for the write's full duration, exactly as it does for every
@@ -1029,9 +1057,15 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // session that is actually still live.
   const sessionDeletedListener = (event: SessionDeletedEvent): void => {
     if (signal?.aborted) return;
+    // A literal replay of the SAME event object — checked first, and
+    // independent of the in-flight-by-owner map below, since that map's
+    // entry is already gone by the time a settled write's event could be
+    // redispatched.
+    if (recordedDeletionEvents.has(event)) return;
     const owner: DurableEventOwner = { kind: 'session', id: event.sessionId };
     const ownerKey = encodeOwner(owner);
     if (pendingSessionDeletionWrites.has(ownerKey)) return;
+    recordedDeletionEvents.add(event);
     trackWrite(ownerKey, () => {
       const write = history.record(owner, 'session.deleted', { sessionId: event.sessionId }).then(
         () => undefined,
