@@ -39,6 +39,27 @@ export interface SessionCleanupOptions {
 }
 
 /**
+ * One pending outbox entry (AB-389) — appended atomically, in the SAME
+ * `conditionalBatch` as the session commit it describes, by `save()`,
+ * `update()`, or `delete()`. `ordinal` is the store-wide, monotonically
+ * increasing commit ordinal a caller drains in order — never a per-session
+ * `revision`, which only orders one lineage, not the whole store. A drain
+ * loop replays each entry as the matching `SessionCreatedEvent`/
+ * `SessionSavedEvent`/`SessionDeletedEvent` and calls
+ * `SessionStore.outbox.acknowledge(ordinal)` only once that replay's
+ * downstream durable write has settled — never before, and never merely
+ * because the event was dispatched.
+ */
+export interface SessionOutboxEntry {
+  readonly ordinal: number;
+  readonly kind: 'session.created' | 'session.saved' | 'session.deleted';
+  readonly sessionId: string;
+  /** Omitted for `kind: 'session.deleted'`, which has no live body left to describe. */
+  readonly agentName?: string;
+  readonly incarnation: string;
+}
+
+/**
  * A high-level store for agent sessions, built on top of ConditionalTextValueStore.
  *
  * Provides CRUD operations plus listing, filtering, metadata updates,
@@ -133,24 +154,50 @@ export interface SessionStore {
   cleanup(options: SessionCleanupOptions): Promise<number>;
 
   /**
-   * Session lifecycle events (AB-384): `SessionCreatedEvent` on the first
-   * successful commit of an id's body (a brand-new id, or one recreated
-   * after deletion), `SessionSavedEvent` on every later commit of the same
-   * live body. Dispatched by `save()`/`update()` after a commit succeeds —
-   * never by `delete()`, which has no body left to describe. Deliberately
-   * not special-cased for `update(id, updater, { refreshActivity: false })`
-   * (a background maintenance write, e.g. pruning stale metadata): that call
-   * is still a real, successful commit of the live body, so it still
-   * dispatches `SessionSavedEvent` — only `updatedAt` itself is withheld.
-   * A caller that needs these facts on a shared bus (Bureau forwards them
-   * onto its own bureau-level emitter, the same one `SessionDeletedEvent` is
-   * dispatched directly onto) attaches a listener here; a caller with no
-   * interest in them can ignore this target entirely — the store still
-   * mints and carries `AgentSession.incarnation` (see its own doc comment)
-   * independently of whether anything is listening. A `SessionStore`
+   * Session lifecycle drain trigger (AB-384, re-scoped by AB-389): `save()`,
+   * `update()`, and `delete()` no longer dispatch `SessionCreatedEvent`/
+   * `SessionSavedEvent`/`SessionDeletedEvent` directly from inside the
+   * commit — that fire-and-forget dispatch is exactly the KNOWN LIMITATION
+   * AB-389 closes (a crash between commit and dispatch used to lose the
+   * fact forever, and two store instances over one shared backend could
+   * record events out of true commit order). Every commit that used to
+   * dispatch one of those three events now instead appends a
+   * `SessionOutboxEntry` to `outbox` in the SAME atomic batch as the
+   * commit, and dispatches only `SessionOutboxAppendedEvent` here — a
+   * best-effort trigger a drain loop uses to wake up promptly, never the
+   * durable fact itself (see that event's own doc comment). A caller that
+   * needs the actual `session.created`/`session.saved`/`session.deleted`
+   * facts must drain `outbox` and replay them itself (Bureau's own drain
+   * loop does this, dispatching the replayed event onto its bureau-level
+   * emitter) — listening here alone is not enough. A `SessionStore`
    * implementation supplied by a caller (not `createSessionStore()`'s own)
    * must provide this member — it is required, not optional, on this
    * interface.
    */
   readonly events: TypedEventTarget<OperativeEventMap>;
+
+  /**
+   * The commit outbox (AB-389) — every `SessionOutboxEntry` a committing
+   * write has appended and no drain has yet acknowledged, exposed so a
+   * caller (Bureau's own drain loop) can replay each entry's durable fact
+   * exactly once, in ordinal order, coupled to the commit that produced it
+   * rather than to a separate, uncoupled fire-and-forget dispatch.
+   */
+  readonly outbox: {
+    /**
+     * Pending entries, oldest (lowest `ordinal`) first. Safe to call
+     * repeatedly and concurrently — it never mutates state, only reads.
+     */
+    pending(): Promise<readonly SessionOutboxEntry[]>;
+    /**
+     * Removes the entry at `ordinal`, once its replay's downstream durable
+     * write has settled. A caller must never call this before that write
+     * settles — doing so re-introduces exactly the lost-fact hazard this
+     * outbox exists to close. Resolves silently if the entry is already
+     * gone (a concurrent drain, in another process sharing this store,
+     * already acknowledged it) — acknowledging is idempotent, not a
+     * conflict.
+     */
+    acknowledge(ordinal: number): Promise<void>;
+  };
 }

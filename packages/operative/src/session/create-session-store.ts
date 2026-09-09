@@ -6,10 +6,11 @@ import { createDefaultRuntimeServices, TypedEventTarget } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
 import type { OperativeEventMap } from '../events';
-import { SessionCreatedEvent, SessionSavedEvent } from '../events';
+import { SessionOutboxAppendedEvent } from '../events';
 import type {
   SessionCleanupOptions,
   SessionListOptions,
+  SessionOutboxEntry,
   SessionStore,
   SessionSummary,
 } from './types';
@@ -23,6 +24,17 @@ const MAXIMUM_SAVE_ATTEMPTS = 5;
 const MAXIMUM_INDEX_CONTENTION_ATTEMPTS = MAXIMUM_SAVE_ATTEMPTS;
 const DEFAULT_SESSION_LIST_LIMIT = 100;
 const SUMMARY_FORMAT_VERSION = 1;
+// AB-389 — the commit outbox. Disjoint from `KEY_PREFIX`/`BODY_PREFIX`
+// (neither is a string prefix of the other) so `listDataKeys()`'s
+// `store.list(KEY_PREFIX)`/`store.list(BODY_PREFIX)` calls never see these
+// keys, and `idForDataKey()` never has to special-case them.
+const OUTBOX_PREFIX = 'agent-session-outbox:v1:entry:';
+const OUTBOX_ORDINAL_KEY = 'agent-session-outbox:v1:ordinal';
+// Zero-padded to a fixed width so `store.list(OUTBOX_PREFIX)` returns
+// entries in ordinal order lexicographically, without requiring a caller to
+// fetch every entry's value before it can sort them. 20 digits comfortably
+// exceeds `Number.MAX_SAFE_INTEGER`'s 16 digits.
+const OUTBOX_ORDINAL_WIDTH = 20;
 
 export class SessionConflictError extends Error {
   readonly code = 'SessionConflictError';
@@ -319,6 +331,50 @@ function serializeSummaryIndex(summaries: Map<string, SessionSummary>): string {
   });
 }
 
+/** AB-389 — parses the store-wide outbox ordinal counter, defaulting to 0 (no commit yet). */
+function parseOutboxOrdinal(raw: string | null): number {
+  if (raw === null) return 0;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function outboxEntryKey(ordinal: number): string {
+  return `${OUTBOX_PREFIX}${String(ordinal).padStart(OUTBOX_ORDINAL_WIDTH, '0')}`;
+}
+
+/**
+ * Parses a stored outbox entry, returning undefined for missing or
+ * malformed data — mirrors `parseSession`'s own fail-closed discipline so a
+ * corrupt entry is skipped by a drain rather than thrown from it.
+ */
+function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (
+      !Number.isSafeInteger(record['ordinal']) ||
+      typeof record['sessionId'] !== 'string' ||
+      typeof record['incarnation'] !== 'string' ||
+      (record['kind'] !== 'session.created' &&
+        record['kind'] !== 'session.saved' &&
+        record['kind'] !== 'session.deleted')
+    ) {
+      return undefined;
+    }
+    return {
+      ordinal: record['ordinal'] as number,
+      kind: record['kind'],
+      sessionId: record['sessionId'],
+      incarnation: record['incarnation'],
+      ...(typeof record['agentName'] === 'string' ? { agentName: record['agentName'] } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function dataKeysForStore(keys: string[]): string[] {
   return keys.filter((key) => key !== SUMMARY_INDEX_KEY);
 }
@@ -389,44 +445,15 @@ export function createSessionStore(
     throw new TypeError('createSessionStore requires a ConditionalTextValueStore.');
   }
   const runtime = options.runtime ?? createDefaultRuntimeServices();
-  // AB-384 — this store's own lifecycle-event target. A caller with no
-  // interest in `session.created`/`session.saved` never has to touch this;
-  // Bureau (`runtime-composition.ts`) forwards it onto its own bureau-level
-  // emitter, the same one `SessionDeletedEvent` is dispatched directly onto.
+  // AB-384, re-scoped by AB-389 — this store's own drain-trigger target. A
+  // caller with no interest in draining the outbox never has to touch this;
+  // Bureau (`runtime-composition.ts`) forwards `SessionOutboxAppendedEvent`
+  // onto its own bureau-level emitter's drain trigger. See
+  // `SessionStore.events`'s and `SessionOutboxAppendedEvent`'s own doc
+  // comments for why this is a best-effort wake-up, never the durable fact
+  // itself, and `SessionStore.outbox` for the durable surface a drain
+  // actually reads.
   const events = new TypedEventTarget<OperativeEventMap>();
-
-  // KNOWN LIMITATION, not closed here (Codex P1 review finding, PR #592,
-  // "Preserve commit order when dispatching lifecycle events"): dispatch
-  // here is fire-and-forget, in-process, immediately after THIS attempt's
-  // own commit resolves — it is not transactionally coupled to that commit.
-  // Two consequences, both SHARED by every other bureau-level-emitter
-  // dispatch this codebase already ships this way (`SessionDeletedEvent` at
-  // `create-bureau.ts`'s `deleteSession`, every `schedule.*`/`review.*`
-  // dispatch — none of them couple dispatch to their own write either):
-  // (1) a crash between a commit succeeding and this dispatch running loses
-  // the `session.created`/`session.saved` fact forever, with no
-  // recovery-time producer to reconstruct it; (2) when two `SessionStore`
-  // instances (e.g. two Bureau processes) share one persistent backend,
-  // the DURABLE record order downstream reflects each instance's own
-  // dispatch-then-forward-then-record latency, not true commit order — a
-  // slower instance A's `session.created` for revision 1 can durably record
-  // AFTER a faster instance B's `session.saved` for revision 2, even though
-  // B's write necessarily happened after A's. Within ONE store instance
-  // this is not observable: `commit()`'s CAS enforces strict revision
-  // order, and each `save()`/`update()` call dispatches in its own program
-  // order immediately after its own commit resolves. Properly closing the
-  // cross-instance case needs the durable record itself to carry an
-  // authoritative sequence or revision the reading side can reorder or
-  // recover by — a schema change to `DurableEventEnvelope`, the same kind of
-  // change AB-313's own "schema-version field" language already assigns to
-  // whoever ships the next audit-record schema revision, not this issue.
-  function dispatchPersistEvent(wasCreate: boolean, committed: AgentSession): void {
-    events.dispatch(
-      wasCreate
-        ? new SessionCreatedEvent(committed.id, committed.agentName, committed.incarnation)
-        : new SessionSavedEvent(committed.id, committed.agentName, committed.incarnation),
-    );
-  }
 
   let mutationTail = Promise.resolve();
   function runMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -519,6 +546,7 @@ export function createSessionStore(
     refreshUpdatedAt: boolean,
     expectedSummaryValue: string | null,
     currentSummaries: Map<string, SessionSummary>,
+    expectedOrdinalValue: string | null,
   ): Promise<AgentSession | undefined> {
     // AB-384 — resolved from `current` (the live body this attempt read
     // BEFORE merging in the caller's candidate), never from
@@ -559,10 +587,28 @@ export function createSessionStore(
       revision: (current?.revision ?? 0) + 1,
       updatedAt: refreshUpdatedAt ? runtime.clock.nowISO() : session.updatedAt,
     };
+    // AB-389 — the outbox entry this commit produces, appended in the SAME
+    // `conditionalBatch` call as the body and summary-index writes below, so
+    // a crash after this call resolves can never observe the body committed
+    // without its matching outbox entry, or vice versa. `wasCreate` mirrors
+    // the ORIGINAL `dispatchPersistEvent` distinction exactly (`current ===
+    // undefined`): the first commit of a brand-new or recreated-after-
+    // delete id is `'session.created'`, every later commit of the same live
+    // body is `'session.saved'`.
+    const wasCreate = current === undefined;
+    const nextOrdinal = parseOutboxOrdinal(expectedOrdinalValue) + 1;
+    const outboxEntry: SessionOutboxEntry = {
+      ordinal: nextOrdinal,
+      kind: wasCreate ? 'session.created' : 'session.saved',
+      sessionId: next.id,
+      agentName: next.agentName,
+      incarnation,
+    };
     const committed = await store.conditionalBatch(
       [
         { key: bodyKey, expectedValue },
         { key: SUMMARY_INDEX_KEY, expectedValue: expectedSummaryValue },
+        { key: OUTBOX_ORDINAL_KEY, expectedValue: expectedOrdinalValue },
       ],
       [
         { type: 'set', key: bodyKey, value: JSON.stringify(next) },
@@ -571,9 +617,16 @@ export function createSessionStore(
           key: SUMMARY_INDEX_KEY,
           value: serializeSummaryIndex(new Map(currentSummaries).set(next.id, toSummary(next))),
         },
+        { type: 'set', key: OUTBOX_ORDINAL_KEY, value: String(nextOrdinal) },
+        { type: 'set', key: outboxEntryKey(nextOrdinal), value: JSON.stringify(outboxEntry) },
       ],
     );
-    return committed ? next : undefined;
+    if (!committed) return undefined;
+    // Best-effort drain trigger (see `SessionOutboxAppendedEvent`'s own doc
+    // comment) — dispatched AFTER the batch above has already durably
+    // committed the outbox entry it names, never before.
+    events.dispatch(new SessionOutboxAppendedEvent(nextOrdinal));
+    return next;
   }
 
   // AB-384 (Codex/Copilot review finding on PR #592, "SessionDeletedEvent
@@ -608,10 +661,11 @@ export function createSessionStore(
       for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
         const currentKey = keyFor(id);
         const legacyKey = legacyKeyFor(id);
-        const [currentRaw, legacyRaw, summaryRaw] = await Promise.all([
+        const [currentRaw, legacyRaw, summaryRaw, ordinalRaw] = await Promise.all([
           store.get(currentKey),
           legacyKey === SUMMARY_INDEX_KEY ? Promise.resolve(null) : store.get(legacyKey),
           store.get(SUMMARY_INDEX_KEY),
+          store.get(OUTBOX_ORDINAL_KEY),
         ]);
         const nextSummaries = await summariesForMutation(summaryRaw);
         nextSummaries.delete(id);
@@ -625,6 +679,26 @@ export function createSessionStore(
                 },
               ]
             : [{ type: 'delete' as const, key: SUMMARY_INDEX_KEY }];
+        // AB-389 — `willRemove`/`removedIncarnation` are derived from the
+        // SAME `currentRaw`/`legacyRaw` values the CAS below verifies are
+        // still current, exactly like the existing `removed`/`incarnation`
+        // derivation further down (computed early here only so the outbox
+        // entry, gated on the SAME condition, can be built before the batch
+        // call). No outbox entry — and no ordinal consumed — for a delete
+        // that removes nothing (id never existed, or already gone): nothing
+        // committed, so there is no fact for a drain to replay.
+        const willRemove = currentRaw !== null || legacyRaw !== null;
+        const removedIncarnation = willRemove
+          ? ((currentRaw !== null ? parseSession(currentRaw)?.incarnation : undefined) ??
+            (legacyRaw !== null ? parseSession(legacyRaw)?.incarnation : undefined))
+          : undefined;
+        const nextOrdinal = parseOutboxOrdinal(ordinalRaw) + 1;
+        const outboxEntry: SessionOutboxEntry = {
+          ordinal: nextOrdinal,
+          kind: 'session.deleted',
+          sessionId: id,
+          incarnation: removedIncarnation ?? '',
+        };
         const deleted = await store.conditionalBatch(
           [
             { key: currentKey, expectedValue: currentRaw },
@@ -632,6 +706,7 @@ export function createSessionStore(
               ? []
               : [{ key: legacyKey, expectedValue: legacyRaw }]),
             { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
+            ...(willRemove ? [{ key: OUTBOX_ORDINAL_KEY, expectedValue: ordinalRaw }] : []),
           ],
           [
             { type: 'delete', key: currentKey },
@@ -639,6 +714,16 @@ export function createSessionStore(
               ? []
               : [{ type: 'delete' as const, key: legacyKey }]),
             ...operations,
+            ...(willRemove
+              ? [
+                  { type: 'set' as const, key: OUTBOX_ORDINAL_KEY, value: String(nextOrdinal) },
+                  {
+                    type: 'set' as const,
+                    key: outboxEntryKey(nextOrdinal),
+                    value: JSON.stringify(outboxEntry),
+                  },
+                ]
+              : []),
           ],
         );
         // The `removed` boolean is derived from the exact `currentRaw`/
@@ -647,12 +732,10 @@ export function createSessionStore(
         // existence check followed by a delete (AB-371). `incarnation` is
         // parsed from those SAME two values, so it is exactly as atomic.
         if (deleted) {
-          const removed = currentRaw !== null || legacyRaw !== null;
+          const removed = willRemove;
+          if (removed) events.dispatch(new SessionOutboxAppendedEvent(nextOrdinal));
           if (!options?.returnIncarnation) return removed;
-          const incarnation =
-            (currentRaw !== null ? parseSession(currentRaw)?.incarnation : undefined) ??
-            (legacyRaw !== null ? parseSession(legacyRaw)?.incarnation : undefined);
-          return { removed, incarnation };
+          return { removed, incarnation: removedIncarnation };
         }
         const bodyValues = JSON.stringify([currentRaw, legacyRaw]);
         if (previousBodyValues !== undefined && previousBodyValues !== bodyValues) {
@@ -669,55 +752,47 @@ export function createSessionStore(
 
   const sessionStore: SessionStore = {
     async save(session: AgentSession): Promise<void> {
-      // AB-384 — the created-vs-saved dispatch happens AFTER `runMutation`
-      // resolves, not from inside its queued operation: a listener that
-      // calls back into this same store (e.g. to read the session it was
-      // just told about) would otherwise enqueue behind `mutationTail`
-      // while still inside the very operation that promise is chained off
-      // of — harmless in practice (the nested call just waits its turn),
-      // but dispatching outside the queue removes any reentrancy question
-      // entirely.
-      const outcome = await runMutation(
-        async (): Promise<{
-          wasCreate: boolean;
-          committed: AgentSession;
-        }> => {
-          await readBody('summary-index');
-          let saveConflicts = 0;
-          let previousBodyRaw: string | null | undefined;
-          for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-            const [body, summaryRaw] = await Promise.all([
-              readBody(session.id),
-              store.get(SUMMARY_INDEX_KEY),
-            ]);
-            const { raw, key: bodyKey } = body;
-            const current = parseSession(raw);
-            assertMatchingIncarnation(session.id, session.incarnation, current);
-            const candidate = current ? mergeSessions(current, session) : session;
-            const committed = await commit(
-              candidate,
-              bodyKey,
-              raw,
-              current,
-              true,
-              summaryRaw,
-              await summariesForMutation(summaryRaw),
-            );
-            if (committed) {
-              Object.assign(session, committed);
-              return { wasCreate: current === undefined, committed };
-            }
-            if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
-            previousBodyRaw = raw;
-            if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
-              throw new SessionConflictError(session.id);
-            }
+      // AB-389 — `commit()` now appends this write's outbox entry and
+      // dispatches the drain trigger itself, inside the SAME
+      // `conditionalBatch` as the body/summary write, so there is no
+      // separate dispatch step here for `runMutation` to enqueue behind.
+      await runMutation(async (): Promise<void> => {
+        await readBody('summary-index');
+        let saveConflicts = 0;
+        let previousBodyRaw: string | null | undefined;
+        for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
+          const [body, summaryRaw, ordinalRaw] = await Promise.all([
+            readBody(session.id),
+            store.get(SUMMARY_INDEX_KEY),
+            store.get(OUTBOX_ORDINAL_KEY),
+          ]);
+          const { raw, key: bodyKey } = body;
+          const current = parseSession(raw);
+          assertMatchingIncarnation(session.id, session.incarnation, current);
+          const candidate = current ? mergeSessions(current, session) : session;
+          const committed = await commit(
+            candidate,
+            bodyKey,
+            raw,
+            current,
+            true,
+            summaryRaw,
+            await summariesForMutation(summaryRaw),
+            ordinalRaw,
+          );
+          if (committed) {
+            Object.assign(session, committed);
+            return;
           }
+          if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
+          previousBodyRaw = raw;
+          if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
+            throw new SessionConflictError(session.id);
+          }
+        }
 
-          throw new SessionConflictError(session.id);
-        },
-      );
-      dispatchPersistEvent(outcome.wasCreate, outcome.committed);
+        throw new SessionConflictError(session.id);
+      });
     },
 
     async update(
@@ -747,6 +822,21 @@ export function createSessionStore(
         assertMatchingIncarnation(id, candidate.incarnation, current);
 
         const next = current ? mergeSessions(current, candidate) : candidate;
+        // AB-389 — the ordinal counter is read HERE, after `updater` has
+        // already resolved, not alongside `raw`/`summaryRaw` above:
+        // `updater` is caller code that may itself commit to this SAME
+        // store (this method's own reentrancy doc comment above) — a
+        // reentrant `save()`/`update()`/`delete()` awaited entirely inside
+        // `updater` has already bumped the counter by the time `updater`
+        // returns. Reading it any earlier would hand `commit()` an
+        // `expectedOrdinalValue` already stale before this attempt's own
+        // CAS even runs, failing every attempt (the reentrant call keeps
+        // moving the counter on every retry too) instead of the ordinary
+        // bounded conflict-retry this loop is built for.
+        const ordinalRaw = await store.get(OUTBOX_ORDINAL_KEY);
+        // `commit()` appends this write's outbox entry and dispatches the
+        // drain trigger itself; see `save()`'s own comment above for why
+        // `update()` no longer has a separate dispatch step.
         const committed = await commit(
           next,
           bodyKey,
@@ -755,13 +845,9 @@ export function createSessionStore(
           refreshActivity,
           summaryRaw,
           await summariesForMutation(summaryRaw),
+          ordinalRaw,
         );
         if (committed) {
-          // AB-384 — dispatched here, after this attempt's commit succeeds:
-          // `update()` is deliberately NOT queued through `runMutation` (see
-          // this method's own doc comment on `SessionStore`), so there is no
-          // queue to dispatch outside of.
-          dispatchPersistEvent(current === undefined, committed);
           return committed;
         }
         if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
@@ -1000,6 +1086,37 @@ export function createSessionStore(
     },
 
     events,
+
+    outbox: {
+      async pending(): Promise<readonly SessionOutboxEntry[]> {
+        const keys = await store.list(OUTBOX_PREFIX);
+        const entries: SessionOutboxEntry[] = [];
+        for (const key of keys) {
+          const entry = parseOutboxEntry(await store.get(key));
+          if (entry) entries.push(entry);
+        }
+        // `store.list(OUTBOX_PREFIX)` already returns keys in ordinal order
+        // (they are zero-padded to a fixed width — see `outboxEntryKey`),
+        // but a caller must not depend on the underlying store's `list()`
+        // returning lexicographic order — sort explicitly by the ordinal
+        // parsed from each entry's own value.
+        entries.sort((a, b) => a.ordinal - b.ordinal);
+        return entries;
+      },
+      async acknowledge(ordinal: number): Promise<void> {
+        const key = outboxEntryKey(ordinal);
+        const raw = await store.get(key);
+        // Already gone — a concurrent drain (this process or a peer sharing
+        // this store) already acknowledged it. Acknowledging is idempotent,
+        // not a conflict: nothing left to remove is success, not an error.
+        if (raw === null) return;
+        // A CAS, not a bare delete: if the value has changed since the read
+        // above (should not happen — outbox entries are write-once — but a
+        // storage anomaly must not delete a DIFFERENT entry than the one
+        // just read), the delete is simply skipped rather than forced.
+        await store.conditionalBatch([{ key, expectedValue: raw }], [{ type: 'delete', key }]);
+      },
+    },
   };
 
   return sessionStore;

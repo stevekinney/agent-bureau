@@ -558,7 +558,8 @@ const result = await activeRun.result;
 | `list(options?)`                          | Paginated list of `SessionSummary` objects.                                                                                                                                                                                                                                                                                                                                    |
 | `updateMetadata(id, metadata)`            | Merge metadata without rewriting the conversation.                                                                                                                                                                                                                                                                                                                             |
 | `cleanup(options)`                        | Delete sessions older than `options.olderThan` ms.                                                                                                                                                                                                                                                                                                                             |
-| `events`                                  | `TypedEventTarget<OperativeEventMap>` (AB-384) the store dispatches its own lifecycle events onto — see below.                                                                                                                                                                                                                                                                 |
+| `events`                                  | `TypedEventTarget<OperativeEventMap>` (AB-384, re-scoped by AB-389) the store dispatches its commit-outbox drain trigger onto — see below.                                                                                                                                                                                                                                     |
+| `outbox`                                  | The commit outbox (AB-389): `outbox.pending()` lists undrained `SessionOutboxEntry` records in ordinal order; `outbox.acknowledge(ordinal)` removes one once its replay has durably settled — see below.                                                                                                                                                                       |
 
 Sessions include a persisted `revision` number. New `AgentSession` objects start
 at revision `0`; successful `SessionStore` writes increment the stored revision.
@@ -575,17 +576,34 @@ of that same live body. A freshly constructed, not-yet-persisted session
 (`createAgentSession()`) carries `''`, the same value a pre-AB-384 record
 loaded from storage defaults to.
 
-Each successful `save()`/`update()` commit dispatches on `SessionStore.events`:
-`SessionCreatedEvent` the first time an id's body is committed, or
-`SessionSavedEvent` on every later commit of the same live body — both carry
-`sessionId`, `agentName`, and the committed `incarnation`. `delete()` carries
-no body to describe and dispatches neither; `@lostgradient/operative`'s own
-`SessionDeletedEvent` (dispatched by consumers, not by the store itself — see
-Bureau's `deleteSession`) carries the deleted record's own `incarnation` at
-the moment of deletion instead. `delete(id, { returnIncarnation: true })`
-reports `{ removed, incarnation }` — the incarnation of the exact body
-deleted, atomically, with no separate `load()` needed (and no race a
-separate `load()` would have).
+**Commit outbox (AB-389):** every successful `save()`, `update()`, or
+`delete()` commit appends a `SessionOutboxEntry` — `{ ordinal, kind, sessionId,
+agentName?, incarnation }` — to the SAME atomic `conditionalBatch` as the body
+and summary-index write (or the removal). `kind` is `'session.created'` the
+first time an id's body is committed, `'session.saved'` on every later commit
+of the same live body, or `'session.deleted'` for a `delete()` that actually
+removed a live record (a delete that removes nothing appends no entry and
+consumes no ordinal). `ordinal` is the store's own commit ordinal: a single
+monotonically increasing counter shared across every session id in this
+store, never a per-session `revision` — a caller draining entries in ordinal
+order sees every commit across the whole store in true commit order, even
+across two `SessionStore` instances sharing one persistent backend.
+
+The store does **not** dispatch `SessionCreatedEvent`/`SessionSavedEvent`/
+`SessionDeletedEvent` directly anymore — that direct, fire-and-forget dispatch
+was a known limitation (AB-384, PR #592): a crash between a commit succeeding
+and its listener's write running lost the fact forever, with no recovery-time
+producer to reconstruct it, and two `SessionStore` instances over one shared
+backend could record events out of true commit order. `save()`/`update()`/
+`delete()` now dispatch only `SessionOutboxAppendedEvent` on `SessionStore.events`
+— a best-effort drain trigger naming the appended entry's ordinal, never the
+event itself. A caller that needs the actual `session.created`/`session.saved`/
+`session.deleted` facts must drain `outbox.pending()` and replay each entry as
+the matching event, acknowledging it (`outbox.acknowledge(ordinal)`) only once
+that replay's own durable write has settled — Bureau's own drain loop
+(`drainSessionOutbox` in `create-bureau.ts`) does exactly this, run on the
+runtime clock inside the durable maintenance pass, right after each commit,
+and during boot recovery before serving reads.
 
 `save()`/`update()` reject with `StaleSessionIncarnationError` when a
 candidate names a specific, nonempty `incarnation` that no longer matches
@@ -596,8 +614,12 @@ this way.
 
 ```ts
 const sessions = createSessionStore(kvStore);
-sessions.events.addEventListener('session.created', (event) => {
-  console.log(`session ${event.sessionId} created, incarnation ${event.incarnation}`);
+sessions.events.addEventListener('session.outbox-appended', async () => {
+  for (const entry of await sessions.outbox.pending()) {
+    console.log(`outbox entry ${entry.ordinal}: ${entry.kind} for ${entry.sessionId}`);
+    // Replay `entry` as the real event, await its own durable write, THEN:
+    await sessions.outbox.acknowledge(entry.ordinal);
+  }
 });
 ```
 

@@ -462,17 +462,28 @@ export class BudgetExceededEvent extends Event {
  * `AgentSession.incarnation` this write committed: minted by the store the
  * first time an id's body is created, then preserved unchanged across every
  * later `save()`/`update()` of that same live record (AB-384).
+ *
+ * `ordinal` (AB-389) is the store-wide, monotonically increasing commit
+ * ordinal assigned to the outbox entry this event replays — the SAME value
+ * carried on the `SessionOutboxEntry` the store appended, in the same
+ * atomic batch as the commit itself, before this event was ever dispatched.
+ * A caller does not construct this event directly from a live commit
+ * anymore (see `SessionStore.outbox`'s own doc comment) — it is built by
+ * whichever drain loop replays a persisted outbox entry, so `ordinal` is
+ * always the entry's own ordinal, never a fresh counter read.
  */
 export class SessionSavedEvent extends Event {
   static readonly type = 'session.saved' as const;
   readonly sessionId: string;
   readonly agentName: string;
   readonly incarnation: string;
-  constructor(sessionId: string, agentName: string, incarnation: string) {
+  readonly ordinal: number;
+  constructor(sessionId: string, agentName: string, incarnation: string, ordinal: number) {
     super(SessionSavedEvent.type);
     this.sessionId = sessionId;
     this.agentName = agentName;
     this.incarnation = incarnation;
+    this.ordinal = ordinal;
   }
 }
 
@@ -500,11 +511,14 @@ export class SessionCreatedEvent extends Event {
   readonly sessionId: string;
   readonly agentName: string;
   readonly incarnation: string;
-  constructor(sessionId: string, agentName: string, incarnation: string) {
+  /** See `SessionSavedEvent.ordinal`'s doc comment (AB-389). */
+  readonly ordinal: number;
+  constructor(sessionId: string, agentName: string, incarnation: string, ordinal: number) {
     super(SessionCreatedEvent.type);
     this.sessionId = sessionId;
     this.agentName = agentName;
     this.incarnation = incarnation;
+    this.ordinal = ordinal;
   }
 }
 
@@ -518,15 +532,44 @@ export class SessionCreatedEvent extends Event {
  * `sessionId` alone, so a session id recreated and deleted again while its
  * prior incarnation's own durable write is still pending is no longer
  * conflated with that prior deletion.
+ *
+ * `ordinal` (AB-389): see `SessionSavedEvent.ordinal`'s doc comment — the
+ * same store-wide commit ordinal, carried on the outbox entry `delete()`
+ * appended atomically with its own removal.
  */
 export class SessionDeletedEvent extends Event {
   static readonly type = 'session.deleted' as const;
   readonly sessionId: string;
   readonly incarnation: string;
-  constructor(sessionId: string, incarnation: string) {
+  readonly ordinal: number;
+  constructor(sessionId: string, incarnation: string, ordinal: number) {
     super(SessionDeletedEvent.type);
     this.sessionId = sessionId;
+    this.ordinal = ordinal;
     this.incarnation = incarnation;
+  }
+}
+
+/**
+ * Dispatched by `SessionStore` (`create-session-store.ts`, AB-389)
+ * immediately after ANY commit — `save()`, `update()`, or `delete()` — that
+ * appended a `SessionOutboxEntry` to its own atomic batch. This is a
+ * best-effort DRAIN TRIGGER, never the durable fact itself: `ordinal` names
+ * the entry just appended so a listener can short-circuit an empty poll,
+ * but a listener that misses this dispatch entirely (no listener attached
+ * yet, or the process crashes between this dispatch and a drain observing
+ * it) loses nothing — the outbox entry is already durably committed in the
+ * same batch as the session write it describes, and the next drain (the
+ * durable maintenance pass, or boot recovery) finds it regardless. Bureau
+ * listens here to drive its outbox drain loop; a caller with no interest in
+ * driving that loop can ignore this event entirely.
+ */
+export class SessionOutboxAppendedEvent extends Event {
+  static readonly type = 'session.outbox-appended' as const;
+  readonly ordinal: number;
+  constructor(ordinal: number) {
+    super(SessionOutboxAppendedEvent.type);
+    this.ordinal = ordinal;
   }
 }
 
@@ -1560,6 +1603,7 @@ export interface OperativeEventClassMap {
   [SessionLoadedEvent.type]: SessionLoadedEvent;
   [SessionCreatedEvent.type]: SessionCreatedEvent;
   [SessionDeletedEvent.type]: SessionDeletedEvent;
+  [SessionOutboxAppendedEvent.type]: SessionOutboxAppendedEvent;
   [ContextBudgetWarningEvent.type]: ContextBudgetWarningEvent;
   // Curated tool.* bubbled events (C3)
   [ToolStartedBubbleEvent.type]: ToolStartedBubbleEvent;
@@ -1651,6 +1695,7 @@ export const OPERATIVE_EVENT_TYPES = [
   SessionLoadedEvent.type,
   SessionCreatedEvent.type,
   SessionDeletedEvent.type,
+  SessionOutboxAppendedEvent.type,
   ContextBudgetWarningEvent.type,
   ToolStartedBubbleEvent.type,
   ToolProgressBubbleEvent.type,

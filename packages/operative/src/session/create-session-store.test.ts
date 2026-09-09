@@ -4,7 +4,7 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
-import { SessionCreatedEvent, SessionSavedEvent } from '../events';
+import { SessionOutboxAppendedEvent } from '../events';
 import {
   createSessionStore,
   SessionConflictError,
@@ -1539,11 +1539,6 @@ describe('AgentSession.incarnation (AB-384)', () => {
     const { incarnation: _incarnation, ...legacyPayload } = legacySession;
     await rawStore.set('agent-session:legacy-incarnation', JSON.stringify(legacyPayload));
 
-    const created: SessionCreatedEvent[] = [];
-    const saved: SessionSavedEvent[] = [];
-    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
-    store.events.addEventListener(SessionSavedEvent.type, (event) => saved.push(event));
-
     const loaded = await store.load('legacy-incarnation');
     expect(loaded!.incarnation).toBe('');
 
@@ -1551,9 +1546,14 @@ describe('AgentSession.incarnation (AB-384)', () => {
 
     const persisted = await store.load('legacy-incarnation');
     expect(persisted!.incarnation).not.toBe('');
-    expect(created).toHaveLength(0);
-    expect(saved).toHaveLength(1);
-    expect(saved[0]?.incarnation).toBe(persisted!.incarnation);
+    // AB-389 — the outbox entry, not a directly-dispatched event, is the
+    // durable fact now: this write commits against an EXISTING live body
+    // (the legacy record `load()` just upgraded), so it is a
+    // `'session.saved'` entry, never `'session.created'`.
+    const pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.kind).toBe('session.saved');
+    expect(pending[0]?.incarnation).toBe(persisted!.incarnation);
   });
 
   it('rejects save() of a candidate naming a specific prior incarnation that no longer matches the live body (Codex P1 review finding, PR #592)', async () => {
@@ -1605,63 +1605,116 @@ describe('AgentSession.incarnation (AB-384)', () => {
   });
 });
 
-describe('SessionStore lifecycle events (AB-384)', () => {
-  it('dispatches SessionCreatedEvent on the first save() and SessionSavedEvent on the next one, both carrying the same incarnation', async () => {
+describe('SessionStore commit outbox (AB-389)', () => {
+  it('appends a session.created outbox entry on the first save() and a session.saved entry on the next one, both carrying the same incarnation', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({ id: 'events-save', agentName: 'events-agent' });
 
-    const created: SessionCreatedEvent[] = [];
-    const saved: SessionSavedEvent[] = [];
-    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
-    store.events.addEventListener(SessionSavedEvent.type, (event) => saved.push(event));
+    const triggers: SessionOutboxAppendedEvent[] = [];
+    store.events.addEventListener(SessionOutboxAppendedEvent.type, (event) => triggers.push(event));
 
     await store.save(session);
-    expect(created).toHaveLength(1);
-    expect(created[0]?.sessionId).toBe('events-save');
-    expect(created[0]?.agentName).toBe('events-agent');
-    expect(created[0]?.incarnation).not.toBe('');
-    expect(saved).toHaveLength(0);
+    let pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.kind).toBe('session.created');
+    expect(pending[0]?.sessionId).toBe('events-save');
+    expect(pending[0]?.agentName).toBe('events-agent');
+    expect(pending[0]?.incarnation).not.toBe('');
+    expect(pending[0]?.ordinal).toBe(1);
+    // The best-effort drain trigger fires once per appended entry, naming
+    // that entry's own ordinal.
+    expect(triggers.map((event) => event.ordinal)).toEqual([1]);
+    await store.outbox.acknowledge(pending[0]!.ordinal);
 
+    const firstIncarnation = pending[0]!.incarnation;
     const reloaded = await store.load(session.id);
     await store.save({ ...reloaded!, updatedAt: reloaded!.updatedAt });
-    expect(created).toHaveLength(1);
-    expect(saved).toHaveLength(1);
-    expect(saved[0]?.incarnation).toBe(created[0]?.incarnation);
+    pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.kind).toBe('session.saved');
+    expect(pending[0]?.incarnation).toBe(firstIncarnation);
+    expect(pending[0]?.ordinal).toBe(2);
+    expect(triggers.map((event) => event.ordinal)).toEqual([1, 2]);
   });
 
-  it('dispatches SessionCreatedEvent when update() creates a brand-new session and SessionSavedEvent on the next update()', async () => {
+  it('appends a session.created entry when update() creates a brand-new session and a session.saved entry on the next update()', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
-
-    const created: SessionCreatedEvent[] = [];
-    const saved: SessionSavedEvent[] = [];
-    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
-    store.events.addEventListener(SessionSavedEvent.type, (event) => saved.push(event));
 
     await store.update(
       'events-update',
       (existing) => existing ?? makeSession({ id: 'events-update' }),
     );
-    expect(created).toHaveLength(1);
-    expect(saved).toHaveLength(0);
+    let pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.kind).toBe('session.created');
+    const firstIncarnation = pending[0]!.incarnation;
+    await store.outbox.acknowledge(pending[0]!.ordinal);
 
     await store.update('events-update', (existing) => existing);
-    expect(created).toHaveLength(1);
-    expect(saved).toHaveLength(1);
-    expect(saved[0]?.incarnation).toBe(created[0]?.incarnation);
+    pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.kind).toBe('session.saved');
+    expect(pending[0]?.incarnation).toBe(firstIncarnation);
   });
 
-  it('dispatches a fresh SessionCreatedEvent, with a new incarnation, when a deleted id is recreated', async () => {
+  it('appends a fresh session.created entry, with a new incarnation, when a deleted id is recreated — and a session.deleted entry for the removal in between', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
     const session = makeSession({ id: 'events-recreate' });
 
-    const created: SessionCreatedEvent[] = [];
-    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
-
     await store.save(session);
-    expect(await store.delete(session.id)).toBe(true);
-    await store.save(makeSession({ id: session.id }));
+    let pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    const firstIncarnation = pending[0]!.incarnation;
+    await store.outbox.acknowledge(pending[0]!.ordinal);
 
-    expect(created).toHaveLength(2);
-    expect(created[1]?.incarnation).not.toBe(created[0]?.incarnation);
+    expect(await store.delete(session.id)).toBe(true);
+    pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.kind).toBe('session.deleted');
+    expect(pending[0]?.incarnation).toBe(firstIncarnation);
+    await store.outbox.acknowledge(pending[0]!.ordinal);
+
+    await store.save(makeSession({ id: session.id }));
+    pending = await store.outbox.pending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.kind).toBe('session.created');
+    expect(pending[0]?.incarnation).not.toBe(firstIncarnation);
+  });
+
+  it('does not append an outbox entry, or consume an ordinal, for a delete() that removes nothing', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    expect(await store.delete('never-existed')).toBe(false);
+    expect(await store.outbox.pending()).toHaveLength(0);
+
+    // The ordinal counter is untouched: the next real commit still starts at 1.
+    await store.save(makeSession({ id: 'after-noop-delete' }));
+    const pending = await store.outbox.pending();
+    expect(pending[0]?.ordinal).toBe(1);
+  });
+
+  it('lists pending entries oldest-ordinal-first regardless of insertion order across sessions', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(makeSession({ id: 'ordinal-a' }));
+    await store.save(makeSession({ id: 'ordinal-b' }));
+    await store.save(makeSession({ id: 'ordinal-c' }));
+
+    const pending = await store.outbox.pending();
+    expect(pending.map((entry) => entry.sessionId)).toEqual([
+      'ordinal-a',
+      'ordinal-b',
+      'ordinal-c',
+    ]);
+    expect(pending.map((entry) => entry.ordinal)).toEqual([1, 2, 3]);
+  });
+
+  it('acknowledge() is idempotent — acknowledging an already-removed entry is a silent no-op', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(makeSession({ id: 'ack-twice' }));
+    const [entry] = await store.outbox.pending();
+    await store.outbox.acknowledge(entry!.ordinal);
+    expect(await store.outbox.pending()).toHaveLength(0);
+    // Second acknowledge of the same, now-gone ordinal must not throw.
+    await store.outbox.acknowledge(entry!.ordinal);
+    expect(await store.outbox.pending()).toHaveLength(0);
   });
 });

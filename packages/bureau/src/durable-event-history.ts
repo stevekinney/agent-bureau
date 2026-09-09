@@ -512,11 +512,60 @@ export function createDurableEventHistory(
   const feed: FleetEventFeed = createFleetEventFeed(storage);
   const diagnose = resolveDiagnosticSink(onDiagnostic);
 
+  /**
+   * AB-389 — finds an already-recorded event for `owner`/`kind` whose
+   * stored payload carries `dedupeKey`, by paging the owner's own history
+   * (the same primitive `page()` already exposes, reused rather than a
+   * second raw feed scan). Used only by `record()`'s own dedupe check
+   * below, so the cost is paid only by a caller that opts in.
+   */
+  async function findByDedupeKey(
+    owner: DurableEventOwner,
+    kind: string,
+    dedupeKey: string,
+  ): Promise<DurableEventEnvelope | undefined> {
+    let since: string | undefined;
+    for (;;) {
+      const result = await page(owner, { since, limit: DEFAULT_PAGE_LIMIT });
+      if ('outcome' in result) return undefined;
+      for (const event of result.events) {
+        if (event.kind !== kind) continue;
+        const eventPayload = event.payload;
+        if (
+          eventPayload !== null &&
+          typeof eventPayload === 'object' &&
+          (eventPayload as Record<string, unknown>)['dedupeKey'] === dedupeKey
+        ) {
+          return event;
+        }
+      }
+      if (!result.hasMore || result.nextCursor === undefined) return undefined;
+      since = result.nextCursor;
+    }
+  }
+
   async function record(
     owner: DurableEventOwner,
     kind: string,
     payload: unknown,
   ): Promise<DurableEventEnvelope> {
+    // AB-389 — a caller (the session outbox drain) may embed a `dedupeKey`
+    // string directly in `payload` to make this write idempotent against a
+    // redelivery of the SAME outbox entry: a crash between this write
+    // settling and the entry's own removal replays it on the next drain,
+    // and two drains (this process's maintenance pass and its post-commit
+    // trigger, or two Bureau processes over one shared backend) can race
+    // the same entry. Every other caller's payload carries no such field
+    // and pays no extra cost — the scan below only runs when one is
+    // present.
+    const dedupeKey =
+      payload !== null && typeof payload === 'object' && 'dedupeKey' in payload
+        ? (payload as Record<string, unknown>)['dedupeKey']
+        : undefined;
+    if (typeof dedupeKey === 'string') {
+      const existing = await findByDedupeKey(owner, kind, dedupeKey);
+      if (existing) return existing;
+    }
     const stored: StoredDurableEventPayload = { schemaVersion: CURRENT_SCHEMA_VERSION, payload };
     const appended = await feed.append({
       kind,
@@ -1318,6 +1367,12 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
         .record(owner, 'session.deleted', {
           sessionId: event.sessionId,
           incarnation: event.incarnation,
+          // AB-389 — the outbox entry's own ordinal, so a redelivery of the
+          // SAME entry (a crash between this write settling and the outbox
+          // drain acknowledging it, or two drains racing) is a no-op read
+          // instead of a second durable record — see `record()`'s own doc
+          // comment for the general mechanism.
+          dedupeKey: String(event.ordinal),
         })
         .then(
           () => {
@@ -1351,20 +1406,24 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   };
   bureau.addEventListener('session.deleted', sessionDeletedListener);
 
-  // AB-384 — `SessionCreatedEvent`/`SessionSavedEvent` reach this emitter
-  // the same indirect way `schedule.completed`/`schedule.failed` do (see
-  // this module's top-of-file doc comment): `create-bureau.ts` forwards
-  // them from `SessionStore.events` onto the bureau-level emitter, never
-  // through `'action'`. No in-flight dedupe is needed here the way
-  // `sessionDeletedListener` above needs one: the store dispatches each
-  // exactly once per real commit, with no documented duplicate-dispatch or
-  // cross-process race analogous to `deleteSession`'s own coalescing gap.
+  // AB-384, re-scoped by AB-389 — `SessionCreatedEvent`/`SessionSavedEvent`
+  // (and `SessionDeletedEvent` above) are no longer dispatched directly by
+  // a live commit; Bureau's own outbox drain loop (`create-bureau.ts`)
+  // replays each persisted `SessionOutboxEntry` as the matching event,
+  // dispatched onto this SAME bureau-level emitter, in ordinal order. No
+  // in-flight dedupe by object identity is needed here the way
+  // `sessionDeletedListener` above still keeps one for `session.deleted`:
+  // the `dedupeKey` on `record()`'s payload below is what makes a
+  // redelivery of the SAME outbox entry (a crash-recovery replay, or two
+  // drains racing over one shared backend) a no-op read instead of a
+  // second durable record — see `record()`'s own doc comment.
   const sessionCreatedListener = (event: SessionCreatedEvent): void => {
     if (signal?.aborted) return;
     sink({ kind: 'session', id: event.sessionId }, 'session.created', {
       sessionId: event.sessionId,
       agentName: event.agentName,
       incarnation: event.incarnation,
+      dedupeKey: String(event.ordinal),
     });
   };
   const sessionSavedListener = (event: SessionSavedEvent): void => {
@@ -1373,6 +1432,7 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       sessionId: event.sessionId,
       agentName: event.agentName,
       incarnation: event.incarnation,
+      dedupeKey: String(event.ordinal),
     });
   };
   bureau.addEventListener('session.created', sessionCreatedListener);
