@@ -16481,6 +16481,45 @@ describe('Bureau durable audit trail retention (AB-388)', () => {
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('rejects a runDurableMaintenance() call that arrives once shutdown has started (Codex review, PR #597, "Fence maintenance admission once shutdown starts")', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-fence-admission-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime,
+        durableBackgroundTasks: 'manual',
+        auditRetention: { olderThan: 500_000 },
+      });
+
+      const run = await bureau.createRun({ message: 'A', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+
+      // Once shutdown() has fully closed maintenance admission (the flag
+      // this fix adds, flipped synchronously partway through its own
+      // teardown chain — see `maintenanceAdmissionClosed`'s own doc
+      // comment for exactly where), a call arriving after that point must
+      // be rejected outright rather than racing backend disposal.
+      await bureau.shutdown();
+
+      await expect(bureau.runDurableMaintenance()).rejects.toThrow(
+        'Cannot run durable maintenance: bureau is shutting down',
+      );
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('deleteSession aborts every run it owns (AB-207)', () => {
