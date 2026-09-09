@@ -6867,8 +6867,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // what its durable history contains (its historical events, including
     // that marker, are still returned in the page; only the outcome
     // classification is suppressed).
-    if (owner.kind === 'session' && hasDeletionMarker && liveSession) {
-      return page;
+    //
+    // Deliberately RE-LOADED here, never `liveSession` from above (Codex
+    // review finding, PR #580, "Recheck liveness after reading the history
+    // page"): `liveSession` was read BEFORE `history.page()` — for
+    // authorization, which must run before paging (see that check's own
+    // doc comment). Between that read and `page()` resolving, a concurrent
+    // `deleteSession` could have committed and its own `'session.deleted'`
+    // marker become the very evidence `hasDeletionMarker` just found — in
+    // which case `liveSession`'s SNAPSHOT is now stale, and using it here
+    // would report a session that was actually deleted DURING this read as
+    // still live. A fresh read, taken as close as possible to the actual
+    // decision, minimizes (though — like any two independent reads with no
+    // shared transaction — cannot fully eliminate) that window.
+    if (owner.kind === 'session' && hasDeletionMarker) {
+      const currentlyLive = runtime.sessionStore
+        ? await runtime.sessionStore.load(owner.id)
+        : undefined;
+      if (currentlyLive) return page;
     }
 
     if (hasDeletionMarker) {
