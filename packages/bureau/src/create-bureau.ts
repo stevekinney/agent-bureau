@@ -2408,6 +2408,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // in fact recorded no durable audit trace at all.
   ): Promise<boolean> {
     if (!runtime.sessionStore) return false;
+    // AB-391 (Codex P1 review finding, PR #601, "Avoid reattaching audits
+    // after an ambiguous commit"): set by the updater below when this
+    // `reviewId` is ALREADY present in the session's `resolvedReviewIds` —
+    // meaning some earlier commit already durably landed this exact
+    // decision (and its coupled audit attachment), most likely because a
+    // prior call's `conditionalBatch` committed but the call back still
+    // rejected (the fault-engine test helper's own `fail-after-commit`
+    // boundary names exactly this ambiguous outcome: a lost
+    // acknowledgement). The updater returns `undefined` in that case so
+    // `sessionStore.update()` never calls `commit()` at all — no re-commit,
+    // no second `session.attachment` outbox entry at a fresh ordinal (which
+    // would carry a distinct `dedupeKey` from the one the earlier commit
+    // already wrote, so the `dedupeKey` guard alone could not have caught
+    // it). Detected HERE, inside the updater, rather than via a separate
+    // read-then-decide check before retrying: the updater already reads the
+    // CAS-fresh session body on every attempt (including a fresh call from
+    // `persistReviewResolutionWithRetry`'s cleanup-pending retry path, not
+    // just an in-loop retry of THIS call), so this is the one place that
+    // sees every attempt's live state without an extra read.
+    let alreadyLanded = false;
     const committed = await runtime.sessionStore.update(
       sessionId,
       (session) => {
@@ -2418,6 +2438,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           for (const id of currentResolved) {
             if (typeof id === 'string') resolvedReviewIds.push(id);
           }
+        }
+        if (resolvedReviewIds.includes(reviewId)) {
+          alreadyLanded = true;
+          return undefined;
         }
         const currentPending = session.metadata['pendingApprovalOverrides'];
         let pendingApprovalOverrides = currentPending;
@@ -2464,9 +2488,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             )
               ? omitStringValue(session.metadata['approvalResolutionStartedIds'], reviewId)
               : [],
-            resolvedReviewIds: resolvedReviewIds.includes(reviewId)
-              ? resolvedReviewIds
-              : [...resolvedReviewIds, reviewId],
+            // `resolvedReviewIds` is guaranteed to NOT already include
+            // `reviewId` here — the `alreadyLanded` early return above
+            // handles that case before this object is ever built.
+            resolvedReviewIds: [...resolvedReviewIds, reviewId],
             ...(removePendingApproval ? { pendingApprovalOverrides } : {}),
             ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
               ? { lastRequestAuthorities }
@@ -2476,6 +2501,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       },
       { outbox: reviewAuditOutboxAttachment(auditAttachment) },
     );
+    if (alreadyLanded) return true;
     return committed !== undefined;
   }
 
@@ -2486,7 +2512,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     runId: string,
     auditAttachment?: ReviewAuditAttachment,
     // AB-391: see `persistReviewResolution`'s own doc comment on this
-    // return value.
+    // return value, including its `alreadyLanded` handling of an ambiguous
+    // prior commit — that check runs on EVERY call to
+    // `persistReviewResolution` below, including a retry in this loop AND a
+    // wholly separate later call from the `reviewResolutionCleanupPending`
+    // path, so this loop itself needs no extra ambiguous-commit handling of
+    // its own.
   ): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {

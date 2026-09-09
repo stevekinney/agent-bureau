@@ -18701,6 +18701,78 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
       await bureau.dispose();
     }
   });
+
+  it('does not append a duplicate audit outbox entry when a review-resolution commit lands durably but the write call itself still rejects (Codex P1 review finding, PR #601, "Avoid reattaching audits after an ambiguous commit")', async () => {
+    // Simulates the fault-engine's own `fail-after-commit` boundary: the
+    // underlying `conditionalBatch` genuinely commits (the resolution AND
+    // its coupled `session.attachment` audit outbox entry both land), but
+    // the call back to `persistReviewResolution` still rejects — a lost
+    // acknowledgement. Without the fix, `persistReviewResolutionWithRetry`
+    // would call `persistReviewResolution` again, appending a SECOND,
+    // distinct `session.attachment` entry (a fresh ordinal — the
+    // `dedupeKey` mechanism has no way to know the two entries name the
+    // same underlying decision), producing two audit records for one
+    // review resolution once both drained.
+    const backing = textValueStore(new MemoryStorage());
+    let failOnceAfterRealCommit = false;
+    const persistence = createTextStoreProxy(backing, {
+      conditionalBatch: async (conditions, operations) => {
+        const isReviewResolutionCommit = operations.some(
+          (operation) =>
+            operation.type === 'set' && operation.value.includes('"namespace":"audit-record"'),
+        );
+        const committed = await backing.conditionalBatch(conditions, operations);
+        if (isReviewResolutionCommit && committed && failOnceAfterRealCommit) {
+          failOnceAfterRealCommit = false;
+          throw new Error('ambiguous failure: acknowledgement lost after a durable commit');
+        }
+        return committed;
+      },
+    });
+
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'ab-391-ambiguous-call', name: 'charge-card', arguments: { cents: 500 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-ambiguous-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      failOnceAfterRealCommit = true;
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:ambiguous-reviewer',
+      });
+      // The retry recognized the review as already resolved and reported
+      // success without attempting a second commit.
+      expect(outcome.decision).toBe('approve');
+      expect(failOnceAfterRealCommit).toBe(false);
+
+      await bureau.runDurableMaintenance();
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });
 
 describe('AB-390 — outbox claim lease', () => {
