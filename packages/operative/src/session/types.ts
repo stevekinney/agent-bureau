@@ -1,6 +1,8 @@
 import type { JSONValue } from 'interoperability';
+import type { TypedEventTarget } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
+import type { OperativeEventMap } from '../events';
 
 /**
  * Options for listing sessions with filtering, pagination, and sorting.
@@ -98,4 +100,26 @@ export interface SessionStore {
 
   /** Delete sessions older than the specified threshold. Returns the number deleted. */
   cleanup(options: SessionCleanupOptions): Promise<number>;
+
+  /**
+   * Session lifecycle events (AB-384): `SessionCreatedEvent` on the first
+   * successful commit of an id's body (a brand-new id, or one recreated
+   * after deletion), `SessionSavedEvent` on every later commit of the same
+   * live body. Dispatched by `save()`/`update()` after a commit succeeds —
+   * never by `delete()`, which has no body left to describe. Deliberately
+   * not special-cased for `update(id, updater, { refreshActivity: false })`
+   * (a background maintenance write, e.g. pruning stale metadata): that call
+   * is still a real, successful commit of the live body, so it still
+   * dispatches `SessionSavedEvent` — only `updatedAt` itself is withheld.
+   * A caller that needs these facts on a shared bus (Bureau forwards them
+   * onto its own bureau-level emitter, the same one `SessionDeletedEvent` is
+   * dispatched directly onto) attaches a listener here; a caller with no
+   * interest in them can ignore this target entirely — the store still
+   * mints and carries `AgentSession.incarnation` (see its own doc comment)
+   * independently of whether anything is listening. A `SessionStore`
+   * implementation supplied by a caller (not `createSessionStore()`'s own)
+   * must provide this member — it is required, not optional, on this
+   * interface.
+   */
+  readonly events: TypedEventTarget<OperativeEventMap>;
 }

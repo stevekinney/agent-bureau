@@ -1057,6 +1057,7 @@ describe('createBureau', () => {
       id: sessionId,
       agentName: 'bureau',
       conversationHistory: baseConversation.current,
+      incarnation: '',
       runs: [],
       metadata: {},
       revision: 0,
@@ -12802,12 +12803,16 @@ describe('createBureau durable event history producer + subscribeEventHistory (A
 
       // `Store.recordAction` (operative's own supported synthetic-action
       // seam — see its doc comment) stamps a `session.*`-typed action onto
-      // a REGISTERED run's action log, exactly the shape a real
-      // `session.created`/`saved`/`loaded`/`deleted`/`fork`/`recover`
-      // dispatch would produce once one of those event classes gains a
-      // dispatch site (none does today — see `createDurableEventProducer`'s
-      // own doc comment) — the supported way to exercise this producer's
-      // `session.*` branch without waiting on that.
+      // a REGISTERED run's action log, exercising this producer's
+      // `'action'`-stream `session.*` branch directly — a path distinct from
+      // `session.created`/`saved`/`deleted`'s own real, dedicated
+      // bureau-level-emitter listeners (AB-372/AB-384; see
+      // `createDurableEventProducer`'s own doc comment), which the
+      // "records session.created and session.saved under the session owner
+      // from directly-dispatched events" test in `durable-event-history.ts`
+      // covers instead. `session.loaded`/`fork`/`recover` have no dispatch
+      // site of either shape today, so this remains the only way to exercise
+      // this producer's handling of those three.
       const run = await bureau.createRun({ message: 'Carry a session action' });
       bureau.store.recordAction(run.id, 'session.created', { sessionId: 'sess-A', agentName: 'x' });
       bureau.store.recordAction(run.id, 'session.saved', { sessionId: 'sess-B', agentName: 'x' });
@@ -12823,6 +12828,71 @@ describe('createBureau durable event history producer + subscribeEventHistory (A
       expect(pageB.events.map((event) => event.kind)).toEqual(['session.saved']);
 
       await waitForRunCompletion(bureau, run.id);
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
+  it('records session.created then session.saved from a real createRun, carrying the same incarnation the session store itself holds, before deleteSession records session.deleted with the same value too (AB-384)', async () => {
+    // End-to-end proof, not a synthetic `Store.recordAction` dispatch (the
+    // sibling "records a session-scoped action" test above): a real
+    // `createRun` call persists a brand-new session through
+    // `SessionStore.save()`/`update()`, which now dispatches
+    // `SessionCreatedEvent`/`SessionSavedEvent` on its own `events` target,
+    // forwarded by `create-bureau.ts` onto the bureau-level emitter this
+    // producer's dedicated `sessionCreatedListener`/`sessionSavedListener`
+    // read — closing `SESSION_DURABLE_ACTION_TYPES`'s two previously-dead
+    // entries for real, not merely in a unit test of the listener alone.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durable-producer-session-created-saved-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+      const run = await bureau.createRun({ message: 'A session created for real' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const session = await bureau.getSession(run.sessionId);
+      expect(session).toBeDefined();
+      const incarnation = session!.incarnation;
+      expect(incarnation).not.toBe('');
+
+      const outcome = await bureau.eventHistory({ kind: 'session', id: run.sessionId });
+      if ('outcome' in outcome) throw new Error(`expected a page, got ${outcome.outcome}`);
+      expect(outcome.events.map((event) => event.kind)).toEqual([
+        'session.created',
+        'session.saved',
+      ]);
+      for (const event of outcome.events) {
+        const payload = event.payload as { sessionId: string; incarnation: string };
+        expect(payload.sessionId).toBe(run.sessionId);
+        expect(payload.incarnation).toBe(incarnation);
+      }
+
+      await bureau.deleteSession(run.sessionId);
+      await runtime.deferred.drain();
+
+      const deletedOutcome = await bureau.eventHistory({ kind: 'session', id: run.sessionId });
+      if (!('outcome' in deletedOutcome) || deletedOutcome.outcome !== 'deleted-aggregate') {
+        throw new Error(`expected deleted-aggregate, got ${JSON.stringify(deletedOutcome)}`);
+      }
+      const deletionEvent = deletedOutcome.events.find((event) => event.kind === 'session.deleted');
+      expect((deletionEvent?.payload as { incarnation: string } | undefined)?.incarnation).toBe(
+        incarnation,
+      );
+
       await bureau.shutdown();
     } finally {
       await rm(databasePath, { force: true });

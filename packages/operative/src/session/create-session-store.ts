@@ -2,9 +2,11 @@ import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-
 import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
 import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, TypedEventTarget } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
+import type { OperativeEventMap } from '../events';
+import { SessionCreatedEvent, SessionSavedEvent } from '../events';
 import type {
   SessionCleanupOptions,
   SessionListOptions,
@@ -72,6 +74,13 @@ function parseSession(raw: string | null): AgentSession | undefined {
             ? ((record as Record<string, number>)['revision'] ?? 0)
             : 0,
         runs: Array.isArray(record['runs']) ? (record['runs'] as AgentSession['runs']) : [],
+        // AB-384 rollback trigger: a record persisted before `incarnation`
+        // existed must still load, defaulted to `''` — the same value a
+        // freshly constructed, not-yet-persisted `AgentSession` carries
+        // (`createAgentSession`) — so `commit()` mints it a fresh identifier
+        // on its next write instead of treating a missing field as a parse
+        // failure.
+        incarnation: typeof record['incarnation'] === 'string' ? record['incarnation'] : '',
       };
     }
     return undefined;
@@ -313,6 +322,19 @@ export function createSessionStore(
     throw new TypeError('createSessionStore requires a ConditionalTextValueStore.');
   }
   const runtime = options.runtime ?? createDefaultRuntimeServices();
+  // AB-384 — this store's own lifecycle-event target. A caller with no
+  // interest in `session.created`/`session.saved` never has to touch this;
+  // Bureau (`runtime-composition.ts`) forwards it onto its own bureau-level
+  // emitter, the same one `SessionDeletedEvent` is dispatched directly onto.
+  const events = new TypedEventTarget<OperativeEventMap>();
+
+  function dispatchPersistEvent(wasCreate: boolean, committed: AgentSession): void {
+    events.dispatch(
+      wasCreate
+        ? new SessionCreatedEvent(committed.id, committed.agentName, committed.incarnation)
+        : new SessionSavedEvent(committed.id, committed.agentName, committed.incarnation),
+    );
+  }
 
   let mutationTail = Promise.resolve();
   function runMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -401,14 +423,29 @@ export function createSessionStore(
     session: AgentSession,
     bodyKey: string,
     expectedValue: string | null,
-    currentRevision: number,
+    current: AgentSession | undefined,
     refreshUpdatedAt: boolean,
     expectedSummaryValue: string | null,
     currentSummaries: Map<string, SessionSummary>,
   ): Promise<AgentSession | undefined> {
+    // AB-384 — resolved from `current` (the live body this attempt read
+    // BEFORE merging in the caller's candidate), never from
+    // `session.incarnation`: `session` here is already `mergeSessions`'
+    // output, which spreads the caller-supplied candidate's own fields over
+    // `current` whenever the candidate is fresh — a caller holding a stale
+    // or forged `incarnation` on its in-memory object must never win. No
+    // live body (`current === undefined`) — a brand-new id, or one
+    // recreated after its previous body was deleted — mints a fresh one.
+    // `current.incarnation` empty (a body persisted before this field
+    // existed, defaulted by `parseSession`) mints one too, upgrading the
+    // legacy record on its next write rather than persisting `''` forever.
+    // Otherwise the live body's own incarnation carries forward unchanged,
+    // stable across every `save()`/`update()` while that body stays live.
+    const incarnation = current?.incarnation || runtime.identifiers.next('session-incarnation');
     const next: AgentSession = {
       ...session,
-      revision: currentRevision + 1,
+      incarnation,
+      revision: (current?.revision ?? 0) + 1,
       updatedAt: refreshUpdatedAt ? runtime.clock.nowISO() : session.updatedAt,
     };
     const committed = await store.conditionalBatch(
@@ -430,40 +467,54 @@ export function createSessionStore(
 
   const sessionStore: SessionStore = {
     async save(session: AgentSession): Promise<void> {
-      await runMutation(async () => {
-        await readBody('summary-index');
-        let saveConflicts = 0;
-        let previousBodyRaw: string | null | undefined;
-        for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-          const [body, summaryRaw] = await Promise.all([
-            readBody(session.id),
-            store.get(SUMMARY_INDEX_KEY),
-          ]);
-          const { raw, key: bodyKey } = body;
-          const current = parseSession(raw);
-          const candidate = current ? mergeSessions(current, session) : session;
-          const committed = await commit(
-            candidate,
-            bodyKey,
-            raw,
-            current?.revision ?? 0,
-            true,
-            summaryRaw,
-            await summariesForMutation(summaryRaw),
-          );
-          if (committed) {
-            Object.assign(session, committed);
-            return;
+      // AB-384 — the created-vs-saved dispatch happens AFTER `runMutation`
+      // resolves, not from inside its queued operation: a listener that
+      // calls back into this same store (e.g. to read the session it was
+      // just told about) would otherwise enqueue behind `mutationTail`
+      // while still inside the very operation that promise is chained off
+      // of — harmless in practice (the nested call just waits its turn),
+      // but dispatching outside the queue removes any reentrancy question
+      // entirely.
+      const outcome = await runMutation(
+        async (): Promise<{
+          wasCreate: boolean;
+          committed: AgentSession;
+        }> => {
+          await readBody('summary-index');
+          let saveConflicts = 0;
+          let previousBodyRaw: string | null | undefined;
+          for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
+            const [body, summaryRaw] = await Promise.all([
+              readBody(session.id),
+              store.get(SUMMARY_INDEX_KEY),
+            ]);
+            const { raw, key: bodyKey } = body;
+            const current = parseSession(raw);
+            const candidate = current ? mergeSessions(current, session) : session;
+            const committed = await commit(
+              candidate,
+              bodyKey,
+              raw,
+              current,
+              true,
+              summaryRaw,
+              await summariesForMutation(summaryRaw),
+            );
+            if (committed) {
+              Object.assign(session, committed);
+              return { wasCreate: current === undefined, committed };
+            }
+            if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
+            previousBodyRaw = raw;
+            if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
+              throw new SessionConflictError(session.id);
+            }
           }
-          if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
-          previousBodyRaw = raw;
-          if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
-            throw new SessionConflictError(session.id);
-          }
-        }
 
-        throw new SessionConflictError(session.id);
-      });
+          throw new SessionConflictError(session.id);
+        },
+      );
+      dispatchPersistEvent(outcome.wasCreate, outcome.committed);
     },
 
     async update(
@@ -496,12 +547,19 @@ export function createSessionStore(
           next,
           bodyKey,
           raw,
-          current?.revision ?? 0,
+          current,
           refreshActivity,
           summaryRaw,
           await summariesForMutation(summaryRaw),
         );
-        if (committed) return committed;
+        if (committed) {
+          // AB-384 — dispatched here, after this attempt's commit succeeds:
+          // `update()` is deliberately NOT queued through `runMutation` (see
+          // this method's own doc comment on `SessionStore`), so there is no
+          // queue to dispatch outside of.
+          dispatchPersistEvent(current === undefined, committed);
+          return committed;
+        }
         if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
         previousBodyRaw = raw;
         if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) throw new SessionConflictError(id);
@@ -794,6 +852,8 @@ export function createSessionStore(
         throw new SessionConflictError('cleanup', 'completed');
       });
     },
+
+    events,
   };
 
   return sessionStore;

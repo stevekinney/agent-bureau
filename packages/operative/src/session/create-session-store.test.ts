@@ -4,6 +4,7 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
+import { SessionCreatedEvent, SessionSavedEvent } from '../events';
 import { createSessionStore, SessionConflictError } from './create-session-store';
 
 const SUMMARY_INDEX_KEY = 'agent-session:summary-index';
@@ -1433,5 +1434,125 @@ describe('createSessionStore', () => {
     const summaries = await store.list();
     expect(summaries).toHaveLength(1);
     expect(summaries[0]!.messageCount).toBe(0);
+  });
+});
+
+describe('AgentSession.incarnation (AB-384)', () => {
+  it('mints an incarnation on the first save and keeps it stable across later save() and update() calls', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'incarnation-stability' });
+
+    await store.save(session);
+    const afterFirstSave = await store.load(session.id);
+    expect(afterFirstSave!.incarnation).not.toBe('');
+
+    await store.save({ ...afterFirstSave!, updatedAt: afterFirstSave!.updatedAt });
+    const afterSecondSave = await store.load(session.id);
+    expect(afterSecondSave!.incarnation).toBe(afterFirstSave!.incarnation);
+
+    await store.update(session.id, (current) => current);
+    const afterUpdate = await store.load(session.id);
+    expect(afterUpdate!.incarnation).toBe(afterFirstSave!.incarnation);
+  });
+
+  it('mints a fresh incarnation when a deleted id is recreated', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'incarnation-recreate' });
+
+    await store.save(session);
+    const firstIncarnation = (await store.load(session.id))!.incarnation;
+
+    expect(await store.delete(session.id)).toBe(true);
+
+    await store.save(makeSession({ id: session.id }));
+    const secondIncarnation = (await store.load(session.id))!.incarnation;
+
+    expect(secondIncarnation).not.toBe('');
+    expect(secondIncarnation).not.toBe(firstIncarnation);
+  });
+
+  it('mints a fresh incarnation for a legacy record with no incarnation field, without treating the write as a creation', async () => {
+    const rawStore = textValueStore(new MemoryStorage());
+    const store = createSessionStore(rawStore);
+    const legacySession = makeSession({ id: 'legacy-incarnation' });
+    const { incarnation: _incarnation, ...legacyPayload } = legacySession;
+    await rawStore.set('agent-session:legacy-incarnation', JSON.stringify(legacyPayload));
+
+    const created: SessionCreatedEvent[] = [];
+    const saved: SessionSavedEvent[] = [];
+    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
+    store.events.addEventListener(SessionSavedEvent.type, (event) => saved.push(event));
+
+    const loaded = await store.load('legacy-incarnation');
+    expect(loaded!.incarnation).toBe('');
+
+    await store.save({ ...loaded!, updatedAt: loaded!.updatedAt });
+
+    const persisted = await store.load('legacy-incarnation');
+    expect(persisted!.incarnation).not.toBe('');
+    expect(created).toHaveLength(0);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.incarnation).toBe(persisted!.incarnation);
+  });
+});
+
+describe('SessionStore lifecycle events (AB-384)', () => {
+  it('dispatches SessionCreatedEvent on the first save() and SessionSavedEvent on the next one, both carrying the same incarnation', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'events-save', agentName: 'events-agent' });
+
+    const created: SessionCreatedEvent[] = [];
+    const saved: SessionSavedEvent[] = [];
+    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
+    store.events.addEventListener(SessionSavedEvent.type, (event) => saved.push(event));
+
+    await store.save(session);
+    expect(created).toHaveLength(1);
+    expect(created[0]?.sessionId).toBe('events-save');
+    expect(created[0]?.agentName).toBe('events-agent');
+    expect(created[0]?.incarnation).not.toBe('');
+    expect(saved).toHaveLength(0);
+
+    const reloaded = await store.load(session.id);
+    await store.save({ ...reloaded!, updatedAt: reloaded!.updatedAt });
+    expect(created).toHaveLength(1);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.incarnation).toBe(created[0]?.incarnation);
+  });
+
+  it('dispatches SessionCreatedEvent when update() creates a brand-new session and SessionSavedEvent on the next update()', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+
+    const created: SessionCreatedEvent[] = [];
+    const saved: SessionSavedEvent[] = [];
+    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
+    store.events.addEventListener(SessionSavedEvent.type, (event) => saved.push(event));
+
+    await store.update(
+      'events-update',
+      (existing) => existing ?? makeSession({ id: 'events-update' }),
+    );
+    expect(created).toHaveLength(1);
+    expect(saved).toHaveLength(0);
+
+    await store.update('events-update', (existing) => existing);
+    expect(created).toHaveLength(1);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]?.incarnation).toBe(created[0]?.incarnation);
+  });
+
+  it('dispatches a fresh SessionCreatedEvent, with a new incarnation, when a deleted id is recreated', async () => {
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const session = makeSession({ id: 'events-recreate' });
+
+    const created: SessionCreatedEvent[] = [];
+    store.events.addEventListener(SessionCreatedEvent.type, (event) => created.push(event));
+
+    await store.save(session);
+    expect(await store.delete(session.id)).toBe(true);
+    await store.save(makeSession({ id: session.id }));
+
+    expect(created).toHaveLength(2);
+    expect(created[1]?.incarnation).not.toBe(created[0]?.incarnation);
   });
 });

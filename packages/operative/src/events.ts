@@ -454,14 +454,25 @@ export class BudgetExceededEvent extends Event {
   }
 }
 
+/**
+ * Dispatched by `SessionStore.save()`/`update()` (`create-session-store.ts`)
+ * whenever a commit succeeds against an id that already had a live body —
+ * `SessionCreatedEvent` is the sibling dispatched instead the first time an
+ * id (or an id recreated after deletion) is committed. `incarnation` is the
+ * `AgentSession.incarnation` this write committed: minted by the store the
+ * first time an id's body is created, then preserved unchanged across every
+ * later `save()`/`update()` of that same live record (AB-384).
+ */
 export class SessionSavedEvent extends Event {
   static readonly type = 'session.saved' as const;
   readonly sessionId: string;
   readonly agentName: string;
-  constructor(sessionId: string, agentName: string) {
+  readonly incarnation: string;
+  constructor(sessionId: string, agentName: string, incarnation: string) {
     super(SessionSavedEvent.type);
     this.sessionId = sessionId;
     this.agentName = agentName;
+    this.incarnation = incarnation;
   }
 }
 
@@ -476,23 +487,46 @@ export class SessionLoadedEvent extends Event {
   }
 }
 
+/**
+ * Dispatched by `SessionStore.save()`/`update()` (`create-session-store.ts`)
+ * the first time a commit succeeds against an id with no live body — a
+ * brand-new id, or one recreated after its previous incarnation was
+ * deleted. `incarnation` is the fresh identifier the store minted for this
+ * new body (AB-384); every later commit of the same live record dispatches
+ * `SessionSavedEvent` with that same value instead.
+ */
 export class SessionCreatedEvent extends Event {
   static readonly type = 'session.created' as const;
   readonly sessionId: string;
   readonly agentName: string;
-  constructor(sessionId: string, agentName: string) {
+  readonly incarnation: string;
+  constructor(sessionId: string, agentName: string, incarnation: string) {
     super(SessionCreatedEvent.type);
     this.sessionId = sessionId;
     this.agentName = agentName;
+    this.incarnation = incarnation;
   }
 }
 
+/**
+ * `incarnation` (AB-384) is the `AgentSession.incarnation` the deleted
+ * record carried at the moment of deletion — `''` for a legacy record that
+ * was never re-saved after this field was introduced (see
+ * `AgentSession.incarnation`'s own doc comment). Bureau's
+ * `sessionDeletedListener` (`durable-event-history.ts`) keys its in-flight
+ * duplicate-dispatch guard on `(sessionId, incarnation)` rather than
+ * `sessionId` alone, so a session id recreated and deleted again while its
+ * prior incarnation's own durable write is still pending is no longer
+ * conflated with that prior deletion.
+ */
 export class SessionDeletedEvent extends Event {
   static readonly type = 'session.deleted' as const;
   readonly sessionId: string;
-  constructor(sessionId: string) {
+  readonly incarnation: string;
+  constructor(sessionId: string, incarnation: string) {
     super(SessionDeletedEvent.type);
     this.sessionId = sessionId;
+    this.incarnation = incarnation;
   }
 }
 

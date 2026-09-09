@@ -557,12 +557,38 @@ const result = await activeRun.result;
 | `list(options?)`                | Paginated list of `SessionSummary` objects.                                                                                                                                                                                                                                                                                                                                    |
 | `updateMetadata(id, metadata)`  | Merge metadata without rewriting the conversation.                                                                                                                                                                                                                                                                                                                             |
 | `cleanup(options)`              | Delete sessions older than `options.olderThan` ms.                                                                                                                                                                                                                                                                                                                             |
+| `events`                        | `TypedEventTarget<OperativeEventMap>` (AB-384) the store dispatches its own lifecycle events onto — see below.                                                                                                                                                                                                                                                                 |
 
 Sessions include a persisted `revision` number. New `AgentSession` objects start
 at revision `0`; successful `SessionStore` writes increment the stored revision.
 When concurrent writers save stale copies of the same session, the store retries
 with Weft's conditional batch primitive and merges conversation messages, run
 references, and metadata instead of silently dropping one writer's turns.
+
+**Incarnation identity (AB-384):** `AgentSession.incarnation` distinguishes
+live bodies of the same session id across a delete-then-recreate cycle (a
+supported flow). `SessionStore` mints it the first time an id's body is
+committed — a brand-new id, or one recreated after its previous body was
+deleted — and preserves it unchanged across every later `save()`/`update()`
+of that same live body. A freshly constructed, not-yet-persisted session
+(`createAgentSession()`) carries `''`, the same value a pre-AB-384 record
+loaded from storage defaults to.
+
+Each successful `save()`/`update()` commit dispatches on `SessionStore.events`:
+`SessionCreatedEvent` the first time an id's body is committed, or
+`SessionSavedEvent` on every later commit of the same live body — both carry
+`sessionId`, `agentName`, and the committed `incarnation`. `delete()` carries
+no body to describe and dispatches neither; `@lostgradient/operative`'s own
+`SessionDeletedEvent` (dispatched by consumers, not by the store itself — see
+Bureau's `deleteSession`) carries the deleted record's own `incarnation` at
+the moment of deletion instead.
+
+```ts
+const sessions = createSessionStore(kvStore);
+sessions.events.addEventListener('session.created', (event) => {
+  console.log(`session ${event.sessionId} created, incarnation ${event.incarnation}`);
+});
+```
 
 #### Hooks
 

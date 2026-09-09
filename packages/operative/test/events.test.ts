@@ -294,19 +294,22 @@ describe('events', () => {
       budget: 1,
       model: 'gpt-test',
     });
-    const saved = new SessionSavedEvent('session-1', 'agent-a');
+    const saved = new SessionSavedEvent('session-1', 'agent-a', 'incarnation-1');
     const loaded = new SessionLoadedEvent('session-1', 'agent-a');
-    const created = new SessionCreatedEvent('session-1', 'agent-a');
-    const deleted = new SessionDeletedEvent('session-1');
+    const created = new SessionCreatedEvent('session-1', 'agent-a', 'incarnation-1');
+    const deleted = new SessionDeletedEvent('session-1', 'incarnation-1');
 
     expect(threshold.type).toBe('budget.threshold');
     expect(threshold.threshold).toBe(0.8);
     expect(exceeded.type).toBe('budget.exceeded');
     expect(exceeded.currentCost).toBe(1.2);
     expect(saved.agentName).toBe('agent-a');
+    expect(saved.incarnation).toBe('incarnation-1');
     expect(loaded.sessionId).toBe('session-1');
     expect(created.type).toBe('session.created');
+    expect(created.incarnation).toBe('incarnation-1');
     expect(deleted.type).toBe('session.deleted');
+    expect(deleted.incarnation).toBe('incarnation-1');
   });
 
   it('constructs scheduling events with the expected payload', () => {
