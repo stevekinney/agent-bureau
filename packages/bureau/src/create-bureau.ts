@@ -4232,7 +4232,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // below (a kv-only session store with no durable engine still has an
     // outbox — see that function's own doc comment — though with no
     // durable event history to drain into it resolves immediately).
-    await drainSessionOutbox();
+    //
+    // Isolated in its own try/catch (Codex P1 review finding, PR #598,
+    // "Isolate outbox failures from durable run recovery"), same rationale
+    // as the scheduler-residue sweep just below: an outbox failure (a
+    // transient session-store outage, say) must be diagnosed loudly, never
+    // let it abort this ENTIRE recovery pass — recovery is single-shot, so
+    // an unguarded throw here would strand every otherwise-recoverable
+    // durable run for the lifetime of this Bureau over an unrelated
+    // subsystem's failure.
+    try {
+      await drainSessionOutbox();
+    } catch (error) {
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Session outbox drain failed during boot recovery; durable run recovery continues: ${serializeUnknownError(error)}`,
+        cause: error,
+      });
+    }
 
     if (!runtime.durable) return { outcome: 'clean', perRunFailures: [] };
 
@@ -5220,8 +5238,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // needs a claimed-entry lease with stale-claim reclaim for a drainer that
   // crashes mid-claim — genuine lease semantics, out of scope here.
   let sessionOutboxDrainInFlight: Promise<void> | undefined;
+  // AB-389 (Codex P2 review finding, PR #598, "Re-run the drain when a
+  // commit joins its completion edge"): a commit's trigger can arrive
+  // exactly when an in-flight drain's last `pending()` call has already
+  // returned empty and is about to return — that trigger's call below
+  // joins `sessionOutboxDrainInFlight` (a promise already committed to
+  // resolving), so its own newly-appended entry would otherwise sit
+  // undrained until a later, unrelated trigger or maintenance tick (and
+  // `performDeleteSession`'s own explicit await would return without the
+  // durable fact it promises). Set synchronously by EVERY joiner — not
+  // just the post-commit trigger — and checked, then reset, by the
+  // in-flight drain itself right after its own pending-loop exits but
+  // before it actually returns: any join that happens in that narrow
+  // window forces one more full pass rather than being silently dropped.
+  let sessionOutboxDrainRerunRequested = false;
   async function drainSessionOutbox(): Promise<void> {
-    if (sessionOutboxDrainInFlight) return sessionOutboxDrainInFlight;
+    if (sessionOutboxDrainInFlight) {
+      sessionOutboxDrainRerunRequested = true;
+      return sessionOutboxDrainInFlight;
+    }
     const drain = (async (): Promise<void> => {
       const outboxSessionStore = runtime.sessionStore;
       // Draining and dispatching happens whenever there is a session store
@@ -5241,57 +5276,104 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // acknowledging immediately after dispatch is correct, not a gap.
       if (!outboxSessionStore) return;
       const producer = durableEventProducerInstance;
-      // Loop until one full pass finds nothing pending — an entry
-      // appended by a commit that lands WHILE this pass is draining is
-      // picked up by THIS pass rather than left for the next trigger.
-      for (;;) {
-        const pending: readonly SessionOutboxEntry[] = await outboxSessionStore.outbox.pending();
-        if (pending.length === 0) return;
-        for (const entry of pending) {
-          const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
-          switch (entry.kind) {
-            case 'session.created':
-              emitter.dispatch(
-                new SessionCreatedEvent(
-                  entry.sessionId,
-                  entry.agentName ?? '',
-                  entry.incarnation,
-                  entry.ordinal,
-                ),
-              );
-              break;
-            case 'session.saved':
-              emitter.dispatch(
-                new SessionSavedEvent(
-                  entry.sessionId,
-                  entry.agentName ?? '',
-                  entry.incarnation,
-                  entry.ordinal,
-                ),
-              );
-              break;
-            case 'session.deleted':
-              emitter.dispatch(
-                new SessionDeletedEvent(entry.sessionId, entry.incarnation, entry.ordinal),
-              );
-              break;
-          }
-          // Waits for the durable write THIS dispatch just started (and
-          // any other write already in flight for the same owner) to
-          // settle before acknowledging — never before. `dispatch()` calls
-          // `durable-event-history.ts`'s listener synchronously, which
-          // starts tracking the write before `dispatch()` itself returns,
-          // so this snapshot-then-await always catches it.
-          await producer?.waitForActiveWrites(owner);
-          await outboxSessionStore.outbox.acknowledge(entry.ordinal);
-        }
-      }
+      do {
+        sessionOutboxDrainRerunRequested = false;
+        // Loop until one full pass finds nothing pending — an entry
+        // appended by a commit that lands WHILE this pass is draining is
+        // picked up by THIS pass rather than left for the next trigger.
+        await drainSessionOutboxPass(outboxSessionStore, producer);
+        // Re-checked with no `await` between the pass above returning and
+        // this read, so a join that set the flag at any point up to and
+        // including this exact moment is observed — see this function's
+        // own doc comment above for why that closes the race.
+      } while (sessionOutboxDrainRerunRequested);
     })();
     sessionOutboxDrainInFlight = drain;
     try {
       await drain;
     } finally {
       sessionOutboxDrainInFlight = undefined;
+    }
+  }
+
+  async function drainSessionOutboxPass(
+    outboxSessionStore: SessionStore,
+    producer: DurableEventProducer | undefined,
+  ): Promise<void> {
+    for (;;) {
+      const pending: readonly SessionOutboxEntry[] = await outboxSessionStore.outbox.pending();
+      if (pending.length === 0) return;
+      for (const entry of pending) {
+        const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
+        switch (entry.kind) {
+          case 'session.created':
+            emitter.dispatch(
+              new SessionCreatedEvent(
+                entry.sessionId,
+                entry.agentName ?? '',
+                entry.incarnation,
+                entry.ordinal,
+              ),
+            );
+            break;
+          case 'session.saved':
+            emitter.dispatch(
+              new SessionSavedEvent(
+                entry.sessionId,
+                entry.agentName ?? '',
+                entry.incarnation,
+                entry.ordinal,
+              ),
+            );
+            break;
+          case 'session.deleted':
+            emitter.dispatch(
+              new SessionDeletedEvent(entry.sessionId, entry.incarnation, entry.ordinal),
+            );
+            break;
+        }
+        // Waits for the durable write THIS dispatch just started (and
+        // any other write already in flight for the same owner) to
+        // settle before acknowledging — never before. `dispatch()` calls
+        // `durable-event-history.ts`'s listener synchronously, which
+        // starts tracking the write before `dispatch()` itself returns,
+        // so this snapshot-then-await always catches it.
+        await producer?.waitForActiveWrites(owner);
+        // AB-389 (Codex P1 review finding, PR #598, "Retain the outbox
+        // entry when its durable write fails"): `waitForActiveWrites`
+        // resolving proves only that the write SETTLED, never that it
+        // SUCCEEDED — a storage failure is diagnosed and swallowed by the
+        // write's own listener, never surfaced here. Verifying via
+        // `wasRecorded` (the SAME dedupe identity `record()` itself checks
+        // — this entry's own ordinal) before acknowledging closes that
+        // gap: a failed write leaves the entry pending for a LATER drain
+        // to retry, rather than being permanently discarded even though
+        // nothing durable was ever recorded. Skipped entirely when there
+        // is no durable event history to verify against (`eventHistoryInstance`
+        // absent) — acknowledging immediately is correct there, per this
+        // function's own doc comment on why `producer` alone gates the
+        // wait above.
+        if (eventHistoryInstance) {
+          const wasRecorded = await eventHistoryInstance.wasRecorded(
+            owner,
+            entry.kind,
+            String(entry.ordinal),
+          );
+          if (!wasRecorded) {
+            diagnose({
+              level: 'error',
+              scope: 'durable-maintenance',
+              message: `[bureau] Session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}") was not durably recorded; leaving it pending for a later drain to retry.`,
+            });
+            // Stop this pass here, rather than spinning on the same
+            // still-failing entry forever within this one call: a LATER,
+            // distinct trigger (the next commit, or the next maintenance
+            // tick) starts a fresh pass and gets a fresh chance at it.
+            return;
+          }
+        }
+        await outboxSessionStore.outbox.acknowledge(entry.ordinal);
+      }
     }
   }
 
@@ -5589,7 +5671,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // idempotent and single-flighted regardless, so this never duplicates
       // work the trigger (fired synchronously inside `sessionStore.delete`
       // above, for the SAME winning call) might also be running.
-      if (removedLiveRecord) await drainSessionOutbox();
+      if (removedLiveRecord) {
+        try {
+          await drainSessionOutbox();
+        } catch (error) {
+          // Same isolation as `recoverDurableRuns`'s own drain call: the
+          // session removal above already committed — a drain failure
+          // (this call's own attempt, or another pending entry's) must not
+          // make `deleteSession()` itself appear to have failed when the
+          // deletion it promised actually succeeded.
+          diagnose({
+            level: 'error',
+            scope: 'recovery',
+            message: `[bureau] Session outbox drain failed after deleteSession("${id}") committed; the deletion itself succeeded: ${serializeUnknownError(error)}`,
+            cause: error,
+          });
+        }
+      }
 
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,

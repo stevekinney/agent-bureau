@@ -202,6 +202,21 @@ export interface DurableEventHistory {
    */
   record(owner: DurableEventOwner, kind: string, payload: unknown): Promise<DurableEventEnvelope>;
   /**
+   * AB-389 — whether a durable record for `owner`/`kind` carrying the
+   * given `dedupeKey` has already been committed. Built for the session
+   * outbox drain (`create-bureau.ts`'s `drainSessionOutbox`), which must
+   * not acknowledge (permanently remove) an outbox entry unless the
+   * durable write it triggered actually succeeded: awaiting
+   * `DurableEventProducer.waitForActiveWrites` alone only proves the write
+   * SETTLED, never that it succeeded — a storage failure is diagnosed and
+   * swallowed by the write's own listener (`trackWrite`), never surfaced
+   * to a caller that merely awaited settlement (Codex P1 review finding,
+   * PR #598, "Retain the outbox entry when its durable write fails").
+   * Shares `record()`'s own dedupe scan (`findByDedupeKey`), so a call
+   * here costs exactly what a redundant `record()` call would have.
+   */
+  wasRecorded(owner: DurableEventOwner, kind: string, dedupeKey: string): Promise<boolean>;
+  /**
    * A bounded, sequence-ordered page of `owner`'s durable events after the
    * exclusive `since` cursor — or a {@link DurableEventGap} when `since`
    * predates the store's retention floor. See this module's top-of-file
@@ -395,6 +410,22 @@ function encodeOwner(owner: DurableEventOwner): string {
 }
 
 /**
+ * AB-389 — reads the `dedupeKey` string a caller may have embedded directly
+ * in a `record()` payload (the session outbox drain does this, keyed on the
+ * outbox entry's own ordinal). Returns `undefined` for any payload shape
+ * that doesn't carry one, including a non-string value — shared by
+ * `record()`'s write-side check and `page()`'s read-side one so both use
+ * the identical extraction rule.
+ */
+function extractDedupeKey(payload: unknown): string | undefined {
+  if (payload === null || typeof payload !== 'object' || !('dedupeKey' in payload)) {
+    return undefined;
+  }
+  const value = (payload as Record<string, unknown>)['dedupeKey'];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
  * The durable event `kind` this module's own deletion-marker writers record
  * for each owner kind that has a deletion concept — `undefined` for
  * `schedule`, which has none. Used by
@@ -527,15 +558,22 @@ export function createDurableEventHistory(
     let since: string | undefined;
     for (;;) {
       const result = await page(owner, { since, limit: DEFAULT_PAGE_LIMIT });
-      if ('outcome' in result) return undefined;
+      if ('outcome' in result) {
+        // AB-389 (Codex P2 review finding, PR #598, "Continue dedupe lookup
+        // from the retention floor"): once the fleet's retention floor has
+        // advanced past sequence 0, a `since: undefined` scan ALWAYS starts
+        // by hitting a gap (the floor check compares against sequence -1,
+        // which is always "before the floor" once the floor is nonzero) —
+        // treating that as "not found" would make this lookup a no-op in
+        // any production system with retention enabled, exactly the
+        // opposite of what it exists to prevent. The record we're looking
+        // for, if it still exists, is somewhere at or after the reported
+        // floor — resume the scan there instead of giving up.
+        since = String(result.firstRetainedSequence - 1);
+        continue;
+      }
       for (const event of result.events) {
-        if (event.kind !== kind) continue;
-        const eventPayload = event.payload;
-        if (
-          eventPayload !== null &&
-          typeof eventPayload === 'object' &&
-          (eventPayload as Record<string, unknown>)['dedupeKey'] === dedupeKey
-        ) {
+        if (event.kind === kind && extractDedupeKey(event.payload) === dedupeKey) {
           return event;
         }
       }
@@ -558,11 +596,18 @@ export function createDurableEventHistory(
     // the same entry. Every other caller's payload carries no such field
     // and pays no extra cost — the scan below only runs when one is
     // present.
-    const dedupeKey =
-      payload !== null && typeof payload === 'object' && 'dedupeKey' in payload
-        ? (payload as Record<string, unknown>)['dedupeKey']
-        : undefined;
-    if (typeof dedupeKey === 'string') {
+    //
+    // This read-before-write check is NOT atomic (Codex P1 review finding,
+    // PR #598, "Make cross-process outbox deduplication atomic"): two
+    // Bureau processes racing to drain the SAME entry can both complete
+    // this lookup, observe nothing, and both append — `FleetEventFeed`
+    // exposes no compare-and-swap append primitive to close that window
+    // with a write-side guarantee alone. `page()` below carries the other
+    // half of the fix: it deduplicates by the SAME `(kind, dedupeKey)`
+    // identity when READING, so even if a race lets two raw records land,
+    // a caller paging this owner's history never observes the fact twice.
+    const dedupeKey = extractDedupeKey(payload);
+    if (dedupeKey !== undefined) {
       const existing = await findByDedupeKey(owner, kind, dedupeKey);
       if (existing) return existing;
     }
@@ -601,6 +646,21 @@ export function createDurableEventHistory(
     const targetWorkflowId = encodeOwner(owner);
     const events: DurableEventEnvelope[] = [];
     let hasMore = false;
+    // AB-389 (Codex P1 review finding, PR #598, "Make cross-process outbox
+    // deduplication atomic"): `record()`'s own dedupe check is a
+    // read-before-write scan, not a compare-and-swap — two processes
+    // racing to drain the SAME outbox entry can both find nothing and both
+    // append, since `FleetEventFeed` exposes no atomic append-if-absent
+    // primitive to close that window on the write side. This Set closes it
+    // on the READ side instead: within this one page() scan, only the
+    // FIRST record carrying a given `(kind, dedupeKey)` pair is returned —
+    // a later duplicate is skipped exactly like a corrupt record (no
+    // diagnostic, since this is an expected, benign race outcome rather
+    // than data corruption), never consuming a `limit` slot or setting
+    // `hasMore`. This does not cover a duplicate landing in a LATER,
+    // separately-cursored page() call — see this module's own doc comment
+    // for the accepted residual.
+    const seenDedupeKeys = new Set<string>();
     for await (const envelope of feed.replay(since === undefined ? {} : { fromCursor: since })) {
       if (envelope.workflowId !== targetWorkflowId) continue;
       // AB-313 (AC2): decode BEFORE checking `limit` — a corrupt record
@@ -624,6 +684,12 @@ export function createDurableEventHistory(
           cause: error,
         });
         continue;
+      }
+      const dedupeKey = extractDedupeKey(decoded.payload);
+      if (dedupeKey !== undefined) {
+        const seenKey = `${decoded.kind} ${dedupeKey}`;
+        if (seenDedupeKeys.has(seenKey)) continue;
+        seenDedupeKeys.add(seenKey);
       }
       if (events.length >= limit) {
         hasMore = true;
@@ -851,8 +917,17 @@ export function createDurableEventHistory(
     return Promise.resolve();
   }
 
+  async function wasRecorded(
+    owner: DurableEventOwner,
+    kind: string,
+    dedupeKey: string,
+  ): Promise<boolean> {
+    return (await findByDedupeKey(owner, kind, dedupeKey)) !== undefined;
+  }
+
   return {
     record,
+    wasRecorded,
     page,
     subscribeEventHistory,
     retainedRunOwnerIds,

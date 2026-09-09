@@ -17258,4 +17258,89 @@ describe('AB-389 — session commit outbox', () => {
       await bureau.dispose();
     }
   });
+
+  it('retains a pending outbox entry, rather than acknowledging it, when its durable write fails (Codex P1 review finding, PR #598)', async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab-389-retain-on-write-failure-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const realStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+    let failNextFleetEventWrite = false;
+    const gatedStorage = new Proxy(realStorage, {
+      get(target, property, receiver) {
+        // `FleetEventFeed.append` commits through `storage.conditionalBatch`
+        // (`storageConditionalBatch`, `weft/src/storage/interface.ts`), not
+        // `storage.batch` — gate both so this works regardless of which
+        // path a caller's write takes.
+        if (property === 'batch' || property === 'conditionalBatch') {
+          const real = (target as unknown as Record<string, unknown>)[property] as (
+            ...args: unknown[]
+          ) => Promise<unknown>;
+          return async (...args: unknown[]) => {
+            const operations = (property === 'conditionalBatch' ? args[1] : args[0]) as {
+              key: string;
+            }[];
+            // Fail only the durable-event-history write (a `fleet-event:`
+            // key), never the session store's own commit — the session
+            // save itself must succeed so its outbox entry exists to be
+            // (not) acknowledged.
+            const isFleetEventWrite = operations.some((operation) =>
+              operation.key.startsWith('fleet-event:'),
+            );
+            if (isFleetEventWrite && failNextFleetEventWrite) {
+              failNextFleetEventWrite = false;
+              throw new Error('injected durable-write failure');
+            }
+            return real.apply(target, args);
+          };
+        }
+        const value: unknown = Reflect.get(target, property, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const runtime = createManualRuntimeServices();
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('unused'),
+      toolbox: createEmptyToolbox(),
+      storage: gatedStorage,
+      runtime,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      await bureau.waitForRecovery?.();
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+
+      const session = createAgentSession({
+        id: 'ab-389-retain-on-write-failure',
+        agentName: 'triage',
+        conversationHistory: createConversationHistory({
+          id: 'ab-389-retain-on-write-failure',
+        }),
+      });
+      failNextFleetEventWrite = true;
+      await sessionStore.save(session);
+      await waitForCondition(
+        () => diagnostics.some((message) => message.includes('was not durably recorded')),
+        'expected a diagnostic reporting the outbox entry was not durably recorded',
+      );
+
+      // The durable write failed — the entry must NOT have been
+      // acknowledged (removed), so a later drain can retry it.
+      expect(await sessionStore.outbox.pending()).toHaveLength(1);
+
+      // A later drain, once storage has recovered, DOES succeed and
+      // acknowledges the entry.
+      await bureau.runDurableMaintenance();
+      expect(await sessionStore.outbox.pending()).toHaveLength(0);
+      const page = await bureau.eventHistory({ kind: 'session', id: session.id });
+      if ('outcome' in page) throw new Error(`expected a page, got outcome "${page.outcome}"`);
+      expect(page.events.map((event) => event.kind)).toEqual(['session.created']);
+    } finally {
+      await bureau.dispose();
+    }
+  });
 });
