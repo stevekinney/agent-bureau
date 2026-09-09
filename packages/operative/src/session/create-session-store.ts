@@ -1198,27 +1198,58 @@ export function createSessionStore(
         return entries;
       },
       async claim(ordinal: number, lease: { owner: string; until: number }): Promise<boolean> {
+        // Codex P2 review finding, PR #599, "Validate the lease before
+        // persisting it": `lease.until` is typed `number`, but `NaN` and
+        // either `Infinity` are all valid TypeScript numbers a caller could
+        // pass. `JSON.stringify()` serializes every one of those as `null`,
+        // and `parseOutboxClaim()` then rejects that `null` as corrupted —
+        // permanently wedging this entry (and every later ordinal behind
+        // it) the moment such a lease is ever persisted. Rejected here,
+        // before any store operation, rather than left to surface as a
+        // "corrupted outbox entry" failure far from its actual cause.
+        if (!Number.isFinite(lease.until)) {
+          throw new TypeError(
+            `SessionStore: outbox.claim() requires a finite "until" timestamp, got ${JSON.stringify(lease.until)}.`,
+          );
+        }
         const key = outboxEntryKey(ordinal);
-        const raw = await store.get(key);
-        const entry = parseOutboxEntry(raw);
-        // Nothing left to claim — already acknowledged (by this drainer or
-        // a peer). Not a conflict, but not a successful claim either:
-        // there is no entry for the caller to go replay.
-        if (!entry) return false;
-        const now = runtime.clock.now();
-        const currentClaim = entry.claim;
-        const claimable =
-          currentClaim === undefined ||
-          currentClaim.until <= now ||
-          // Same-owner reentry always succeeds — see this method's own doc
-          // comment on why renewal must not be refused.
-          currentClaim.owner === lease.owner;
-        if (!claimable) return false;
-        const claimed: SessionOutboxEntry = { ...entry, claim: lease };
-        return store.conditionalBatch(
-          [{ key, expectedValue: raw }],
-          [{ type: 'set', key, value: JSON.stringify(claimed) }],
-        );
+        // Codex P2 review finding, PR #599, "Retry same-owner claim
+        // contention before returning false": two overlapping renewal
+        // calls for the SAME owner (a real scenario once a caller renews a
+        // claim on a timer while an earlier renewal is still in flight)
+        // can both read the same current value and both find themselves
+        // `claimable`, but only one `conditionalBatch` wins the CAS — the
+        // other must not report `false` (implying a genuine conflict) when
+        // the entry is still held by this SAME owner and simply needs a
+        // fresh read-and-retry. Bounded exactly like this file's other CAS
+        // retry loops (see `MAXIMUM_SAVE_ATTEMPTS`); a DIFFERENT owner
+        // holding the entry is detected by the `claimable` check itself on
+        // the very next iteration and returns `false` immediately, without
+        // burning the remaining attempts.
+        for (let attempt = 0; attempt < MAXIMUM_SAVE_ATTEMPTS; attempt++) {
+          const raw = await store.get(key);
+          const entry = parseOutboxEntry(raw);
+          // Nothing left to claim — already acknowledged (by this drainer
+          // or a peer). Not a conflict, but not a successful claim either:
+          // there is no entry for the caller to go replay.
+          if (!entry) return false;
+          const now = runtime.clock.now();
+          const currentClaim = entry.claim;
+          const claimable =
+            currentClaim === undefined ||
+            currentClaim.until <= now ||
+            // Same-owner reentry always succeeds — see this method's own
+            // doc comment on why renewal must not be refused.
+            currentClaim.owner === lease.owner;
+          if (!claimable) return false;
+          const claimed: SessionOutboxEntry = { ...entry, claim: lease };
+          const committed = await store.conditionalBatch(
+            [{ key, expectedValue: raw }],
+            [{ type: 'set', key, value: JSON.stringify(claimed) }],
+          );
+          if (committed) return true;
+        }
+        return false;
       },
       async acknowledge(ordinal: number, owner: string): Promise<boolean> {
         const key = outboxEntryKey(ordinal);
@@ -1240,7 +1271,24 @@ export function createSessionStore(
         // A CAS, not a bare delete: if the value has changed since the read
         // above (a peer reclaimed it in between this read and this write),
         // the delete is simply skipped rather than forced.
-        return store.conditionalBatch([{ key, expectedValue: raw }], [{ type: 'delete', key }]);
+        const committed = await store.conditionalBatch(
+          [{ key, expectedValue: raw }],
+          [{ type: 'delete', key }],
+        );
+        if (committed) return true;
+        // Copilot review finding, PR #599, "acknowledge() should return
+        // true when a peer reclaimed-and-acknowledged the entry": the CAS
+        // above can lose the race not because a peer merely RECLAIMED the
+        // claim (a live conflict this owner should hear about as `false`),
+        // but because that peer's OWN drain already replayed and
+        // acknowledged the entry in between this call's read and its own
+        // delete attempt — in which case the entry is gone, exactly the
+        // outcome this method's own doc comment defines as `true`,
+        // regardless of who retired it. One more read distinguishes the
+        // two: gone now means `true`; a DIFFERENT owner's claim still
+        // sitting there means `false`, unchanged from before.
+        const recheck = await store.get(key);
+        return recheck === null;
       },
     },
   };

@@ -166,6 +166,7 @@ import {
   serializeRunState,
   serializeUnknownError,
 } from './serialization';
+import { generateSessionOutboxDrainOwnerSuffix } from './session-outbox-drain-owner-suffix';
 import {
   type BureauSteeringGate,
   createSteeringCommandLedger,
@@ -5276,7 +5277,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // is recognized as "the owner I already am", never treated as a foreign
   // claim — see `SessionStore.outbox.claim()`'s own doc comment on why
   // same-owner renewal must always succeed.
-  const sessionOutboxDrainOwner = runtimeServices.identifiers.next('session-outbox-drainer');
+  //
+  // Codex P1 review finding, PR #599, "Use an owner identifier unique
+  // across runtime instances": `runtimeServices.identifiers.next()` alone
+  // is NOT a cross-instance uniqueness guarantee — `RuntimeServices`'
+  // own contract lets two independently constructed manual/deterministic
+  // runtimes with the same `identifierSeed` intentionally mint identical
+  // sequences (exact reproduction is the whole point of that seam). Two
+  // bureau processes built that way would then mint the SAME drain-owner
+  // id, and `outbox.claim()` treats a matching owner as same-owner
+  // renewal — exactly the cross-owner exclusivity this lease exists to
+  // enforce, silently defeated. `crypto.randomUUID()` appended here
+  // mirrors what `createDefaultRuntimeServices()` itself does internally
+  // for the identical reason (`lifecycle/src/runtime-services.ts`) — real
+  // randomness is the right tool for a value that must be globally unique
+  // regardless of injected determinism, never serialized into any
+  // reproduction artifact, run report, or other reproducible-output
+  // surface this codebase's determinism guarantees actually cover.
+  const sessionOutboxDrainOwner = `${runtimeServices.identifiers.next('session-outbox-drainer')}:${generateSessionOutboxDrainOwnerSuffix()}`;
   // How long a claim protects an entry from being reclaimed by a different
   // drainer. Long enough to comfortably cover one pass's durable-write wait
   // (`waitForActiveWrites`) under ordinary load; short enough that a
@@ -5285,6 +5303,54 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // above is not one — the issue's acceptance criteria name no configurable
   // lease duration.
   const SESSION_OUTBOX_CLAIM_LEASE_MS = 30_000;
+  // How often the renewal timer (below) extends an in-progress claim.
+  // Comfortably shorter than the lease itself so a renewal always lands
+  // well before the PRIOR grant would expire, even under one slow tick.
+  const SESSION_OUTBOX_CLAIM_RENEWAL_INTERVAL_MS = Math.floor(SESSION_OUTBOX_CLAIM_LEASE_MS / 3);
+  // Codex P1 review finding, PR #599, "Schedule a retry when a live claim
+  // blocks recovery": when this drainer loses a `claim()` to a peer whose
+  // lease has not yet expired, the ONLY built-in retry today is whichever
+  // of the three drivers happens to fire again later (another commit's
+  // trigger, the automatic maintenance timer, or a future boot). A
+  // KV-only or manual-maintenance bureau can go arbitrarily long with
+  // none of those, leaving the entry undelivered long after the blocking
+  // claim itself expired. This single-slot timer (never more than one
+  // outstanding — a later-firing retry is redundant once an earlier one
+  // is armed, and an earlier-observed lease always REPLACES a
+  // later-armed one) wakes this bureau's own drain right at the known
+  // holder's `claim.until`, without waiting on an unrelated trigger.
+  // `RuntimeTimeoutHandle` is `unknown` (lifecycle's own opaque-handle
+  // type, see `automaticRunOwnershipPruneTimer` below for the same note),
+  // so it cannot be distinguished from `undefined` by type alone —
+  // `sessionOutboxRetryTimerArmedForMs`'s own `undefined`/set state is the
+  // single source of truth for whether this handle holds a live timer.
+  let sessionOutboxRetryTimerHandle: RuntimeTimeoutHandle;
+  let sessionOutboxRetryTimerArmedForMs: number | undefined;
+  function scheduleSessionOutboxRetry(atMs: number): void {
+    if (
+      sessionOutboxRetryTimerArmedForMs !== undefined &&
+      sessionOutboxRetryTimerArmedForMs <= atMs
+    ) {
+      // An earlier (or equal) retry is already armed — it covers this
+      // case too, since a fresh drain pass re-evaluates from scratch.
+      return;
+    }
+    if (sessionOutboxRetryTimerArmedForMs !== undefined) {
+      runtimeServices.timers.clearTimeout(sessionOutboxRetryTimerHandle);
+    }
+    sessionOutboxRetryTimerArmedForMs = atMs;
+    const delayMs = Math.max(0, atMs - runtimeServices.clock.now());
+    sessionOutboxRetryTimerHandle = runtimeServices.timers.setTimeout(() => {
+      sessionOutboxRetryTimerArmedForMs = undefined;
+      drainSessionOutbox().catch((error: unknown) => {
+        diagnose({
+          level: 'error',
+          scope: 'durable-maintenance',
+          message: `[bureau] Session outbox retry drain (scheduled after losing a claim to a live peer) failed: ${serializeUnknownError(error)}`,
+        });
+      });
+    }, delayMs);
+  }
   let sessionOutboxDrainInFlight: Promise<void> | undefined;
   // AB-389 (Codex P2 review finding, PR #598, "Re-run the drain when a
   // commit joins its completion edge"): a commit's trigger can arrive
@@ -5385,169 +5451,51 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           owner: sessionOutboxDrainOwner,
           until: runtimeServices.clock.now() + SESSION_OUTBOX_CLAIM_LEASE_MS,
         });
-        if (!claimed) return;
-        const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
-        // AB-389 (Codex P2 review finding, PR #598, "Isolate subscriber
-        // exceptions while draining the outbox"): `emitter.dispatch()`
-        // fans out to two kinds of listener — `addEventListener`-registered
-        // ones (this includes `durableEventProducerInstance`'s own
-        // write-tracking listener, native-`EventTarget`-isolated per spec:
-        // a throw there never reaches this call) and a public
-        // `bureau.toObservable()` subscriber, which has NO such isolation
-        // (`CompletableEventTarget.dispatchEvent` calls those directly, no
-        // try/catch of its own — see that class's own doc comment on why
-        // this is intentionally NOT fixed there: `active-run-adapter.ts`'s
-        // OWN emitter relies on a throwing observer aborting its dispatch
-        // call, an unrelated, already-tested contract this fix must not
-        // disturb). Isolated HERE instead, scoped to exactly this call
-        // site: because the native listener above already started
-        // tracking its write synchronously before any observer runs, a
-        // throw from a downstream OBSERVER can never un-start that write —
-        // catching it here just stops one badly-behaved subscriber from
-        // permanently wedging the RESERVED lowest-ordinal entry (returned
-        // on every retry) and starving every later session lifecycle fact
-        // behind it.
-        try {
-          switch (entry.kind) {
-            case 'session.created':
-              emitter.dispatch(
-                new SessionCreatedEvent(
-                  entry.sessionId,
-                  entry.agentName,
-                  entry.incarnation,
-                  entry.ordinal,
-                  entry.committedAtMs,
-                ),
-              );
-              break;
-            case 'session.saved':
-              emitter.dispatch(
-                new SessionSavedEvent(
-                  entry.sessionId,
-                  entry.agentName,
-                  entry.incarnation,
-                  entry.ordinal,
-                  entry.committedAtMs,
-                ),
-              );
-              break;
-            case 'session.deleted':
-              emitter.dispatch(
-                new SessionDeletedEvent(
-                  entry.sessionId,
-                  entry.incarnation,
-                  entry.ordinal,
-                  entry.committedAtMs,
-                ),
-              );
-              break;
-          }
-        } catch (error) {
-          diagnose({
-            level: 'error',
-            scope: 'durable-maintenance',
-            message: `[bureau] A bureau.toObservable() subscriber threw while replaying session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}"); continuing the drain:`,
-            cause: error,
-          });
-        }
-        // Waits for the durable write THIS dispatch just started (and
-        // any other write already in flight for the same owner) to
-        // settle before acknowledging — never before. `dispatch()` calls
-        // `durable-event-history.ts`'s listener synchronously, which
-        // starts tracking the write before `dispatch()` itself returns,
-        // so this snapshot-then-await always catches it.
-        await producer?.waitForActiveWrites(owner);
-        // AB-389 (Codex P1 review finding, PR #598, "Retain the outbox
-        // entry when its durable write fails"): `waitForActiveWrites`
-        // resolving proves only that the write SETTLED, never that it
-        // SUCCEEDED — a storage failure is diagnosed and swallowed by the
-        // write's own listener, never surfaced here. Verifying via
-        // `wasRecorded` (the SAME dedupe identity `record()` itself checks
-        // — this entry's own ordinal) before acknowledging closes that
-        // gap: a failed write leaves the entry pending for a LATER drain
-        // to retry, rather than being permanently discarded even though
-        // nothing durable was ever recorded. Skipped entirely when there
-        // is no durable event history to verify against (`eventHistoryInstance`
-        // absent) — acknowledging immediately is correct there, per this
-        // function's own doc comment on why `producer` alone gates the
-        // wait above.
-        if (eventHistoryInstance) {
-          const wasRecorded = await eventHistoryInstance.wasRecorded(
-            owner,
-            entry.kind,
-            String(entry.ordinal),
-          );
-          if (!wasRecorded) {
-            diagnose({
-              level: 'error',
-              scope: 'durable-maintenance',
-              message: `[bureau] Session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}") was not durably recorded; leaving it pending for a later drain to retry.`,
-            });
-            // Stop this pass here, rather than spinning on the same
-            // still-failing entry forever within this one call: a LATER,
-            // distinct trigger (the next commit, or the next maintenance
-            // tick) starts a fresh pass and gets a fresh chance at it.
-            return;
-          }
-        }
-        // AB-389 (Codex P1 review finding, PR #598, "Verify deletion audit
-        // persistence before acknowledging"): `audit-trail.ts`'s own
-        // `session.deleted` listener writes an out-of-band KV record
-        // through the SAME swallow-and-diagnose discipline `sink()` uses
-        // for durable history — a failed `kv.set()` never surfaces to this
-        // drain. `eventHistoryInstance`'s own `wasRecorded` check above
-        // verifies ONLY durable event history, which can be entirely
-        // absent (a KV-only bureau with no durable engine) even though the
-        // audit trail is configured and its write is the ONLY record of
-        // this deletion. `query({ runId })` already waits for that
-        // specific owner's in-flight write to settle (AB-228) before
-        // reading back, so this both waits AND verifies in one call — a
-        // bureau with no `runtime.kv` configured skips this entirely
-        // (`query()` always returns `[]` there, which would otherwise read
-        // as a permanent, un-retryable failure).
-        if (entry.kind === 'session.deleted' && auditTrailInstance && runtime.kv) {
-          const ownerRunId = auditTrailSessionOwnerId(entry.sessionId);
-          const records = await auditTrailInstance.query({
-            runId: ownerRunId,
-            type: 'session.deleted',
-          });
-          const persisted = records.some((record) => {
-            const detail = record.detail;
-            return (
-              typeof detail === 'object' &&
-              detail !== null &&
-              'incarnation' in detail &&
-              detail.incarnation === entry.incarnation
-            );
-          });
-          if (!persisted) {
-            diagnose({
-              level: 'error',
-              scope: 'durable-maintenance',
-              message: `[bureau] Session outbox entry ${entry.ordinal} (session.deleted for session "${entry.sessionId}") was not durably recorded in the audit trail; leaving it pending for a later drain to retry.`,
-            });
-            return;
-          }
-        }
-        const acknowledged = await outboxSessionStore.outbox.acknowledge(
-          entry.ordinal,
-          sessionOutboxDrainOwner,
-        );
-        // AB-390 — a `false` here means a different owner reclaimed this
-        // entry between this pass's `claim()` above and this point (this
-        // owner's own lease must have lapsed under an unusually slow
-        // durable write). The dispatch above already ran, so the current
-        // claimant's own acknowledge (or a future one) retires the entry;
-        // continuing this pass past a lost claim risks the same reordering
-        // hazard the claim-before-replay check above exists to prevent.
-        if (!acknowledged) {
-          diagnose({
-            level: 'error',
-            scope: 'durable-maintenance',
-            message: `[bureau] Lost the claim on session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}") before acknowledging it; a different drainer reclaimed and will retire it.`,
-          });
+        if (!claimed) {
+          // Codex P1 review finding, PR #599, "Schedule a retry when a
+          // live claim blocks recovery": `entry.claim` (from THIS pass's
+          // own `pending()` snapshot, taken just above) names the
+          // blocking holder's own lease — wake this bureau's drain right
+          // when that lease is due to expire, rather than depending on
+          // whichever unrelated trigger happens to fire next.
+          if (entry.claim) scheduleSessionOutboxRetry(entry.claim.until);
           return;
         }
+        const owner: DurableEventOwner = { kind: 'session', id: entry.sessionId };
+        // Codex P1 review finding, PR #599, "Renew the claim while replay
+        // is in flight": the stretch this `try` wraps — the durable write
+        // `waitForActiveWrites` settles, `wasRecorded`, and the
+        // audit-trail read-your-writes query — has no upper bound under
+        // real backpressure or a slow backend. A claim taken once, before
+        // any of that, can lapse mid-wait, letting a peer reclaim and
+        // dispatch this SAME entry again before this drainer ever
+        // discovers the lost claim at `acknowledge()` — recreating the
+        // exact duplicate-delivery hazard this lease exists to close.
+        // This timer renews the lease every
+        // `SESSION_OUTBOX_CLAIM_RENEWAL_INTERVAL_MS` for as long as this
+        // drainer is still actively working the entry, and is always
+        // cleared in `finally` — including on every early `return` below.
+        const renewalTimerHandle = runtimeServices.timers.setInterval(() => {
+          outboxSessionStore.outbox
+            .claim(entry.ordinal, {
+              owner: sessionOutboxDrainOwner,
+              until: runtimeServices.clock.now() + SESSION_OUTBOX_CLAIM_LEASE_MS,
+            })
+            .catch((error: unknown) => {
+              diagnose({
+                level: 'error',
+                scope: 'durable-maintenance',
+                message: `[bureau] Failed to renew the claim on session outbox entry ${entry.ordinal} while replaying it: ${serializeUnknownError(error)}`,
+              });
+            });
+        }, SESSION_OUTBOX_CLAIM_RENEWAL_INTERVAL_MS);
+        let outcome: 'stop' | 'continue';
+        try {
+          outcome = await drainSessionOutboxEntry(entry, owner, outboxSessionStore, producer);
+        } finally {
+          runtimeServices.timers.clearInterval(renewalTimerHandle);
+        }
+        if (outcome === 'stop') return;
       }
     }
   }
@@ -5727,6 +5675,186 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // flipping and the snapshot being taken — ordinary JS single-threaded
   // synchronous-until-the-first-`await` semantics, not a real lock.
   let maintenanceAdmissionClosed = false;
+
+  // AB-390 — the claim-then-replay-then-acknowledge sequence for ONE
+  // outbox entry, extracted so `drainSessionOutboxPass` can wrap it in
+  // the renewal-timer `try`/`finally` above without duplicating a return
+  // path per verification step. Returns `'stop'` for every case that used
+  // to `return` directly out of `drainSessionOutboxPass` itself (the
+  // caller propagates that into its OWN `return`, so "stop this entry"
+  // and "stop the whole pass" remain exactly the same observable behavior
+  // they were before this was split out) and `'continue'` once this
+  // entry is fully acknowledged.
+  async function drainSessionOutboxEntry(
+    entry: SessionOutboxEntry,
+    owner: DurableEventOwner,
+    outboxSessionStore: SessionStore,
+    producer: DurableEventProducer | undefined,
+  ): Promise<'stop' | 'continue'> {
+    // AB-389 (Codex P2 review finding, PR #598, "Isolate subscriber
+    // exceptions while draining the outbox"): `emitter.dispatch()`
+    // fans out to two kinds of listener — `addEventListener`-registered
+    // ones (this includes `durableEventProducerInstance`'s own
+    // write-tracking listener, native-`EventTarget`-isolated per spec:
+    // a throw there never reaches this call) and a public
+    // `bureau.toObservable()` subscriber, which has NO such isolation
+    // (`CompletableEventTarget.dispatchEvent` calls those directly, no
+    // try/catch of its own — see that class's own doc comment on why
+    // this is intentionally NOT fixed there: `active-run-adapter.ts`'s
+    // OWN emitter relies on a throwing observer aborting its dispatch
+    // call, an unrelated, already-tested contract this fix must not
+    // disturb). Isolated HERE instead, scoped to exactly this call
+    // site: because the native listener above already started
+    // tracking its write synchronously before any observer runs, a
+    // throw from a downstream OBSERVER can never un-start that write —
+    // catching it here just stops one badly-behaved subscriber from
+    // permanently wedging the RESERVED lowest-ordinal entry (returned
+    // on every retry) and starving every later session lifecycle fact
+    // behind it.
+    try {
+      switch (entry.kind) {
+        case 'session.created':
+          emitter.dispatch(
+            new SessionCreatedEvent(
+              entry.sessionId,
+              entry.agentName,
+              entry.incarnation,
+              entry.ordinal,
+              entry.committedAtMs,
+            ),
+          );
+          break;
+        case 'session.saved':
+          emitter.dispatch(
+            new SessionSavedEvent(
+              entry.sessionId,
+              entry.agentName,
+              entry.incarnation,
+              entry.ordinal,
+              entry.committedAtMs,
+            ),
+          );
+          break;
+        case 'session.deleted':
+          emitter.dispatch(
+            new SessionDeletedEvent(
+              entry.sessionId,
+              entry.incarnation,
+              entry.ordinal,
+              entry.committedAtMs,
+            ),
+          );
+          break;
+      }
+    } catch (error) {
+      diagnose({
+        level: 'error',
+        scope: 'durable-maintenance',
+        message: `[bureau] A bureau.toObservable() subscriber threw while replaying session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}"); continuing the drain:`,
+        cause: error,
+      });
+    }
+    // Waits for the durable write THIS dispatch just started (and
+    // any other write already in flight for the same owner) to
+    // settle before acknowledging — never before. `dispatch()` calls
+    // `durable-event-history.ts`'s listener synchronously, which
+    // starts tracking the write before `dispatch()` itself returns,
+    // so this snapshot-then-await always catches it.
+    await producer?.waitForActiveWrites(owner);
+    // AB-389 (Codex P1 review finding, PR #598, "Retain the outbox
+    // entry when its durable write fails"): `waitForActiveWrites`
+    // resolving proves only that the write SETTLED, never that it
+    // SUCCEEDED — a storage failure is diagnosed and swallowed by the
+    // write's own listener, never surfaced here. Verifying via
+    // `wasRecorded` (the SAME dedupe identity `record()` itself checks
+    // — this entry's own ordinal) before acknowledging closes that
+    // gap: a failed write leaves the entry pending for a LATER drain
+    // to retry, rather than being permanently discarded even though
+    // nothing durable was ever recorded. Skipped entirely when there
+    // is no durable event history to verify against (`eventHistoryInstance`
+    // absent) — acknowledging immediately is correct there, per this
+    // function's own doc comment on why `producer` alone gates the
+    // wait above.
+    if (eventHistoryInstance) {
+      const wasRecorded = await eventHistoryInstance.wasRecorded(
+        owner,
+        entry.kind,
+        String(entry.ordinal),
+      );
+      if (!wasRecorded) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-maintenance',
+          message: `[bureau] Session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}") was not durably recorded; leaving it pending for a later drain to retry.`,
+        });
+        // Stop this pass here, rather than spinning on the same
+        // still-failing entry forever within this one call: a LATER,
+        // distinct trigger (the next commit, or the next maintenance
+        // tick) starts a fresh pass and gets a fresh chance at it.
+        return 'stop';
+      }
+    }
+    // AB-389 (Codex P1 review finding, PR #598, "Verify deletion audit
+    // persistence before acknowledging"): `audit-trail.ts`'s own
+    // `session.deleted` listener writes an out-of-band KV record
+    // through the SAME swallow-and-diagnose discipline `sink()` uses
+    // for durable history — a failed `kv.set()` never surfaces to this
+    // drain. `eventHistoryInstance`'s own `wasRecorded` check above
+    // verifies ONLY durable event history, which can be entirely
+    // absent (a KV-only bureau with no durable engine) even though the
+    // audit trail is configured and its write is the ONLY record of
+    // this deletion. `query({ runId })` already waits for that
+    // specific owner's in-flight write to settle (AB-228) before
+    // reading back, so this both waits AND verifies in one call — a
+    // bureau with no `runtime.kv` configured skips this entirely
+    // (`query()` always returns `[]` there, which would otherwise read
+    // as a permanent, un-retryable failure).
+    if (entry.kind === 'session.deleted' && auditTrailInstance && runtime.kv) {
+      const ownerRunId = auditTrailSessionOwnerId(entry.sessionId);
+      const records = await auditTrailInstance.query({
+        runId: ownerRunId,
+        type: 'session.deleted',
+      });
+      const persisted = records.some((record) => {
+        const detail = record.detail;
+        return (
+          typeof detail === 'object' &&
+          detail !== null &&
+          'incarnation' in detail &&
+          detail.incarnation === entry.incarnation
+        );
+      });
+      if (!persisted) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-maintenance',
+          message: `[bureau] Session outbox entry ${entry.ordinal} (session.deleted for session "${entry.sessionId}") was not durably recorded in the audit trail; leaving it pending for a later drain to retry.`,
+        });
+        return 'stop';
+      }
+    }
+    const acknowledged = await outboxSessionStore.outbox.acknowledge(
+      entry.ordinal,
+      sessionOutboxDrainOwner,
+    );
+    // AB-390 — a `false` here means a different owner reclaimed this
+    // entry between this pass's `claim()` above and this point (this
+    // owner's own lease must have lapsed under an unusually slow
+    // durable write, outrunning even the renewal timer above). The
+    // dispatch above already ran, so the current claimant's own
+    // acknowledge (or a future one) retires the entry; continuing
+    // this pass past a lost claim risks the same reordering hazard
+    // the claim-before-replay check above exists to prevent.
+    if (!acknowledged) {
+      diagnose({
+        level: 'error',
+        scope: 'durable-maintenance',
+        message: `[bureau] Lost the claim on session outbox entry ${entry.ordinal} (${entry.kind} for session "${entry.sessionId}") before acknowledging it; a different drainer reclaimed and will retire it.`,
+      });
+      return 'stop';
+    }
+    return 'continue';
+  }
 
   async function runDurableMaintenance(now?: number): Promise<true | undefined> {
     if (maintenanceAdmissionClosed) {
@@ -7378,6 +7506,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       if (automaticRunOwnershipPruneTimerStarted) {
         runtimeServices.timers.clearInterval(automaticRunOwnershipPruneTimer);
         automaticRunOwnershipPruneTimerStarted = false;
+      }
+      // AB-390 — the session-outbox retry timer (armed when this bureau
+      // last lost a claim to a still-live peer) must not fire after
+      // shutdown: a retry drain running post-teardown would race the very
+      // cleanup this shutdown sequence exists to make orderly.
+      if (sessionOutboxRetryTimerArmedForMs !== undefined) {
+        runtimeServices.timers.clearTimeout(sessionOutboxRetryTimerHandle);
+        sessionOutboxRetryTimerArmedForMs = undefined;
       }
       if (automaticRunOwnershipPruneCurrentPass) {
         await automaticRunOwnershipPruneCurrentPass;

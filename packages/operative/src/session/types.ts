@@ -46,9 +46,13 @@ export interface SessionCleanupOptions {
  * `revision`, which only orders one lineage, not the whole store. A drain
  * loop replays each entry as the matching `SessionCreatedEvent`/
  * `SessionSavedEvent`/`SessionDeletedEvent` and calls
- * `SessionStore.outbox.acknowledge(ordinal)` only once that replay's
- * downstream durable write has settled — never before, and never merely
- * because the event was dispatched.
+ * `SessionStore.outbox.acknowledge(ordinal, owner)` only once that
+ * replay's downstream durable write has settled — never before, and never
+ * merely because the event was dispatched. As of AB-390, a drain must
+ * first win `SessionStore.outbox.claim(ordinal, { owner, until })` — a
+ * compare-and-swap lease on this entry's own `claim` field, below — before
+ * replaying it at all; `acknowledge()` itself re-verifies that claim is
+ * still held before removing the entry.
  *
  * A discriminated union on `kind` (Codex P2 review finding, PR #598,
  * "Require agent names on created and saved entries"): `agentName` is

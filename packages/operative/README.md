@@ -649,15 +649,20 @@ this way.
 const sessions = createSessionStore(kvStore);
 const drainerId = 'my-drainer-instance';
 sessions.events.addEventListener('session.outbox-appended', async () => {
+  // Ordinals define store-wide replay order — stop at the first entry
+  // this drainer cannot own, rather than skipping ahead to a later one,
+  // or a `session.saved`/`session.deleted` could replay before an
+  // earlier `session.created` a peer still holds.
   for (const entry of await sessions.outbox.pending()) {
     const claimed = await sessions.outbox.claim(entry.ordinal, {
       owner: drainerId,
       until: Date.now() + 30_000,
     });
-    if (!claimed) continue; // a peer already holds this entry's lease
+    if (!claimed) break; // a peer already holds this entry's lease
     console.log(`outbox entry ${entry.ordinal}: ${entry.kind} for ${entry.sessionId}`);
     // Replay `entry` as the real event, await its own durable write, THEN:
-    await sessions.outbox.acknowledge(entry.ordinal, drainerId);
+    const acknowledged = await sessions.outbox.acknowledge(entry.ordinal, drainerId);
+    if (!acknowledged) break; // lost the claim before acknowledging
   }
 });
 ```

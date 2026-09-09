@@ -1933,4 +1933,133 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     expect(await store.outbox.acknowledge(entry!.ordinal, 'never-claimed-this')).toBe(false);
     expect(await store.outbox.pending()).toHaveLength(1);
   });
+
+  it.each([NaN, Infinity, -Infinity])(
+    'claim() rejects a non-finite lease.until (%p), rather than persisting a value JSON.stringify would silently turn into null (Codex P2 review finding, PR #599)',
+    async (until) => {
+      const store = createSessionStore(textValueStore(new MemoryStorage()));
+      await store.save(makeSession({ id: `claim-non-finite-${until}` }));
+      const [entry] = await store.outbox.pending();
+      await expect(
+        store.outbox.claim(entry!.ordinal, { owner: 'drainer-a', until }),
+      ).rejects.toThrow(TypeError);
+      // Rejected before any store mutation — the entry is still pending
+      // and unclaimed, not wedged behind a corrupted `claim` field.
+      expect(await store.outbox.pending()).toHaveLength(1);
+      expect(
+        await store.outbox.claim(entry!.ordinal, {
+          owner: 'drainer-a',
+          until: 1_000,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it('claim() retries CAS contention for the SAME owner rather than reporting a false conflict (Codex P2 review finding, PR #599)', async () => {
+    const runtime = createManualRuntimeServices();
+    const base = textValueStore(new MemoryStorage());
+    let conditionalBatchCalls = 0;
+    // Stands in for two overlapping renewal calls racing the SAME CAS: the
+    // first attempt loses (as if a concurrent call won it first) even
+    // though nothing about the entry actually changed, so a correct retry
+    // re-reads and wins on its next attempt rather than surfacing `false`.
+    let contentionArmed = false;
+    const contended = {
+      ...base,
+      async conditionalBatch(
+        conditions: Parameters<typeof base.conditionalBatch>[0],
+        operations: Parameters<typeof base.conditionalBatch>[1],
+      ) {
+        if (contentionArmed) {
+          conditionalBatchCalls += 1;
+          if (conditionalBatchCalls === 1) return false;
+        }
+        return base.conditionalBatch(conditions, operations);
+      },
+    };
+    const store = createSessionStore(contended, { runtime });
+    await store.save(makeSession({ id: 'claim-same-owner-retry' }));
+    const [entry] = await store.outbox.pending();
+    // Only the claim() call below is under test — `save()`'s own
+    // conditionalBatch calls (appending the outbox entry itself) must not
+    // count toward the retry assertion.
+    contentionArmed = true;
+
+    expect(
+      await store.outbox.claim(entry!.ordinal, {
+        owner: 'drainer-a',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(true);
+    expect(conditionalBatchCalls).toBe(2);
+  });
+
+  it('claim() gives up and returns false after exhausting its retries against a different, still-live owner (never confused with same-owner contention)', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'claim-different-owner-no-retry' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+
+    expect(
+      await store.outbox.claim(ordinal, {
+        owner: 'drainer-a',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(true);
+    expect(
+      await store.outbox.claim(ordinal, {
+        owner: 'drainer-b',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(false);
+  });
+
+  it("acknowledge() reports true, not a false conflict, when a peer's own claim-and-acknowledge already retired the entry between this call's read and its CAS (Copilot review finding, PR #599)", async () => {
+    const runtime = createManualRuntimeServices();
+    const base = textValueStore(new MemoryStorage());
+    let interceptedDelete = false;
+    const store = createSessionStore(
+      {
+        ...base,
+        async conditionalBatch(
+          conditions: Parameters<typeof base.conditionalBatch>[0],
+          operations: Parameters<typeof base.conditionalBatch>[1],
+        ) {
+          // Only `acknowledge()`'s own CAS issues a `delete` operation —
+          // `save()`'s outbox append and `claim()`'s lease write both
+          // issue `set` — so gating on the operation's own shape targets
+          // exactly the call under test without an unrelated call-count
+          // that would also have to account for `save()`'s own append.
+          const deleteOperation = operations.find(
+            (operation): operation is { type: 'delete'; key: string } =>
+              operation.type === 'delete',
+          );
+          if (deleteOperation && !interceptedDelete) {
+            interceptedDelete = true;
+            // Simulates a peer's own claim-and-acknowledge landing between
+            // this call's initial read and its own CAS: by the time this
+            // call's CAS runs, the entry is already gone, so the CAS
+            // legitimately loses — but the caller's OWN intent (retire
+            // this entry) has still been satisfied.
+            await base.delete(deleteOperation.key);
+            return false;
+          }
+          return base.conditionalBatch(conditions, operations);
+        },
+      },
+      { runtime },
+    );
+    await store.save(makeSession({ id: 'ack-peer-retired-race' }));
+    const [entry] = await store.outbox.pending();
+    expect(
+      await store.outbox.claim(entry!.ordinal, {
+        owner: 'drainer-a',
+        until: runtime.clock.now() + 30_000,
+      }),
+    ).toBe(true);
+
+    expect(await store.outbox.acknowledge(entry!.ordinal, 'drainer-a')).toBe(true);
+    expect(await store.outbox.pending()).toHaveLength(0);
+  });
 });

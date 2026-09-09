@@ -43,6 +43,12 @@
       "owningIssue": "AB-252"
     },
     {
+      "path": "packages/bureau/src/session-outbox-drain-owner-suffix.ts",
+      "reason": "AB-390 (Codex P1 review finding, PR #599, \"Use an owner identifier unique across runtime instances\"): create-bureau.ts's session-outbox drain-owner id needs a real-randomness suffix so two bureau PROCESSES built from independently constructed manual RuntimeServices with the SAME identifierSeed (a documented, intentional reproducibility feature of createManualRuntimeServices()) never mint the identical drain-owner id and get treated as the same owner by SessionStore.outbox.claim()'s compare-and-swap. Split out of create-bureau.ts into this one-function file — mirroring lifecycle's identifier-seed.ts, which carries the same exemption for the same reason — so the exemption covers only this single real crypto.randomUUID() call, never create-bureau.ts as a whole.",
+      "owner": "Agent Bureau team",
+      "owningIssue": "AB-390"
+    },
+    {
       "path": "packages/lifecycle/test/runtime-services.test.ts",
       "reason": "This is the direct test of createDefaultRuntimeServices() itself (the real-globals implementation) — it asserts clock.now() tracks the real Date.now(), monotonic.now() tracks real elapsed time, and timers schedule and cancel real callbacks. Injecting createManualRuntimeServices() here would test the fake instead of the real adapter it exists to prove correct.",
       "owner": "Agent Bureau team",
