@@ -11,8 +11,10 @@ export type {
 export { createAgentCatalog } from './agent-catalog';
 export type {
   AuditEventType,
+  AuditPruneResult,
   AuditQueryOptions,
   AuditRecord,
+  AuditRetentionOption,
   AuditTrail,
   AuditTrailOptions,
 } from './audit-trail';

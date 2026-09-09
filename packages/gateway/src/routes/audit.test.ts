@@ -556,6 +556,7 @@ describe('GET /api/v1/audit', () => {
     const stubAuditTrail: AuditTrail = {
       query: async () => [durableRecord],
       record: async () => {},
+      prune: async () => undefined,
       dispose: async () => {},
     };
 
@@ -689,6 +690,7 @@ describe('GET /api/v1/audit', () => {
     const stubAuditTrail: AuditTrail = {
       query: async () => [durableFirst, durableSecond],
       record: async () => {},
+      prune: async () => undefined,
       dispose: async () => {},
     };
 
@@ -808,6 +810,7 @@ describe('GET /api/v1/audit', () => {
     const stubAuditTrail: AuditTrail = {
       query: async () => [legacyRecord],
       record: async () => {},
+      prune: async () => undefined,
       dispose: async () => {},
     };
     const stubStore = {

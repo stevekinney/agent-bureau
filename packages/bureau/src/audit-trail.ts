@@ -19,11 +19,16 @@ import type {
   ScheduleResumedEvent,
   SessionDeletedEvent,
 } from '@lostgradient/operative';
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
-import { resolveDiagnosticSink, serializeActionDetail } from './serialization';
+import type { EventTimestampResolver } from './event-timestamp';
+import {
+  resolveDiagnosticSink,
+  serializeActionDetail,
+  serializeUnknownError,
+} from './serialization';
 import type { Bureau, DiagnosticSink } from './types';
 
 // ── Public surface ──────────────────────────────────────────────────
@@ -173,6 +178,26 @@ export const AUDIT_EVENT_TYPES = [
 
 export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
 
+/**
+ * AB-388: retention policy for {@link AuditTrail.prune}. `'forever'` (the
+ * default everywhere this type is consumed) means no record is ever pruned
+ * — today's unbounded behavior, unchanged until an operator opts in.
+ * `{ olderThan }` prunes any record whose `timestampMs` is more than
+ * `olderThan` milliseconds before the pruning pass's own clock reading —
+ * see `create-bureau.ts`'s `pruneAuditTrail` for how that cutoff is further
+ * clamped to never remove a record the Weft fleet feed's own retention
+ * floor still protects.
+ */
+export type AuditRetentionOption = 'forever' | { olderThan: number };
+
+/** The outcome of one {@link AuditTrail.prune} pass. */
+export interface AuditPruneResult {
+  /** How many records this pass deleted. Zero when nothing qualified. */
+  prunedCount: number;
+  /** The effective cutoff this pass pruned against (epoch milliseconds). */
+  cutoffMs: number;
+}
+
 /** A single entry in the durable audit log. */
 export interface AuditRecord {
   /** ISO-8601 timestamp. */
@@ -282,6 +307,43 @@ export interface AuditTrail {
     principal?: string;
   }): Promise<void>;
   /**
+   * AB-388: delete every durable record whose `timestampMs` is strictly
+   * before `cutoffMs`, EXCEPT one whose `runId` satisfies
+   * `pruneOptions.protectRunId` (if supplied) — see that option's own doc
+   * comment. The caller (`create-bureau.ts`'s `pruneAuditTrail`) computes
+   * `cutoffMs` already clamped to the fleet feed's own global retention
+   * floor timestamp, but a single scalar cutoff cannot express "protect
+   * THIS owner's entire history" when that owner's only currently-retained
+   * durable event is a single, later terminal transition — `protectRunId`
+   * closes that gap. A no-op, returning `undefined`, when no KV store is
+   * configured (ephemeral bureau, nothing to prune).
+   *
+   * When at least one record is pruned, persists the highest pruned
+   * `sequence` (so {@link computeInitialAuditSequence} seeds correctly
+   * after a restart even if every remaining record was itself pruned) and
+   * writes one out-of-band `audit.pruned` record naming the count and
+   * cutoff — skipped when nothing qualified, so a pass with nothing to do
+   * does not itself grow the trail it is pruning.
+   */
+  prune(
+    cutoffMs: number,
+    pruneOptions?: {
+      /**
+       * AB-388 (Codex review, PR #597, "Protect earlier audit records for
+       * retained owners"): a record whose `runId` this returns `true` for
+       * is never pruned, no matter how old `timestampMs` is —
+       * `create-bureau.ts`'s `pruneAuditTrail` passes a predicate backed by
+       * `eventHistoryInstance.retainedRunOwnerIds()`'s snapshot, so a run
+       * whose durable history retains only its own terminal `run.*` event
+       * keeps its EARLIER `tool.*`/`step.completed` audit records too,
+       * honoring the README's "a retained run history keeps that run's
+       * audit records" promise instead of only protecting records at or
+       * after the fleet feed's global floor timestamp.
+       */
+      protectRunId?: (runId: string) => boolean;
+    },
+  ): Promise<AuditPruneResult | undefined>;
+  /**
    * Stop listening to bureau events, release the subscription, and await
    * every write already in flight (from the action-stream listener and from
    * {@link record}) before resolving (AB-207). Never rejects — an
@@ -312,6 +374,17 @@ export interface AuditTrailOptions {
    * new, never-before-persisted trail.
    */
   initialSequence?: number;
+  /**
+   * AB-388: shared `emittedAtMs` resolver (see `event-timestamp.ts`) — when
+   * supplied, the `schedule.*`/`session.deleted` out-of-band listeners
+   * below stamp their record with this resolver's reading for the event
+   * instance, instead of an independent `runtime.clock.now()` call, so the
+   * same event's durable-event-history record (via
+   * `createDurableEventProducer`, sharing the SAME resolver instance) never
+   * diverges from this audit record's `timestampMs`. Falls back to
+   * `runtime.clock.now()` when omitted, matching every prior caller.
+   */
+  eventTimestamp?: EventTimestampResolver;
 }
 
 /**
@@ -333,6 +406,90 @@ export interface AuditTrailOptions {
  * own listeners use) — this only needs the two FIXED-width segments before
  * it, so runId's own content never matters here.
  */
+/**
+ * AB-388: parses BOTH fixed-width segments `encodeKey` guarantees —
+ * timestamp and sequence — directly from a key, with no I/O. Used by
+ * {@link AuditTrail.prune} so a well-formed key can be judged against
+ * `cutoffMs` and, if pruned, contribute to the highest-pruned-sequence
+ * floor WITHOUT a `kv.get` round trip per key — the same "one network call
+ * instead of `1 + keys.length`" saving {@link parseSequenceFromKey} gives
+ * {@link computeInitialAuditSequence} (Codex review, PR #594), applied to
+ * the prune path this issue adds.
+ *
+ * A separate function from {@link parseSequenceFromKey} rather than a
+ * shared refactor: that function tolerates a non-numeric timestamp
+ * segment (it never reads timestamp, only sequence, so it doesn't need
+ * to validate one) — changing its tolerance would risk an existing,
+ * already-tested fast-path boundary for a caller that has nothing to do
+ * with pruning. This function validates BOTH segments as digits, since a
+ * pruning decision genuinely needs a numeric `timestampMs` to compare
+ * against `cutoffMs` — a key whose timestamp segment fails that check
+ * safely falls back to {@link AuditTrail.prune}'s own slow
+ * `kv.get`-then-`JSON.parse` path, exactly like an unparseable key does
+ * for {@link computeInitialAuditSequence}.
+ *
+ * Returns `undefined` for any key that doesn't match this exact shape —
+ * wrong prefix, a non-16-digit or non-numeric timestamp segment, or no
+ * numeric sequence segment before the next `:` — safe fallback for the
+ * same edge cases {@link parseSequenceFromKey}'s own doc comment covers.
+ *
+ * AB-388 (Codex review, PR #597, "Protect earlier audit records for
+ * retained owners"): also returns `runId` — everything after the sequence
+ * segment, exactly as `encodeKey` appended it, colons and all (a
+ * `schedule:<id>`/`session:<id>` synthetic owner embeds its own `:`) — so
+ * {@link AuditTrail.prune}'s caller can protect a specific owner's records
+ * without a `kv.get`/`JSON.parse` round trip on this fast path either.
+ */
+function parsePruneCandidateFromKey(
+  key: string,
+): { timestampMs: number; sequence: number; runId: string } | undefined {
+  if (!key.startsWith(PREFIX)) return undefined;
+  const rest = key.slice(PREFIX.length);
+  const TIMESTAMP_WIDTH = 16;
+  if (rest.length <= TIMESTAMP_WIDTH + 1 || rest[TIMESTAMP_WIDTH] !== ':') return undefined;
+  const timestampSegment = rest.slice(0, TIMESTAMP_WIDTH);
+  if (!/^\d+$/.test(timestampSegment)) return undefined;
+  const timestampMs = Number(timestampSegment);
+  if (!Number.isSafeInteger(timestampMs)) return undefined;
+  const afterTimestamp = rest.slice(TIMESTAMP_WIDTH + 1);
+  const nextColon = afterTimestamp.indexOf(':');
+  if (nextColon === -1) return undefined;
+  const sequenceSegment = afterTimestamp.slice(0, nextColon);
+  if (!/^\d+$/.test(sequenceSegment)) return undefined;
+  const sequence = Number(sequenceSegment);
+  if (!Number.isSafeInteger(sequence)) return undefined;
+  const runId = afterTimestamp.slice(nextColon + 1);
+  return { timestampMs, sequence, runId };
+}
+
+/**
+ * AB-388 (Codex review, PR #597, "Validate decoded records before
+ * pruning"): a narrowing guard for the slow-path decode both
+ * {@link AuditTrail.prune} and {@link AuditTrail.query} use — `JSON.parse`
+ * on a value under this trail's prefix can succeed while producing
+ * something that is not an {@link AuditRecord} at all (`null`, a string, an
+ * array, or an object missing/mistyping one of the fields either caller
+ * reads). Casting that result straight to `AuditRecord` and reading a field
+ * off it would THROW for such a value, aborting the entire pass/query at
+ * that one key — including every record after it in `kv.list()`'s order —
+ * rather than skipping just the one corrupt record. `prune()` only ever
+ * reads `timestampMs`/`sequence` off the result; `query()` additionally
+ * reads `runId`/`type`, both validated here too so the same guard serves
+ * both callers.
+ */
+function isPrunableAuditRecordShape(
+  value: unknown,
+): value is { timestampMs: number; sequence?: number; runId: string; type: string } {
+  if (typeof value !== 'object' || value === null) return false;
+  if (!('timestampMs' in value) || typeof value.timestampMs !== 'number') return false;
+  if (!('runId' in value) || typeof value.runId !== 'string') return false;
+  if (!('type' in value) || typeof value.type !== 'string') return false;
+  if ('sequence' in value && value.sequence !== undefined && typeof value.sequence !== 'number') {
+    return false;
+  }
+  return true;
+}
+
 function parseSequenceFromKey(key: string): number | undefined {
   if (!key.startsWith(PREFIX)) return undefined;
   const rest = key.slice(PREFIX.length);
@@ -396,7 +553,7 @@ function parseSequenceFromKey(key: string): number | undefined {
  * share a millisecond, this issue's own rollback trigger.
  */
 export async function computeInitialAuditSequence(
-  kv: TextValueStore | undefined,
+  kv: ConditionalTextValueStore | undefined,
   onDiagnostic?: DiagnosticSink,
 ): Promise<number> {
   if (!kv) return 0;
@@ -431,6 +588,38 @@ export async function computeInitialAuditSequence(
           continue;
         }
       }
+
+      // AB-388: a pruning pass can remove EVERY record this scan above
+      // would otherwise have seen (the whole trail is older than the
+      // configured cutoff), which would leave `highest` at `-1` and make
+      // this function return `0` — reissuing sequence values a prior
+      // process lifetime already used, exactly the collision
+      // `AuditRecord.sequence`'s own doc comment says this function exists
+      // to prevent. `AuditTrail.prune` persists the highest sequence it
+      // ever deletes under this separate, non-`PREFIX` key precisely so
+      // this scan (which only ever sees SURVIVING records) can still
+      // recover that watermark. A key under a different top-level prefix
+      // than `PREFIX` so `kv.list(PREFIX)` above — and every other
+      // `PREFIX`-scoped scan in this file (`query()`) — never encounters
+      // it as a bogus "record".
+      const prunedFloorRaw = await kv.get(PRUNE_FLOOR_KEY);
+      if (prunedFloorRaw) {
+        try {
+          const prunedFloor: unknown = JSON.parse(prunedFloorRaw);
+          if (
+            typeof prunedFloor === 'number' &&
+            Number.isSafeInteger(prunedFloor) &&
+            prunedFloor >= 0 &&
+            prunedFloor > highest
+          ) {
+            highest = prunedFloor;
+          }
+        } catch {
+          // Malformed meta record — ignore it, same tolerance as every
+          // other malformed-record fallback in this function.
+        }
+      }
+
       return highest + 1;
     } catch (error: unknown) {
       diagnose({
@@ -452,6 +641,91 @@ export async function computeInitialAuditSequence(
 // ── Key encoding ────────────────────────────────────────────────────
 
 const PREFIX = 'audit:v1:';
+
+/**
+ * AB-388: where {@link AuditTrail.prune} persists the highest `sequence` it
+ * has ever pruned, so {@link computeInitialAuditSequence} can recover that
+ * watermark after a restart even when every record at or below it has since
+ * been deleted. Deliberately NOT under {@link PREFIX} — every `PREFIX`-scoped
+ * scan in this file (`query()`'s `kv.list(PREFIX)`, `computeInitialAuditSequence`'s
+ * own fast-path key parse) must never encounter this key and misread it as a
+ * malformed `AuditRecord`.
+ */
+const PRUNE_FLOOR_KEY = 'audit-retention:v1:highest-pruned-sequence';
+
+/**
+ * AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+ * with deletions"): a durable RECORD OF INTENT, written alongside
+ * {@link PRUNE_FLOOR_KEY} before this pass deletes anything, and cleared
+ * only after the pass's own `audit.pruned` summary has been durably
+ * written. If the process terminates after some `kv.delete()` calls have
+ * already committed but before the summary lands, this key survives —
+ * the deleted records themselves carry no evidence of their own removal
+ * once gone, but this intent record does, letting the NEXT pass emit the
+ * missing summary on this pass's behalf before doing any new work of its
+ * own. Deliberately NOT under {@link PREFIX}, for the same reason
+ * {@link PRUNE_FLOOR_KEY} is not.
+ */
+const PRUNE_INTENT_KEY = 'audit-retention:v1:prune-intent';
+
+/** The shape persisted at {@link PRUNE_INTENT_KEY}. */
+interface PruneIntentValue {
+  readonly count: number;
+  readonly cutoffMs: number;
+}
+
+function isPruneIntentValue(value: unknown): value is PruneIntentValue {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { count?: unknown }).count === 'number' &&
+    typeof (value as { cutoffMs?: unknown }).cutoffMs === 'number'
+  );
+}
+
+/**
+ * AB-388 (Codex review, PR #597, "Coordinate pruning across shared-store
+ * instances"): `prunePassQueue` only serializes `prune()` calls made
+ * WITHIN one `createAuditTrail()` instance — two Bureau PROCESSES sharing
+ * the same KV store (the same supported configuration `SessionStore`
+ * already handles via `durableOwnership: { ownership: 'workflow-lease' }`)
+ * each construct their OWN queue, so their passes can still overlap: both
+ * can list and delete the SAME qualifying keys, and both can race the
+ * read-modify-write of {@link PRUNE_FLOOR_KEY}, letting a later-committing
+ * pass overwrite a higher watermark with a lower one. A CAS-guarded lease
+ * key closes this the same way `SessionStore`'s own leases do: whichever
+ * instance's {@link ConditionalTextValueStore.conditionalBatch} commits
+ * first holds exclusive pruning rights for the duration of its pass; every
+ * other instance's own acquisition attempt fails its precondition and that
+ * instance skips this tick entirely (mirroring the in-process overlap
+ * guard's own "skip rather than double-run" choice) rather than attempting
+ * to merge or partially proceed.
+ */
+const PRUNE_LEASE_KEY = 'audit-retention:v1:prune-lease';
+
+/**
+ * AB-388: how long a held {@link PRUNE_LEASE_KEY} is honored before another
+ * instance is allowed to steal it. Set well above
+ * `AUTOMATIC_RUN_OWNERSHIP_PRUNE_INTERVAL_MS` (`create-bureau.ts`, 5
+ * minutes) so a live pass is never preempted mid-flight by a sibling
+ * instance's own next tick, while still bounding how long a crash that
+ * left the lease held (the crashed process never reached its `finally`
+ * release) can block every future pass indefinitely.
+ */
+const PRUNE_LEASE_TTL_MS = 900_000;
+
+/** The value {@link PRUNE_LEASE_KEY} is written with while a pass holds it. */
+interface PruneLeaseValue {
+  acquiredAtMs: number;
+  token: string;
+}
+
+function isPruneLeaseValue(value: unknown): value is PruneLeaseValue {
+  if (typeof value !== 'object' || value === null) return false;
+  if (!('acquiredAtMs' in value) || typeof value.acquiredAtMs !== 'number') return false;
+  if (!('token' in value) || typeof value.token !== 'string') return false;
+  return true;
+}
 
 /**
  * Encode a key so chronological sort is lexicographic. Exported so a reader
@@ -513,7 +787,7 @@ export function auditTrailSessionOwnerId(sessionId: string): string {
  */
 export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   bureau: Bureau<D>,
-  kv: TextValueStore | undefined,
+  kv: ConditionalTextValueStore | undefined,
   onDiagnostic?: DiagnosticSink,
   auditTrailOptions?: AuditTrailOptions,
   // AB-260: the bureau's single composed `RuntimeServices` instance. Defaults
@@ -524,6 +798,15 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 ): AuditTrail {
   const diagnose = resolveDiagnosticSink(onDiagnostic);
   const signal = auditTrailOptions?.signal;
+  // AB-388: see `event-timestamp.ts` — shared with `createDurableEventProducer`
+  // so a `schedule.*`/`session.deleted` event stamped by whichever
+  // subsystem's listener runs first is reused by the other, instead of each
+  // independently calling `runtime.clock.now()`. Falls back to a
+  // per-instance resolver (still `runtime.clock`-backed) when the caller
+  // supplies none, so every pre-existing direct caller of this factory is
+  // unaffected.
+  const eventTimestamp: EventTimestampResolver =
+    auditTrailOptions?.eventTimestamp ?? (() => runtime.clock.now());
   // Determine which event types qualify as audit events.
   const auditEventSet = new Set<string>(AUDIT_EVENT_TYPES);
 
@@ -648,16 +931,44 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   // operative-store `Action` to draw a `sequence`/`timestamp` from. Returns
   // the write promise (already tracked in `activeWrites`) so both callers
   // can await it.
-  function writeOutOfBandRecord(entry: {
-    runId: string;
-    type: string;
-    detail: unknown;
-    principal?: string;
-  }): Promise<void> {
+  //
+  // `writeOptions.bypassAbortCheck` (AB-388, Codex review PR #597, "Finish
+  // the prune summary after shutdown begins") skips the `signal?.aborted`
+  // refusal above — used ONLY by `prune()`'s own summary write, for a pass
+  // that was already admitted (passed ITS OWN abort check) before
+  // `shutdown()` aborted the shared signal partway through deleting
+  // records. Every other caller of this function keeps the default refusal.
+  //
+  // `writeOptions.strict` (AB-388, Codex review PR #597, "Propagate
+  // failures to persist the prune summary") makes the RETURNED promise
+  // reject on a write failure, instead of the default best-effort
+  // swallow-and-diagnose every other caller relies on (an approve/deny
+  // decision or a schedule pause/resume/cancel must never fail because the
+  // audit trail happened to be unavailable). The write is STILL tracked in
+  // `activeWrites`/`activeWritesByRunId` through a separate, never-rejecting
+  // derived promise, so this rejection can never surface as an unhandled
+  // rejection through that internal bookkeeping — only through the promise
+  // this call returns, which `prune()` awaits directly.
+  function writeOutOfBandRecord(
+    entry: {
+      runId: string;
+      type: string;
+      detail: unknown;
+      principal?: string;
+    },
+    writeOptions?: { strict?: boolean; bypassAbortCheck?: boolean; timestampMs?: number },
+  ): Promise<void> {
     if (!kv) return Promise.resolve();
-    if (signal?.aborted) return Promise.resolve();
+    if (!writeOptions?.bypassAbortCheck && signal?.aborted) return Promise.resolve();
 
-    const timestampMs = runtime.clock.now();
+    // AB-388: `writeOptions.timestampMs` lets the schedule-definition and
+    // session-deletion listeners below stamp with the shared
+    // `eventTimestamp` resolver's reading for THEIR event instance, instead
+    // of a fresh `runtime.clock.now()` call here — see `event-timestamp.ts`.
+    // Every other caller (the action-stream listener writes its own record
+    // directly; `record()` and `prune()`'s summary have no event to share a
+    // reading with) keeps the original per-write clock reading.
+    const timestampMs = writeOptions?.timestampMs ?? runtime.clock.now();
     const sequence = allocateSequence();
 
     const record: AuditRecord = {
@@ -671,10 +982,18 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     };
 
     const key = encodeKey(timestampMs, sequence, entry.runId);
-    const writePromise = kv.set(key, JSON.stringify(record)).catch((error: unknown) => {
+    const rawWrite = kv.set(key, JSON.stringify(record));
+
+    // Best-effort observability path: never rejects. This is what gets
+    // tracked in `activeWrites`/`activeWritesByRunId` — `dispose()` awaits
+    // that set with `Promise.allSettled`, so nothing here needs to reject
+    // to be observed there.
+    const observedWrite = rawWrite.catch((error: unknown) => {
       // Best-effort, matching the action-stream listener above: a write
       // failure must never fail the caller (an approve/deny decision, or a
-      // schedule pause/resume/cancel).
+      // schedule pause/resume/cancel) UNLESS `writeOptions.strict` asked
+      // for the failure to propagate — handled separately below so this
+      // shared, tracked promise itself never rejects.
       diagnose({
         level: 'error',
         scope: 'audit-trail',
@@ -687,8 +1006,17 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // tracked by `entry.runId` (AB-228) so a `query({ runId: entry.runId })`
     // immediately following this write observes it without waiting on any
     // OTHER owner's in-flight write.
-    trackWrite(writePromise, entry.runId);
-    return writePromise;
+    trackWrite(observedWrite, entry.runId);
+
+    if (writeOptions?.strict) {
+      return rawWrite.catch((error: unknown) => {
+        // Already diagnosed via `observedWrite` above — this second
+        // `.catch` on the SAME underlying `rawWrite` only re-raises for
+        // the strict caller, it does not diagnose a second time.
+        throw error;
+      });
+    }
+    return observedWrite;
   }
 
   // AB-228 — schedule-DEFINITION lifecycle listeners. `pauseSchedule`/
@@ -710,40 +1038,52 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   }
   const scheduleCreatedListener = (event: AgentScheduledEvent): void => {
     if (!auditEventSet.has('schedule.created')) return;
-    void writeOutOfBandRecord({
-      runId: scheduleOwnerId(event.scheduleId),
-      type: 'schedule.created',
-      detail: {
-        scheduleId: event.scheduleId,
-        agentName: event.agentName,
-        spec: event.spec,
-        ...(event.sessionId !== undefined ? { sessionId: event.sessionId } : {}),
+    void writeOutOfBandRecord(
+      {
+        runId: scheduleOwnerId(event.scheduleId),
+        type: 'schedule.created',
+        detail: {
+          scheduleId: event.scheduleId,
+          agentName: event.agentName,
+          spec: event.spec,
+          ...(event.sessionId !== undefined ? { sessionId: event.sessionId } : {}),
+        },
       },
-    });
+      { timestampMs: eventTimestamp(event) },
+    );
   };
   const schedulePausedListener = (event: SchedulePausedEvent): void => {
     if (!auditEventSet.has('schedule.paused')) return;
-    void writeOutOfBandRecord({
-      runId: scheduleOwnerId(event.scheduleId),
-      type: 'schedule.paused',
-      detail: { scheduleId: event.scheduleId },
-    });
+    void writeOutOfBandRecord(
+      {
+        runId: scheduleOwnerId(event.scheduleId),
+        type: 'schedule.paused',
+        detail: { scheduleId: event.scheduleId },
+      },
+      { timestampMs: eventTimestamp(event) },
+    );
   };
   const scheduleResumedListener = (event: ScheduleResumedEvent): void => {
     if (!auditEventSet.has('schedule.resumed')) return;
-    void writeOutOfBandRecord({
-      runId: scheduleOwnerId(event.scheduleId),
-      type: 'schedule.resumed',
-      detail: { scheduleId: event.scheduleId },
-    });
+    void writeOutOfBandRecord(
+      {
+        runId: scheduleOwnerId(event.scheduleId),
+        type: 'schedule.resumed',
+        detail: { scheduleId: event.scheduleId },
+      },
+      { timestampMs: eventTimestamp(event) },
+    );
   };
   const scheduleCancelledListener = (event: ScheduleCancelledEvent): void => {
     if (!auditEventSet.has('schedule.cancelled')) return;
-    void writeOutOfBandRecord({
-      runId: scheduleOwnerId(event.scheduleId),
-      type: 'schedule.cancelled',
-      detail: { scheduleId: event.scheduleId },
-    });
+    void writeOutOfBandRecord(
+      {
+        runId: scheduleOwnerId(event.scheduleId),
+        type: 'schedule.cancelled',
+        detail: { scheduleId: event.scheduleId },
+      },
+      { timestampMs: eventTimestamp(event) },
+    );
   };
   bureau.addEventListener('schedule.created', scheduleCreatedListener);
   bureau.addEventListener('schedule.paused', schedulePausedListener);
@@ -763,19 +1103,600 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   const sessionOwnerId = auditTrailSessionOwnerId;
   const sessionDeletedListener = (event: SessionDeletedEvent): void => {
     if (!auditEventSet.has('session.deleted')) return;
-    void writeOutOfBandRecord({
-      runId: sessionOwnerId(event.sessionId),
-      type: 'session.deleted',
-      // AB-384 (Codex P2 review finding, PR #592, "Preserve the incarnation
-      // in deletion audit records"): `SessionDeletedEvent` now carries the
-      // deleted record's own `incarnation` — omitting it here would leave a
-      // consumer of `bureau.auditTrail` unable to tell WHICH live body a
-      // deletion removed when a session id was deleted, recreated, and
-      // deleted again, even though that identity is available.
-      detail: { sessionId: event.sessionId, incarnation: event.incarnation },
-    });
+    void writeOutOfBandRecord(
+      {
+        runId: sessionOwnerId(event.sessionId),
+        type: 'session.deleted',
+        // AB-384 (Codex P2 review finding, PR #592, "Preserve the incarnation
+        // in deletion audit records"): `SessionDeletedEvent` now carries the
+        // deleted record's own `incarnation` — omitting it here would leave a
+        // consumer of `bureau.auditTrail` unable to tell WHICH live body a
+        // deletion removed when a session id was deleted, recreated, and
+        // deleted again, even though that identity is available.
+        detail: { sessionId: event.sessionId, incarnation: event.incarnation },
+      },
+      // AB-389: `event.committedAtMs` — the session outbox entry's own
+      // authoritative commit time — is used directly here rather than the
+      // shared `eventTimestamp` resolver the schedule-definition listeners
+      // above use: this event is dispatched by a REPLAYED outbox drain,
+      // possibly long after its real commit, so a fresh clock read at
+      // dispatch time would misdate it. `durable-event-history.ts`'s own
+      // `sessionDeletedListener` reads the SAME `event.committedAtMs` for
+      // the identical reason, so the two records still never diverge —
+      // just by each independently reading the same event field, rather
+      // than through the shared resolver.
+      { timestampMs: event.committedAtMs },
+    );
   };
   bureau.addEventListener('session.deleted', sessionDeletedListener);
+
+  // AB-388 (Codex review, PR #597, "Serialize concurrent audit-pruning
+  // passes"): two overlapping `prune()` calls on THIS instance — e.g. an
+  // explicit `runDurableMaintenance()` call landing while the automatic
+  // timer's own tick is still running, or two manual calls racing — could
+  // both list the SAME qualifying key before either deletion completes,
+  // double-counting `prunedCount` and writing two competing `audit.pruned`
+  // summaries. `create-bureau.ts`'s own
+  // `automaticRunOwnershipPruneCurrentPass` guard only prevents the
+  // AUTOMATIC timer's own ticks from overlapping EACH OTHER — it says
+  // nothing about a concurrent manual call reaching this method while that
+  // tick is still in flight. Serializing every `prune()` call through one
+  // promise chain, at the SOURCE, closes the gap regardless of which
+  // caller races which. (Two SEPARATE bureau processes sharing the same KV
+  // store is a distinct, cross-process race this in-process queue cannot
+  // and does not attempt to solve.)
+  let prunePassQueue: Promise<AuditPruneResult | undefined> = Promise.resolve(undefined);
+
+  async function runPrunePass(
+    cutoffMs: number,
+    protectRunId?: (runId: string) => boolean,
+  ): Promise<AuditPruneResult | undefined> {
+    if (!kv) return undefined;
+    // AB-207: once the owner-issued signal aborts (shutdown() has
+    // begun), refuse to START a new pruning pass — same rule the
+    // action-stream listener and `writeOutOfBandRecord` already apply to
+    // new writes. A pass already in flight when the signal aborts still
+    // runs to completion, including its own summary write below, which
+    // bypasses this same check (AB-388, Codex review PR #597, "Finish the
+    // prune summary after shutdown begins").
+    if (signal?.aborted) return undefined;
+
+    // AB-388 (Codex review, PR #597, "Reject non-finite and negative
+    // retention durations"): a non-finite `cutoffMs` (`NaN`, `Infinity`,
+    // `-Infinity`) reaching here would make every comparison below either
+    // always-false (pruning the ENTIRE trail — `NaN` compares false
+    // against anything) or always-true (silently pruning nothing),
+    // depending on sign — neither is a safe default for a destructive
+    // operation. `create-bureau.ts` already validates
+    // `options.auditRetention.olderThan` at construction time, but this
+    // method is part of the PUBLIC `AuditTrail` surface — a caller
+    // reaching it directly must get the same protection.
+    if (!Number.isFinite(cutoffMs)) {
+      diagnose({
+        level: 'error',
+        scope: 'audit-trail',
+        message: `[audit-trail] prune() called with a non-finite cutoffMs (${cutoffMs}); refusing to prune anything.`,
+      });
+      return undefined;
+    }
+
+    // AB-388 (Codex review, PR #597, "Coordinate pruning across
+    // shared-store instances"): acquire the cross-process lease BEFORE
+    // reading anything else — see `PRUNE_LEASE_KEY`'s own doc comment.
+    // Failure to acquire (another instance currently holds it, and it is
+    // not yet stale) skips this pass entirely, exactly like the
+    // in-process overlap guard (`prunePassQueue`) skips an overlapping
+    // call within one instance — never a partial or merged attempt.
+    const leaseToken = runtime.identifiers.next('audit-prune-lease');
+    const acquired = await acquirePruneLease(leaseToken);
+    if (!acquired) return undefined;
+
+    try {
+      return await runPrunePassLocked(cutoffMs, protectRunId, leaseToken);
+    } finally {
+      await releasePruneLease(leaseToken);
+    }
+  }
+
+  /**
+   * AB-388 (Codex review, PR #597, "Coordinate pruning across shared-store
+   * instances"): attempt to write {@link PRUNE_LEASE_KEY} via
+   * `conditionalBatch`, so the write only commits when no OTHER instance
+   * currently holds a live lease. Two cases both count as "no live lease
+   * to respect": the key is genuinely absent (`expectedValue: null`), or
+   * the existing value is malformed/older than {@link PRUNE_LEASE_TTL_MS}
+   * (a prior holder crashed before releasing) — in the second case the
+   * CAS precondition targets the STALE value exactly, so a THIRD instance
+   * racing the same takeover cannot also succeed against a precondition
+   * that already changed.
+   */
+  async function acquirePruneLease(token: string): Promise<boolean> {
+    if (!kv) return false;
+    const existingRaw = await kv.get(PRUNE_LEASE_KEY);
+    if (existingRaw === null) {
+      return kv.conditionalBatch(
+        [{ key: PRUNE_LEASE_KEY, expectedValue: null }],
+        [
+          {
+            type: 'set',
+            key: PRUNE_LEASE_KEY,
+            value: JSON.stringify({ acquiredAtMs: runtime.clock.now(), token }),
+          },
+        ],
+      );
+    }
+
+    let existing: unknown;
+    try {
+      existing = JSON.parse(existingRaw);
+    } catch {
+      existing = undefined;
+    }
+    const isStale =
+      !isPruneLeaseValue(existing) ||
+      runtime.clock.now() - existing.acquiredAtMs >= PRUNE_LEASE_TTL_MS;
+    if (!isStale) return false;
+
+    return kv.conditionalBatch(
+      [{ key: PRUNE_LEASE_KEY, expectedValue: existingRaw }],
+      [
+        {
+          type: 'set',
+          key: PRUNE_LEASE_KEY,
+          value: JSON.stringify({ acquiredAtMs: runtime.clock.now(), token }),
+        },
+      ],
+    );
+  }
+
+  /**
+   * Release the lease ONLY if it still names THIS pass's own `token` — a
+   * lease this pass's own acquisition already lost (stolen by another
+   * instance after this one's TTL expired, which can only happen if this
+   * pass ran unexpectedly long) must never be released out from under
+   * whichever instance now legitimately holds it.
+   */
+  async function releasePruneLease(token: string): Promise<void> {
+    if (!kv) return;
+    const existingRaw = await kv.get(PRUNE_LEASE_KEY);
+    if (existingRaw === null) return;
+    let existing: unknown;
+    try {
+      existing = JSON.parse(existingRaw);
+    } catch {
+      existing = undefined;
+    }
+    if (!isPruneLeaseValue(existing) || existing.token !== token) return;
+    await kv.conditionalBatch(
+      [{ key: PRUNE_LEASE_KEY, expectedValue: existingRaw }],
+      [{ type: 'delete', key: PRUNE_LEASE_KEY }],
+    );
+  }
+
+  /**
+   * AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
+   * standard lease-renewal — extends THIS pass's own lease with a fresh
+   * `acquiredAtMs`, but ONLY if the lease still names `token` (a CAS
+   * precondition on the exact current value, mirroring
+   * {@link releasePruneLease}'s own token check). Called right before the
+   * potentially-slow delete loop below, so a pass whose listing/decoding
+   * phase alone already consumed a meaningful fraction of
+   * {@link PRUNE_LEASE_TTL_MS} gets a fresh full TTL for the deletes and
+   * summary write that remain — a pass that is still genuinely running
+   * (not crashed) is never preempted mid-flight by a sibling instance's
+   * own stale-lease takeover.
+   *
+   * This still assumes every instance's clock is reasonably synchronized
+   * (the same assumption {@link acquirePruneLease}'s own staleness check
+   * already makes) — a lease is a lightweight, best-effort coordination
+   * primitive here, not a fenced, monotonic-counter-backed lock; a
+   * pathologically skewed clock on another instance remains a known,
+   * accepted residual, consistent with this codebase's existing
+   * cross-process residuals (see `create-bureau.ts`'s own
+   * `drainSessionOutbox` doc comment for an analogous ACCEPTED RESIDUAL).
+   *
+   * AB-388 (Codex review, PR #597, "Abort pruning when lease renewal
+   * loses its CAS"): returns whether THIS pass still holds the lease
+   * after the call, rather than silently tolerating a lost renewal — a
+   * `false` return (the token no longer matches, the lease key is gone,
+   * or the `conditionalBatch` itself lost its CAS to a concurrent
+   * takeover) means another instance now owns the lease, and every
+   * caller MUST abort the pass immediately rather than continue deleting
+   * candidates that instance could be deleting or has already deleted,
+   * or racing its own watermark/summary writes.
+   */
+  async function renewPruneLease(token: string): Promise<boolean> {
+    if (!kv) return true;
+    const existingRaw = await kv.get(PRUNE_LEASE_KEY);
+    if (existingRaw === null) return false;
+    let existing: unknown;
+    try {
+      existing = JSON.parse(existingRaw);
+    } catch {
+      return false;
+    }
+    if (!isPruneLeaseValue(existing) || existing.token !== token) return false;
+    return kv.conditionalBatch(
+      [{ key: PRUNE_LEASE_KEY, expectedValue: existingRaw }],
+      [
+        {
+          type: 'set',
+          key: PRUNE_LEASE_KEY,
+          value: JSON.stringify({ acquiredAtMs: runtime.clock.now(), token }),
+        },
+      ],
+    );
+  }
+
+  /**
+   * AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+   * with deletions"): recovers a pass whose deletions committed but whose
+   * `audit.pruned` summary never landed — a crash between the two. Reads
+   * {@link PRUNE_INTENT_KEY}; if present, emits the missing summary from
+   * the intent's own recorded `count`/`cutoffMs` (the deleted records
+   * themselves are long gone by now and carry no evidence of their own
+   * removal — the intent is the only surviving account of what happened),
+   * then clears the intent key. Called at the very start of every pass,
+   * BEFORE that pass does any new listing or deleting of its own, so a
+   * missed summary is reconciled at the first opportunity rather than
+   * waiting for some unrelated future trigger.
+   *
+   * AB-388 (Codex review, PR #597, "Make prune-summary recovery
+   * idempotent"): the summary write and the intent clear commit through
+   * ONE `kv.conditionalBatch` call, CAS-guarded on the intent's own raw
+   * value — never two separate calls. Without this, a crash (or a
+   * rejected delete) between a successful summary write and the
+   * following `kv.delete(PRUNE_INTENT_KEY)` would leave the intent
+   * behind even though its summary is already durable, and the NEXT
+   * pass's own call to this function would emit a SECOND, duplicate
+   * `audit.pruned` record for the same already-accounted-for deletions —
+   * inflating any consumer aggregating `detail.count`. The CAS
+   * precondition also makes two instances racing this same reconciliation
+   * safe: only the first commits, and it doesn't matter WHICH one — the
+   * loser's own conditionalBatch simply reports `false` and this function
+   * returns without emitting anything, exactly as if nothing needed
+   * reconciling. Deliberately bypasses `writeOutOfBandRecord` (and its
+   * `activeWrites` bookkeeping) for this one write — this call is always
+   * awaited as the first step of `runPrunePassLocked`, itself awaited the
+   * whole way up through `prune()`, so it is already covered by that
+   * chain's own tracking; see `writeOutOfBandRecord`'s own doc comment for
+   * what that bookkeeping is for.
+   */
+  async function reconcileOrphanedPruneIntent(): Promise<void> {
+    if (!kv) return;
+    const raw = await kv.get(PRUNE_INTENT_KEY);
+    if (raw === null) return;
+    let intent: unknown;
+    try {
+      intent = JSON.parse(raw);
+    } catch {
+      // Malformed intent record — nothing recoverable from it; clear it
+      // so it does not block every future pass forever.
+      await kv.delete(PRUNE_INTENT_KEY);
+      return;
+    }
+    if (!isPruneIntentValue(intent)) {
+      await kv.delete(PRUNE_INTENT_KEY);
+      return;
+    }
+
+    const timestampMs = runtime.clock.now();
+    const sequence = allocateSequence();
+    const record: AuditRecord = {
+      timestamp: new Date(timestampMs).toISOString(),
+      timestampMs,
+      sequence,
+      runId: 'bureau:audit-retention',
+      type: 'audit.pruned',
+      detail: { count: intent.count, cutoffMs: intent.cutoffMs, recovered: true },
+    };
+    const summaryKey = encodeKey(timestampMs, sequence, 'bureau:audit-retention');
+
+    // A `false` result means the intent no longer matches what was just
+    // read — another instance already reconciled it (or a fresh pass
+    // already overwrote it with a new intent of its own) — either way,
+    // there is nothing left for THIS call to do.
+    await kv.conditionalBatch(
+      [{ key: PRUNE_INTENT_KEY, expectedValue: raw }],
+      [
+        { type: 'set', key: summaryKey, value: JSON.stringify(record) },
+        { type: 'delete', key: PRUNE_INTENT_KEY },
+      ],
+    );
+  }
+
+  async function runPrunePassLocked(
+    cutoffMs: number,
+    protectRunId?: (runId: string) => boolean,
+    leaseToken?: string,
+  ): Promise<AuditPruneResult | undefined> {
+    if (!kv) return undefined;
+
+    await reconcileOrphanedPruneIntent();
+
+    // AB-388: list once, then judge each key against `cutoffMs` from the
+    // KEY alone via `parsePruneCandidateFromKey` wherever possible — no
+    // `kv.get`/`JSON.parse` per record, the same "one network call
+    // instead of `1 + keys.length`" saving `computeInitialAuditSequence`
+    // already applies to the boot scan (Codex review, PR #594). A key
+    // this fast path cannot parse falls back to reading and decoding the
+    // record the slow way, same tolerance `query()` uses for a
+    // corrupted stored record: skip it, never crash the pass over it.
+    const keys = await kv.list(PREFIX);
+
+    // AB-388 (Codex review, PR #597, "Persist the sequence watermark
+    // before deleting records"): collect every qualifying key FIRST,
+    // without deleting anything yet, so the highest-pruned-sequence floor
+    // can be durably raised BEFORE any `kv.delete()` runs. Deleting first
+    // and persisting the floor last (the original order) left a window
+    // where a crash after one or more deletes but before the floor write
+    // loses track of those sequences entirely: the next boot's
+    // `computeInitialAuditSequence` scan sees neither the deleted keys nor
+    // an updated floor, and can reissue an already-used sequence.
+    const candidates: { key: string; sequence: number | undefined }[] = [];
+    for (const key of keys) {
+      const fromKey = parsePruneCandidateFromKey(key);
+      if (fromKey) {
+        if (fromKey.timestampMs >= cutoffMs) continue;
+        // AB-388 (Codex review, PR #597, "Protect earlier audit records
+        // for retained owners"): checked on the fast path too, so a
+        // protected run's records never even reach the slow decode path.
+        if (protectRunId?.(fromKey.runId)) continue;
+        candidates.push({ key, sequence: fromKey.sequence });
+        continue;
+      }
+
+      const raw = await kv.get(key);
+      if (!raw) continue;
+
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+
+      // AB-388 (Codex review, PR #597, "Validate decoded records before
+      // pruning"): a syntactically valid JSON value that is not an
+      // `AuditRecord` at all (`null`, an array, an object with no
+      // numeric `timestampMs`) must be skipped like any other corrupt
+      // record, never cast and dereferenced — the same tolerance
+      // `query()` extends to its own decode. Without this, one such value
+      // throws on `.timestampMs` access and aborts the ENTIRE pass at
+      // that key, never reaching any subsequent key `kv.list()` returned.
+      if (!isPrunableAuditRecordShape(decoded)) continue;
+
+      if (decoded.timestampMs >= cutoffMs) continue;
+      if (protectRunId?.(decoded.runId)) continue;
+      candidates.push({ key, sequence: decoded.sequence });
+    }
+
+    // Nothing qualified — deliberately no `audit.pruned` record and no
+    // floor update, so a pass that prunes nothing does not itself grow
+    // the trail it exists to bound.
+    if (candidates.length === 0) return { prunedCount: 0, cutoffMs };
+
+    let highestPrunedSequence = -1;
+    for (const candidate of candidates) {
+      if (typeof candidate.sequence === 'number' && candidate.sequence > highestPrunedSequence) {
+        highestPrunedSequence = candidate.sequence;
+      }
+    }
+
+    if (highestPrunedSequence >= 0) {
+      // Read-modify-max, never a blind overwrite: a record with no
+      // `sequence` at all (legacy, pre-AB-370) never raises this floor,
+      // and a floor already persisted by an earlier pass never regresses.
+      const existingRaw = await kv.get(PRUNE_FLOOR_KEY);
+      let existing = -1;
+      if (existingRaw) {
+        try {
+          const parsed: unknown = JSON.parse(existingRaw);
+          if (typeof parsed === 'number' && Number.isSafeInteger(parsed)) existing = parsed;
+        } catch {
+          // Malformed meta record — treat as absent, same as
+          // `computeInitialAuditSequence`'s own tolerance.
+        }
+      }
+      if (highestPrunedSequence > existing) {
+        await kv.set(PRUNE_FLOOR_KEY, JSON.stringify(highestPrunedSequence));
+      }
+    }
+
+    // AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
+    // renewed HERE, right before the potentially-slow delete loop — the
+    // listing/decoding phase above (candidate collection, floor read) can
+    // itself consume a meaningful fraction of the lease's TTL for a large
+    // trail, so this gives the deletes and summary write that remain a
+    // fresh full TTL rather than racing whatever budget was left over.
+    //
+    // AB-388 (Codex review, PR #597, "Abort pruning when lease renewal
+    // loses its CAS"): a `false` return means another instance now holds
+    // the lease — abort BEFORE the delete loop below even starts, rather
+    // than proceeding to delete candidates that instance could be
+    // deleting (or has already deleted) concurrently. The watermark write
+    // just above already landed durably, so aborting here loses nothing
+    // — the NEXT pass (this instance's retry, or the new holder's own
+    // pass) simply re-lists and re-deletes the same still-present keys.
+    if (leaseToken !== undefined && !(await renewPruneLease(leaseToken))) {
+      throw new Error(
+        'Aborting audit-trail prune pass: lost the prune lease before the delete phase',
+      );
+    }
+
+    // AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+    // with deletions"): declares this pass's intent to delete UP TO
+    // `candidates.length` records under `cutoffMs`, right before the
+    // delete loop below actually starts — never before the lease-renewal
+    // check above, which can still abort with NOTHING deleted; writing
+    // the intent before that check would falsely claim deletions that
+    // never happened. See `PRUNE_INTENT_KEY`'s own doc comment for why
+    // this exists and `reconcileOrphanedPruneIntent`'s own doc comment
+    // for why `count` here is an upper bound, not a guarantee, for the
+    // one case this recovers: a process that terminates mid-delete-loop
+    // with no code left to run to record what actually committed.
+    // Cleared once THIS pass's own summary write below lands, whether
+    // that summary reports a full or partial `prunedCount`.
+    await kv.set(PRUNE_INTENT_KEY, JSON.stringify({ count: candidates.length, cutoffMs }));
+
+    // Only NOW, after the watermark durably reflects every sequence this
+    // pass is about to remove, actually delete the qualifying records.
+    //
+    // AB-388 (Codex review, PR #597, "Record successful deletions when a
+    // later delete fails"): if `kv.delete()` rejects partway through (a
+    // later candidate, after one or more earlier deletions already
+    // committed), the loop below stops immediately rather than continuing
+    // past a failure the caller needs to know about — but `deleteError`
+    // is captured, not rethrown yet, so the summary write further down
+    // still runs and records the PARTIAL `prunedCount` that actually
+    // committed. Without this, those already-deleted records would be
+    // permanently gone with no `audit.pruned` evidence naming them, and a
+    // retry would only see the remaining keys — no future summary could
+    // reconstruct what this pass actually removed.
+    //
+    // AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
+    // also renewed periodically DURING a large delete loop (every 200
+    // deletions) — the same TTL-refresh rationale as the renewal above,
+    // for a pass whose delete phase alone is long enough to approach the
+    // lease's TTL.
+    const RENEW_EVERY_N_DELETES = 200;
+    let prunedCount = 0;
+    let deleteError: Error | undefined;
+    for (const candidate of candidates) {
+      try {
+        await kv.delete(candidate.key);
+        prunedCount += 1;
+        if (
+          leaseToken !== undefined &&
+          prunedCount % RENEW_EVERY_N_DELETES === 0 &&
+          !(await renewPruneLease(leaseToken))
+        ) {
+          // AB-388 (Codex review, PR #597, "Abort pruning when lease
+          // renewal loses its CAS"): treated exactly like a `kv.delete()`
+          // failure below — stop deleting further candidates immediately,
+          // but still let the partial summary write (further down) record
+          // what THIS pass already committed before another instance took
+          // over the lease.
+          deleteError = new Error(
+            'Aborting audit-trail prune pass: lost the prune lease mid-delete',
+          );
+          break;
+        }
+      } catch (error: unknown) {
+        // Normalized to a real `Error` here (never re-thrown as `unknown`)
+        // so the eventual `throw deleteError` below satisfies
+        // `@typescript-eslint/only-throw-error` — the ORIGINAL cause is
+        // still preserved via `Error.cause`, not lost.
+        deleteError = error instanceof Error ? error : new Error(serializeUnknownError(error));
+        break;
+      }
+    }
+
+    // AB-388 (Codex review, PR #597, "Skip summaries when no deletion
+    // committed"): if the very FIRST candidate's `kv.delete()` rejects,
+    // `prunedCount` stays `0` — this must be treated the same as the
+    // "nothing qualified" early return above and write no summary. A
+    // zero-progress pass under automatic maintenance (e.g. a persistent
+    // delete-path outage) must not add a fresh zero-count `audit.pruned`
+    // record on every tick while retaining every original record — that
+    // violates the documented "a pass that prunes nothing writes no
+    // summary" guarantee and would itself grow the trail unboundedly. The
+    // delete failure is still surfaced via the `throw` below either way;
+    // only the summary write is skipped.
+    if (prunedCount > 0) {
+      // Out-of-band, through the same shared-sequence-counter path every
+      // other manual write in this file uses — this record's own
+      // `sequence` is allocated from the SAME counter `computeInitialAuditSequence`
+      // seeded, so it never collides with a surviving or future record.
+      // Attributed to a synthetic, non-run owner (mirrors the
+      // `schedule:<id>`/`session:<id>` convention above) since a retention
+      // pass belongs to no single run.
+      //
+      // AB-388 (Codex review, PR #597, "Give prune summaries
+      // cross-instance-unique keys"): the owner also embeds THIS pass's
+      // own `leaseToken` — two `AuditTrail` instances over the same
+      // shared store can each start their own local `sequence` counter
+      // from the same value (e.g. both booting before either has ever
+      // written), so a bare constant owner risks two SEQUENTIAL passes
+      // (never concurrent ones — the lease already prevents that)
+      // producing the identical encoded key at the same millisecond, with
+      // the later summary silently overwriting the earlier one.
+      // `leaseToken` (`runtime.identifiers.next(...)`) is unique per
+      // pass, closing that gap the same way `encodeKey`'s own doc comment
+      // already relies on a unique `runId` to guarantee global uniqueness.
+      //
+      // `bypassAbortCheck` (Codex review PR #597, "Finish the prune summary
+      // after shutdown begins"): this pass was already admitted (passed the
+      // `signal?.aborted` check above) before starting — if `shutdown()`
+      // aborts the shared signal while the deletions above were still
+      // running, this summary write must still land; the deletions already
+      // happened, so losing the summary would report success with no
+      // corresponding audit evidence. `strict` (Codex review PR #597,
+      // "Propagate failures to persist the prune summary") makes a write
+      // failure here reject this pass, rather than the best-effort swallow
+      // every other out-of-band caller relies on — reporting success after
+      // permanently deleting records without the promised evidence would be
+      // worse than surfacing the failure to whatever called `prune()`.
+      await writeOutOfBandRecord(
+        {
+          runId:
+            leaseToken !== undefined
+              ? `bureau:audit-retention:${leaseToken}`
+              : 'bureau:audit-retention',
+          type: 'audit.pruned',
+          detail: {
+            count: prunedCount,
+            cutoffMs,
+            ...(deleteError !== undefined ? { partial: true } : {}),
+          },
+        },
+        { strict: true, bypassAbortCheck: true },
+      );
+    }
+
+    // AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
+    // with deletions"): reaching this line means either the summary above
+    // was durably written, or there was nothing to summarize
+    // (`prunedCount === 0`) — either way THIS pass's own outcome is now
+    // fully accounted for, so the intent recorded before the delete loop
+    // no longer needs recovering. A `strict` `writeOutOfBandRecord`
+    // failure above throws out of this function before reaching here,
+    // deliberately leaving the intent in place for the NEXT pass's
+    // `reconcileOrphanedPruneIntent` to recover.
+    //
+    // ACCEPTED RESIDUAL (Codex review, PR #597, "Make prune-summary
+    // recovery idempotent"): unlike `reconcileOrphanedPruneIntent`'s own
+    // summary-write-plus-clear (made atomic via `conditionalBatch` for
+    // exactly this reason), this `kv.delete()` is a SEPARATE call from the
+    // `writeOutOfBandRecord` above it — a crash (or a rejected delete)
+    // between the two would leave this intent behind even though its
+    // summary already landed, and the next pass's own reconciliation
+    // would then emit ONE duplicate `audit.pruned` record for it. Left
+    // as-is rather than rewritten onto the same raw `conditionalBatch`
+    // primitive: that write's `strict`/`bypassAbortCheck` behavior and its
+    // `activeWrites` tracking are exercised by several existing tests
+    // (this pass's shutdown-race and summary-failure-propagation
+    // coverage), and this window is narrower than the recovery path's own
+    // — no listing/decoding/deleting happens between this summary write
+    // succeeding and this line, unlike the gap between a crash mid-delete-
+    // loop and a LATER pass's reconciliation. A future fix that also
+    // closes this specific window should extend the SAME idempotency
+    // guarantee here, not silently duplicate the accepted-residual pattern
+    // without documenting it, consistent with this file's existing
+    // residuals (see `pruneAuditTrail`'s own cross-process write-race
+    // doc comment in `create-bureau.ts`).
+    await kv.delete(PRUNE_INTENT_KEY);
+
+    // Surfaced only AFTER the partial summary above has been durably
+    // written — a caller (`pruneAuditTrail`'s `runDurableMaintenance`
+    // wrapper) still learns the pass did not fully complete, but the
+    // records it DID remove are never silently unaccounted for.
+    if (deleteError !== undefined) {
+      throw deleteError;
+    }
+
+    return { prunedCount, cutoffMs };
+  }
 
   return {
     async record(entry: {
@@ -785,6 +1706,29 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       principal?: string;
     }): Promise<void> {
       await writeOutOfBandRecord(entry);
+    },
+
+    prune(
+      cutoffMs: number,
+      pruneOptions?: { protectRunId?: (runId: string) => boolean },
+    ): Promise<AuditPruneResult | undefined> {
+      // AB-388 (Codex review, PR #597, "Serialize concurrent audit-pruning
+      // passes"): chained onto the shared queue (declared above, outside
+      // this returned object) so this call only starts once every
+      // previously queued pass has settled. `prunePassQueue` is always
+      // reassigned through its own `.catch(() => undefined)` below, so it
+      // never itself rejects — a single `onFulfilled` handler is enough,
+      // no `onRejected` branch would ever run.
+      const scheduled = prunePassQueue.then(() =>
+        runPrunePass(cutoffMs, pruneOptions?.protectRunId),
+      );
+      // Keep the queue alive even when this pass rejects (a strict
+      // summary-write failure) — a future call must still run rather than
+      // being stuck forever behind a permanently-rejected link. This
+      // catch is on a SEPARATE derived promise from `scheduled`, which is
+      // what the caller actually awaits and sees the rejection through.
+      prunePassQueue = scheduled.catch(() => undefined);
+      return scheduled;
     },
 
     async query(options: AuditQueryOptions = {}): Promise<AuditRecord[]> {
@@ -865,12 +1809,27 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         const raw = await kv.get(key);
         if (!raw) continue;
 
-        let record: AuditRecord;
+        let decoded: unknown;
         try {
-          record = JSON.parse(raw) as AuditRecord;
+          decoded = JSON.parse(raw);
         } catch {
           continue;
         }
+
+        // A syntactically valid JSON value that is not an `AuditRecord` at
+        // all (`null`, a string, an array) must be skipped like any other
+        // corrupt record — casting it straight to `AuditRecord` and reading
+        // `.timestampMs`/`.runId` off it would THROW here and abort this
+        // entire query at that one key, same failure class `prune()`'s own
+        // decode had (AB-388, Codex review PR #597, "Validate decoded
+        // records before pruning").
+        if (!isPrunableAuditRecordShape(decoded)) continue;
+        // `isPrunableAuditRecordShape` has already validated every field
+        // this function reads (`timestampMs`, `runId`, `type`, `sequence`);
+        // the remaining `AuditRecord` fields (`timestamp`, `detail`,
+        // `principal`, `actionSequence`) are carried through unread and
+        // untyped-checked here, same as before this validation existed.
+        const record = decoded as AuditRecord;
 
         if (since !== undefined && record.timestampMs < since) continue;
         if (runId !== undefined && record.runId !== runId) continue;
@@ -941,6 +1900,21 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // to bound here beyond refusing new writes (above); a write already
       // started runs to completion and `dispose()` waits for it.
       await Promise.allSettled([...activeWrites]);
+      // AB-388 (Codex review, PR #597, "Await manual pruning before storage
+      // teardown"): `activeWrites` only tracks individual `kv.set` calls —
+      // a `prune()` pass's `kv.list()`/`kv.delete()` sequence and its
+      // watermark write are NOT writes tracked there until the very last
+      // summary write starts. `prunePassQueue` (declared below, closed over
+      // here) resolves only once every `prune()` call ever chained onto it
+      // — including one still in flight right now — has settled, so
+      // awaiting it here (in addition to `activeWrites` above) means a
+      // caller reaching `bureau.auditTrail.prune()` directly, with no
+      // `runDurableMaintenance()` in between, is also fully drained before
+      // this trail is disposed. No `.catch()` needed here: `prunePassQueue`
+      // is always reassigned through its OWN `.catch(() => undefined)`
+      // inside `prune()` below, so the reference closed over here can
+      // never itself reject.
+      await prunePassQueue;
     },
   };
 }

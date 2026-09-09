@@ -70,7 +70,7 @@ import type {
   AgentRunForName,
   BureauAgentCatalog,
 } from './agent-catalog';
-import type { AuditTrail } from './audit-trail';
+import type { AuditRetentionOption, AuditTrail } from './audit-trail';
 import type {
   DurableEventHistoryPageOptions,
   DurableEventHistorySubscribeOptions,
@@ -386,6 +386,31 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * call {@link Bureau.runDurableMaintenance} from each alarm or Cron wake-up.
    */
   durableBackgroundTasks?: 'automatic' | 'manual';
+  /**
+   * AB-388: retention policy for the durable audit trail
+   * ({@link Bureau.auditTrail}). Defaults to `'forever'` — unbounded,
+   * exactly today's behavior — so a long-lived deployment must opt in
+   * before any postmortem evidence is ever removed.
+   *
+   * `{ olderThan: milliseconds }` prunes any audit record older than that
+   * many milliseconds by the runtime clock, but never a record newer than
+   * the Weft fleet feed's own retention floor — audit evidence always
+   * outlives the durable events it describes, even when `olderThan` would
+   * otherwise have allowed pruning it sooner. Pruning runs inside the
+   * existing durable maintenance pass: {@link Bureau.runDurableMaintenance}
+   * for a `'manual'` host's own alarm/Cron trigger, and — under the
+   * default `'automatic'` profile — the same background interval that
+   * already prunes stale run ownership (AB-374). It is never driven on a
+   * separate schedule of its own.
+   *
+   * Each pass that actually prunes something writes exactly one
+   * `audit.pruned` record into the trail itself, naming the count and the
+   * effective cutoff, and persists the highest pruned sequence so a
+   * restart's boot-time sequence scan
+   * ({@link computeInitialAuditSequence}) never reissues a value a pruned
+   * record already used.
+   */
+  auditRetention?: AuditRetentionOption;
   memory?: CreateMemoryOptions | Memory;
   cache?: CacheConfiguration;
   /**
@@ -1103,12 +1128,26 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * Run one host-driven durable-engine maintenance cycle. This fires due
    * timers and schedules and performs Weft's cleanup, retention, and alert
    * maintenance. Intended for `durableBackgroundTasks: 'manual'` hosts.
-   * Returns `undefined` when no durable engine is composed.
    *
    * Also prunes a session's `lastRunOwningPrincipals` entries (AB-359) once
    * a run's entire durable event history has fallen below the fleet feed's
    * retention floor (AB-363) — never on a run's terminal transition, and
-   * never on a count.
+   * never on a count. AB-388: also prunes the durable audit trail per
+   * `BureauOptions.auditRetention` (default `'forever'`, a no-op) — see
+   * that option's own doc comment.
+   *
+   * AB-388 (Codex review, PR #597, "Document the KV-only maintenance
+   * return value"): resolves `true` whenever there was ANY maintenance
+   * surface to drive — a composed durable engine, OR just a KV-backed
+   * audit trail with no durable engine at all (a persistent backend with
+   * `durableExecution: false`, or a custom KV-only `persistence`). This
+   * used to document `undefined` for "no durable engine is composed",
+   * which was accurate before this issue but is no longer: a KV-only
+   * bureau now genuinely has maintenance to run (audit retention) even
+   * with no engine, and this method returns `true` for that case, not
+   * `undefined`. `undefined` is reserved for the fully ephemeral case —
+   * no durable engine AND no KV-backed audit trail — where there is
+   * nothing at all for this method to do.
    */
   runDurableMaintenance(now?: number): Promise<true | undefined>;
 

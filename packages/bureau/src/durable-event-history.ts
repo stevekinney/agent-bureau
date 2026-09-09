@@ -128,6 +128,7 @@ import type { Storage } from '@lostgradient/weft/storage';
 import type { RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
+import type { EventTimestampResolver } from './event-timestamp';
 import type {
   ActionEvent,
   ReviewApprovedEvent,
@@ -246,6 +247,24 @@ export interface DurableEventHistory {
    * Durably append one owner-scoped event. Delegates to
    * `FleetEventFeed.append`, stamping `owner` into the envelope's
    * `workflowId` via the `${owner.kind}:${owner.id}` convention.
+   *
+   * `emittedAtMs` defaults to `runtime.clock.now()` — the clock reading at
+   * the moment this call executes. Pass it explicitly (AB-388, Codex review
+   * PR #597, "Clamp at an audit-safe timestamp boundary") when the caller
+   * has an earlier, more authoritative timestamp for the SAME logical
+   * event: `createDurableEventProducer`'s `actionListener` passes the
+   * originating `Action.timestamp` for `run`/`session`-kind events, so this
+   * envelope's `emittedAtMs` exactly matches the timestamp
+   * `createAuditTrail`'s own action-stream listener stamps onto ITS record
+   * for the identical action — no clock read taken independently, later,
+   * at whatever moment this listener happens to run. Without this, the
+   * durable event's own `emittedAtMs` could read later than the audit
+   * record's `timestampMs` for the very same action (the runtime clock can
+   * advance between the action being created and this producer recording
+   * it), and `AuditTrail.prune`'s floor-based clamp (derived from
+   * `retentionFloorTimestamp()`, which reads this field) would then treat
+   * the durable event's later timestamp as the protection boundary and
+   * delete the audit record it was supposed to protect.
    */
   record(
     owner: DurableEventOwner,
@@ -348,6 +367,34 @@ export interface DurableEventHistory {
    */
   retainedRunOwnerIds(): Promise<RetainedRunOwnerSnapshot | undefined>;
   /**
+   * Like {@link retainedRunOwnerIds}, but NEVER returns `undefined` at
+   * floor 0 — it scans and returns the real (possibly empty) owner set
+   * regardless of the current retention floor.
+   *
+   * AB-388 (Codex review, PR #597, "Scan retained run owners at floor
+   * zero"): `retainedRunOwnerIds()`'s floor-0 `undefined` is the RIGHT
+   * answer for its one existing caller, `pruneStaleRunOwnership`, which
+   * uses the returned set to decide what is prune-ELIGIBLE — an empty
+   * set there would indistinguishably read as "everything is eligible,"
+   * so floor 0 (nothing retired yet, nothing eligible) must return
+   * `undefined` instead of an empty set for that caller specifically (see
+   * that function's own doc comment above).
+   *
+   * `Bureau.pruneAuditTrail`'s `protectRunId` consumer has the OPPOSITE
+   * polarity: the returned set says what to PROTECT, and a small or empty
+   * real set is never ambiguous with "protect everything." Reusing
+   * `retainedRunOwnerIds()` there made a retained run's OWN audit records
+   * (e.g. an earlier `tool.result`/`step.completed` write than that run's
+   * later terminal durable event) prunable whenever the fleet feed floor
+   * happened to still be 0 — the floor-0 "nothing has been retired"
+   * escape hatch silently dropped ALL owner-based protection instead of
+   * computing the real (and at floor 0, complete) set that a full
+   * `feed.replay()` already gives for free. This function is that same
+   * scan, called unconditionally, so `pruneAuditTrail` gets accurate
+   * per-run protection at every floor value including 0.
+   */
+  retainedRunOwnerIdsForAuditRetention(): Promise<RetainedRunOwnerSnapshot>;
+  /**
    * Cheaply extends a {@link RetainedRunOwnerSnapshot} to reflect any
    * durable event appended to the feed since it was taken, WITHOUT
    * rescanning the records the snapshot already walked.
@@ -412,6 +459,35 @@ export interface DurableEventHistory {
    * only answers whether a marker exists, not whether it is stale.
    */
   latestDeletionMarker(owner: DurableEventOwner): Promise<DurableEventEnvelope | undefined>;
+  /**
+   * AB-388: the earliest `emittedAtMs` across every durable event the fleet
+   * feed currently retains — the timestamp `AuditTrail.prune` must never
+   * delete an audit record at or after, so audit evidence always outlives
+   * the durable events it describes. Returns `undefined` only when the feed
+   * currently retains no events at all (fresh feed, or the floor has
+   * advanced past everything that ever existed) — a caller reading
+   * `undefined` applies no floor-based clamp.
+   *
+   * A retention floor of `0` (nothing has ever been retired) is NOT treated
+   * as "no floor" — every currently-retained event still needs protecting,
+   * same as any other floor value. Returning `undefined` for a zero floor
+   * was a real bug this fixed (Codex review, PR #597): it removed the
+   * clamp entirely for the normal, common case (`retain()` is never called
+   * automatically — see this module's own top-of-file doc comment), letting
+   * `auditRetention` delete audit records for durable events that remain
+   * fully pageable.
+   *
+   * Scans the ENTIRE retained window via `feed.replay({})` rather than
+   * trusting the first envelope's own `emittedAtMs` — retained events are
+   * not guaranteed to be timestamp-monotonic in sequence order (skewed
+   * fleet-writer clocks, a clock moving backward, or concurrent appends
+   * racing into a different sequence order than their own timestamps), so
+   * the true floor timestamp is the MINIMUM `emittedAtMs` across every
+   * retained envelope, not merely the one at the lowest sequence. The
+   * internal `fleet:gap` marker `retain()` leaves at the head of replay
+   * carries no meaningful `emittedAtMs` for this purpose and is skipped.
+   */
+  retentionFloorTimestamp(): Promise<number | undefined>;
   /** Releases the underlying `FleetEventFeed`. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -910,6 +986,16 @@ export function createDurableEventHistory(
     return scanRunOwnerIdsFrom(new Set(), undefined);
   }
 
+  function retainedRunOwnerIdsForAuditRetention(): Promise<RetainedRunOwnerSnapshot> {
+    // No floor-0 short-circuit (see this function's own doc comment on
+    // the interface): `pruneAuditTrail`'s `protectRunId` consumer needs
+    // the real owner set at every floor value, including 0, where the
+    // real set is simply "every owner the feed has ever retained" — no
+    // different in cost from the floor>0 case, since `scanRunOwnerIdsFrom`
+    // already walks exactly the currently-retained window either way.
+    return scanRunOwnerIdsFrom(new Set(), undefined);
+  }
+
   async function refreshRetainedRunOwnerIds(
     snapshot: RetainedRunOwnerSnapshot,
   ): Promise<RetainedRunOwnerSnapshot> {
@@ -975,6 +1061,23 @@ export function createDurableEventHistory(
     return latest;
   }
 
+  async function retentionFloorTimestamp(): Promise<number | undefined> {
+    let minTimestamp: number | undefined;
+    for await (const envelope of feed.replay({})) {
+      // The internal gap marker carries no meaningful `emittedAtMs` for
+      // this purpose — it announces the floor's SEQUENCE, not a real
+      // event's own timestamp.
+      if (envelope.kind === 'fleet:gap') continue;
+      if (minTimestamp === undefined || envelope.emittedAtMs < minTimestamp) {
+        minTimestamp = envelope.emittedAtMs;
+      }
+    }
+    // `undefined` when nothing is currently retained (fresh feed, or the
+    // floor has advanced past every event that ever existed) — nothing
+    // needs protecting either way.
+    return minTimestamp;
+  }
+
   function dispose(): Promise<void> {
     feed.dispose();
     return Promise.resolve();
@@ -997,8 +1100,10 @@ export function createDurableEventHistory(
     page,
     subscribeEventHistory,
     retainedRunOwnerIds,
+    retainedRunOwnerIdsForAuditRetention,
     refreshRetainedRunOwnerIds,
     latestDeletionMarker,
+    retentionFloorTimestamp,
     dispose,
   };
 }
@@ -1014,6 +1119,17 @@ export interface DurableEventProducerOptions {
    * flight before the abort.
    */
   signal?: AbortSignal;
+  /**
+   * AB-388: shared `emittedAtMs` resolver (see `event-timestamp.ts`) — when
+   * supplied, the `schedule.*`/`session.deleted` listeners below stamp
+   * their durable event with this resolver's reading for the event
+   * instance, instead of an independent `runtime.clock.now()` call inside
+   * `sink()`/`history.record()`, so the same event's audit-trail record
+   * (via `createAuditTrail`, sharing the SAME resolver instance) never
+   * diverges from this durable event's own `emittedAtMs`. Falls back to
+   * `runtime.clock.now()` when omitted, matching every prior caller.
+   */
+  eventTimestamp?: EventTimestampResolver;
 }
 
 /**
@@ -1061,6 +1177,21 @@ export interface DurableEventProducer {
    * success").
    */
   waitForActiveWrites(owner: DurableEventOwner): Promise<void>;
+  /**
+   * AB-388 (Codex review, PR #597, "Wait for durable event writes before
+   * reading the floor"): await EVERY owner's write currently in flight, not
+   * one owner's — `create-bureau.ts`'s `pruneAuditTrail` calls this
+   * immediately before `retentionFloorTimestamp()`/`retainedRunOwnerIds()`,
+   * so an audit write that already committed (e.g. on an asynchronously
+   * delayed storage backend where the audit-trail's own write settles
+   * before this producer's corresponding `history.record()` append does)
+   * cannot have its protection computed from a floor/owner-set snapshot
+   * that omits the still-in-flight durable event describing the SAME
+   * action. Never rejects (an individual write's own failure is diagnosed
+   * by its own listener); a snapshot, like {@link waitForActiveWrites} —
+   * never waits on a write that starts after this call.
+   */
+  waitForAllActiveWrites(): Promise<void>;
   /**
    * Stop listening to the bureau's event streams and await every write
    * already in flight before resolving. Never rejects. Idempotent.
@@ -1187,6 +1318,10 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
 ): DurableEventProducer {
   const diagnose = resolveDiagnosticSink(onDiagnostic);
   const signal = producerOptions?.signal;
+  // AB-388: see `event-timestamp.ts`. Falls back to a per-instance
+  // resolver (still `runtime.clock`-backed) when the caller supplies none.
+  const eventTimestamp: EventTimestampResolver =
+    producerOptions?.eventTimestamp ?? (() => runtime.clock.now());
 
   // Every write kicked off by a listener below, so `dispose()` can await
   // terminal state deterministically (mirrors `createAuditTrail`'s own
@@ -1306,10 +1441,18 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
     if (signal?.aborted) return;
 
     if (RUN_DURABLE_ACTION_TYPES.has(action.type)) {
+      // AB-388 (Codex review, PR #597, "Clamp at an audit-safe timestamp
+      // boundary"): pass the originating action's OWN timestamp rather
+      // than letting `record()` read the clock fresh at this listener's
+      // invocation — see `DurableEventHistory.record`'s own doc comment
+      // for why a divergent read here can otherwise make
+      // `retentionFloorTimestamp()` under-protect the audit record
+      // `createAuditTrail`'s listener stamps for this SAME action.
       sink(
         { kind: 'run', id: action.runId },
         action.type,
         serializeActionDetail(action.type, action.detail),
+        { emittedAtMs: action.timestamp },
       );
       return;
     }
@@ -1328,6 +1471,7 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
         { kind: 'session', id: sessionId },
         action.type,
         serializeActionDetail(action.type, action.detail),
+        { emittedAtMs: action.timestamp },
       );
     }
   };
@@ -1360,30 +1504,44 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // `{ kind: 'schedule', id: scheduleId }`, never under `'run'`/`'session'`.
   const scheduleCreatedListener = (event: AgentScheduledEvent): void => {
     if (signal?.aborted) return;
-    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.created', {
-      scheduleId: event.scheduleId,
-      agentName: event.agentName,
-      spec: event.spec,
-      ...(event.sessionId !== undefined ? { sessionId: event.sessionId } : {}),
-    });
+    sink(
+      { kind: 'schedule', id: event.scheduleId },
+      'schedule.created',
+      {
+        scheduleId: event.scheduleId,
+        agentName: event.agentName,
+        spec: event.spec,
+        ...(event.sessionId !== undefined ? { sessionId: event.sessionId } : {}),
+      },
+      { emittedAtMs: eventTimestamp(event) },
+    );
   };
   const schedulePausedListener = (event: SchedulePausedEvent): void => {
     if (signal?.aborted) return;
-    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.paused', {
-      scheduleId: event.scheduleId,
-    });
+    sink(
+      { kind: 'schedule', id: event.scheduleId },
+      'schedule.paused',
+      { scheduleId: event.scheduleId },
+      { emittedAtMs: eventTimestamp(event) },
+    );
   };
   const scheduleResumedListener = (event: ScheduleResumedEvent): void => {
     if (signal?.aborted) return;
-    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.resumed', {
-      scheduleId: event.scheduleId,
-    });
+    sink(
+      { kind: 'schedule', id: event.scheduleId },
+      'schedule.resumed',
+      { scheduleId: event.scheduleId },
+      { emittedAtMs: eventTimestamp(event) },
+    );
   };
   const scheduleCancelledListener = (event: ScheduleCancelledEvent): void => {
     if (signal?.aborted) return;
-    sink({ kind: 'schedule', id: event.scheduleId }, 'schedule.cancelled', {
-      scheduleId: event.scheduleId,
-    });
+    sink(
+      { kind: 'schedule', id: event.scheduleId },
+      'schedule.cancelled',
+      { scheduleId: event.scheduleId },
+      { emittedAtMs: eventTimestamp(event) },
+    );
   };
   bureau.addEventListener('schedule.created', scheduleCreatedListener);
   bureau.addEventListener('schedule.paused', schedulePausedListener);
@@ -1523,6 +1681,18 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
             // outbox drain acknowledging it, or two drains racing) is a
             // no-op read instead of a second durable record — see
             // `record()`'s own doc comment for the general mechanism.
+            //
+            // AB-388: `event.committedAtMs` — the outbox entry's own
+            // authoritative commit time — is used here directly rather
+            // than the shared `eventTimestamp` resolver this file's other
+            // dedicated listeners (`schedule.*`) use: this event is
+            // dispatched by a REPLAYED outbox drain, possibly long after
+            // its real commit, so a fresh `runtime.clock.now()` read at
+            // dispatch time would misdate it. `audit-trail.ts`'s own
+            // `sessionDeletedListener` reads the SAME `event.committedAtMs`
+            // for the identical reason, so the two records still never
+            // diverge — just by each independently reading the same
+            // event field, rather than through the shared resolver.
             dedupeKey: String(event.ordinal),
             emittedAtMs: event.committedAtMs,
           },
@@ -1678,6 +1848,10 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       const ownerWrites = activeWritesByOwner.get(encodeOwner(owner));
       if (!ownerWrites || ownerWrites.size === 0) return;
       await Promise.allSettled([...ownerWrites]);
+    },
+    async waitForAllActiveWrites(): Promise<void> {
+      if (activeWrites.size === 0) return;
+      await Promise.allSettled([...activeWrites]);
     },
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);
