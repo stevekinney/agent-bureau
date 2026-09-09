@@ -1,0 +1,17 @@
+{
+  "entries": [
+    {
+      "adapterSuite": "packages/pkg-b/test/internal-with-valid-manifest.ts",
+      "guarantee": "Fixture guarantee: proves the internal thing publicly.",
+      "blackBoxTest": "packages/pkg-b/test/black-box-proof.test.ts > proves the guarantee publicly > does the public thing",
+      "owner": "Fixture owner"
+    },
+    {
+      "adapterSuite": "packages/pkg-b/test/internal-with-missing-manifest.ts",
+      "guarantee": "Fixture guarantee: names a black-box test that does not exist.",
+      "blackBoxTest": "packages/pkg-b/test/black-box-proof.test.ts > this test does not exist",
+      "owner": "Fixture owner"
+    }
+  ],
+  "notRuled": []
+}

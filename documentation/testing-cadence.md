@@ -26,6 +26,39 @@ release reviewer to reverse-engineer from `.github/workflows/*.yml`.
 | Cloudflare real-runtime conformance (workerd/Miniflare)         | `bun run test:cloudflare-conformance`                                                                      | not run                                                                                                                        | `cloudflare-conformance` job, nightly, Linux-only (`ubuntu-latest`) | Required release evidence: the real Durable Object SQLite, R2, and Vectorize-compatible bindings behave per AB-276's shared behavior contract, not only the fast Bun doubles the pull-request lane already exercises through `validate`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Targeted lifecycle mutation check (tst-09g)                     | `bun run check-mutation`                                                                                   | not run (re-runs the covering tests once per candidate mutant, per target set; AB-100 rules this out of the pull-request lane) | `mutation-check` job, nightly                                       | Required release evidence: proves the four AB-284 target sets (lifecycle transition tables, cancellation propagation, terminal-event uniqueness, cleanup-ownership resolution) are covered by an assertion that fails when the branch's _effect_ is wrong, not merely that a test _ran_ the branch — line/function coverage alone cannot show this. A surviving-mutant count above `scripts/mutation-baseline.json`'s recorded value fails the job; the baseline only moves down via `bun run mutation:baseline`, never by excluding a mutant.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
+## Repository gate scripts folded into `bun run validate`
+
+A handful of repository-wide gates run as `bun run validate` steps rather than
+as their own pull-request-lane row above, because each is a fast, static scan
+with no suite to reduce for a smoke subset:
+
+- `bun run check-determinism` (AB-278) re-lints `packages/**` with the two
+  `determinism/*` ESLint rules in an isolated configuration where inline
+  `eslint-disable` cannot bypass them, catching a real clock, timer,
+  identifier, or randomness call, or a global transport mutation, outside
+  `scripts/determinism-manifest.json`'s declared exemptions.
+- `bun run check-skip-manifest` (AB-279) parses every test file's AST and
+  fails on an unmanifested `.skip`/`.todo`/conditional early return, or any
+  `.only` at all, per `scripts/skip-manifest.json`.
+- `bun run check-test-helper-parity` (AB-280, enforcing AB-92 AC6) parses
+  every `packages/*/test/**/*.ts` and `packages/*/src/**/*.test.ts` file's
+  imports and fails on a cross-package import that reaches a path a target
+  package's `package.json` `exports` map does not declare, unless
+  `scripts/adapter-suite-manifest.json` names the importing file as a
+  labeled adapter suite with a real black-box test proving the same
+  guarantee through that package's public surface. A same-package import is
+  never reported — a package's own unit tests, and its `src/test/` helper
+  subpath, legitimately reach their own internals.
+- `bun run check-runtime-matrix` (AB-283) checks every published package's
+  declared `engines.node` floor against the Node versions CI actually
+  exercises.
+
+Each of these is a static analysis over source text or package metadata, not
+a suite that executes application code, so there is no slow real-process or
+real-network scenario to defer to a nightly lane the way the rows above do —
+the full check runs on every pull request at effectively no added wall-clock
+cost.
+
 ## Why the reduced pull-request-lane subsets are honest, not weaker
 
 - **Crash smoke is a real kill, not a mock.** The `[smoke]`-tagged scenario in
