@@ -333,14 +333,45 @@ export interface AuditTrail {
        * retained owners"): a record whose `runId` this returns `true` for
        * is never pruned, no matter how old `timestampMs` is —
        * `create-bureau.ts`'s `pruneAuditTrail` passes a predicate backed by
-       * `eventHistoryInstance.retainedRunOwnerIds()`'s snapshot, so a run
-       * whose durable history retains only its own terminal `run.*` event
-       * keeps its EARLIER `tool.*`/`step.completed` audit records too,
-       * honoring the README's "a retained run history keeps that run's
-       * audit records" promise instead of only protecting records at or
-       * after the fleet feed's global floor timestamp.
+       * `eventHistoryInstance.retainedRunOwnerIdsForAuditRetention()`'s
+       * scan, so a run whose durable history retains only its own
+       * terminal `run.*` event keeps its EARLIER `tool.*`/`step.completed`
+       * audit records too, honoring the README's "a retained run history
+       * keeps that run's audit records" promise instead of only
+       * protecting records at or after the fleet feed's global floor
+       * timestamp.
+       *
+       * AB-393: ASYNC, and called AGAIN, per candidate, immediately
+       * before that candidate's own delete — not only once during
+       * listing. `create-bureau.ts`'s `pruneAuditTrail` builds this
+       * predicate around `eventHistoryInstance.refreshRetainedRunOwnerIds`,
+       * the same cursor-resumed revalidation `pruneStaleRunOwnership`
+       * already uses for the identical class of race, so a durable event
+       * that starts after this predicate's first call for a candidate but
+       * lands before that candidate's delete is still observed.
+       *
+       * `phase` names WHICH call this is — `'listing'` (candidate
+       * collection, best-effort, may see a stale answer) or `'delete'`
+       * (immediately before this candidate's `kv.delete()`, MUST see the
+       * current answer). `create-bureau.ts`'s own predicate uses this to
+       * bound cost (Codex review, PR #600, "Avoid replaying the feed for
+       * every unprotected audit record"): a `'listing'` call only
+       * consults whatever retained-owner set the pass has already
+       * resolved (from its one up-front snapshot, or from a `'delete'`
+       * call for an EARLIER candidate that already advanced it) — it
+       * never itself triggers a fresh `refreshRetainedRunOwnerIds()` call.
+       * `refreshRetainedRunOwnerIds()`'s own cost is a real, if bounded
+       * (never a full replay), storage round trip even when nothing new
+       * has landed — calling it once per `'listing'` check across a large
+       * backlog of never-retained candidates would multiply that cost by
+       * roughly the size of the trail for no correctness benefit, since
+       * only the check immediately before a candidate's OWN delete needs
+       * the current answer. Only a `'delete'` call refreshes, bounding
+       * the extra cost to one call per SURVIVING candidate (the ones this
+       * pass actually reaches the delete loop for), not per candidate
+       * examined during listing.
        */
-      protectRunId?: (runId: string) => boolean;
+      protectRunId?: (runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>;
     },
   ): Promise<AuditPruneResult | undefined>;
   /**
@@ -1149,7 +1180,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
   async function runPrunePass(
     cutoffMs: number,
-    protectRunId?: (runId: string) => boolean,
+    protectRunId?: (runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>,
   ): Promise<AuditPruneResult | undefined> {
     if (!kv) return undefined;
     // AB-207: once the owner-issued signal aborts (shutdown() has
@@ -1407,7 +1438,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
   async function runPrunePassLocked(
     cutoffMs: number,
-    protectRunId?: (runId: string) => boolean,
+    protectRunId?: (runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>,
     leaseToken?: string,
   ): Promise<AuditPruneResult | undefined> {
     if (!kv) return undefined;
@@ -1433,7 +1464,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // loses track of those sequences entirely: the next boot's
     // `computeInitialAuditSequence` scan sees neither the deleted keys nor
     // an updated floor, and can reissue an already-used sequence.
-    const candidates: { key: string; sequence: number | undefined }[] = [];
+    const candidates: { key: string; sequence: number | undefined; runId: string }[] = [];
     for (const key of keys) {
       const fromKey = parsePruneCandidateFromKey(key);
       if (fromKey) {
@@ -1441,8 +1472,15 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         // AB-388 (Codex review, PR #597, "Protect earlier audit records
         // for retained owners"): checked on the fast path too, so a
         // protected run's records never even reach the slow decode path.
-        if (protectRunId?.(fromKey.runId)) continue;
-        candidates.push({ key, sequence: fromKey.sequence });
+        // AB-393: `protectRunId` may be async — passed `'listing'` here,
+        // a best-effort check against whatever retained-owner set this
+        // pass has already resolved (never itself the trigger for a
+        // fresh feed read; see this option's own doc comment on
+        // `AuditTrail.prune` for why). A "not protected" answer here is
+        // not the last word — see this candidate's own `'delete'`-phase
+        // re-check immediately before its delete below.
+        if (await protectRunId?.(fromKey.runId, 'listing')) continue;
+        candidates.push({ key, sequence: fromKey.sequence, runId: fromKey.runId });
         continue;
       }
 
@@ -1467,8 +1505,8 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       if (!isPrunableAuditRecordShape(decoded)) continue;
 
       if (decoded.timestampMs >= cutoffMs) continue;
-      if (protectRunId?.(decoded.runId)) continue;
-      candidates.push({ key, sequence: decoded.sequence });
+      if (await protectRunId?.(decoded.runId, 'listing')) continue;
+      candidates.push({ key, sequence: decoded.sequence, runId: decoded.runId });
     }
 
     // Nothing qualified — deliberately no `audit.pruned` record and no
@@ -1523,6 +1561,13 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         'Aborting audit-trail prune pass: lost the prune lease before the delete phase',
       );
     }
+    // AB-393 (Codex review, PR #600, "Renew the prune lease before
+    // deleting after async checks"): seeds the elapsed-time renewal
+    // clock the delete loop below checks BEFORE every delete — see that
+    // check's own doc comment for why elapsed time, not a candidate
+    // count, is what actually bounds lease-holding time when the
+    // `'delete'`-phase `protectRunId` check itself can be slow.
+    let lastLeaseRenewalAtMs = runtime.clock.now();
 
     // AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
     // with deletions"): declares this pass's intent to delete UP TO
@@ -1535,6 +1580,36 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // for why `count` here is an upper bound, not a guarantee, for the
     // one case this recovers: a process that terminates mid-delete-loop
     // with no code left to run to record what actually committed.
+    //
+    // ACCEPTED RESIDUAL (Codex review, PR #600, "Update prune intent when
+    // delete-time protection skips records"): AB-393's own `'delete'`
+    // -phase `protectRunId` re-check below can also make `prunedCount`
+    // fall short of `candidates.length` for a reason OTHER than a crash
+    // or a delete failure — a candidate newly protected between listing
+    // and its own delete is deliberately, correctly SKIPPED, not deleted.
+    // If this pass then crashes (or its strict summary write rejects)
+    // before reaching its own summary write, the NEXT pass's
+    // `reconcileOrphanedPruneIntent()` recovers `candidates.length` —
+    // which now overstates the true `prunedCount` by however many
+    // candidates were skipped for protection, not only by however many
+    // were still pending when the crash landed. This is the SAME class
+    // of imprecision `reconcileOrphanedPruneIntent`'s own doc comment
+    // already names and accepts (the intent is deliberately an upper
+    // bound, "not a guarantee," because a crash mid-loop leaves no
+    // evidence of what actually committed) — AB-393 adds a second,
+    // non-crash reason the same upper bound can be inexact, rather than
+    // introducing a new failure mode. Recomputing the intent's `count`
+    // to reflect ONLY candidates not yet known to be protected would
+    // require re-running every remaining candidate's `'delete'`-phase
+    // check BEFORE writing the intent — reopening the exact
+    // listing-vs-delete staleness window this issue exists to close for
+    // whichever candidates are checked early, and adding a second
+    // `protectRunId` call for every one of them. `detail.count` on the
+    // recovered `audit.pruned` record remains an upper bound on records
+    // REMOVED, never a claim that a still-present, still-protected
+    // record was deleted — no audit record is ever incorrectly deleted
+    // by this residual, only the recovered SUMMARY's own count can read
+    // high.
     // Cleared once THIS pass's own summary write below lands, whether
     // that summary reports a full or partial `prunedCount`.
     await kv.set(PRUNE_INTENT_KEY, JSON.stringify({ count: candidates.length, cutoffMs }));
@@ -1555,32 +1630,100 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // reconstruct what this pass actually removed.
     //
     // AB-388 (Codex review, PR #597, "Renew or fence the prune lease"):
-    // also renewed periodically DURING a large delete loop (every 200
-    // deletions) — the same TTL-refresh rationale as the renewal above,
-    // for a pass whose delete phase alone is long enough to approach the
-    // lease's TTL.
-    const RENEW_EVERY_N_DELETES = 200;
+    // also renewed periodically DURING a large delete loop — the same
+    // TTL-refresh rationale as the renewal above, for a pass whose delete
+    // phase alone is long enough to approach the lease's TTL.
+    //
+    // AB-393 (Codex review, PR #600, "Renew the lease while skipping
+    // protected candidates" / "Renew the prune lease before deleting
+    // after async checks"): renewal below is keyed off ELAPSED TIME since
+    // the last successful renewal (`lastLeaseRenewalAtMs`, seeded above,
+    // before this loop), not a candidate count and not `prunedCount`. Two
+    // independent gaps a count-based check left open: (1) a run of
+    // candidates the `'delete'`-phase `protectRunId` re-check APPROVES
+    // (skipped, never deleted) never advanced a `prunedCount`-keyed
+    // counter at all, so a long stretch of skips could run past the
+    // lease's TTL completely undetected; (2) even counting every
+    // candidate PROCESSED (deleted or skipped), a fixed-count interval
+    // says nothing about wall-clock time — a single slow `protectRunId`
+    // call (network-backed `refreshRetainedRunOwnerIds`, or many merely
+    // adequate ones) can burn the entire TTL well before candidate 200.
+    // Checking elapsed time directly closes both: it doesn't matter how
+    // many candidates were examined or how many were deleted, only how
+    // long it has actually been since the lease was last confirmed held.
+    // Renewed at a THIRD of the TTL, not the whole TTL, so a check that
+    // fires right at the boundary still leaves real margin before the
+    // lease could actually expire.
+    const RENEW_INTERVAL_MS = PRUNE_LEASE_TTL_MS / 3;
     let prunedCount = 0;
     let deleteError: Error | undefined;
+    // AB-393 (Codex review, PR #600, "Preserve the successor's intent
+    // after losing the lease"): distinct from `deleteError` — a plain
+    // `kv.delete()` failure (the `catch` block below) means THIS pass
+    // still legitimately holds the lease (nothing here contested it), so
+    // clearing `PRUNE_INTENT_KEY` afterward is still correct. Losing the
+    // LEASE ITSELF mid-delete is different: by the time this pass's own
+    // post-loop cleanup runs, another Bureau instance may have already
+    // acquired the now-available lease, reconciled (and cleared) this
+    // pass's orphaned intent, and written its OWN fresh intent for its
+    // OWN, still-in-progress pass. This pass's unconditional
+    // `kv.delete(PRUNE_INTENT_KEY)` cannot tell the difference between
+    // "my own intent, safe to clear" and "a successor's intent I have no
+    // business touching" — so `leaseLost` gates that cleanup below,
+    // skipping it entirely rather than guessing.
+    let leaseLost = false;
     for (const candidate of candidates) {
       try {
-        await kv.delete(candidate.key);
-        prunedCount += 1;
+        // AB-393: the listing phase above judged this candidate against
+        // the retained-owner set as it stood WHEN THIS KEY WAS LISTED —
+        // for a large trail, the delete loop can reach this candidate a
+        // meaningful time later, during which a durable event that makes
+        // this run newly retained (a concurrent `deleteRun()` appending
+        // its own retained `run.removed`, for example) can land. Re-check
+        // `protectRunId` here, `'delete'`-phase, immediately before the
+        // delete that would otherwise remove this run's earlier audit
+        // records, so that race is closed rather than only narrowed.
+        // `'delete'`-phase calls are the ONLY ones this pass's predicate
+        // (see `create-bureau.ts`'s `pruneAuditTrail`) ever refreshes
+        // against `refreshRetainedRunOwnerIds` for — bounded to one
+        // refresh call per SURVIVING candidate, never one per candidate
+        // examined during listing (Codex review, PR #600, "Avoid
+        // replaying the feed for every unprotected audit record"; see
+        // this option's own doc comment on `AuditTrail.prune` for why).
+        const stillProtected = await protectRunId?.(candidate.runId, 'delete');
+
+        // AB-393 (Codex review, PR #600, "Renew the prune lease before
+        // deleting after async checks"): checked HERE — immediately
+        // AFTER the (potentially slow) async `protectRunId` call above
+        // settles, but BEFORE the `kv.delete()` below — never after a
+        // delete already committed. A pass that lost its lease while
+        // `protectRunId` was resolving must never proceed to delete on
+        // an expired lease just because the check that would have caught
+        // it was scheduled for "after this delete" instead of "before
+        // it."
         if (
           leaseToken !== undefined &&
-          prunedCount % RENEW_EVERY_N_DELETES === 0 &&
-          !(await renewPruneLease(leaseToken))
+          runtime.clock.now() - lastLeaseRenewalAtMs >= RENEW_INTERVAL_MS
         ) {
-          // AB-388 (Codex review, PR #597, "Abort pruning when lease
-          // renewal loses its CAS"): treated exactly like a `kv.delete()`
-          // failure below — stop deleting further candidates immediately,
-          // but still let the partial summary write (further down) record
-          // what THIS pass already committed before another instance took
-          // over the lease.
-          deleteError = new Error(
-            'Aborting audit-trail prune pass: lost the prune lease mid-delete',
-          );
-          break;
+          if (!(await renewPruneLease(leaseToken))) {
+            // AB-388 (Codex review, PR #597, "Abort pruning when lease
+            // renewal loses its CAS"): treated exactly like a
+            // `kv.delete()` failure below — stop deleting further
+            // candidates immediately, but still let the partial summary
+            // write (further down) record what THIS pass already
+            // committed before another instance took over the lease.
+            deleteError = new Error(
+              'Aborting audit-trail prune pass: lost the prune lease mid-delete',
+            );
+            leaseLost = true;
+            break;
+          }
+          lastLeaseRenewalAtMs = runtime.clock.now();
+        }
+
+        if (!stillProtected) {
+          await kv.delete(candidate.key);
+          prunedCount += 1;
         }
       } catch (error: unknown) {
         // Normalized to a real `Error` here (never re-thrown as `unknown`)
@@ -1685,7 +1828,25 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // without documenting it, consistent with this file's existing
     // residuals (see `pruneAuditTrail`'s own cross-process write-race
     // doc comment in `create-bureau.ts`).
-    await kv.delete(PRUNE_INTENT_KEY);
+    //
+    // AB-393 (Codex review, PR #600, "Preserve the successor's intent
+    // after losing the lease"): skipped entirely when `leaseLost` — by
+    // the time this line runs, a DIFFERENT Bureau instance may have
+    // already acquired the lease this pass just lost, reconciled (and
+    // cleared) THIS pass's own orphaned intent on its own, and written
+    // its OWN fresh `PRUNE_INTENT_KEY` for its OWN in-progress pass. This
+    // pass has no CAS-guarded way to tell "still my own intent" from "a
+    // successor's intent" from here (unlike `reconcileOrphanedPruneIntent`,
+    // which reads and re-checks the raw value before clearing it) — so
+    // rather than risk erasing a successor's real, in-progress intent
+    // (which would leave THAT successor's own eventual deletions
+    // unrecoverable if it later crashes before its own summary write),
+    // this pass simply leaves `PRUNE_INTENT_KEY` untouched and lets
+    // whoever legitimately owns it — this pass's own next attempt, or the
+    // successor's own pass — account for it normally.
+    if (!leaseLost) {
+      await kv.delete(PRUNE_INTENT_KEY);
+    }
 
     // Surfaced only AFTER the partial summary above has been durably
     // written — a caller (`pruneAuditTrail`'s `runDurableMaintenance`
@@ -1710,7 +1871,9 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
 
     prune(
       cutoffMs: number,
-      pruneOptions?: { protectRunId?: (runId: string) => boolean },
+      pruneOptions?: {
+        protectRunId?: (runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>;
+      },
     ): Promise<AuditPruneResult | undefined> {
       // AB-388 (Codex review, PR #597, "Serialize concurrent audit-pruning
       // passes"): chained onto the shared queue (declared above, outside

@@ -16041,6 +16041,130 @@ describe('Bureau durable audit trail retention (AB-388)', () => {
     }
   });
 
+  it("survives a candidate run's earlier audit records when a retained run.removed for that SAME run lands after the pass's own protectRunId snapshot but before the pass reaches (deletes) that candidate (AB-393)", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-audit-retention-per-candidate-revalidation-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        runtime,
+        durableBackgroundTasks: 'manual',
+        auditRetention: { olderThan: 500_000 },
+      });
+
+      try {
+        // Run A: retired from the fleet feed below, so at the START of
+        // the coming prune pass it is NOT a retained run owner —
+        // `retainedRunOwnerIdsForAuditRetention()`'s own initial snapshot
+        // (seeding `pruneAuditTrail`'s `protectRunId`) would not protect
+        // it, exactly the precondition AB-393's race needs.
+        const runA = await bureau.createRun({ message: 'A', principal: 'alice' });
+        await waitForRunCompletion(bureau, runA.id);
+        await runtime.deferred.drain();
+        const runAAuditRecordsBefore = await bureau.auditTrail?.query({ runId: runA.id });
+        if (!runAAuditRecordsBefore || runAAuditRecordsBefore.length === 0) {
+          throw new Error('expected at least one durable audit record for run A');
+        }
+
+        // A second run, created at a strictly LATER timestamp, whose own
+        // first durable event becomes the retention floor once run A's
+        // own events are retired below — same technique the "olderThan"
+        // test above uses to pick a safe retirement boundary, and needed
+        // so `effectiveCutoff`'s floor clamp lands strictly AFTER run A's
+        // own audit timestamp (never at or before it, which would make
+        // run A's records ineligible for this pass regardless of
+        // `protectRunId`).
+        await runtime.advance(100_000);
+        const runFence = await bureau.createRun({ message: 'fence', principal: 'bob' });
+        await waitForRunCompletion(bureau, runFence.id);
+        await runtime.deferred.drain();
+
+        const runFencePage = await bureau.eventHistory({ kind: 'run', id: runFence.id });
+        if ('outcome' in runFencePage) throw new Error('expected a durable page for the fence run');
+        const runFenceFirstEvent = runFencePage.events[0];
+        if (!runFenceFirstEvent) {
+          throw new Error('expected at least one durable event for the fence run');
+        }
+
+        const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const adminFeed = createFleetEventFeed(adminStorage);
+        await adminFeed.retain({ beforeSequence: runFenceFirstEvent.sequence });
+        adminFeed.dispose();
+        adminStorage[Symbol.dispose]();
+
+        // Run A is no longer a retained owner (its only durable events
+        // were just retired) — a fresh `retainedRunOwnerIdsForAuditRetention()`
+        // scan right now would not protect it.
+
+        // Advance well past `olderThan` relative to run A's own audit
+        // records, so they qualify for pruning by timestamp alone once
+        // this pass starts.
+        await runtime.advance(1_000_000);
+
+        // Inject the race directly into the REAL `protectRunId` this
+        // pass's `pruneAuditTrail()` builds (backed by the real
+        // `eventHistoryInstance.refreshRetainedRunOwnerIds`), by wrapping
+        // `bureau.auditTrail.prune` — the object `pruneAuditTrail()`
+        // calls through is the SAME instance `bureau.auditTrail` exposes
+        // (a getter over the same closure variable), so this wrapper
+        // observes and can augment the actual production call. On the
+        // FIRST time the real predicate is asked about run A (the
+        // listing-phase check, which must see "not protected" — proving
+        // the snapshot really did not already cover this run), this
+        // deletes run A — appending a brand-new, retained `run.removed`
+        // durable event for that SAME owner AFTER the pass's own initial
+        // snapshot was taken — then lets the pass continue. If the
+        // delete-time re-check this issue adds did not exist, the pass
+        // would have already decided (at listing) that run A is
+        // unprotected and would delete its earlier audit records anyway.
+        const auditTrail = bureau.auditTrail;
+        if (!auditTrail) throw new Error('expected an audit trail for a durable bureau');
+        const originalPrune = auditTrail.prune.bind(auditTrail);
+        let injected = false;
+        let sawUnprotectedAtListing = false;
+        auditTrail.prune = (cutoffMs, pruneOptions) => {
+          const originalProtect = pruneOptions?.protectRunId;
+          const racingProtect = async (
+            runId: string,
+            phase: 'listing' | 'delete',
+          ): Promise<boolean> => {
+            const protectedNow = (await originalProtect?.(runId, phase)) ?? false;
+            if (runId === runA.id && phase === 'listing' && !injected) {
+              injected = true;
+              sawUnprotectedAtListing = !protectedNow;
+              await bureau.deleteRun(runA.id);
+              await runtime.deferred.drain();
+            }
+            return protectedNow;
+          };
+          return originalPrune(cutoffMs, { ...pruneOptions, protectRunId: racingProtect });
+        };
+
+        await bureau.runDurableMaintenance();
+
+        expect(sawUnprotectedAtListing).toBe(true);
+        expect(injected).toBe(true);
+
+        const runAAuditRecordsAfter = await bureau.auditTrail?.query({ runId: runA.id });
+        expect(runAAuditRecordsAfter).toEqual(runAAuditRecordsBefore);
+      } finally {
+        await bureau.shutdown();
+      }
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('under the default automatic maintenance profile, prunes on its own timer — never requiring an explicit runDurableMaintenance() call', async () => {
     const databasePath = join(
       tmpdir(),

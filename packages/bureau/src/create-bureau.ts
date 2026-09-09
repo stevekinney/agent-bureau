@@ -5602,30 +5602,76 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * unacknowledged outbox entry before either acknowledges it) — closing
    * it fully is out of scope here and left as a follow-up.
    *
-   * ACCEPTED RESIDUAL (Codex review, PR #597, "Revalidate retained owners
-   * before deleting audit records"): `retainedRunOwnerIdsForAuditRetention()`
-   * below takes ONE snapshot, used for the ENTIRE `auditTrailInstance.prune()`
-   * call that follows — including its own candidate-listing phase, which
-   * can take real time for a large trail. A durable event that starts
-   * AFTER this snapshot but lands before `prune()` reaches that
-   * candidate's key (e.g. a concurrent `deleteRun()` appending `run.removed`
-   * for a run whose earlier feed events had already aged out) makes that
-   * run newly retained without this snapshot ever seeing it, so its
-   * earlier `tool.*`/`step.completed` audit records can still be deleted
-   * this pass. `pruneStaleRunOwnership()` closes the identical class of
-   * staleness for ITS OWN owner-set consumption by revalidating via
-   * `refreshRetainedRunOwnerIds()` immediately before every write (see
-   * that function's own doc comment) — doing the same here would require
-   * `AuditTrail.prune()`'s `protectRunId` to become an ASYNC predicate,
-   * re-checked per candidate during both the listing AND deletion phases,
-   * a substantially larger change to a function this same round of fixes
-   * already hardened for lease coordination, atomic summary/intent
-   * commits, and non-finite-cutoff validation. Left as a follow-up rather
-   * than rushed alongside those; the window this leaves open is narrower
-   * than it looks in practice — `protectRunId` is evaluated once per
-   * candidate during listing, not re-checked at delete time, so exposure
-   * is bounded by how long that listing scan takes, not by the (often
-   * slower) delete loop after it.
+   * AB-393 (coordinator ruling, 2026-09-09, closing the residual the
+   * paragraph above once described): `retainedRunOwnerIdsForAuditRetention()`
+   * below still takes one snapshot to SEED this pass, but `protectRunId`
+   * itself is now an ASYNC predicate that revalidates that snapshot via
+   * `eventHistoryInstance.refreshRetainedRunOwnerIds()` — including the
+   * re-check `audit-trail.ts`'s own `prune()` now performs immediately
+   * before each candidate's delete, not only once during listing. This is
+   * the exact pattern `pruneStaleRunOwnership()` already uses for the
+   * identical class of staleness (see that function's own doc comment): a
+   * shared, monotonically-accumulating snapshot variable, advanced by a
+   * cursor-resumed scan rather than a from-scratch replay, so a durable
+   * event that starts after this predicate's first call for a candidate
+   * but lands before that candidate's own delete is still observed —
+   * closing the window the prior revision of this comment described as an
+   * accepted residual.
+   *
+   * AB-393 (Codex review, PR #600, "Avoid replaying the feed for every
+   * unprotected audit record" / "Batch retained-owner refreshes instead
+   * of replaying per record"): the predicate below only refreshes on a
+   * `'delete'`-phase call, never on a `'listing'`-phase one — bounding the
+   * extra cost to one `refreshRetainedRunOwnerIds()` round trip per
+   * SURVIVING candidate (the ones this pass's delete loop actually
+   * reaches), not per candidate examined during listing. That round trip
+   * is now cheap in the common case too:
+   * `refreshRetainedRunOwnerIds()` itself pre-checks
+   * `FleetEventFeed.snapshotTailSequence()` (a single `storage.get`)
+   * before ever paying for a full `feed.replay()` page load — see that
+   * function's own doc comment (`durable-event-history.ts`) for why that
+   * pre-check is sound. Under this ruling's per-candidate requirement,
+   * one bounded read per surviving candidate is the floor; coarsening it
+   * further (batching several candidates per refresh) would reopen the
+   * exact staleness window this issue exists to close and would need a
+   * fresh coordinator ruling to trade away.
+   *
+   * AB-393 (Codex review, PR #600, "Fence event appends through the
+   * audit-record deletion" / "Fence producer admission through the audit
+   * deletion"): the predicate also re-awaits
+   * `durableEventProducerInstance.waitForAllActiveWrites()` on every
+   * `'delete'`-phase call, not only once at this function's own start
+   * above — a producer write for a candidate can start any time after
+   * that first wait (during listing, or during an earlier candidate's own
+   * delete) and would otherwise still be mid-flight, invisible to the
+   * `refreshRetainedRunOwnerIds` read that immediately follows, when THAT
+   * candidate's own delete is reached.
+   *
+   * ACCEPTED RESIDUAL (Codex review, PR #600, "Fence producer admission
+   * through the audit deletion", round 2): the re-awaited
+   * `waitForAllActiveWrites()` above closes the window where a producer
+   * write STARTED before that wait but had not yet landed — it does NOT
+   * close a write that starts strictly AFTER that wait resolves but
+   * before `refreshRetainedRunOwnerIds()`'s own read settles, or between
+   * that read settling and the following `kv.delete()` actually
+   * executing. `waitForAllActiveWrites()` itself is explicitly a
+   * snapshot-then-await, by its own doc comment ("a write that starts
+   * AFTER this call is a NEW write this call never promised to wait
+   * for") — every check-then-act pair has some such window unless the
+   * check and the act are one atomic operation. Closing this fully would
+   * need either a primitive spanning both the fleet feed and the audit
+   * KV in one atomic operation (which does not exist here), or blocking
+   * new durable-event-producer admission for the full duration of the
+   * delete phase (a materially larger, cross-cutting change touching
+   * every run's own write path, far outside this issue's "one pull
+   * request in packages/bureau" delivery boundary). This is the same
+   * class of residual this same paragraph's own earlier revision, and
+   * `pruneStaleRunOwnership`'s doc comment above, already accept for
+   * analogous races — the coordinator ruling's ask ("re-checked per
+   * candidate immediately before each delete") is satisfied; what
+   * remains is the theoretically irreducible gap between one async check
+   * and the destructive operation it gates, narrowed from this pass's
+   * entire duration down to one async tick.
    */
   async function pruneAuditTrail(): Promise<void> {
     if (!auditTrailInstance) return;
@@ -5652,9 +5698,49 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // `retainedRunOwnerIdsForAuditRetention`'s own doc comment
     // (`durable-event-history.ts`) for why this consumer's polarity makes
     // the real set safe to use at every floor value.
-    const retainedRunOwners = await eventHistoryInstance?.retainedRunOwnerIdsForAuditRetention();
-    const protectRunId = retainedRunOwners
-      ? (runId: string) => retainedRunOwners.ownerIds.has(runId)
+    //
+    // AB-393: seeds the shared, mutable `retainedRunOwners` variable this
+    // pass's `protectRunId` closure below revalidates on every `'delete'`
+    // -phase call — the SAME "seed once, refresh per check" shape
+    // `pruneStaleRunOwnership()` already uses (see that function's own
+    // doc comment for why a shared variable reassigned sequentially,
+    // never cloned, is race-free here).
+    let retainedRunOwners = await eventHistoryInstance?.retainedRunOwnerIdsForAuditRetention();
+    const protectRunId = eventHistoryInstance
+      ? async (runId: string, phase: 'listing' | 'delete'): Promise<boolean> => {
+          if (retainedRunOwners === undefined) return false;
+          if (retainedRunOwners.ownerIds.has(runId)) return true;
+          // AB-393 (Codex review, PR #600, "Avoid replaying the feed for
+          // every unprotected audit record"): a `'listing'` call answers
+          // from whatever `retainedRunOwners` this pass has ALREADY
+          // resolved — it never itself triggers a fresh
+          // `refreshRetainedRunOwnerIds()` read. Refreshing here too
+          // would cost one bounded-but-real feed round trip PER
+          // NEVER-RETAINED CANDIDATE EXAMINED DURING LISTING, which for a
+          // large backlog of ordinary (non-retained) audit records is a
+          // real, avoidable multiplier — only the `'delete'`-phase call
+          // immediately before a SURVIVING candidate's own delete needs
+          // the current answer; see `audit-trail.ts`'s own doc comment on
+          // `protectRunId`'s `phase` parameter for the full rationale.
+          if (phase !== 'delete') return false;
+          // AB-393 (Codex review, PR #600, "Fence event appends through
+          // the audit-record deletion"): this pass's ONE
+          // `waitForAllActiveWrites()` call above ran before listing even
+          // started — a NEW durable-event-producer write for a candidate
+          // can start any time after that (during listing, or during an
+          // earlier candidate's own delete) and would otherwise still be
+          // in flight, not yet visible to the `refreshRetainedRunOwnerIds`
+          // read just below, when THIS candidate's delete is reached.
+          // Waiting again here, immediately before that read, closes that
+          // gap: any write that has started by this exact point is
+          // guaranteed to have landed in the feed before `refresh` reads
+          // it. Cheap when nothing is in flight (`activeWrites.size === 0`
+          // resolves immediately; see that method's own doc comment).
+          await durableEventProducerInstance?.waitForAllActiveWrites();
+          retainedRunOwners =
+            await eventHistoryInstance.refreshRetainedRunOwnerIds(retainedRunOwners);
+          return retainedRunOwners.ownerIds.has(runId);
+        }
       : undefined;
 
     await auditTrailInstance.prune(effectiveCutoff, { protectRunId });
