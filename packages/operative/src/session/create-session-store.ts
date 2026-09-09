@@ -515,8 +515,8 @@ export function createSessionStore(
       return parseSession(raw);
     },
 
-    async delete(id: string): Promise<void> {
-      await runMutation(async () => {
+    async delete(id: string): Promise<boolean> {
+      return runMutation(async () => {
         await readBody('summary-index');
         await readBody(id);
         let deleteConflicts = 0;
@@ -557,7 +557,11 @@ export function createSessionStore(
               ...operations,
             ],
           );
-          if (deleted) return;
+          // The `boolean` return is derived from the exact `currentRaw`/
+          // `legacyRaw` values the CAS just verified were still current when
+          // it committed — one atomic delete-and-count, never a separate
+          // existence check followed by a delete (AB-371).
+          if (deleted) return currentRaw !== null || legacyRaw !== null;
           const bodyValues = JSON.stringify([currentRaw, legacyRaw]);
           if (previousBodyValues !== undefined && previousBodyValues !== bodyValues) {
             deleteConflicts += 1;

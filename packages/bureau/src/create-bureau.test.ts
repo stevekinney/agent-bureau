@@ -13926,6 +13926,96 @@ describe('bureau.eventHistory deleted-aggregate through a real session deletion 
   });
 });
 
+describe('two Bureau processes racing deleteSession over one shared persistent store (AB-371)', () => {
+  it('produces exactly one durable session.deleted record and one notification when both processes delete the same session concurrently', async () => {
+    // The cross-process race AB-228's own process-local coalescing map and
+    // the durable-event-history producer's own in-flight-by-owner map both
+    // explicitly do NOT cover (see both modules' doc comments): two SEPARATE
+    // Bureau instances, each with its own coalescing map and its own
+    // producer, sharing one persistent SQLite backend the way two processes
+    // would. Before AB-371, each process's own `sessionStore.load(id)` could
+    // observe a truthy session before either had actually deleted it, so
+    // both would unconditionally dispatch their own `SessionDeletedEvent` —
+    // two durable records and two notifications for one real deletion.
+    // `SessionStore.delete`'s new atomic `boolean` return closes this: only
+    // the call that genuinely removed the live record dispatches.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-ab371-two-process-delete-race-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+
+    const bureauA = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+    });
+    const bureauB = await createBureau({
+      agents: {},
+      generate: createMockGenerate('Done.'),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'sqlite', path: databasePath },
+    });
+
+    try {
+      const run = await bureauA.createRun({ message: 'A session deleted by two processes' });
+      await waitForRunCompletion(bureauA, run.id);
+
+      // Bureau B shares the same persistent store, so it sees the same
+      // session record bureau A just created and persisted.
+      await waitForCondition(
+        async () => (await bureauB.getSession(run.sessionId)) !== undefined,
+        'expected bureau B to observe the session bureau A persisted',
+      );
+
+      let notifications = 0;
+      const onDeleted = (): void => {
+        notifications += 1;
+      };
+      bureauA.addEventListener('session.deleted', onDeleted);
+      bureauB.addEventListener('session.deleted', onDeleted);
+
+      const [deletedByA, deletedByB] = await Promise.all([
+        bureauA.deleteSession(run.sessionId),
+        bureauB.deleteSession(run.sessionId),
+      ]);
+      void deletedByA;
+      void deletedByB;
+
+      bureauA.removeEventListener('session.deleted', onDeleted);
+      bureauB.removeEventListener('session.deleted', onDeleted);
+
+      // Exactly one of the two processes' own notification listeners fired —
+      // each bureau only ever notifies for its own dispatch, so this counts
+      // the total across both.
+      expect(notifications).toBe(1);
+
+      let deletedAggregatePage: Awaited<ReturnType<Bureau['eventHistory']>> | undefined;
+      await waitForCondition(async () => {
+        const page = await bureauA.eventHistory({ kind: 'session', id: run.sessionId });
+        if ('outcome' in page && page.outcome === 'deleted-aggregate') {
+          deletedAggregatePage = page;
+          return true;
+        }
+        return false;
+      }, 'expected the durable session history to reach deleted-aggregate');
+      if (!deletedAggregatePage || !('events' in deletedAggregatePage)) {
+        throw new Error('expected a deleted-aggregate page with events');
+      }
+      const deletionRecords = deletedAggregatePage.events.filter(
+        (event) => event.kind === 'session.deleted',
+      );
+      expect(deletionRecords).toHaveLength(1);
+    } finally {
+      await bureauA.dispose();
+      await bureauB.dispose();
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+});
+
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
   // The LMDB variant of this recovery scenario lives in its own file
   // (`event-history-run-ownership-recovery-lmdb.test.ts`) — it needs a real
