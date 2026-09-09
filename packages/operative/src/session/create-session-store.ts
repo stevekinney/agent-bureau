@@ -1270,6 +1270,22 @@ export function createSessionStore(
           // against.
           const nextUntil =
             sameOwner && currentClaim ? Math.max(currentClaim.until, lease.until) : lease.until;
+          // Codex P1 review finding, PR #599, "Refuse leases that expire
+          // before the claim is persisted": `now` above was read once, at
+          // the TOP of this attempt — a slow `store.get()` (or a caller
+          // supplying an already-stale absolute `lease.until`) can leave
+          // `nextUntil` no longer in the future by the time this attempt is
+          // about to persist it. Persisting it anyway would report
+          // `{ claimed: true }` while the lease is already expired, letting
+          // ANY peer immediately reclaim the entry while this caller still
+          // believes it holds exclusivity — exactly the duplicate-dispatch
+          // hazard the lease exists to prevent. Re-reading the clock here,
+          // immediately before the write, catches both causes; refusing
+          // (never a conflict — this attempt itself made the lease
+          // pointless) rather than persisting a lease already born expired.
+          if (nextUntil <= runtime.clock.now()) {
+            return { claimed: false, lease: currentClaim };
+          }
           const claimed: SessionOutboxEntry = {
             ...entry,
             claim: { owner: lease.owner, until: nextUntil },

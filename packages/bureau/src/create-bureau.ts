@@ -5326,7 +5326,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // single source of truth for whether this handle holds a live timer.
   let sessionOutboxRetryTimerHandle: RuntimeTimeoutHandle;
   let sessionOutboxRetryTimerArmedForMs: number | undefined;
+  // Codex P1 review finding, PR #599, "Cap retry delays before passing them
+  // to setTimeout": `atMs` comes from a WINNING peer's own `claim.until` —
+  // which this bureau does not control (`outbox.claim()` is a public
+  // `SessionStore` method any caller sharing this backend may invoke with
+  // an arbitrarily distant `until`). Both Node's and Bun's timer
+  // implementations silently truncate a delay beyond the int32 range
+  // (~24.8 days) to roughly 1ms instead of throwing, so passing such a
+  // delay straight to `setTimeout` would fire almost immediately, observe
+  // the SAME still-live claim, and re-arm another overflowing timer — a
+  // tight storage-polling loop for the entire remaining lease. Capping the
+  // delay and re-checking the remaining time on each capped fire closes
+  // this without ever passing an out-of-range delay to a real timer.
+  const MAXIMUM_SETTIMEOUT_DELAY_MS = 2_147_483_647;
   function scheduleSessionOutboxRetry(atMs: number): void {
+    // Codex P2 review finding, PR #599, "Clear retry timers armed by the
+    // drain awaited at shutdown": shutdown's own `sessionOutboxDrainInFlight`
+    // await (below) can let an in-flight drain reach a peer-owned entry and
+    // call back into this function AFTER shutdown already cleared any
+    // PRIOR retry timer but BEFORE that await resolves — arming a NEW timer
+    // shutdown never clears, which could later invoke a drain against
+    // disposed storage. `maintenanceAdmissionClosed` flips to `true`
+    // synchronously at the very start of shutdown, before that await, so
+    // checking it here closes retry admission for the rest of shutdown
+    // rather than requiring shutdown to clear the timer a second time.
+    if (maintenanceAdmissionClosed) return;
     if (
       sessionOutboxRetryTimerArmedForMs !== undefined &&
       sessionOutboxRetryTimerArmedForMs <= atMs
@@ -5339,9 +5363,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       runtimeServices.timers.clearTimeout(sessionOutboxRetryTimerHandle);
     }
     sessionOutboxRetryTimerArmedForMs = atMs;
-    const delayMs = Math.max(0, atMs - runtimeServices.clock.now());
+    const remainingMs = Math.max(0, atMs - runtimeServices.clock.now());
+    const delayMs = Math.min(remainingMs, MAXIMUM_SETTIMEOUT_DELAY_MS);
     sessionOutboxRetryTimerHandle = runtimeServices.timers.setTimeout(() => {
+      // The delay above may have been CAPPED rather than the real
+      // remaining wait — if `atMs` has not actually arrived yet, this fire
+      // is early: re-arm for the (now shorter) remaining time instead of
+      // draining prematurely. `sessionOutboxRetryTimerArmedForMs` is
+      // cleared first so the re-arm below is not refused as a no-op by
+      // this same function's own "earlier retry already armed" guard.
       sessionOutboxRetryTimerArmedForMs = undefined;
+      if (runtimeServices.clock.now() < atMs) {
+        scheduleSessionOutboxRetry(atMs);
+        return;
+      }
       drainSessionOutbox().catch((error: unknown) => {
         diagnose({
           level: 'error',

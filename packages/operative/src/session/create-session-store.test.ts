@@ -1933,7 +1933,8 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
   it.each([NaN, Infinity, -Infinity])(
     'claim() rejects a non-finite lease.until (%p), rather than persisting a value JSON.stringify would silently turn into null (Codex P2 review finding, PR #599)',
     async (until) => {
-      const store = createSessionStore(textValueStore(new MemoryStorage()));
+      const runtime = createManualRuntimeServices();
+      const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
       await store.save(makeSession({ id: `claim-non-finite-${until}` }));
       const [entry] = await store.outbox.pending();
       await expect(
@@ -1944,7 +1945,7 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
       expect(await store.outbox.pending()).toHaveLength(1);
       const claimAttempt = await store.outbox.claim(entry!.ordinal, {
         owner: 'drainer-a',
-        until: 1_000,
+        until: runtime.clock.now() + 30_000,
       });
       expect(claimAttempt.claimed).toBe(true);
     },
@@ -2176,5 +2177,74 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
     // retry rather than reporting a false conflict.
     expect(await store.outbox.acknowledge(entry!.ordinal, 'drainer-a')).toBe(true);
     expect(await store.outbox.pending()).toHaveLength(0);
+  });
+
+  it('claim() refuses to persist a lease that is already expired by the time it is about to write it — a slow store.get() must not report a false claimed:true (Codex P1 review finding, PR #599, "Refuse leases that expire before the claim is persisted")', async () => {
+    const runtime = createManualRuntimeServices();
+    const base = textValueStore(new MemoryStorage());
+    // Armed only right before the `claim()` call under test below — `get()`
+    // is also called by `pending()` above it, which must not consume this
+    // one-shot delay.
+    let armed = false;
+    let delayed = false;
+    const slowGet = {
+      ...base,
+      async get(key: string) {
+        const value = await base.get(key);
+        // Simulates `store.get()` itself taking long enough that the
+        // clock has already passed the caller's requested `until` by the
+        // time this attempt is ready to persist it — a slow backend, not
+        // a caller bug.
+        if (armed && key.includes('outbox') && !delayed) {
+          delayed = true;
+          await runtime.advance(10_000);
+        }
+        return value;
+      },
+    };
+    const store = createSessionStore(slowGet, { runtime });
+    await store.save(makeSession({ id: 'claim-expires-before-persist' }));
+    const [entry] = await store.outbox.pending();
+
+    // Requested lease is only 1s out — by the time the delayed `get()`
+    // above returns, 10s have already passed.
+    armed = true;
+    const attempt = await store.outbox.claim(entry!.ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 1_000,
+    });
+    expect(attempt.claimed).toBe(false);
+
+    // The entry is genuinely unclaimed — a fresh, still-valid lease
+    // request succeeds normally.
+    const retry = await store.outbox.claim(entry!.ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 30_000,
+    });
+    expect(retry.claimed).toBe(true);
+  });
+
+  it('claim() never persists a lease that is already expired even for a same-owner renewal request naming a stale absolute deadline', async () => {
+    const runtime = createManualRuntimeServices();
+    const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
+    await store.save(makeSession({ id: 'claim-stale-renewal-deadline' }));
+    const [entry] = await store.outbox.pending();
+    const ordinal = entry!.ordinal;
+
+    const initial = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() + 1_000,
+    });
+    expect(initial.claimed).toBe(true);
+
+    // The prior claim expires; a caller then supplies a stale, already-past
+    // absolute `until` (a caller bug, not a timing race) for the SAME
+    // owner — same-owner reentry must not bypass the expiry check.
+    await runtime.advance(2_000);
+    const staleRenewal = await store.outbox.claim(ordinal, {
+      owner: 'drainer-a',
+      until: runtime.clock.now() - 500,
+    });
+    expect(staleRenewal.claimed).toBe(false);
   });
 });

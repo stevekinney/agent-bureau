@@ -671,7 +671,26 @@ this way.
 
 ```ts
 const sessions = createSessionStore(kvStore);
-const drainerId = 'my-drainer-instance';
+const LEASE_MS = 30_000;
+// Unique across PROCESSES, not merely across calls in this one — two
+// processes minting `drainerId` the same deterministic way (a fixed
+// literal, a shared counter seed) would look like the SAME owner to
+// `claim()`, letting both replay concurrently. The production drainer adds
+// exactly this kind of real-randomness suffix to its own id for the
+// identical reason.
+const drainerId = `my-drainer-instance:${crypto.randomUUID()}`;
+
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleRetry(atMs: number): void {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = setTimeout(
+    () => {
+      retryTimer = undefined;
+      drain().catch((error: unknown) => console.error('outbox retry drain failed:', error));
+    },
+    Math.max(0, atMs - Date.now()),
+  );
+}
 
 // Single-flighted, the same way Bureau's own `drainSessionOutbox` is: two
 // `session.outbox-appended` events firing before the first callback below
@@ -697,13 +716,37 @@ async function drain(): Promise<void> {
         for (const entry of await sessions.outbox.pending()) {
           const attempt = await sessions.outbox.claim(entry.ordinal, {
             owner: drainerId,
-            until: Date.now() + 30_000,
+            until: Date.now() + LEASE_MS,
           });
-          if (!attempt.claimed) return; // a peer already holds this entry's lease
-          console.log(`outbox entry ${entry.ordinal}: ${entry.kind} for ${entry.sessionId}`);
-          // Replay `entry` as the real event, await its own durable write, THEN:
-          const acknowledged = await sessions.outbox.acknowledge(entry.ordinal, drainerId);
-          if (!acknowledged) return; // lost the claim before acknowledging
+          if (!attempt.claimed) {
+            // A peer already holds this entry's lease — wake up and try
+            // again right when it expires, rather than depending on some
+            // unrelated future trigger to ever retry this store-wide
+            // choke point.
+            if (attempt.lease) scheduleRetry(attempt.lease.until);
+            return;
+          }
+          // Keeps the lease alive for as long as replaying this ONE entry
+          // takes — a slow durable write or a slow verification read could
+          // otherwise outlast the fixed lease above, letting a peer
+          // reclaim and replay the SAME entry while this callback is still
+          // working it.
+          const renewal = setInterval(
+            () => {
+              sessions.outbox
+                .claim(entry.ordinal, { owner: drainerId, until: Date.now() + LEASE_MS })
+                .catch((error: unknown) => console.error('outbox lease renewal failed:', error));
+            },
+            Math.floor(LEASE_MS / 3),
+          );
+          try {
+            console.log(`outbox entry ${entry.ordinal}: ${entry.kind} for ${entry.sessionId}`);
+            // Replay `entry` as the real event, await its own durable write, THEN:
+            const acknowledged = await sessions.outbox.acknowledge(entry.ordinal, drainerId);
+            if (!acknowledged) return; // lost the claim before acknowledging
+          } finally {
+            clearInterval(renewal);
+          }
         }
       } while (rerunRequested);
     } finally {
