@@ -13561,6 +13561,81 @@ describe('bureau.eventHistory deleted-aggregate through a real session deletion 
       await rm(`${databasePath}-shm`, { force: true });
     }
   });
+
+  it('denies an unauthorized principal with not-found even when the durable read would otherwise report a retention gap (Codex P2 review finding, PR #580, "Authorize sessions before returning history gaps")', async () => {
+    // Authorization must run BEFORE `history.page()` is even called, not
+    // merely before its ORDINARY-page outcome is returned — otherwise an
+    // unauthorized caller whose `since` cursor lands before the retention
+    // floor gets back a `DurableEventGap` (with its own retention metadata)
+    // instead of the documented not-found-shaped denial every other
+    // authorization failure uses.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-event-history-session-authz-gap-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'alice owns this', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      // A LIVE session accrues no durable event of its own from an
+      // ordinary run today (`session.created`/`session.saved` are never
+      // dispatched in production — see `durable-event-history.ts`'s own
+      // doc comment) — synthesize one directly the same supported way
+      // AB-313's own tests do, so this owner has at least one durable
+      // event for the retention floor below to advance past.
+      bureau.store.recordAction(run.id, 'session.saved', { sessionId: run.sessionId });
+      await runtime.deferred.drain();
+
+      const beforeGap = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      if ('outcome' in beforeGap)
+        throw new Error(`expected a page, got ${JSON.stringify(beforeGap)}`);
+      const lastEvent = beforeGap.events.at(-1);
+      if (!lastEvent) throw new Error('expected at least one durable event for this session');
+
+      // Advance the retention floor past every one of this session's
+      // durable events, via a second admin storage handle over the SAME
+      // sqlite file (the identical pattern the AB-359 recovery tests use).
+      const adminStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const adminFeed = createFleetEventFeed(adminStorage);
+      await adminFeed.retain({ beforeSequence: lastEvent.sequence + 1 });
+      adminFeed.dispose();
+      adminStorage[Symbol.dispose]();
+
+      // An unauthorized principal is denied — never the gap.
+      const deniedOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'mallory' },
+      );
+      expect(deniedOutcome).toEqual({ outcome: 'not-found' });
+
+      // The actual owner still sees the real gap outcome.
+      const ownerOutcome = await bureau.eventHistory(
+        { kind: 'session', id: run.sessionId },
+        { principal: 'alice' },
+      );
+      expect(ownerOutcome).toMatchObject({ outcome: 'gap' });
+
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
 });
 
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {

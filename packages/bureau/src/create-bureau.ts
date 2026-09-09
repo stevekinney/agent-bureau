@@ -6807,32 +6807,35 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // first — so this is always defined whenever `history` is.
     await durableEventProducerInstance?.waitForActiveWrites(owner);
 
-    const page = await history.page(owner, options);
-    if ('outcome' in page) return page; // a DurableEventGap
-
     // AB-372 (Codex review findings, PR #580, "Reauthorize the live session
-    // before returning its page" and its follow-up "Reauthorize when the
-    // requested page omits the marker") — session authorization is done
-    // exactly ONCE, HERE, against whatever session record exists RIGHT NOW
-    // (after the owner-write wait and the history replay above have both
-    // completed), rather than a record loaded earlier. Two earlier rounds
-    // of this fix checked authorization up front, before that async work,
-    // then separately re-checked it only inside the branch that happened to
-    // find a `'session.deleted'` marker on the ONE requested page — both
-    // left a window where a session id deleted (or never live) at the
-    // up-front check, then recreated under a DIFFERENT authority while the
-    // async work was pending, could read back as open: the up-front check
-    // saw nothing to deny, and the later re-check either ran only when the
-    // requested page happened to contain the stale marker (never guaranteed
-    // — a `since` cursor past it, or a limit that pages around it, both
-    // skip that branch entirely) or didn't exist yet. Loading and
-    // authorizing the CURRENT live record unconditionally, after all async
-    // work, removes the window: whichever record exists at the moment this
-    // function is about to decide what to return is the ONLY one that ever
-    // gets checked or matters. Omitting `principal` entirely still skips
-    // this (an internal/trusted caller), matching every other owner kind's
+    // before returning its page", its follow-up "Reauthorize when the
+    // requested page omits the marker", and the further follow-up
+    // "Authorize sessions before returning history gaps") — session
+    // authorization is done exactly ONCE, HERE, BEFORE `history.page()` is
+    // even called, against whatever session record exists RIGHT NOW (after
+    // the owner-write wait above has completed), rather than a record
+    // loaded earlier OR a check nested after a page/gap outcome already
+    // exists. Three earlier rounds of this fix each left a window: checking
+    // authorization up front (before the async wait) missed a session
+    // recreated under a different authority while that wait was pending;
+    // re-checking only inside the branch that found a `'session.deleted'`
+    // marker skipped whenever a `since` cursor or limit paged around that
+    // marker; and re-checking only after `history.page()` returned an
+    // ordinary page let an UNAUTHORIZED caller's request that instead
+    // yields a `DurableEventGap` (retention has advanced past `since`)
+    // escape through the earlier `if ('outcome' in page) return page`
+    // before authorization ever ran, leaking the gap's own retention
+    // metadata. Authorizing before EITHER `page()` is called or any of its
+    // outcomes (ordinary page, gap) is inspected removes every one of those
+    // windows at once: nothing this function can return — page, gap, or
+    // deleted-aggregate — is reachable for a session owner without first
+    // passing this check. Omitting `principal` entirely still skips this
+    // (an internal/trusted caller), matching every other owner kind's
     // convention; a session with no recorded authority is still open,
-    // matching `isSessionAuthorityAuthorized`'s own documented rule.
+    // matching `isSessionAuthorityAuthorized`'s own documented rule. The
+    // record loaded here is reused below (never re-loaded) for the
+    // separate "is this owner still live" check the deletion-marker branch
+    // needs.
     const liveSession =
       owner.kind === 'session' && runtime.sessionStore
         ? await runtime.sessionStore.load(owner.id)
@@ -6844,6 +6847,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     ) {
       return { outcome: 'not-found' };
     }
+
+    const page = await history.page(owner, options);
+    if ('outcome' in page) return page; // a DurableEventGap
 
     const deletionMarkerKind =
       owner.kind === 'session'
