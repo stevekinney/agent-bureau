@@ -1082,20 +1082,38 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // fire-and-forget schedule/session out-of-band write does.
     if (writeOptions?.dedupeKey !== undefined) {
       const markerKey = `${DEDUPE_MARKER_PREFIX}${writeOptions.dedupeKey}`;
-      return kv
-        .conditionalBatch(
-          [{ key: markerKey, expectedValue: null }],
-          [
-            { type: 'set', key: markerKey, value: key },
-            { type: 'set', key, value: JSON.stringify(record) },
-          ],
-        )
-        .then((committed) => {
-          // `committed === false` means the marker already existed — this
-          // exact fact was already recorded, by this call or a peer's.
-          // Nothing further to do; this is success, not a skipped write.
-          void committed;
-        });
+      const conditionalWrite = kv.conditionalBatch(
+        [{ key: markerKey, expectedValue: null }],
+        [
+          { type: 'set', key: markerKey, value: key },
+          { type: 'set', key, value: JSON.stringify(record) },
+        ],
+      );
+      // AB-391 (Codex P2 review finding, PR #601, "Track deduplicated audit
+      // writes before returning"): unlike every other write path in this
+      // function, this branch used to return `conditionalWrite` directly
+      // without ever calling `trackWrite` — a caller that started this call
+      // and then, without awaiting it, called `query({ runId })`,
+      // `runtime.deferred.drain()`, or `dispose()` could miss the in-flight
+      // write (a query racing ahead of it) or have storage torn down while
+      // `conditionalBatch` was still running. Tracked here via a
+      // NEVER-REJECTING derivative — mirroring the `strict` path just below
+      // — while the REJECTING `conditionalWrite` itself is still what this
+      // function returns to the `dedupeKey` caller, which needs to observe
+      // a genuine failure (see this branch's own doc comment above).
+      trackWrite(
+        conditionalWrite.then(
+          () => undefined,
+          () => undefined,
+        ),
+        entry.runId,
+      );
+      return conditionalWrite.then((committed) => {
+        // `committed === false` means the marker already existed — this
+        // exact fact was already recorded, by this call or a peer's.
+        // Nothing further to do; this is success, not a skipped write.
+        void committed;
+      });
     }
 
     const rawWrite = kv.set(key, JSON.stringify(record));
@@ -1587,10 +1605,59 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       candidates.push({ key, sequence: decoded.sequence });
     }
 
+    // AB-391 (Codex P2 review finding, PR #601, "Prune dedupe markers with
+    // expired audit records"): every `record({ dedupeKey })` write
+    // (`writeOutOfBandRecord`'s `dedupeKey` branch) leaves a permanent
+    // `audit-dedupe:v1:<dedupeKey>` marker behind — nothing else in this
+    // file ever deletes one, so without this, retention bounds the audit
+    // records themselves but not this marker family, which grows forever.
+    // RECONCILIATION, not a filter over this pass's own `candidates`: a
+    // marker's value is the key of the record it guards, so a marker whose
+    // named record no longer exists is orphaned regardless of whether THIS
+    // pass's delete loop below just removed that record, or an EARLIER
+    // pass crashed between deleting the record and deleting its marker —
+    // the latter could never be found again by matching against this
+    // pass's own candidate list, since an already-deleted record is gone
+    // from the `kv.list(PREFIX)` scan above and so never becomes a
+    // candidate a second time. Called from BOTH the "nothing qualified"
+    // early return just below AND after the delete loop further down —
+    // an orphan from an earlier pass can be the only work a pass has to do,
+    // so this must not be skipped just because `candidates` is empty here.
+    // Listing every marker every call matches this function's own existing
+    // cost profile (it already lists every `PREFIX` audit-record key every
+    // call, regardless of the retention floor). Best-effort and isolated in
+    // its own try/catch: a marker-cleanup failure must never turn an
+    // otherwise-successful record prune into a rejected pass, and marker
+    // deletions are deliberately never added to `prunedCount` — that count,
+    // and the `audit.pruned` summary it feeds, describe audit RECORDS
+    // pruned, not markers.
+    const reconcileOrphanedDedupeMarkers = async (): Promise<void> => {
+      try {
+        const markerKeys = await kv.list(DEDUPE_MARKER_PREFIX);
+        for (const markerKey of markerKeys) {
+          const recordKey = await kv.get(markerKey);
+          if (recordKey === null) continue;
+          if (await kv.has(recordKey)) continue;
+          await kv.delete(markerKey);
+        }
+      } catch (error: unknown) {
+        diagnose({
+          level: 'error',
+          scope: 'audit-trail',
+          message: '[audit-trail] Failed to reconcile orphaned dedupe markers during a prune pass:',
+          cause: error,
+        });
+      }
+    };
+
     // Nothing qualified — deliberately no `audit.pruned` record and no
     // floor update, so a pass that prunes nothing does not itself grow
-    // the trail it exists to bound.
-    if (candidates.length === 0) return { prunedCount: 0, cutoffMs };
+    // the trail it exists to bound. Marker reconciliation still runs,
+    // independent of that guarantee.
+    if (candidates.length === 0) {
+      await reconcileOrphanedDedupeMarkers();
+      return { prunedCount: 0, cutoffMs };
+    }
 
     let highestPrunedSequence = -1;
     for (const candidate of candidates) {
@@ -1707,6 +1774,11 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         break;
       }
     }
+
+    // See `reconcileOrphanedDedupeMarkers`'s own doc comment above — called
+    // again here (not just from the early-return branch) so a marker for a
+    // record THIS pass's own delete loop just removed is also caught.
+    await reconcileOrphanedDedupeMarkers();
 
     // AB-388 (Codex review, PR #597, "Skip summaries when no deletion
     // committed"): if the very FIRST candidate's `kv.delete()` rejects,
