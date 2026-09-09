@@ -43,6 +43,22 @@ export interface AgentSession {
   agentName: string;
   conversationHistory: ConversationHistory;
   /**
+   * Identity of this session's current live body (AB-384), distinct from
+   * `id`: an id can be deleted and later recreated (a supported flow), and
+   * each live body gets its own incarnation. Minted by `SessionStore`
+   * (`create-session-store.ts`'s `commit()`) the first time an id's body is
+   * committed — never by `createAgentSession()` itself, so a freshly
+   * constructed, not-yet-persisted session carries `''` here. Stable across
+   * every later `save()`/`update()` of the same live body; a fresh value is
+   * minted the next time the id is committed after a deletion removed the
+   * previous body. A record loaded from before this field existed (an
+   * empty string, same as an unpersisted session) is treated as needing a
+   * fresh mint on its next write, exactly like a brand-new id — see
+   * `SessionCreatedEvent`/`SessionSavedEvent`'s own doc comments for how
+   * this drives which of the two a commit dispatches.
+   */
+  incarnation: string;
+  /**
    * Optimistic-concurrency revision. New in-memory sessions start at 0; each
    * successful SessionStore write increments the persisted revision.
    */
@@ -79,6 +95,9 @@ export function createAgentSession(options: {
     id: options.id ?? runtime.identifiers.next('session'),
     agentName: options.agentName,
     conversationHistory: options.conversationHistory,
+    // Minted by the store's first `commit()`, not here — see
+    // `AgentSession.incarnation`'s own doc comment.
+    incarnation: '',
     revision: 0,
     runs: options.runs ?? [],
     metadata: options.metadata ?? {},
@@ -89,12 +108,23 @@ export function createAgentSession(options: {
 
 /**
  * Saves an agent session through the conflict-aware SessionStore path.
+ *
+ * `options.runtime` (AB-384, Codex P2 review finding, PR #592, "Pass the
+ * runtime through standalone session saves") is forwarded to
+ * `createSessionStore()` so a first-time save mints `AgentSession.incarnation`
+ * from the SAME injected `RuntimeServices.identifiers` seam the caller's own
+ * `createAgentSession({ runtime })` used for `id`/timestamps, rather than a
+ * second, internally-constructed default instance reading real
+ * `crypto.randomUUID()` — the identical class of bug `createRuntimeComposition`
+ * had for the Bureau-composed store. Defaults to the real globals when
+ * omitted, unchanged from before this option existed.
  */
 export async function saveAgentSession(
   store: ConditionalTextValueStore,
   session: AgentSession,
+  options: { runtime?: RuntimeServices } = {},
 ): Promise<void> {
-  await createSessionStore(store).save(session);
+  await createSessionStore(store, { runtime: options.runtime }).save(session);
 }
 
 /**

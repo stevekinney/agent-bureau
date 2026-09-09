@@ -31,8 +31,10 @@ import {
   ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  SessionCreatedEvent,
   SessionDeletedEvent,
   type SessionListOptions,
+  SessionSavedEvent,
   type SessionStore,
   type SessionSummary,
   SteeringAppliedEvent,
@@ -1407,6 +1409,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
     emitter.dispatch(new ScheduleFailedEvent(event.scheduleId, event.runId));
   });
+  // AB-384 — `SessionStore.events` (`@lostgradient/operative`) is where the
+  // store itself dispatches `SessionCreatedEvent`/`SessionSavedEvent` after
+  // every successful `save()`/`update()` commit. Forwarded onto THIS
+  // bureau-level emitter the same way the two `scheduleFireEvents` listeners
+  // just above forward theirs — a fresh instance each time, never a
+  // re-dispatch of `event` itself, for the identical "already being
+  // dispatched" reason their own comment explains. Lands on the SAME
+  // emitter `SessionDeletedEvent` is already dispatched directly onto
+  // (`deleteSession`, below), so `durable-event-history.ts`'s dedicated
+  // `sessionCreatedListener`/`sessionSavedListener` can subscribe here
+  // exactly the way `sessionDeletedListener` already does.
+  if (runtime.sessionStore) {
+    runtime.sessionStore.events.addEventListener(SessionCreatedEvent.type, (event) => {
+      emitter.dispatch(
+        new SessionCreatedEvent(event.sessionId, event.agentName, event.incarnation),
+      );
+    });
+    runtime.sessionStore.events.addEventListener(SessionSavedEvent.type, (event) => {
+      emitter.dispatch(new SessionSavedEvent(event.sessionId, event.agentName, event.incarnation));
+    });
+  }
   // AB-246 — the model-catalog refresh service. Independent of `runtime`.
   // When the caller doesn't supply one, the default `descriptorSource`
   // re-derives `@lostgradient/operative/providers`'s static seed — this is
@@ -5362,7 +5385,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         if (!isPaused) abortRun(runId);
       }
 
-      const removedLiveRecord = await sessionStore.delete(id);
+      // AB-384 (Codex/Copilot review finding, PR #592, "SessionDeletedEvent
+      // carries the wrong incarnation across a cross-process race"): uses
+      // the `{ returnIncarnation: true }` overload rather than the `session`
+      // snapshot loaded above — that snapshot's `incarnation` has a real
+      // race window (another process can delete-and-recreate this id
+      // between that earlier `load()` and this `delete()`), where this
+      // overload has none: it reports the incarnation of the exact body
+      // this SAME atomic delete-and-count removed.
+      const { removed: removedLiveRecord, incarnation: removedIncarnation } =
+        await sessionStore.delete(id, { returnIncarnation: true });
       onStoreDeletionCommitted();
 
       // AB-228 (Codex P1 + follow-up review findings, PR #566): the durable
@@ -5419,7 +5451,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // `run.error` — gets the lower `sequence` and sorts first, with no
       // dependency on wall-clock granularity or real elapsed time between
       // the two. See `create-bureau.test.ts`'s AB-370 regression coverage.
-      if (removedLiveRecord) emitter.dispatch(new SessionDeletedEvent(id));
+      // AB-384: `removedIncarnation` comes from the SAME atomic delete
+      // above, not a separately-timed `load()` — no load→delete race window
+      // to document here (see that call's own comment). `?? session.incarnation`
+      // is a defensive fallback only, never expected to differ: the pre-load
+      // `session` snapshot's own value, used only if the store somehow
+      // reports `removed: true` with `incarnation: undefined` (a legacy
+      // body that was never re-saved after this field existed carries `''`,
+      // never `undefined`, so this fallback is not expected to trigger in
+      // production).
+      if (removedLiveRecord) {
+        emitter.dispatch(new SessionDeletedEvent(id, removedIncarnation ?? session.incarnation));
+      }
 
       // AB-67/AB-199 review findings (PR #430 — Codex P2): a deleted
       // session's steering gate — and its entries in the shared,
@@ -6890,9 +6933,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * RECREATED after deletion (`create-bureau.test.ts`'s "does not coalesce
    * a deleteSession call for a session RECREATED with the same id"), and
    * `createDurableEventProducer`'s own session.deleted listener does not
-   * (and, absent a real per-incarnation identity on `SessionDeletedEvent`,
-   * cannot) prune a prior incarnation's marker from the durable history a
-   * recreated session shares with its predecessor. Evidence of a deletion
+   * prune a prior incarnation's marker from the durable history a recreated
+   * session shares with its predecessor — by design, not for lack of a
+   * mechanism: `SessionDeletedEvent` carries a real per-incarnation
+   * `incarnation` identity since AB-384, but AB-87's retention posture is no
+   * silent data loss, so a settled incarnation's own durable facts stay
+   * queryable forever, exactly like a run's. Evidence of a deletion
    * that once happened is therefore not sufficient on its own once a
    * session id has been reused — this function ALSO checks whether
    * `owner.id` currently names a LIVE session record before reporting

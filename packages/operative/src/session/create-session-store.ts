@@ -2,9 +2,11 @@ import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-
 import type { ConversationHistory } from 'conversationalist';
 import type { JSONValue } from 'interoperability';
 import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, TypedEventTarget } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
+import type { OperativeEventMap } from '../events';
+import { SessionCreatedEvent, SessionSavedEvent } from '../events';
 import type {
   SessionCleanupOptions,
   SessionListOptions,
@@ -30,6 +32,73 @@ export class SessionConflictError extends Error {
       `Session "${sessionId}" could not be ${operation} after ${MAXIMUM_SAVE_ATTEMPTS} conflicts.`,
     );
     this.name = 'SessionConflictError';
+  }
+}
+
+/**
+ * Thrown by `save()`/`update()` (AB-384, Codex P1 review finding, PR #592,
+ * "Reject saves from a prior session incarnation") when a candidate carries
+ * a NONEMPTY `incarnation` that does not match the live body's current one.
+ * Before `incarnation` existed, `mergeSessions()`'s revision-based
+ * freshness check could already let a stale in-memory object overwrite a
+ * session id that was deleted and recreated in the meantime — that data
+ * hazard predates AB-384. What AB-384 changes is that a caller can now
+ * explicitly EXPRESS which incarnation it believes it is writing to; this
+ * error is what makes a stale write ($incarnation, from a body that no
+ * longer exists) visibly fail instead of being silently relabeled under the
+ * CURRENT incarnation, which would make genuinely stale content
+ * indistinguishable from a legitimate write to the live body.
+ *
+ * Deliberately narrow: a candidate with `incarnation: ''` (the
+ * `createAgentSession()` default, and every legacy record's default) never
+ * triggers this — only a caller that read a specific PRIOR incarnation's
+ * body and is now writing it back verbatim is rejected. No production call
+ * site in this monorepo does that (`session-handle.ts`'s own `update()`
+ * calls always build their candidate off the FRESH `existingSession`/
+ * `freshSession`/`latestSession` argument the updater itself receives,
+ * never a separately cached `AgentSession` object; its one direct `save()`
+ * call is always a brand-new forked session id with no live predecessor to
+ * conflict with) — this guards a hazard external callers or future code
+ * could introduce, not a live production hazard this issue found and fixed
+ * elsewhere.
+ */
+export class StaleSessionIncarnationError extends Error {
+  readonly code = 'StaleSessionIncarnationError';
+
+  constructor(
+    sessionId: string,
+    readonly candidateIncarnation: string,
+    readonly currentIncarnation: string,
+  ) {
+    super(
+      `Session "${sessionId}" could not be committed: candidate incarnation ` +
+        `"${candidateIncarnation}" does not match the live body's current ` +
+        `incarnation "${currentIncarnation}".`,
+    );
+    this.name = 'StaleSessionIncarnationError';
+    this.candidateIncarnation = candidateIncarnation;
+    this.currentIncarnation = currentIncarnation;
+  }
+}
+
+/**
+ * Rejects a candidate that names a specific, NONEMPTY prior incarnation
+ * that does not match the live body's current one — see
+ * `StaleSessionIncarnationError`'s own doc comment for exactly which case
+ * this is (and is not) guarding against.
+ */
+function assertMatchingIncarnation(
+  id: string,
+  candidateIncarnation: string,
+  current: AgentSession | undefined,
+): void {
+  if (
+    candidateIncarnation !== '' &&
+    current !== undefined &&
+    current.incarnation !== '' &&
+    candidateIncarnation !== current.incarnation
+  ) {
+    throw new StaleSessionIncarnationError(id, candidateIncarnation, current.incarnation);
   }
 }
 
@@ -72,6 +141,13 @@ function parseSession(raw: string | null): AgentSession | undefined {
             ? ((record as Record<string, number>)['revision'] ?? 0)
             : 0,
         runs: Array.isArray(record['runs']) ? (record['runs'] as AgentSession['runs']) : [],
+        // AB-384 rollback trigger: a record persisted before `incarnation`
+        // existed must still load, defaulted to `''` — the same value a
+        // freshly constructed, not-yet-persisted `AgentSession` carries
+        // (`createAgentSession`) — so `commit()` mints it a fresh identifier
+        // on its next write instead of treating a missing field as a parse
+        // failure.
+        incarnation: typeof record['incarnation'] === 'string' ? record['incarnation'] : '',
       };
     }
     return undefined;
@@ -313,6 +389,44 @@ export function createSessionStore(
     throw new TypeError('createSessionStore requires a ConditionalTextValueStore.');
   }
   const runtime = options.runtime ?? createDefaultRuntimeServices();
+  // AB-384 — this store's own lifecycle-event target. A caller with no
+  // interest in `session.created`/`session.saved` never has to touch this;
+  // Bureau (`runtime-composition.ts`) forwards it onto its own bureau-level
+  // emitter, the same one `SessionDeletedEvent` is dispatched directly onto.
+  const events = new TypedEventTarget<OperativeEventMap>();
+
+  // KNOWN LIMITATION, not closed here (Codex P1 review finding, PR #592,
+  // "Preserve commit order when dispatching lifecycle events"): dispatch
+  // here is fire-and-forget, in-process, immediately after THIS attempt's
+  // own commit resolves — it is not transactionally coupled to that commit.
+  // Two consequences, both SHARED by every other bureau-level-emitter
+  // dispatch this codebase already ships this way (`SessionDeletedEvent` at
+  // `create-bureau.ts`'s `deleteSession`, every `schedule.*`/`review.*`
+  // dispatch — none of them couple dispatch to their own write either):
+  // (1) a crash between a commit succeeding and this dispatch running loses
+  // the `session.created`/`session.saved` fact forever, with no
+  // recovery-time producer to reconstruct it; (2) when two `SessionStore`
+  // instances (e.g. two Bureau processes) share one persistent backend,
+  // the DURABLE record order downstream reflects each instance's own
+  // dispatch-then-forward-then-record latency, not true commit order — a
+  // slower instance A's `session.created` for revision 1 can durably record
+  // AFTER a faster instance B's `session.saved` for revision 2, even though
+  // B's write necessarily happened after A's. Within ONE store instance
+  // this is not observable: `commit()`'s CAS enforces strict revision
+  // order, and each `save()`/`update()` call dispatches in its own program
+  // order immediately after its own commit resolves. Properly closing the
+  // cross-instance case needs the durable record itself to carry an
+  // authoritative sequence or revision the reading side can reorder or
+  // recover by — a schema change to `DurableEventEnvelope`, the same kind of
+  // change AB-313's own "schema-version field" language already assigns to
+  // whoever ships the next audit-record schema revision, not this issue.
+  function dispatchPersistEvent(wasCreate: boolean, committed: AgentSession): void {
+    events.dispatch(
+      wasCreate
+        ? new SessionCreatedEvent(committed.id, committed.agentName, committed.incarnation)
+        : new SessionSavedEvent(committed.id, committed.agentName, committed.incarnation),
+    );
+  }
 
   let mutationTail = Promise.resolve();
   function runMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -401,14 +515,48 @@ export function createSessionStore(
     session: AgentSession,
     bodyKey: string,
     expectedValue: string | null,
-    currentRevision: number,
+    current: AgentSession | undefined,
     refreshUpdatedAt: boolean,
     expectedSummaryValue: string | null,
     currentSummaries: Map<string, SessionSummary>,
   ): Promise<AgentSession | undefined> {
+    // AB-384 — resolved from `current` (the live body this attempt read
+    // BEFORE merging in the caller's candidate), never from
+    // `session.incarnation`: `session` here is already `mergeSessions`'
+    // output, which spreads the caller-supplied candidate's own fields over
+    // `current` whenever the candidate is fresh — a caller holding a stale
+    // or forged `incarnation` on its in-memory object must never win. No
+    // live body (`current === undefined`) — a brand-new id, or one
+    // recreated after its previous body was deleted — mints a fresh one.
+    // `current.incarnation` empty (a body persisted before this field
+    // existed, defaulted by `parseSession`) mints one too, upgrading the
+    // legacy record on its next write rather than persisting `''` forever.
+    // Otherwise the live body's own incarnation carries forward unchanged,
+    // stable across every `save()`/`update()` while that body stays live.
+    const mintedIncarnation =
+      current?.incarnation || runtime.identifiers.next('session-incarnation');
+    // AB-384 (Codex P2 review finding, PR #592, "Reject empty incarnation
+    // IDs"): `RuntimeIdentifiers.next`'s own contract permits any string,
+    // including `''` — the exact sentinel `AgentSession.incarnation`
+    // reserves for "unminted" (a fresh `createAgentSession()`) and "legacy"
+    // (a pre-AB-384 record, defaulted by `parseSession`). An injected
+    // implementation that ever minted `''` here would silently disable
+    // every guarantee this field exists to provide: the NEXT write would
+    // treat this body as still needing a mint (re-minting on every commit,
+    // never stabilizing), and `assertMatchingIncarnation`'s stale-write
+    // fencing would treat it as `''` and skip the check entirely. Fail
+    // loudly instead of persisting a value indistinguishable from "never
+    // minted".
+    if (mintedIncarnation === '') {
+      throw new TypeError(
+        "SessionStore: the injected RuntimeIdentifiers implementation minted an empty string for kind 'session-incarnation' — AgentSession.incarnation reserves '' for an unminted or legacy session, so RuntimeIdentifiers.next() must never return '' for any kind this store mints.",
+      );
+    }
+    const incarnation = mintedIncarnation;
     const next: AgentSession = {
       ...session,
-      revision: currentRevision + 1,
+      incarnation,
+      revision: (current?.revision ?? 0) + 1,
       updatedAt: refreshUpdatedAt ? runtime.clock.nowISO() : session.updatedAt,
     };
     const committed = await store.conditionalBatch(
@@ -428,42 +576,148 @@ export function createSessionStore(
     return committed ? next : undefined;
   }
 
+  // AB-384 (Codex/Copilot review finding on PR #592, "SessionDeletedEvent
+  // carries the wrong incarnation across a cross-process race"): a caller
+  // that reads `sessionStore.load(id)` BEFORE calling `delete(id)` to learn
+  // which incarnation it is about to remove has a real race window — a
+  // concurrent process can delete-and-recreate that id between the two
+  // calls, so the `boolean`-returning `delete()` alone gives no atomic way
+  // to know which incarnation its own successful deletion actually removed.
+  // Overloaded (not a new method) so `delete(id): Promise<boolean>` — the
+  // AB-371 contract every existing caller and test already relies on —
+  // stays byte-for-byte unchanged; `delete(id, { returnIncarnation: true })`
+  // is the SAME atomic CAS attempt, just also returning the `incarnation`
+  // parsed from the exact `currentRaw`/`legacyRaw` value that CAS verified
+  // was still current when it committed (never a second, separately-racing
+  // read). `create-bureau.ts`'s `deleteSession` uses this overload instead
+  // of a `load()` beforehand.
+  function deleteSession(id: string): Promise<boolean>;
+  function deleteSession(
+    id: string,
+    options: { returnIncarnation: true },
+  ): Promise<{ removed: boolean; incarnation: string | undefined }>;
+  function deleteSession(
+    id: string,
+    options?: { returnIncarnation?: boolean },
+  ): Promise<boolean | { removed: boolean; incarnation: string | undefined }> {
+    return runMutation(async () => {
+      await readBody('summary-index');
+      await readBody(id);
+      let deleteConflicts = 0;
+      let previousBodyValues: string | undefined;
+      for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
+        const currentKey = keyFor(id);
+        const legacyKey = legacyKeyFor(id);
+        const [currentRaw, legacyRaw, summaryRaw] = await Promise.all([
+          store.get(currentKey),
+          legacyKey === SUMMARY_INDEX_KEY ? Promise.resolve(null) : store.get(legacyKey),
+          store.get(SUMMARY_INDEX_KEY),
+        ]);
+        const nextSummaries = await summariesForMutation(summaryRaw);
+        nextSummaries.delete(id);
+        const operations =
+          nextSummaries.size > 0
+            ? [
+                {
+                  type: 'set' as const,
+                  key: SUMMARY_INDEX_KEY,
+                  value: serializeSummaryIndex(nextSummaries),
+                },
+              ]
+            : [{ type: 'delete' as const, key: SUMMARY_INDEX_KEY }];
+        const deleted = await store.conditionalBatch(
+          [
+            { key: currentKey, expectedValue: currentRaw },
+            ...(legacyKey === SUMMARY_INDEX_KEY
+              ? []
+              : [{ key: legacyKey, expectedValue: legacyRaw }]),
+            { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
+          ],
+          [
+            { type: 'delete', key: currentKey },
+            ...(legacyKey === SUMMARY_INDEX_KEY
+              ? []
+              : [{ type: 'delete' as const, key: legacyKey }]),
+            ...operations,
+          ],
+        );
+        // The `removed` boolean is derived from the exact `currentRaw`/
+        // `legacyRaw` values the CAS just verified were still current when
+        // it committed — one atomic delete-and-count, never a separate
+        // existence check followed by a delete (AB-371). `incarnation` is
+        // parsed from those SAME two values, so it is exactly as atomic.
+        if (deleted) {
+          const removed = currentRaw !== null || legacyRaw !== null;
+          if (!options?.returnIncarnation) return removed;
+          const incarnation =
+            (currentRaw !== null ? parseSession(currentRaw)?.incarnation : undefined) ??
+            (legacyRaw !== null ? parseSession(legacyRaw)?.incarnation : undefined);
+          return { removed, incarnation };
+        }
+        const bodyValues = JSON.stringify([currentRaw, legacyRaw]);
+        if (previousBodyValues !== undefined && previousBodyValues !== bodyValues) {
+          deleteConflicts += 1;
+        }
+        previousBodyValues = bodyValues;
+        if (deleteConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
+          throw new SessionConflictError(id, 'deleted');
+        }
+      }
+      throw new SessionConflictError(id, 'deleted');
+    });
+  }
+
   const sessionStore: SessionStore = {
     async save(session: AgentSession): Promise<void> {
-      await runMutation(async () => {
-        await readBody('summary-index');
-        let saveConflicts = 0;
-        let previousBodyRaw: string | null | undefined;
-        for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-          const [body, summaryRaw] = await Promise.all([
-            readBody(session.id),
-            store.get(SUMMARY_INDEX_KEY),
-          ]);
-          const { raw, key: bodyKey } = body;
-          const current = parseSession(raw);
-          const candidate = current ? mergeSessions(current, session) : session;
-          const committed = await commit(
-            candidate,
-            bodyKey,
-            raw,
-            current?.revision ?? 0,
-            true,
-            summaryRaw,
-            await summariesForMutation(summaryRaw),
-          );
-          if (committed) {
-            Object.assign(session, committed);
-            return;
+      // AB-384 — the created-vs-saved dispatch happens AFTER `runMutation`
+      // resolves, not from inside its queued operation: a listener that
+      // calls back into this same store (e.g. to read the session it was
+      // just told about) would otherwise enqueue behind `mutationTail`
+      // while still inside the very operation that promise is chained off
+      // of — harmless in practice (the nested call just waits its turn),
+      // but dispatching outside the queue removes any reentrancy question
+      // entirely.
+      const outcome = await runMutation(
+        async (): Promise<{
+          wasCreate: boolean;
+          committed: AgentSession;
+        }> => {
+          await readBody('summary-index');
+          let saveConflicts = 0;
+          let previousBodyRaw: string | null | undefined;
+          for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
+            const [body, summaryRaw] = await Promise.all([
+              readBody(session.id),
+              store.get(SUMMARY_INDEX_KEY),
+            ]);
+            const { raw, key: bodyKey } = body;
+            const current = parseSession(raw);
+            assertMatchingIncarnation(session.id, session.incarnation, current);
+            const candidate = current ? mergeSessions(current, session) : session;
+            const committed = await commit(
+              candidate,
+              bodyKey,
+              raw,
+              current,
+              true,
+              summaryRaw,
+              await summariesForMutation(summaryRaw),
+            );
+            if (committed) {
+              Object.assign(session, committed);
+              return { wasCreate: current === undefined, committed };
+            }
+            if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
+            previousBodyRaw = raw;
+            if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
+              throw new SessionConflictError(session.id);
+            }
           }
-          if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
-          previousBodyRaw = raw;
-          if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
-            throw new SessionConflictError(session.id);
-          }
-        }
 
-        throw new SessionConflictError(session.id);
-      });
+          throw new SessionConflictError(session.id);
+        },
+      );
+      dispatchPersistEvent(outcome.wasCreate, outcome.committed);
     },
 
     async update(
@@ -490,18 +744,26 @@ export function createSessionStore(
         if (candidate.id !== id) {
           throw new TypeError(`Session updater for "${id}" returned id "${candidate.id}".`);
         }
+        assertMatchingIncarnation(id, candidate.incarnation, current);
 
         const next = current ? mergeSessions(current, candidate) : candidate;
         const committed = await commit(
           next,
           bodyKey,
           raw,
-          current?.revision ?? 0,
+          current,
           refreshActivity,
           summaryRaw,
           await summariesForMutation(summaryRaw),
         );
-        if (committed) return committed;
+        if (committed) {
+          // AB-384 — dispatched here, after this attempt's commit succeeds:
+          // `update()` is deliberately NOT queued through `runMutation` (see
+          // this method's own doc comment on `SessionStore`), so there is no
+          // queue to dispatch outside of.
+          dispatchPersistEvent(current === undefined, committed);
+          return committed;
+        }
         if (previousBodyRaw !== undefined && previousBodyRaw !== raw) saveConflicts += 1;
         previousBodyRaw = raw;
         if (saveConflicts >= MAXIMUM_SAVE_ATTEMPTS) throw new SessionConflictError(id);
@@ -515,65 +777,7 @@ export function createSessionStore(
       return parseSession(raw);
     },
 
-    async delete(id: string): Promise<boolean> {
-      return runMutation(async () => {
-        await readBody('summary-index');
-        await readBody(id);
-        let deleteConflicts = 0;
-        let previousBodyValues: string | undefined;
-        for (let attempt = 1; attempt <= MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
-          const currentKey = keyFor(id);
-          const legacyKey = legacyKeyFor(id);
-          const [currentRaw, legacyRaw, summaryRaw] = await Promise.all([
-            store.get(currentKey),
-            legacyKey === SUMMARY_INDEX_KEY ? Promise.resolve(null) : store.get(legacyKey),
-            store.get(SUMMARY_INDEX_KEY),
-          ]);
-          const nextSummaries = await summariesForMutation(summaryRaw);
-          nextSummaries.delete(id);
-          const operations =
-            nextSummaries.size > 0
-              ? [
-                  {
-                    type: 'set' as const,
-                    key: SUMMARY_INDEX_KEY,
-                    value: serializeSummaryIndex(nextSummaries),
-                  },
-                ]
-              : [{ type: 'delete' as const, key: SUMMARY_INDEX_KEY }];
-          const deleted = await store.conditionalBatch(
-            [
-              { key: currentKey, expectedValue: currentRaw },
-              ...(legacyKey === SUMMARY_INDEX_KEY
-                ? []
-                : [{ key: legacyKey, expectedValue: legacyRaw }]),
-              { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },
-            ],
-            [
-              { type: 'delete', key: currentKey },
-              ...(legacyKey === SUMMARY_INDEX_KEY
-                ? []
-                : [{ type: 'delete' as const, key: legacyKey }]),
-              ...operations,
-            ],
-          );
-          // The `boolean` return is derived from the exact `currentRaw`/
-          // `legacyRaw` values the CAS just verified were still current when
-          // it committed — one atomic delete-and-count, never a separate
-          // existence check followed by a delete (AB-371).
-          if (deleted) return currentRaw !== null || legacyRaw !== null;
-          const bodyValues = JSON.stringify([currentRaw, legacyRaw]);
-          if (previousBodyValues !== undefined && previousBodyValues !== bodyValues) {
-            deleteConflicts += 1;
-          }
-          previousBodyValues = bodyValues;
-          if (deleteConflicts >= MAXIMUM_SAVE_ATTEMPTS) {
-            throw new SessionConflictError(id, 'deleted');
-          }
-        }
-        throw new SessionConflictError(id, 'deleted');
-      });
-    },
+    delete: deleteSession,
 
     async list(options?: SessionListOptions): Promise<SessionSummary[]> {
       return runMutation(async () => {
@@ -794,6 +998,8 @@ export function createSessionStore(
         throw new SessionConflictError('cleanup', 'completed');
       });
     },
+
+    events,
   };
 
   return sessionStore;

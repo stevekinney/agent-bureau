@@ -843,13 +843,13 @@ describe('createAuditTrail', () => {
       const { bureau, emit } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);
 
-      emit(new SessionDeletedEvent('session-1'));
+      emit(new SessionDeletedEvent('session-1', 'incarnation-1'));
       await yieldToPortableEventLoop();
 
       const records = await trail.query({ runId: 'session:session-1' });
       expect(records).toHaveLength(1);
       expect(records[0]?.type).toBe('session.deleted');
-      expect(records[0]?.detail).toEqual({ sessionId: 'session-1' });
+      expect(records[0]?.detail).toEqual({ sessionId: 'session-1', incarnation: 'incarnation-1' });
       trail.dispose();
     });
 

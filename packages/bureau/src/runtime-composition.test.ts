@@ -1391,6 +1391,56 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  it("mints AgentSession.incarnation from this composition's own injected runtime, not a second default one (AB-384, Codex P2 review finding, PR #592)", async () => {
+    // Two independently seeded manual runtimes, each composed with its own
+    // `createRuntimeComposition` call: if `sessionStore` were built from a
+    // second, internally-constructed default `RuntimeServices` instead of
+    // the one actually passed in, its minted incarnation would come from
+    // real `crypto.randomUUID()` — nondeterministic, and never matching
+    // either runtime's own `identifierPrefix`-derived sequence.
+    const runtimeA = createManualRuntimeServices({ identifierSeed: 'runtime-a' });
+    const runtimeB = createManualRuntimeServices({ identifierSeed: 'runtime-b' });
+
+    const compositionA = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      runtime: runtimeA,
+    });
+    const compositionB = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+      storage: { type: 'memory' },
+      runtime: runtimeB,
+    });
+
+    await compositionA.sessionStore!.save(
+      createAgentSession({
+        id: 'session-a',
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        runtime: runtimeA,
+      }),
+    );
+    await compositionB.sessionStore!.save(
+      createAgentSession({
+        id: 'session-b',
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        runtime: runtimeB,
+      }),
+    );
+
+    const sessionA = await compositionA.sessionStore!.load('session-a');
+    const sessionB = await compositionB.sessionStore!.load('session-b');
+
+    expect(sessionA?.incarnation).toBe(`${runtimeA.identifierPrefix}-session-incarnation-1`);
+    expect(sessionB?.incarnation).toBe(`${runtimeB.identifierPrefix}-session-incarnation-1`);
+    // Distinct identifier prefixes prove these came from each composition's
+    // OWN injected runtime, never a shared or internally-constructed one.
+    expect(sessionA?.incarnation).not.toBe(sessionB?.incarnation);
+  });
+
   it('binds service request authority to scheduled fire toolbox execution and durable options', async () => {
     const { z } = await import('zod');
     const observedRequestContexts: ToolRequestContext[] = [];

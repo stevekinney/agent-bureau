@@ -1,4 +1,8 @@
-export { createSessionStore } from './create-session-store';
+export {
+  createSessionStore,
+  SessionConflictError,
+  StaleSessionIncarnationError,
+} from './create-session-store';
 export type {
   MonitorOptions,
   SessionHandle,

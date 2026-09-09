@@ -547,22 +547,59 @@ const result = await activeRun.result;
 
 **`SessionStore` interface:**
 
-| Method                          | Description                                                                                                                                                                                                                                                                                                                                                                    |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `save(session)`                 | Persist a session with conflict-aware merging.                                                                                                                                                                                                                                                                                                                                 |
-| `update(id, updater, options?)` | Read-modify-write a session through optimistic concurrency. `options.refreshActivity` (default `true`) controls whether a successful write stamps a fresh `updatedAt`; pass `false` for a background write (e.g. pruning stale metadata) that must not read as session activity.                                                                                               |
-| `load(id)`                      | Load by id; returns `undefined` if not found.                                                                                                                                                                                                                                                                                                                                  |
-| `delete(id)`                    | Remove a session atomically. Resolves `true` only when this call itself removed a live record, `false` when there was nothing to remove — already gone, or never existed. A custom store must implement this as one delete-and-count operation, never a separate existence check followed by a delete, so a caller can tell which of two racing callers actually won (AB-371). |
-| `exists(id)`                    | Check existence.                                                                                                                                                                                                                                                                                                                                                               |
-| `list(options?)`                | Paginated list of `SessionSummary` objects.                                                                                                                                                                                                                                                                                                                                    |
-| `updateMetadata(id, metadata)`  | Merge metadata without rewriting the conversation.                                                                                                                                                                                                                                                                                                                             |
-| `cleanup(options)`              | Delete sessions older than `options.olderThan` ms.                                                                                                                                                                                                                                                                                                                             |
+| Method                                    | Description                                                                                                                                                                                                                                                                                                                                                                    |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `save(session)`                           | Persist a session with conflict-aware merging.                                                                                                                                                                                                                                                                                                                                 |
+| `update(id, updater, options?)`           | Read-modify-write a session through optimistic concurrency. `options.refreshActivity` (default `true`) controls whether a successful write stamps a fresh `updatedAt`; pass `false` for a background write (e.g. pruning stale metadata) that must not read as session activity.                                                                                               |
+| `load(id)`                                | Load by id; returns `undefined` if not found.                                                                                                                                                                                                                                                                                                                                  |
+| `delete(id)`                              | Remove a session atomically. Resolves `true` only when this call itself removed a live record, `false` when there was nothing to remove — already gone, or never existed. A custom store must implement this as one delete-and-count operation, never a separate existence check followed by a delete, so a caller can tell which of two racing callers actually won (AB-371). |
+| `delete(id, { returnIncarnation: true })` | The same atomic delete, additionally reporting `{ removed, incarnation }` — the `AgentSession.incarnation` of the body actually removed (AB-384). Use this instead of reading `load(id)` beforehand when the deleted incarnation matters: a separate `load()` has a real race window a concurrent delete-and-recreate can fall into, where this overload has none.             |
+| `exists(id)`                              | Check existence.                                                                                                                                                                                                                                                                                                                                                               |
+| `list(options?)`                          | Paginated list of `SessionSummary` objects.                                                                                                                                                                                                                                                                                                                                    |
+| `updateMetadata(id, metadata)`            | Merge metadata without rewriting the conversation.                                                                                                                                                                                                                                                                                                                             |
+| `cleanup(options)`                        | Delete sessions older than `options.olderThan` ms.                                                                                                                                                                                                                                                                                                                             |
+| `events`                                  | `TypedEventTarget<OperativeEventMap>` (AB-384) the store dispatches its own lifecycle events onto — see below.                                                                                                                                                                                                                                                                 |
 
 Sessions include a persisted `revision` number. New `AgentSession` objects start
 at revision `0`; successful `SessionStore` writes increment the stored revision.
 When concurrent writers save stale copies of the same session, the store retries
 with Weft's conditional batch primitive and merges conversation messages, run
 references, and metadata instead of silently dropping one writer's turns.
+
+**Incarnation identity (AB-384):** `AgentSession.incarnation` distinguishes
+live bodies of the same session id across a delete-then-recreate cycle (a
+supported flow). `SessionStore` mints it the first time an id's body is
+committed — a brand-new id, or one recreated after its previous body was
+deleted — and preserves it unchanged across every later `save()`/`update()`
+of that same live body. A freshly constructed, not-yet-persisted session
+(`createAgentSession()`) carries `''`, the same value a pre-AB-384 record
+loaded from storage defaults to.
+
+Each successful `save()`/`update()` commit dispatches on `SessionStore.events`:
+`SessionCreatedEvent` the first time an id's body is committed, or
+`SessionSavedEvent` on every later commit of the same live body — both carry
+`sessionId`, `agentName`, and the committed `incarnation`. `delete()` carries
+no body to describe and dispatches neither; `@lostgradient/operative`'s own
+`SessionDeletedEvent` (dispatched by consumers, not by the store itself — see
+Bureau's `deleteSession`) carries the deleted record's own `incarnation` at
+the moment of deletion instead. `delete(id, { returnIncarnation: true })`
+reports `{ removed, incarnation }` — the incarnation of the exact body
+deleted, atomically, with no separate `load()` needed (and no race a
+separate `load()` would have).
+
+`save()`/`update()` reject with `StaleSessionIncarnationError` when a
+candidate names a specific, nonempty `incarnation` that no longer matches
+the live body's current one — writing back a prior incarnation's own object
+after that body was deleted and the id recreated. A candidate with
+`incarnation: ''` (the `createAgentSession()` default) is never rejected
+this way.
+
+```ts
+const sessions = createSessionStore(kvStore);
+sessions.events.addEventListener('session.created', (event) => {
+  console.log(`session ${event.sessionId} created, incarnation ${event.incarnation}`);
+});
+```
 
 #### Hooks
 

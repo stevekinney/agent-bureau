@@ -5,7 +5,9 @@ import type {
   ScheduleFailedEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionCreatedEvent,
   SessionDeletedEvent,
+  SessionSavedEvent,
 } from '@lostgradient/operative';
 import type { LivenessLeaseEvidence } from '@lostgradient/operative/liveness';
 import type { Action } from '@lostgradient/operative/store';
@@ -322,6 +324,15 @@ export class ReviewSupersededEvent extends ReviewLifecycleEvent {
  * surface to carry it — see `create-bureau.ts`'s `deleteSession` and
  * `audit-trail.ts`'s dedicated `sessionDeletedListener` for the durable
  * write this closes.
+ *
+ * `session.created`/`session.saved` (`SessionCreatedEvent`/
+ * `SessionSavedEvent`, AB-384) reach this emitter differently again:
+ * `@lostgradient/operative`'s `SessionStore` dispatches them on its OWN
+ * `events` target as `save()`/`update()` commits succeed, and
+ * `create-bureau.ts` forwards each onto this bureau-level emitter (fresh
+ * instances, the same forwarding shape `scheduleFireEvents` above uses) —
+ * see `durable-event-history.ts`'s dedicated `sessionCreatedListener`/
+ * `sessionSavedListener` for the durable write this makes possible.
  */
 export interface BureauEventMap extends EventMap {
   [ActionEvent.type]: ActionEvent;
@@ -337,6 +348,8 @@ export interface BureauEventMap extends EventMap {
   'schedule.cancelled': ScheduleCancelledEvent;
   'schedule.failed': ScheduleFailedEvent;
   'schedule.completed': ScheduleCompletedEvent;
+  'session.created': SessionCreatedEvent;
+  'session.saved': SessionSavedEvent;
   'session.deleted': SessionDeletedEvent;
   [ReviewApprovedEvent.type]: ReviewApprovedEvent;
   [ReviewDeniedEvent.type]: ReviewDeniedEvent;

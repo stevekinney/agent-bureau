@@ -80,13 +80,35 @@
  * cannot tell a duplicate dispatch apart from a session id's legitimate
  * later reuse, and exactly which duplicate-dispatch case the in-flight map
  * does and does not cover.
+ *
+ * Widened again by AB-384, 2026-09-09: a sixth and seventh bureau-level-
+ * emitter source, `SessionCreatedEvent`/`SessionSavedEvent` — closing the
+ * same shape of gap `SessionDeletedEvent` closed above.
+ * `SESSION_DURABLE_ACTION_TYPES` has listed `'session.created'`/
+ * `'session.saved'` since AB-91, but nothing ever dispatched either onto the
+ * `'action'` stream. `@lostgradient/operative`'s `SessionStore` now
+ * dispatches both directly on its own `events` target as `save()`/`update()`
+ * commits succeed, forwarded by `create-bureau.ts` onto this bureau-level
+ * emitter; the dedicated `sessionCreatedListener`/`sessionSavedListener`
+ * below record them under the same `{ kind: 'session', id: sessionId }`
+ * owner `session.deleted` uses. No in-flight dedupe is needed for either:
+ * unlike `deleteSession`, `SessionStore` dispatches each exactly once per
+ * real commit, with no documented duplicate-dispatch or cross-process race
+ * to guard against. This same AB-384 change also gives `SessionDeletedEvent`
+ * a real `incarnation` field (`AgentSession.incarnation`, minted by
+ * `SessionStore` on create, preserved across save/update, fresh on recreate
+ * after delete) — see `sessionDeletedListener`'s own doc comment for how
+ * that closes its previously KNOWN, ACCEPTED overlapping-incarnations
+ * limitation.
  */
 import type {
   AgentScheduledEvent,
   ScheduleCancelledEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  SessionCreatedEvent,
   SessionDeletedEvent,
+  SessionSavedEvent,
 } from '@lostgradient/operative';
 import type {
   DurableEventEnvelope,
@@ -886,13 +908,17 @@ export const RUN_DURABLE_EVENT_TYPES: ReadonlySet<string> = new Set(RUN_DURABLE_
 
 /**
  * `session.*` action types AB-87's matrix classifies as durable — the
- * lifecycle and reattachment facts. `session.deleted` is listed here for
- * completeness (an `'action'`-stream dispatch of that type, if one ever
- * existed, would be forwarded the same way every other entry is), but no
- * production code dispatches `'session.deleted'` onto the `'action'` stream
- * — `deleteSession` dispatches a real `SessionDeletedEvent` directly onto
- * the bureau-level emitter instead, handled by the dedicated
- * `sessionDeletedListener` below (AB-372), not by this set.
+ * lifecycle and reattachment facts. `session.created`, `session.saved`, and
+ * `session.deleted` are listed here for completeness (an `'action'`-stream
+ * dispatch of any of the three, if one ever existed, would be forwarded the
+ * same way every other entry is), but no production code dispatches any of
+ * them onto the `'action'` stream: `@lostgradient/operative`'s `SessionStore`
+ * dispatches `SessionCreatedEvent`/`SessionSavedEvent` on its own `events`
+ * target, forwarded by `create-bureau.ts` onto the bureau-level emitter
+ * (AB-384), and `deleteSession` dispatches a real `SessionDeletedEvent`
+ * directly onto that same emitter (AB-372) — all three handled by their own
+ * dedicated listeners below (`sessionCreatedListener`/`sessionSavedListener`/
+ * `sessionDeletedListener`), not by this set.
  * `session.cancel`/`sleep`/`signal`/`update`/`query` (process-local per
  * AB-39) and `session.monitor.tick`/`done` (explicitly non-cursor-advancing)
  * are deliberately excluded.
@@ -1045,16 +1071,19 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // 'session.created'` branch in `actionListener` below, intending to
   // close the overlapping-incarnations edge case described on
   // `sessionDeletedListener`'s own doc comment. That branch was DEAD CODE
-  // in production (Codex review finding, PR #580, "Clear the guard from
-  // the actual session creation path"): a repo-wide search
-  // (`grep -rn "new SessionCreatedEvent("`) finds `SessionCreatedEvent`
-  // defined and type-mapped in `@lostgradient/operative` but constructed
-  // NOWHERE — no production code path ever dispatches a `'session.created'`
-  // action onto the bureau's `'action'` stream, so the clearing branch
-  // could only ever fire from a test that synthesized the action directly.
-  // Removed rather than left in as harmless-looking dead code; see
-  // `sessionDeletedListener`'s own doc comment for the resulting known,
-  // accepted limitation.
+  // in production at the time (Codex review finding, PR #580, "Clear the
+  // guard from the actual session creation path"): `SessionCreatedEvent`
+  // was defined and type-mapped in `@lostgradient/operative` but never
+  // constructed anywhere — no production code path dispatched a
+  // `'session.created'` action onto the bureau's `'action'` stream, so the
+  // clearing branch could only ever fire from a test that synthesized the
+  // action directly. Removed rather than left in as harmless-looking dead
+  // code. AB-384 later closed the underlying gap for real — see this
+  // module's top-of-file doc comment and `sessionDeletedListener`'s own
+  // below — by giving `SessionDeletedEvent` a real per-incarnation
+  // identity instead of resurrecting this clearing branch.
+  // AB-384 — keyed by `JSON.stringify([encodeOwner(owner), incarnation])`,
+  // not owner alone; see `sessionDeletedListener`'s own doc comment below.
   const pendingSessionDeletionWrites = new Map<string, Promise<void>>();
 
   // AB-372 (Codex review findings, PR #580, "Remember handled deletion
@@ -1241,31 +1270,26 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
   // owner for the write's full duration, exactly as it does for every
   // other listener's write (Copilot review finding, PR #580).
   //
-  // KNOWN, ACCEPTED LIMITATION (Codex review findings, PR #580, "Preserve
-  // overlapping deletions of reused session IDs" and the follow-up "Clear
-  // the guard from the actual session creation path" that caught an
-  // earlier attempted fix relying on a production-dead action type): this
-  // in-flight-by-owner map still conflates a session id recreated and
-  // deleted again WHILE the prior incarnation's own `session.deleted`
-  // write is still pending (e.g. a slow durable append) — the second,
-  // genuinely distinct deletion is dropped as if it were a duplicate of
-  // the first. Closing this properly needs a real signal that fires when a
-  // session is (re)created; none exists in production today
-  // (`SessionCreatedEvent`/`SessionSavedEvent` are both defined and
-  // type-mapped in `@lostgradient/operative` but never constructed
-  // anywhere — verified by `grep -rn "new Session(Created|Saved)Event("`
-  // across `packages/`), and adding one is an `@lostgradient/operative`
-  // change (this issue's delivery boundary is `packages/bureau` only), or
-  // else a per-incarnation identity on `SessionDeletedEvent` itself,
-  // equally out of this boundary. The window is extremely narrow in
-  // practice (it requires the FIRST incarnation's own durable append to
-  // still be pending at the moment the id is recreated AND deleted again),
-  // and `resolveEventHistory` (`create-bureau.ts`) already checks the
-  // session's LIVE record before trusting a historical `'session.deleted'`
-  // marker (see that function's own doc comment), so this residual gap can
-  // only ever manifest as a MISSING durable fact for the second
-  // incarnation's deletion, never a false `deleted-aggregate` report for a
-  // session that is actually still live.
+  // CLOSED by AB-384 (previously a KNOWN, ACCEPTED LIMITATION — Codex review
+  // findings, PR #580, "Preserve overlapping deletions of reused session
+  // IDs" and the follow-up "Clear the guard from the actual session
+  // creation path" that caught an earlier attempted fix relying on a
+  // production-dead action type): the in-flight map used to be keyed by
+  // OWNER alone, so a session id recreated and deleted again WHILE the
+  // prior incarnation's own `session.deleted` write was still pending (e.g.
+  // a slow durable append) was conflated with a duplicate dispatch of that
+  // prior deletion and silently dropped. `SessionDeletedEvent` now carries
+  // `AgentSession.incarnation` (AB-384 — minted by the store on create,
+  // preserved across save/update, fresh on recreate after delete), so the
+  // dedupe map below is keyed by `(id, incarnation)`, never `id` alone:
+  // `trackWrite`'s own bookkeeping (`activeWriteCountsByOwner`/
+  // `activeWritesByOwner`, read by `hasActiveWrite()`) stays keyed by OWNER,
+  // since a per-incarnation key there would make `hasActiveWrite(owner)`
+  // blind to a second incarnation's in-flight write against the exact same
+  // owner. The `recordedDeletionEvents` `WeakSet` above needs no equivalent
+  // change: it already partitions by event OBJECT identity, and two
+  // incarnations' deletions are always two distinct `SessionDeletedEvent`
+  // instances.
   const sessionDeletedListener = (event: SessionDeletedEvent): void => {
     if (signal?.aborted) return;
     // A literal replay of the SAME event object — checked first, and
@@ -1275,39 +1299,84 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
     if (recordedDeletionEvents.has(event)) return;
     const owner: DurableEventOwner = { kind: 'session', id: event.sessionId };
     const ownerKey = encodeOwner(owner);
-    if (pendingSessionDeletionWrites.has(ownerKey)) return;
+    // AB-384 — keyed by `(id, incarnation)`, not `ownerKey` alone (see this
+    // listener's own doc comment above): two different incarnations of the
+    // same session id are two independent deletions, never duplicates of
+    // each other, even when their writes overlap. `JSON.stringify` of the
+    // two-element tuple, not template-string concatenation (Codex P2 review
+    // finding, PR #592, "Encode deletion dedupe keys without delimiter
+    // collisions"): a plain `${ownerKey}:${incarnation}` is not a unique
+    // encoding once an injected `RuntimeIdentifiers.next` policy can emit a
+    // colon — `('x:y', 'z')` and `('x', 'y:z')` would both concatenate to
+    // the same string. `JSON.stringify` escapes each element's own
+    // delimiter-like characters, so distinct tuples always serialize to
+    // distinct strings.
+    const dedupeKey = JSON.stringify([ownerKey, event.incarnation]);
+    if (pendingSessionDeletionWrites.has(dedupeKey)) return;
     trackWrite(ownerKey, () => {
-      const write = history.record(owner, 'session.deleted', { sessionId: event.sessionId }).then(
-        () => {
-          // Only remember this event as handled on SUCCESS (Codex review
-          // finding, PR #580, "Allow retries after a failed deletion
-          // write"): marking it before the write even started would
-          // permanently block a legitimate retry of the SAME event object
-          // after a transient storage failure recovers — the in-flight map
-          // above already prevents a genuinely concurrent duplicate from
-          // starting a second write while this one is pending, so nothing
-          // is lost by waiting for success here.
-          recordedDeletionEvents.add(event);
-        },
-        (error: unknown) => {
-          diagnose({
-            level: 'error',
-            scope: 'durable-event-history',
-            message: `[durable-event-history] Failed to record durable event "session.deleted" for ${owner.kind}:${owner.id}:`,
-            cause: error,
-          });
-        },
-      );
-      pendingSessionDeletionWrites.set(ownerKey, write);
+      const write = history
+        .record(owner, 'session.deleted', {
+          sessionId: event.sessionId,
+          incarnation: event.incarnation,
+        })
+        .then(
+          () => {
+            // Only remember this event as handled on SUCCESS (Codex review
+            // finding, PR #580, "Allow retries after a failed deletion
+            // write"): marking it before the write even started would
+            // permanently block a legitimate retry of the SAME event object
+            // after a transient storage failure recovers — the in-flight map
+            // above already prevents a genuinely concurrent duplicate from
+            // starting a second write while this one is pending, so nothing
+            // is lost by waiting for success here.
+            recordedDeletionEvents.add(event);
+          },
+          (error: unknown) => {
+            diagnose({
+              level: 'error',
+              scope: 'durable-event-history',
+              message: `[durable-event-history] Failed to record durable event "session.deleted" for ${owner.kind}:${owner.id}:`,
+              cause: error,
+            });
+          },
+        );
+      pendingSessionDeletionWrites.set(dedupeKey, write);
       void write.finally(() => {
-        if (pendingSessionDeletionWrites.get(ownerKey) === write) {
-          pendingSessionDeletionWrites.delete(ownerKey);
+        if (pendingSessionDeletionWrites.get(dedupeKey) === write) {
+          pendingSessionDeletionWrites.delete(dedupeKey);
         }
       });
       return write;
     });
   };
   bureau.addEventListener('session.deleted', sessionDeletedListener);
+
+  // AB-384 — `SessionCreatedEvent`/`SessionSavedEvent` reach this emitter
+  // the same indirect way `schedule.completed`/`schedule.failed` do (see
+  // this module's top-of-file doc comment): `create-bureau.ts` forwards
+  // them from `SessionStore.events` onto the bureau-level emitter, never
+  // through `'action'`. No in-flight dedupe is needed here the way
+  // `sessionDeletedListener` above needs one: the store dispatches each
+  // exactly once per real commit, with no documented duplicate-dispatch or
+  // cross-process race analogous to `deleteSession`'s own coalescing gap.
+  const sessionCreatedListener = (event: SessionCreatedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'session', id: event.sessionId }, 'session.created', {
+      sessionId: event.sessionId,
+      agentName: event.agentName,
+      incarnation: event.incarnation,
+    });
+  };
+  const sessionSavedListener = (event: SessionSavedEvent): void => {
+    if (signal?.aborted) return;
+    sink({ kind: 'session', id: event.sessionId }, 'session.saved', {
+      sessionId: event.sessionId,
+      agentName: event.agentName,
+      incarnation: event.incarnation,
+    });
+  };
+  bureau.addEventListener('session.created', sessionCreatedListener);
+  bureau.addEventListener('session.saved', sessionSavedListener);
 
   // AB-224's `review.*` lifecycle family (AB-87/AB-46) — like `schedule.*`
   // above, these are dispatched directly onto the bureau-level emitter
@@ -1398,6 +1467,8 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       bureau.removeEventListener('schedule.resumed', scheduleResumedListener);
       bureau.removeEventListener('schedule.cancelled', scheduleCancelledListener);
       bureau.removeEventListener('run.removed', runRemovedListener);
+      bureau.removeEventListener('session.created', sessionCreatedListener);
+      bureau.removeEventListener('session.saved', sessionSavedListener);
       bureau.removeEventListener('session.deleted', sessionDeletedListener);
       bureau.removeEventListener('review.approved', reviewApprovedListener);
       bureau.removeEventListener('review.denied', reviewDeniedListener);

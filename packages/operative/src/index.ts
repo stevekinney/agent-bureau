@@ -566,6 +566,8 @@ export {
   NoDurableEngineError,
   NoRunningRunError,
   resumeSession,
+  SessionConflictError,
+  StaleSessionIncarnationError,
 } from './session/index';
 export { withStreaming } from './streaming';
 export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
