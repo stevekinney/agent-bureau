@@ -1657,6 +1657,21 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     const RENEW_INTERVAL_MS = PRUNE_LEASE_TTL_MS / 3;
     let prunedCount = 0;
     let deleteError: Error | undefined;
+    // AB-393 (Codex review, PR #600, "Preserve the successor's intent
+    // after losing the lease"): distinct from `deleteError` — a plain
+    // `kv.delete()` failure (the `catch` block below) means THIS pass
+    // still legitimately holds the lease (nothing here contested it), so
+    // clearing `PRUNE_INTENT_KEY` afterward is still correct. Losing the
+    // LEASE ITSELF mid-delete is different: by the time this pass's own
+    // post-loop cleanup runs, another Bureau instance may have already
+    // acquired the now-available lease, reconciled (and cleared) this
+    // pass's orphaned intent, and written its OWN fresh intent for its
+    // OWN, still-in-progress pass. This pass's unconditional
+    // `kv.delete(PRUNE_INTENT_KEY)` cannot tell the difference between
+    // "my own intent, safe to clear" and "a successor's intent I have no
+    // business touching" — so `leaseLost` gates that cleanup below,
+    // skipping it entirely rather than guessing.
+    let leaseLost = false;
     for (const candidate of candidates) {
       try {
         // AB-393: the listing phase above judged this candidate against
@@ -1700,6 +1715,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
             deleteError = new Error(
               'Aborting audit-trail prune pass: lost the prune lease mid-delete',
             );
+            leaseLost = true;
             break;
           }
           lastLeaseRenewalAtMs = runtime.clock.now();
@@ -1812,7 +1828,25 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     // without documenting it, consistent with this file's existing
     // residuals (see `pruneAuditTrail`'s own cross-process write-race
     // doc comment in `create-bureau.ts`).
-    await kv.delete(PRUNE_INTENT_KEY);
+    //
+    // AB-393 (Codex review, PR #600, "Preserve the successor's intent
+    // after losing the lease"): skipped entirely when `leaseLost` — by
+    // the time this line runs, a DIFFERENT Bureau instance may have
+    // already acquired the lease this pass just lost, reconciled (and
+    // cleared) THIS pass's own orphaned intent on its own, and written
+    // its OWN fresh `PRUNE_INTENT_KEY` for its OWN in-progress pass. This
+    // pass has no CAS-guarded way to tell "still my own intent" from "a
+    // successor's intent" from here (unlike `reconcileOrphanedPruneIntent`,
+    // which reads and re-checks the raw value before clearing it) — so
+    // rather than risk erasing a successor's real, in-progress intent
+    // (which would leave THAT successor's own eventual deletions
+    // unrecoverable if it later crashes before its own summary write),
+    // this pass simply leaves `PRUNE_INTENT_KEY` untouched and lets
+    // whoever legitimately owns it — this pass's own next attempt, or the
+    // successor's own pass — account for it normally.
+    if (!leaseLost) {
+      await kv.delete(PRUNE_INTENT_KEY);
+    }
 
     // Surfaced only AFTER the partial summary above has been durably
     // written — a caller (`pruneAuditTrail`'s `runDurableMaintenance`

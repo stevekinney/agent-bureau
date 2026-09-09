@@ -2305,6 +2305,61 @@ describe('createAuditTrail', () => {
 
       trail.dispose();
     });
+
+    it('never deletes PRUNE_INTENT_KEY once this pass has lost its own lease mid-delete — a successor Bureau instance may have already reconciled and written its OWN fresh intent there by the time this pass\'s own cleanup runs (Codex review, PR #600, "Preserve the successor\'s intent after losing the lease")', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      await seedRecord(kv, makeRecord(0, { timestampMs: 1000, runId: 'run-a' }));
+      await seedRecord(kv, makeRecord(1, { timestampMs: 1000, runId: 'run-b' }));
+
+      const runtime = createManualRuntimeServices();
+      runtime.setTime(0);
+
+      let leaseSetAttempts = 0;
+      const trackedKv: ReturnType<typeof textValueStore> = {
+        ...kv,
+        async conditionalBatch(conditions, operations) {
+          const isLeaseSet = operations.some(
+            (op) => op.type === 'set' && op.key === 'audit-retention:v1:prune-lease',
+          );
+          if (isLeaseSet) {
+            leaseSetAttempts += 1;
+            // Call 1: acquisition. Call 2: renewal before the delete
+            // loop. Call 3: the first elapsed-time-driven periodic
+            // renewal, checked before the SECOND candidate's own delete.
+            // Simulates losing the CAS to a successor instance that has
+            // ALREADY reconciled this pass's own now-orphaned intent and
+            // written its OWN fresh one — the exact interleaving this
+            // fix protects against.
+            if (leaseSetAttempts === 3) {
+              await kv.set(
+                'audit-retention:v1:prune-intent',
+                JSON.stringify({ count: 999, cutoffMs: 123_456 }),
+              );
+              return false;
+            }
+          }
+          return kv.conditionalBatch(conditions, operations);
+        },
+        async delete(key: string) {
+          await kv.delete(key);
+          runtime.setTime(runtime.clock.now() + 350_000); // > PRUNE_LEASE_TTL_MS / 3
+        },
+      };
+
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 2 }, runtime);
+
+      await expect(trail.prune(5000)).rejects.toThrow('lost the prune lease mid-delete');
+
+      // The successor's own intent survives completely untouched — this
+      // pass never calls `kv.delete(PRUNE_INTENT_KEY)` once it knows it
+      // lost the lease, regardless of what currently occupies that key.
+      const intentRaw = await kv.get('audit-retention:v1:prune-intent');
+      expect(intentRaw).not.toBeNull();
+      expect(JSON.parse(intentRaw ?? '')).toEqual({ count: 999, cutoffMs: 123_456 });
+
+      trail.dispose();
+    });
   });
 
   describe('AB-388 — commit deletion summaries atomically with deletions (Codex review, PR #597)', () => {
