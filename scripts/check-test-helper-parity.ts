@@ -200,10 +200,16 @@ export function isSubpathReachable(exportsField: unknown, subpath: string): bool
   return bestMatch !== undefined && resolvesToSomething(bestMatch.value);
 }
 
-/** A pattern key contains exactly one `*`; matches when `subpath` shares its prefix and suffix. */
+/**
+ * A valid `exports` pattern key contains exactly one `*` (Node rejects more than one); matches
+ * when `subpath` shares its prefix and suffix. A key with a second `*` is not a valid pattern —
+ * per Node's own `exports` resolution, it is never treated as a match, however superficially
+ * similar its prefix/suffix might look, rather than silently matching on the first `*` alone.
+ */
 function matchesWildcardPattern(pattern: string, subpath: string): boolean {
   const starIndex = pattern.indexOf('*');
   if (starIndex === -1) return pattern === subpath;
+  if (pattern.includes('*', starIndex + 1)) return false;
   const prefix = pattern.slice(0, starIndex);
   const suffix = pattern.slice(starIndex + 1);
   return (
@@ -311,6 +317,15 @@ function findModuleSpecifiers(sourceFile: ts.SourceFile): ModuleSpecifierRecord[
       ts.isStringLiteralLike(node.arguments[0])
     ) {
       recordSpecifier(node.arguments[0]);
+    } else if (
+      // A type-only equivalent of a dynamic import — `type T = import('../x').T` — parses as an
+      // `ImportTypeNode`, not a call expression, so it is invisible to the branch above even
+      // though it reaches the same internal path.
+      ts.isImportTypeNode(node) &&
+      ts.isLiteralTypeNode(node.argument) &&
+      ts.isStringLiteralLike(node.argument.literal)
+    ) {
+      recordSpecifier(node.argument.literal);
     }
     node.forEachChild(visit);
   }
@@ -393,7 +408,11 @@ export function findCrossPackageFindings(
 export function evaluateTestHelperParity(
   findings: readonly CrossPackageFinding[],
   manifest: AdapterSuiteManifest,
-  allTestIdentifiers: ReadonlySet<string>,
+  /**
+   * Only `it`/`test` CASE identifiers — a `describe` SUITE identifier alone must never satisfy a
+   * `blackBoxTest`, since a suite name identifies no assertion that actually runs.
+   */
+  leafTestIdentifiers: ReadonlySet<string>,
 ): TestHelperParityCheckResult {
   const pairedAdapterSuites = new Set(manifest.entries.map((entry) => entry.adapterSuite));
 
@@ -402,7 +421,7 @@ export function evaluateTestHelperParity(
     .map((finding) => ({ ...finding, reason: 'unpaired-adapter-import' as const }));
 
   const brokenPairings: BrokenPairing[] = manifest.entries
-    .filter((entry) => !allTestIdentifiers.has(entry.blackBoxTest))
+    .filter((entry) => !leafTestIdentifiers.has(entry.blackBoxTest))
     .map((entry) => ({ adapterSuite: entry.adapterSuite, blackBoxTest: entry.blackBoxTest }));
 
   return { violations, brokenPairings };
@@ -453,7 +472,9 @@ export async function checkTestHelperParity(
   const scannedFiles = [...new Set(fileListsByGlob.flat())].sort();
 
   const allFindings: CrossPackageFinding[] = [];
-  const allTestIdentifiers = new Set<string>();
+  // Only `it`/`test` CASE identifiers, never a `describe` SUITE identifier alone — a manifest
+  // entry naming just a suite would assert nothing and must not satisfy a `blackBoxTest`.
+  const leafTestIdentifiers = new Set<string>();
 
   for (const relativeFilePath of scannedFiles) {
     const sourceText = await readFile(resolve(repositoryRoot, relativeFilePath), 'utf-8');
@@ -465,17 +486,17 @@ export async function checkTestHelperParity(
       ts.ScriptKind.TS,
     );
     allFindings.push(...findCrossPackageFindings(relativeFilePath, sourceFile, packages));
-    const { allTestIdentifiers: fileIdentifiers } = findSkipFindingsInSource(
+    const { leafTestIdentifiers: fileIdentifiers } = findSkipFindingsInSource(
       relativeFilePath,
       sourceText,
     );
-    for (const identifier of fileIdentifiers) allTestIdentifiers.add(identifier);
+    for (const identifier of fileIdentifiers) leafTestIdentifiers.add(identifier);
   }
 
   const { violations, brokenPairings } = evaluateTestHelperParity(
     allFindings,
     manifest,
-    allTestIdentifiers,
+    leafTestIdentifiers,
   );
 
   return { violations, brokenPairings, scannedFiles };

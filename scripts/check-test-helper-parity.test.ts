@@ -61,6 +61,13 @@ describe('isSubpathReachable', () => {
     expect(isSubpathReachable(exportsField, './public/x')).toBe(true);
   });
 
+  it('never matches a key with more than one "*" — an invalid pattern is not silently matched on its first wildcard alone', () => {
+    // '.\/a\*b\*c' has two '*'s: Node rejects multi-wildcard exports keys outright, so this must
+    // never be treated as a match even though a naive first-'*'-only split would report one.
+    const exportsField = { './a*b*c': './dist/index.js' };
+    expect(isSubpathReachable(exportsField, './aXbYc')).toBe(false);
+  });
+
   it('treats a subpath explicitly mapped to null as forbidden, not reachable', () => {
     const exportsField = { '.': './dist/index.js', './internal': null };
     expect(isSubpathReachable(exportsField, './internal')).toBe(false);
@@ -268,6 +275,25 @@ describe('findCrossPackageFindings', () => {
       },
     ]);
   });
+
+  it('sees a type-only import() expression (ImportTypeNode) the same way it sees a value import', () => {
+    // `type T = import('...').T` parses as an `ImportTypeNode`, not a call expression — a
+    // TypeScript-only equivalent to a dynamic import that reaches the same internal path without
+    // ever appearing as `ts.isCallExpression`.
+    const findings = findingsFor(
+      'packages/pkg-b/test/type-only.ts',
+      `export type X = import('fixture-pkg-a/src/internal').InternalThing;\n`,
+    );
+    expect(findings).toEqual([
+      {
+        importingFile: 'packages/pkg-b/test/type-only.ts',
+        importingPackage: 'fixture-pkg-b',
+        targetPackage: 'fixture-pkg-a',
+        internalPath: './src/internal',
+        line: 1,
+      },
+    ]);
+  });
 });
 
 describe('evaluateTestHelperParity', () => {
@@ -345,6 +371,39 @@ describe('evaluateTestHelperParity', () => {
     const result = evaluateTestHelperParity([], manifest, allTestIdentifiers);
     expect(result.violations).toEqual([]);
     expect(result.brokenPairings).toEqual([]);
+  });
+
+  it('rejects a blackBoxTest naming only a describe suite, not an actual it/test case', () => {
+    // findCrossPackageFindings/checkTestHelperParity pass only `leafTestIdentifiers` (it/test
+    // cases) here, never the full `allTestIdentifiers` set — a manifest entry naming a suite alone
+    // identifies no assertion that actually runs, so it must be treated exactly like naming no
+    // test at all.
+    const manifest = {
+      entries: [
+        {
+          adapterSuite: finding.importingFile,
+          guarantee: 'guarantee',
+          blackBoxTest:
+            'packages/pkg-b/test/black-box-proof.test.ts > proves the guarantee publicly',
+          owner: 'owner',
+        },
+      ],
+      notRuled: [],
+    };
+    // A caller that (incorrectly) passed the full describe+test identifier set would find this
+    // suite-only identifier present; the correct leaf-only set never contains it.
+    const suiteOnlyIdentifierPresentButNotALeaf = new Set<string>();
+    const result = evaluateTestHelperParity(
+      [finding],
+      manifest,
+      suiteOnlyIdentifierPresentButNotALeaf,
+    );
+    expect(result.brokenPairings).toEqual([
+      {
+        adapterSuite: finding.importingFile,
+        blackBoxTest: 'packages/pkg-b/test/black-box-proof.test.ts > proves the guarantee publicly',
+      },
+    ]);
   });
 });
 

@@ -370,16 +370,20 @@ function hasConditionalEarlyReturn(callback: FunctionLikeDeclaration): boolean {
 }
 
 /**
- * Walks one already-parsed source file, returning every skip-like finding and every
- * `describe`/`it`/`test` identifier seen (skip-like or not), the latter used to detect a manifest
- * entry that names no real test.
+ * Walks one already-parsed source file, returning every skip-like finding, every
+ * `describe`/`it`/`test` identifier seen (skip-like or not, `allTestIdentifiers`) — used to detect
+ * a manifest entry that names no real test — and the subset of those identifiers that name an
+ * actual `it`/`test` CASE rather than a `describe` SUITE (`leafTestIdentifiers`) — used by callers
+ * (`scripts/check-test-helper-parity.ts`) that must reject a manifest entry naming only a suite,
+ * which asserts nothing on its own.
  */
 export function findSkipFindings(
   filePath: string,
   sourceFile: ts.SourceFile,
-): { findings: SkipFinding[]; allTestIdentifiers: Set<string> } {
+): { findings: SkipFinding[]; allTestIdentifiers: Set<string>; leafTestIdentifiers: Set<string> } {
   const findings: SkipFinding[] = [];
   const allTestIdentifiers = new Set<string>();
+  const leafTestIdentifiers = new Set<string>();
   const importAliases = collectTestImportAliases(sourceFile);
   const functionBindings = collectFunctionBindings(sourceFile);
 
@@ -391,6 +395,9 @@ export function findSkipFindings(
         const fullChain = [...describeChain, title];
         const testIdentifier = `${filePath} > ${fullChain.join(' > ')}`;
         allTestIdentifiers.add(testIdentifier);
+        if (callInfo.rootName === 'it' || callInfo.rootName === 'test') {
+          leafTestIdentifiers.add(testIdentifier);
+        }
 
         const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 
@@ -412,7 +419,7 @@ export function findSkipFindings(
   }
 
   visit(sourceFile, []);
-  return { findings, allTestIdentifiers };
+  return { findings, allTestIdentifiers, leafTestIdentifiers };
 }
 
 /**
@@ -431,7 +438,7 @@ function scriptKindForFilePath(filePath: string): ts.ScriptKind {
 export function findSkipFindingsInSource(
   filePath: string,
   sourceText: string,
-): { findings: SkipFinding[]; allTestIdentifiers: Set<string> } {
+): { findings: SkipFinding[]; allTestIdentifiers: Set<string>; leafTestIdentifiers: Set<string> } {
   const sourceFile = ts.createSourceFile(
     filePath,
     sourceText,

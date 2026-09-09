@@ -73,6 +73,32 @@ describe('findSkipFindingsInSource', () => {
     expect([...allTestIdentifiers]).toEqual([`${filePath} > runs unconditionally and asserts`]);
   });
 
+  it('leafTestIdentifiers names only the it/test case, never the enclosing describe suite alone (consumed by scripts/check-test-helper-parity.ts)', () => {
+    const filePath = 'suite-and-case.ts';
+    const sourceText = `
+      import { describe, expect, it } from 'bun:test';
+      describe('a suite with no assertion of its own', () => {
+        it('the one real test case', () => {
+          expect(true).toBe(true);
+        });
+      });
+    `;
+    const { allTestIdentifiers, leafTestIdentifiers } = findSkipFindingsInSource(
+      filePath,
+      sourceText,
+    );
+
+    expect([...allTestIdentifiers].sort()).toEqual(
+      [
+        `${filePath} > a suite with no assertion of its own`,
+        `${filePath} > a suite with no assertion of its own > the one real test case`,
+      ].sort(),
+    );
+    expect([...leafTestIdentifiers]).toEqual([
+      `${filePath} > a suite with no assertion of its own > the one real test case`,
+    ]);
+  });
+
   it('does not treat a conditional return nested past the first statement as a skip', () => {
     const filePath = 'inline.ts';
     const sourceText = `
