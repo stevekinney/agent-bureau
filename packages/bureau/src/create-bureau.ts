@@ -5602,30 +5602,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * unacknowledged outbox entry before either acknowledges it) — closing
    * it fully is out of scope here and left as a follow-up.
    *
-   * ACCEPTED RESIDUAL (Codex review, PR #597, "Revalidate retained owners
-   * before deleting audit records"): `retainedRunOwnerIdsForAuditRetention()`
-   * below takes ONE snapshot, used for the ENTIRE `auditTrailInstance.prune()`
-   * call that follows — including its own candidate-listing phase, which
-   * can take real time for a large trail. A durable event that starts
-   * AFTER this snapshot but lands before `prune()` reaches that
-   * candidate's key (e.g. a concurrent `deleteRun()` appending `run.removed`
-   * for a run whose earlier feed events had already aged out) makes that
-   * run newly retained without this snapshot ever seeing it, so its
-   * earlier `tool.*`/`step.completed` audit records can still be deleted
-   * this pass. `pruneStaleRunOwnership()` closes the identical class of
-   * staleness for ITS OWN owner-set consumption by revalidating via
-   * `refreshRetainedRunOwnerIds()` immediately before every write (see
-   * that function's own doc comment) — doing the same here would require
-   * `AuditTrail.prune()`'s `protectRunId` to become an ASYNC predicate,
-   * re-checked per candidate during both the listing AND deletion phases,
-   * a substantially larger change to a function this same round of fixes
-   * already hardened for lease coordination, atomic summary/intent
-   * commits, and non-finite-cutoff validation. Left as a follow-up rather
-   * than rushed alongside those; the window this leaves open is narrower
-   * than it looks in practice — `protectRunId` is evaluated once per
-   * candidate during listing, not re-checked at delete time, so exposure
-   * is bounded by how long that listing scan takes, not by the (often
-   * slower) delete loop after it.
+   * AB-393 (coordinator ruling, 2026-09-09, closing the residual the
+   * paragraph above once described): `retainedRunOwnerIdsForAuditRetention()`
+   * below still takes one snapshot to SEED this pass, but `protectRunId`
+   * itself is now an ASYNC predicate that revalidates that snapshot via
+   * `eventHistoryInstance.refreshRetainedRunOwnerIds()` on every call —
+   * including the re-check `audit-trail.ts`'s own `prune()` now performs
+   * immediately before each candidate's delete, not only once during
+   * listing. This is the exact pattern `pruneStaleRunOwnership()` already
+   * uses for the identical class of staleness (see that function's own
+   * doc comment): a shared, monotonically-accumulating snapshot variable,
+   * advanced by a cursor-resumed scan rather than a from-scratch replay,
+   * so a durable event that starts after this predicate's first call for
+   * a candidate but lands before that candidate's own delete is still
+   * observed — closing the window the prior revision of this comment
+   * described as an accepted residual, at the cost of one extra
+   * cursor-resumed feed read per surviving candidate (zero storage reads
+   * when nothing new landed since the previous call).
    */
   async function pruneAuditTrail(): Promise<void> {
     if (!auditTrailInstance) return;
@@ -5652,9 +5645,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // `retainedRunOwnerIdsForAuditRetention`'s own doc comment
     // (`durable-event-history.ts`) for why this consumer's polarity makes
     // the real set safe to use at every floor value.
-    const retainedRunOwners = await eventHistoryInstance?.retainedRunOwnerIdsForAuditRetention();
-    const protectRunId = retainedRunOwners
-      ? (runId: string) => retainedRunOwners.ownerIds.has(runId)
+    //
+    // AB-393: seeds the shared, mutable `retainedRunOwners` variable this
+    // pass's `protectRunId` closure below revalidates on every call — the
+    // SAME "seed once, refresh per check" shape `pruneStaleRunOwnership()`
+    // already uses (see that function's own doc comment for why a shared
+    // variable reassigned sequentially, never cloned, is race-free here).
+    let retainedRunOwners = await eventHistoryInstance?.retainedRunOwnerIdsForAuditRetention();
+    const protectRunId = eventHistoryInstance
+      ? async (runId: string): Promise<boolean> => {
+          if (retainedRunOwners === undefined) return false;
+          if (retainedRunOwners.ownerIds.has(runId)) return true;
+          retainedRunOwners =
+            await eventHistoryInstance.refreshRetainedRunOwnerIds(retainedRunOwners);
+          return retainedRunOwners.ownerIds.has(runId);
+        }
       : undefined;
 
     await auditTrailInstance.prune(effectiveCutoff, { protectRunId });
