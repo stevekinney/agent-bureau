@@ -478,6 +478,96 @@ describe('createAuditTrail', () => {
     trail.dispose();
   });
 
+  describe('record() dedupeKey (AB-391, Codex review finding, PR #601, "Make attachment replay deduplication atomic")', () => {
+    it('a second record() call with the SAME dedupeKey is a no-op — no second record is written', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const entry = {
+        runId: 'run-dedupe-1',
+        type: 'review.tool-approval.approved',
+        detail: { decision: 'approve' },
+        principal: 'api-key:reviewer-1',
+        dedupeKey: 'session.attachment:session-1:3',
+      };
+      await trail.record(entry);
+      await trail.record(entry);
+
+      const records = await trail.query({ runId: 'run-dedupe-1' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('two CONCURRENT record() calls with the SAME dedupeKey — simulating two Bureau processes racing after a lease renewal failure — still produce exactly one record', async () => {
+      // The exact race Codex's finding described: a read-before-write
+      // existence check has a window between the read and the write that
+      // two concurrent callers can both pass through before either writes.
+      // `dedupeKey`'s atomic compare-and-swap has no such window — both
+      // calls START before either COMPLETES, and only one can win the
+      // underlying `conditionalBatch`.
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      const entry = {
+        runId: 'run-dedupe-race',
+        type: 'review.tool-approval.approved',
+        detail: { decision: 'approve' },
+        principal: 'api-key:reviewer-1',
+        dedupeKey: 'session.attachment:session-race:7',
+      };
+      await Promise.all([trail.record(entry), trail.record(entry)]);
+
+      const records = await trail.query({ runId: 'run-dedupe-race' });
+      expect(records).toHaveLength(1);
+      trail.dispose();
+    });
+
+    it('two DIFFERENT dedupeKeys for the same runId/type both persist their own record', async () => {
+      const kv = textValueStore(new MemoryStorage());
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, kv);
+
+      await trail.record({
+        runId: 'run-dedupe-2',
+        type: 'review.tool-approval.approved',
+        detail: { call: 1 },
+        dedupeKey: 'session.attachment:session-2:1',
+      });
+      await trail.record({
+        runId: 'run-dedupe-2',
+        type: 'review.tool-approval.approved',
+        detail: { call: 2 },
+        dedupeKey: 'session.attachment:session-2:2',
+      });
+
+      const records = await trail.query({ runId: 'run-dedupe-2' });
+      expect(records).toHaveLength(2);
+      trail.dispose();
+    });
+
+    it('propagates a genuine storage failure from a dedupeKey write, unlike the default best-effort record() path', async () => {
+      const backing = textValueStore(new MemoryStorage());
+      const failingKv: typeof backing = {
+        ...backing,
+        conditionalBatch: () => Promise.reject(new Error('storage unavailable')),
+      };
+      const { bureau } = createStubBureau();
+      const trail = createAuditTrail(bureau, failingKv);
+
+      await expect(
+        trail.record({
+          runId: 'run-dedupe-failure',
+          type: 'review.tool-approval.approved',
+          detail: {},
+          dedupeKey: 'session.attachment:session-failure:1',
+        }),
+      ).rejects.toThrow('storage unavailable');
+      trail.dispose();
+    });
+  });
+
   it('record() and the live action-event listener never collide on key/sequence', async () => {
     const kv = textValueStore(new MemoryStorage());
     const { bureau, emit } = createStubBureau();

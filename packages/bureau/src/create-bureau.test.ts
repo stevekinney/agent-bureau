@@ -18500,18 +18500,17 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
     }
   });
 
-  it('scopes the dedup query with `since` so a re-drained attachment is found (and not duplicated) behind 500+ earlier same-runId/type records (Copilot review finding, PR #601)', async () => {
-    // `AuditTrail.query()` defaults to `limit: 500` and stops collecting
-    // once it hits that many MATCHING records, scanned in chronological
-    // order. Without `since: entry.committedAtMs` scoping the dedup
-    // lookup, 500+ earlier records sharing this entry's exact `runId`/
-    // `type` (an unlikely but real volume for a long-lived run) would fill
-    // that limit before the scan ever reached this entry's own timestamp —
-    // both the pre-write "already recorded?" check and the post-write
-    // "did it actually land?" verification would then wrongly report "not
-    // found", the latter making this drain treat its own successful write
-    // as a failure and retry it forever, duplicating the record on every
-    // pass.
+  it('the dedupeKey-guarded attachment write stays correct behind 500+ earlier same-runId/type records (Copilot review finding, PR #601, superseded by the atomic dedupeKey fix)', async () => {
+    // Copilot originally flagged that a read-before-write existence check
+    // scoped by `AuditTrail.query()`'s default `limit: 500` could miss the
+    // target record behind enough earlier same-`runId`/`type` history and
+    // duplicate the write. The fix that shipped goes further than
+    // rescoping that query (Codex flagged the read-then-write pattern
+    // itself as racy across processes — see the "Make attachment replay
+    // deduplication atomic" tests below): the attachment write now goes
+    // through `AuditTrail.record`'s atomic `dedupeKey`, which does not
+    // query existing history at all. This test keeps the original
+    // volume scenario as a regression guard for that superseded bug.
     const bureau = await createBureau({
       agents: {},
       generate: createMockGenerate('unused'),
@@ -18553,8 +18552,9 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
 
       await bureau.runDurableMaintenance();
 
-      // The entry must be acknowledged — the fix's `since`-scoped
-      // verification query found the write it just made.
+      // The entry must be acknowledged — the atomic `dedupeKey` write
+      // landed regardless of how much unrelated same-runId/type history
+      // preceded it.
       expect(await sessionStore.outbox.pending()).toHaveLength(0);
 
       const allMatching = await bureau.auditTrail!.query({ runId, type, limit: floodCount + 10 });
@@ -18573,6 +18573,130 @@ describe('AB-391 — review-transition audit records ride the session outbox', (
         limit: floodCount + 10,
       });
       expect(afterSecondPass).toHaveLength(floodCount + 1);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('a review decision whose session vanished before the resolution commit still records an audit entry via the direct fallback write (Codex review finding, PR #601, "Detect when the resolution update appends nothing")', async () => {
+    // Simulates the session disappearing between this review being read
+    // and `persistReviewResolution`'s `sessionStore.update()` call —
+    // e.g. a concurrent caller deleting it through the exposed
+    // `bureau.sessionStore`. The updater returns `undefined` (nothing
+    // committed: neither the resolution NOR the coupled audit-record
+    // outbox attachment), so `persistReviewResolutionWithRetry` must
+    // report `false`, and `recordReviewDecision` must fall back to its
+    // own direct write — otherwise a successfully returned review
+    // decision would have no durable audit record at all.
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [{ id: 'ab-391-vanish-call', name: 'charge-card', arguments: { cents: 500 } }],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-vanish-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence: textValueStore(new MemoryStorage()),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      const sessionStore = bureau.sessionStore;
+      if (!sessionStore) throw new Error('expected a configured session store');
+      const deleted = await sessionStore.delete(review.sessionId);
+      expect(deleted).toBe(true);
+
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:vanish-reviewer',
+      });
+      expect(outcome.decision).toBe('approve');
+
+      const records = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = records.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
+      expect(approvedRecords[0]?.principal).toBe('api-key:vanish-reviewer');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('isolates a post-commit outbox drain failure from resolveReview — the decision result and live event still land, and the audit record recovers on a later drain (Codex review finding, PR #601, "Isolate post-commit drain failures from review resolution")', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    let failAuditDedupeWriteOnce = false;
+    const persistence = createTextStoreProxy(backing, {
+      conditionalBatch: (conditions, operations) => {
+        const touchesAuditDedupe = conditions.some((condition) =>
+          condition.key.startsWith('audit-dedupe:v1:'),
+        );
+        if (touchesAuditDedupe && failAuditDedupeWriteOnce) {
+          failAuditDedupeWriteOnce = false;
+          return Promise.reject(new Error('storage unavailable during drain'));
+        }
+        return backing.conditionalBatch(conditions, operations);
+      },
+    });
+    const diagnostics: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([
+        {
+          content: '',
+          toolCalls: [
+            { id: 'ab-391-drain-fail-call', name: 'charge-card', arguments: { cents: 700 } },
+          ],
+        },
+      ]),
+      toolbox: createNeedsApprovalToolbox('ab-391-drain-fail-secret', []),
+      stopWhen: stopWhen.toolOutcome('action_required'),
+      persistence,
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'Charge the customer' });
+      await waitForRunCompletion(bureau, run.id);
+
+      const [review] = bureau.listPendingReviews();
+      if (!review) throw new Error('Expected a pending review');
+
+      failAuditDedupeWriteOnce = true;
+      const outcome = await bureau.resolveReview({
+        id: review.id,
+        decision: 'approve',
+        principal: 'api-key:drain-fail-reviewer',
+      });
+      // The decision result must land even though the post-commit drain
+      // failed — the resolution itself already committed successfully.
+      expect(outcome.decision).toBe('approve');
+      expect(
+        diagnostics.some((message) => message.includes('Post-commit outbox drain failed')),
+      ).toBe(true);
+
+      // The audit record is not yet visible — the failed drain left the
+      // attachment pending rather than losing it.
+      const recordsBeforeRecovery = await bureau.auditTrail!.query({ runId: run.id });
+      expect(
+        recordsBeforeRecovery.filter((record) => record.type === 'review.tool-approval.approved'),
+      ).toHaveLength(0);
+
+      // A later drain (no longer failing) recovers it — exactly once.
+      await bureau.runDurableMaintenance();
+      const recordsAfterRecovery = await bureau.auditTrail!.query({ runId: run.id });
+      const approvedRecords = recordsAfterRecovery.filter(
+        (record) => record.type === 'review.tool-approval.approved',
+      );
+      expect(approvedRecords).toHaveLength(1);
     } finally {
       await bureau.dispose();
     }

@@ -105,7 +105,6 @@ import {
 
 import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
 import {
-  type AuditRecord,
   type AuditTrail,
   auditTrailSessionOwnerId,
   computeInitialAuditSequence,
@@ -2397,9 +2396,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // behavioral difference (see `recordReviewStatusTransition`'s own doc
     // comment on the `superseded` branch).
     auditAttachment?: ReviewAuditAttachment,
-  ): Promise<void> {
-    if (!runtime.sessionStore) return;
-    await runtime.sessionStore.update(
+    // AB-391 (Codex review finding, PR #601, "Detect when the resolution
+    // update appends nothing"): returns whether the `sessionStore.update()`
+    // call below actually committed — `false` when the updater returned
+    // `undefined` (e.g. the session was concurrently deleted between this
+    // review being read and this call running), in which case NEITHER the
+    // resolution NOR the coupled `auditAttachment` outbox entry was
+    // appended. A caller that ignored this return and unconditionally
+    // treated the audit record as "already appended" would suppress the
+    // fallback direct write in `recordReviewDecision` for a decision that
+    // in fact recorded no durable audit trace at all.
+  ): Promise<boolean> {
+    if (!runtime.sessionStore) return false;
+    const committed = await runtime.sessionStore.update(
       sessionId,
       (session) => {
         if (!session) return session;
@@ -2467,6 +2476,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       },
       { outbox: reviewAuditOutboxAttachment(auditAttachment) },
     );
+    return committed !== undefined;
   }
 
   async function persistReviewResolutionWithRetry(
@@ -2475,18 +2485,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     removePendingApproval: boolean,
     runId: string,
     auditAttachment?: ReviewAuditAttachment,
-  ): Promise<void> {
+    // AB-391: see `persistReviewResolution`'s own doc comment on this
+    // return value.
+  ): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
       try {
-        await persistReviewResolution(
+        return await persistReviewResolution(
           sessionId,
           reviewId,
           removePendingApproval,
           runId,
           auditAttachment,
         );
-        return;
       } catch (error) {
         lastError = error;
         if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
@@ -5851,15 +5862,22 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * write this bureau's own review-transition code coupled to a
    * session-store commit (see the "review-transition audit records ride
    * the session outbox" section above) — into the real audit trail, then
-   * acknowledges it. Verifies against the audit trail BEFORE writing
-   * (rather than only after, as the session-lifecycle entries below do):
-   * unlike `session.deleted`, there is no separate durable-event-history
-   * surface to check first, so this is the only idempotency guard standing
-   * between a re-drained entry (this owner's claim lapsed and was
-   * reclaimed after a write it already made, or a peer instance replays
-   * the same entry) and a duplicate `audit:v1:` record — `record()` always
-   * mints a fresh key from a fresh `sequence`, so writing twice is never
-   * safe to rely on a downstream dedupe for.
+   * acknowledges it.
+   *
+   * Idempotency is `AuditTrail.record`'s own `dedupeKey` — an atomic
+   * storage-level compare-and-swap keyed by THIS entry's `sessionId` and
+   * `ordinal` (Codex review finding, PR #601, "Make attachment replay
+   * deduplication atomic": a read-before-write existence check, no matter
+   * how it is scoped, has a race window between the read and the write
+   * that two Bureau processes both reclaiming this entry after a lease
+   * renewal race can land in, each seeing "not yet recorded" and each
+   * durably writing — `dedupeKey` closes that window at the storage layer
+   * rather than trying to narrow it in application code). A rejection
+   * from `record()` here (a genuine storage failure, since `dedupeKey`
+   * opts into propagating failures rather than swallowing them — see its
+   * own doc comment) propagates out of this function uncaught, leaving
+   * the entry claimed-but-unacknowledged for a later drain to retry,
+   * exactly the "leave it pending" behavior a failed write always had.
    *
    * Only ever called for a `REVIEW_AUDIT_OUTBOX_NAMESPACE` entry —
    * `drainOutboxPass` filters out (and never claims) any other
@@ -5906,46 +5924,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
     const payload = entry.payload;
     if (auditTrailInstance) {
-      const matches = (record: AuditRecord): boolean =>
-        record.timestampMs === entry.committedAtMs &&
-        JSON.stringify(record.detail) === JSON.stringify(payload.detail);
-      // Codex/Copilot review finding, PR #601: scoping this dedup query
-      // to records `since: entry.committedAtMs` keeps it correct
-      // regardless of `query()`'s default `limit: 500` — without `since`,
-      // 500 EARLIER records of this exact `runId`/`type` (however
-      // unlikely for a per-review decision type) would fill the limit
-      // before the scan ever reached this entry's own timestamp, and this
-      // check would then write a duplicate rather than find the record it
-      // is looking for. `since` is inclusive of the exact millisecond
-      // (`record.timestampMs < since` is what `query()` excludes on), so
-      // the target record itself is never filtered out.
-      const existing = await auditTrailInstance.query({
+      await auditTrailInstance.record({
         runId: payload.runId,
         type: payload.type,
-        since: entry.committedAtMs,
+        detail: payload.detail,
+        principal: payload.principal,
+        timestampMs: entry.committedAtMs,
+        dedupeKey: `session.attachment:${entry.sessionId}:${entry.ordinal}`,
       });
-      if (!existing.some(matches)) {
-        await auditTrailInstance.record({
-          runId: payload.runId,
-          type: payload.type,
-          detail: payload.detail,
-          principal: payload.principal,
-          timestampMs: entry.committedAtMs,
-        });
-        const verified = await auditTrailInstance.query({
-          runId: payload.runId,
-          type: payload.type,
-          since: entry.committedAtMs,
-        });
-        if (!verified.some(matches)) {
-          diagnose({
-            level: 'error',
-            scope: 'durable-maintenance',
-            message: `[bureau] Outbox entry ${entry.ordinal} (session.attachment, "${payload.type}" for run "${payload.runId}") was not durably recorded in the audit trail; leaving it pending for a later drain to retry.`,
-          });
-          return 'stop';
-        }
-      }
     }
     return acknowledge();
   }
@@ -6995,7 +6981,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             cleanup.principal,
             cleanup.reason,
           );
-          await persistReviewResolutionWithRetry(
+          const cleanupAuditAppended = await persistReviewResolutionWithRetry(
             cleanup.sessionId,
             input.id,
             cleanup.kind === 'tool-approval',
@@ -7004,17 +6990,38 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           );
           reviewResolutionCleanupPending.delete(input.id);
           releaseTerminalRunReviewState(cleanup.runId);
-          // AB-391: the audit record above was appended in the SAME commit
-          // as the resolution just persisted — replay it into the real
-          // audit trail now, while this bureau is alive, rather than
-          // leaving it for a later maintenance tick.
-          await drainOutbox();
+          if (cleanupAuditAppended) {
+            // AB-391: the audit record above was appended in the SAME
+            // commit as the resolution just persisted — replay it into the
+            // real audit trail now, while this bureau is alive, rather
+            // than leaving it for a later maintenance tick.
+            //
+            // Codex review finding, PR #601, "Isolate post-commit drain
+            // failures from review resolution": the resolution commit
+            // above has ALREADY succeeded — a transient failure in this
+            // best-effort drain (a claim contention, a query error) must
+            // never abort this call before it dispatches the live
+            // ReviewApprovedEvent/ReviewDeniedEvent/ReviewRejectedEvent
+            // below or returns its result. A failed drain here leaves the
+            // attachment claimed-but-unacknowledged for a LATER drain
+            // (this bureau's own next maintenance tick, or boot recovery
+            // after a restart) to replay — it is never lost, only delayed.
+            try {
+              await drainOutbox();
+            } catch (error) {
+              diagnose({
+                level: 'error',
+                scope: 'durable-maintenance',
+                message: `[bureau] Post-commit outbox drain failed after resolving review "${input.id}" from the cleanup-retry path; the audit record remains pending for a later drain: ${serializeUnknownError(error)}`,
+              });
+            }
+          }
           await recordReviewDecision(
             cleanup.review,
             cleanup.decision,
             cleanup.principal,
             cleanup.reason,
-            { auditAlreadyAppended: true },
+            { auditAlreadyAppended: cleanupAuditAppended },
           );
           return {
             id: input.id,
@@ -7234,7 +7241,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         input.reason,
       );
       try {
-        await persistReviewResolutionWithRetry(
+        auditAlreadyAppended = await persistReviewResolutionWithRetry(
           review.sessionId,
           review.id,
           review.kind === 'tool-approval',
@@ -7255,10 +7262,28 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         throw error;
       }
       releaseTerminalRunReviewState(review.runId);
-      auditAlreadyAppended = true;
-      // AB-391: replay the just-appended audit record promptly, while this
-      // bureau is alive, rather than leaving it for a later trigger.
-      await drainOutbox();
+      if (auditAlreadyAppended) {
+        // AB-391: replay the just-appended audit record promptly, while
+        // this bureau is alive, rather than leaving it for a later
+        // trigger.
+        //
+        // Codex review finding, PR #601, "Isolate post-commit drain
+        // failures from review resolution": the resolution commit above
+        // has ALREADY succeeded — a transient failure in this best-effort
+        // drain must never abort `resolveReview` before it dispatches the
+        // live event below or returns its result. A failed drain leaves
+        // the attachment claimed-but-unacknowledged for a later drain (a
+        // maintenance tick, or boot recovery) to replay.
+        try {
+          await drainOutbox();
+        } catch (error) {
+          diagnose({
+            level: 'error',
+            scope: 'durable-maintenance',
+            message: `[bureau] Post-commit outbox drain failed after resolving review "${review.id}"; the audit record remains pending for a later drain: ${serializeUnknownError(error)}`,
+          });
+        }
+      }
     }
 
     await recordReviewDecision(review, input.decision, input.principal, input.reason, {

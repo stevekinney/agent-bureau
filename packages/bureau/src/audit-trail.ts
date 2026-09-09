@@ -314,6 +314,26 @@ export interface AuditTrail {
      * caller.
      */
     timestampMs?: number;
+    /**
+     * AB-391 (Codex review finding, PR #601, "Make attachment replay
+     * deduplication atomic"): when provided, this write is dedupe-guarded
+     * by an atomic storage-level compare-and-swap on a marker key derived
+     * from `dedupeKey` — mirroring {@link DurableEventRecordOptions.dedupeKey}
+     * (`durable-event-history.ts`) — rather than this trail's own
+     * `sequence`, which always mints a fresh value and so can never by
+     * itself prevent two callers racing to record the identical fact (this
+     * is exactly the case `create-bureau.ts`'s outbox attachment replay
+     * needs: two Bureau processes both reclaiming the same outbox entry
+     * after a lease renewal race must never BOTH durably record it). A
+     * caller supplying `dedupeKey` gets the ATOMICITY, and also opts into
+     * this call's returned promise REJECTING on a genuine storage failure
+     * (unlike the default best-effort `record()` path, which never
+     * rejects) — the caller is expected to leave its own outer unit of
+     * work (an outbox entry) unacknowledged and retry on that rejection,
+     * exactly the "leave it pending" contract the read-before/verify-after
+     * pattern this replaces used to provide, just without the race.
+     */
+    dedupeKey?: string;
   }): Promise<void>;
   /**
    * AB-388: delete every durable record whose `timestampMs` is strictly
@@ -663,6 +683,17 @@ const PREFIX = 'audit:v1:';
 const PRUNE_FLOOR_KEY = 'audit-retention:v1:highest-pruned-sequence';
 
 /**
+ * AB-391 (Codex review finding, PR #601, "Make attachment replay
+ * deduplication atomic"): the reserved key prefix for
+ * {@link AuditTrail.record}'s `dedupeKey` marker — mirrors
+ * `durable-event-history.ts`'s own `DEDUPE_MARKER_PREFIX`. Deliberately NOT
+ * under {@link PREFIX}, same reason as {@link PRUNE_FLOOR_KEY}: every
+ * `PREFIX`-scoped scan in this file must never encounter one of these
+ * markers and misread it as a malformed `AuditRecord`.
+ */
+const DEDUPE_MARKER_PREFIX = 'audit-dedupe:v1:';
+
+/**
  * AB-388 (Codex review, PR #597, "Commit deletion summaries atomically
  * with deletions"): a durable RECORD OF INTENT, written alongside
  * {@link PRUNE_FLOOR_KEY} before this pass deletes anything, and cleared
@@ -965,7 +996,12 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       detail: unknown;
       principal?: string;
     },
-    writeOptions?: { strict?: boolean; bypassAbortCheck?: boolean; timestampMs?: number },
+    writeOptions?: {
+      strict?: boolean;
+      bypassAbortCheck?: boolean;
+      timestampMs?: number;
+      dedupeKey?: string;
+    },
   ): Promise<void> {
     if (!kv) return Promise.resolve();
     if (!writeOptions?.bypassAbortCheck && signal?.aborted) return Promise.resolve();
@@ -991,6 +1027,47 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     };
 
     const key = encodeKey(timestampMs, sequence, entry.runId);
+
+    // AB-391 (Codex review finding, PR #601, "Make attachment replay
+    // deduplication atomic"): `dedupeKey` routes this write through an
+    // atomic storage-level compare-and-swap instead of a plain `kv.set` —
+    // two callers racing to record the SAME `dedupeKey` (two Bureau
+    // processes both believing they hold the claim on one outbox entry
+    // after a lease-renewal race) can never both durably write, unlike a
+    // plain `kv.set` under a freshly minted `sequence`, which has no
+    // precondition at all. `conditionalBatch`'s own atomicity guarantee
+    // (the SAME guarantee `durable-event-history.ts`'s `dedupeKey` and
+    // this codebase's session outbox `claim()` both already rely on) means
+    // a caller that gets `committed: true` back knows the write already
+    // durably landed — no separate read-your-writes query needed. A
+    // caller that gets `committed: false` back knows a DIFFERENT writer
+    // (an earlier attempt by this same caller, or a peer) already recorded
+    // this exact fact; this function treats that as a successful no-op,
+    // never a duplicate write. This path REJECTS on a genuine storage
+    // failure — deliberately, unlike the default best-effort path below —
+    // because the one caller that supplies `dedupeKey`
+    // (`create-bureau.ts`'s `drainOutboxAttachmentEntry`) needs to know a
+    // write failed so it can leave its own outbox entry pending for a
+    // later retry, rather than silently swallowing it the way a
+    // fire-and-forget schedule/session out-of-band write does.
+    if (writeOptions?.dedupeKey !== undefined) {
+      const markerKey = `${DEDUPE_MARKER_PREFIX}${writeOptions.dedupeKey}`;
+      return kv
+        .conditionalBatch(
+          [{ key: markerKey, expectedValue: null }],
+          [
+            { type: 'set', key: markerKey, value: key },
+            { type: 'set', key, value: JSON.stringify(record) },
+          ],
+        )
+        .then((committed) => {
+          // `committed === false` means the marker already existed — this
+          // exact fact was already recorded, by this call or a peer's.
+          // Nothing further to do; this is success, not a skipped write.
+          void committed;
+        });
+    }
+
     const rawWrite = kv.set(key, JSON.stringify(record));
 
     // Best-effort observability path: never rejects. This is what gets
@@ -1714,8 +1791,12 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       detail: unknown;
       principal?: string;
       timestampMs?: number;
+      dedupeKey?: string;
     }): Promise<void> {
-      await writeOutOfBandRecord(entry, { timestampMs: entry.timestampMs });
+      await writeOutOfBandRecord(entry, {
+        timestampMs: entry.timestampMs,
+        dedupeKey: entry.dedupeKey,
+      });
     },
 
     prune(
