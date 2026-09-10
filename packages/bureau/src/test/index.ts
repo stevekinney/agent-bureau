@@ -45,6 +45,7 @@ export type {
 export { assembleReproductionArtifact, locateWorkspaceRoot } from './reproduction-artifact';
 export type {
   BureauStorageFixture,
+  CreateLmdbStorageFixtureOptions,
   CreateMemoryStorageFixtureOptions,
   CreatePersistentStorageFixtureOptions,
 } from './storage-fixtures';
