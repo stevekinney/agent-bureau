@@ -1,0 +1,16 @@
+{
+  "entries": [
+    {
+      "adapterSuite": "packages/operative/src/durable/active-run-adapter.test.ts",
+      "guarantee": "A run driven by a durable engine progresses through its generate/tool steps and reaches a terminal completed state — with the completion event firing and the owning session persisted as completed — exactly as an in-memory run does.",
+      "blackBoxTest": "packages/bureau/src/create-bureau.test.ts > createBureau > routes runs through the durable engine end-to-end when durableExecution is on",
+      "owner": "Agent Bureau team"
+    }
+  ],
+  "notRuled": [
+    {
+      "path": "packages/armorer/test/execution-lifecycle.test.ts",
+      "reason": "AB-92's Decision (2026-09-01), \"Test-helper parity (AC6)\", rules armorer's ExecutionLifecycle.inspect/abort as production public surface, not adapter tools reaching internals on behalf of a missing public guarantee. This file's imports of execution-lifecycle.ts internals are same-package (armorer testing its own module under test) and would never be reported by this gate regardless of this ruling; the entry exists so a later reader does not add a manifest pairing here that AB-92 already forecloses."
+    }
+  ]
+}

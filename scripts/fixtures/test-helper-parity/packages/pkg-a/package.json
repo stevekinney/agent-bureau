@@ -1,0 +1,7 @@
+{
+  "name": "fixture-pkg-a",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test": "./src/test/index.ts"
+  }
+}

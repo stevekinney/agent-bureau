@@ -30,7 +30,7 @@
     },
     "packages/armorer": {
       "name": "armorer",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "devDependencies": {
         "@anthropic-ai/claude-agent-sdk": "^0.3.231",
         "@eslint/compat": "^2.1.0",
@@ -137,7 +137,7 @@
     },
     "packages/conversationalist": {
       "name": "conversationalist",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "dependencies": {
         "gray-matter": "^4.0.3",
       },
@@ -309,7 +309,7 @@
     },
     "packages/operative": {
       "name": "@lostgradient/operative",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@lostgradient/weft": "^0.23.1",
         "armorer": "^2.3.0",

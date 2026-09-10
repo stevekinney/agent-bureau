@@ -73,6 +73,77 @@ describe('findSkipFindingsInSource', () => {
     expect([...allTestIdentifiers]).toEqual([`${filePath} > runs unconditionally and asserts`]);
   });
 
+  it('leafTestIdentifiers names only the it/test case, never the enclosing describe suite alone (consumed by scripts/check-test-helper-parity.ts)', () => {
+    const filePath = 'suite-and-case.ts';
+    const sourceText = `
+      import { describe, expect, it } from 'bun:test';
+      describe('a suite with no assertion of its own', () => {
+        it('the one real test case', () => {
+          expect(true).toBe(true);
+        });
+      });
+    `;
+    const { allTestIdentifiers, leafTestIdentifiers } = findSkipFindingsInSource(
+      filePath,
+      sourceText,
+    );
+
+    expect([...allTestIdentifiers].sort()).toEqual(
+      [
+        `${filePath} > a suite with no assertion of its own`,
+        `${filePath} > a suite with no assertion of its own > the one real test case`,
+      ].sort(),
+    );
+    expect([...leafTestIdentifiers]).toEqual([
+      `${filePath} > a suite with no assertion of its own > the one real test case`,
+    ]);
+  });
+
+  it('leafTestIdentifiers excludes an it.skip/it.todo case — it never actually runs, so it can never serve as a black-box proof', () => {
+    const filePath = 'skipped-cases.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      it.skip('never runs', () => {});
+      it.todo('never runs either');
+      it('runs for real', () => {});
+    `;
+    const { leafTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect([...leafTestIdentifiers]).toEqual([`${filePath} > runs for real`]);
+  });
+
+  it('leafTestIdentifiers still includes an it.only case — it does actually execute', () => {
+    const filePath = 'only-case.ts';
+    const sourceText = `
+      import { it } from 'bun:test';
+      it.only('the only case that runs', () => {});
+    `;
+    const { leafTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect([...leafTestIdentifiers]).toEqual([`${filePath} > the only case that runs`]);
+  });
+
+  it('leafTestIdentifiers excludes a case nested inside describe.skip/describe.todo even though its own call carries no skip modifier', () => {
+    const filePath = 'skipped-suites.ts';
+    const sourceText = `
+      import { describe, it } from 'bun:test';
+      describe.skip('a suite that never runs', () => {
+        it('inherits the suite skip', () => {});
+      });
+      describe.todo('another suite that never runs', () => {
+        it('inherits the suite todo', () => {});
+      });
+      describe('a suite that does run', () => {
+        it('runs for real', () => {});
+      });
+    `;
+    const { leafTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect([...leafTestIdentifiers]).toEqual([
+      `${filePath} > a suite that does run > runs for real`,
+    ]);
+  });
+
   it('does not treat a conditional return nested past the first statement as a skip', () => {
     const filePath = 'inline.ts';
     const sourceText = `
