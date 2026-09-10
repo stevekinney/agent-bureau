@@ -169,6 +169,12 @@ export interface CreatePersistentStorageFixtureOptions {
   readonly path?: string;
 }
 
+/** LMDB fixture options, including the durability mode exercised by the test. */
+export interface CreateLmdbStorageFixtureOptions extends CreatePersistentStorageFixtureOptions {
+  /** Defaults to Weft's production `full` durability. */
+  readonly durability?: 'full' | 'relaxed';
+}
+
 /**
  * Process-local monotonic counter, used ONLY to keep two fixtures minted
  * from two DIFFERENT `RuntimeServices` instances (each with its own
@@ -266,18 +272,20 @@ export function createSqliteStorageFixture(
  * A LMDB-backed `BureauStorageFixture`. LMDB's configuration names a
  * directory, not a file — when `options.path` is omitted, a fresh, unique
  * directory path under the OS temp directory is allocated (created lazily
- * by whatever later opens `configuration`). `dispose()` removes the
+ * by whatever later opens `configuration`). The fixture uses Weft's production
+ * `full` durability unless a timing-independent test explicitly selects `relaxed`.
+ * `dispose()` removes the
  * directory (recursively, if it exists) when, and only when, this fixture
  * allocated the path itself.
  */
 export function createLmdbStorageFixture(
-  options: CreatePersistentStorageFixtureOptions,
+  options: CreateLmdbStorageFixtureOptions,
 ): BureauStorageFixture<StorageConfiguration> {
   const owned = options.path === undefined;
   const path = options.path ?? allocateFixturePath('lmdb', options.runtime);
 
   return {
-    configuration: { type: 'lmdb', path },
+    configuration: { type: 'lmdb', path, durability: options.durability ?? 'full' },
     path,
     owned,
     async dispose() {

@@ -195,8 +195,25 @@ describe('createLmdbStorageFixture', () => {
     const second = createLmdbStorageFixture({ runtime });
 
     expect(first.path).not.toBe(second.path);
-    expect(first.configuration).toEqual({ type: 'lmdb', path: first.path! });
+    expect(first.configuration).toEqual({
+      type: 'lmdb',
+      path: first.path!,
+      durability: 'full',
+    });
     expect(first.owned).toBe(true);
+  });
+
+  it('allows an isolation test to select relaxed durability explicitly', () => {
+    const fixture = createLmdbStorageFixture({
+      runtime: createManualRuntimeServices(),
+      durability: 'relaxed',
+    });
+
+    expect(fixture.configuration).toEqual({
+      type: 'lmdb',
+      path: fixture.path!,
+      durability: 'relaxed',
+    });
   });
 
   it('deletes only a directory it allocated itself', async () => {

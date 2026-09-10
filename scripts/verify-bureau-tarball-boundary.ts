@@ -252,6 +252,7 @@ import type {
   BureauStorageFixture,
   BureauTestHarness,
   BureauTestHarnessOptions,
+  CreateLmdbStorageFixtureOptions,
   ReproductionArtifact,
 } from 'bureau/test';
 import {
@@ -269,7 +270,7 @@ import { packageVersions, sourceRevision } from './probe-environment';
 // installed tarball, even though the executed scenario below drives only
 // the memory fixture.
 export { assertBureauQuiescent, createLmdbStorageFixture, createSqliteStorageFixture };
-export type { BureauStorageFixture, BureauTestHarnessOptions };
+export type { BureauStorageFixture, BureauTestHarnessOptions, CreateLmdbStorageFixtureOptions };
 
 export interface HarnessProbeOutcome {
   readonly artifact: ReproductionArtifact;
@@ -500,7 +501,7 @@ async function main(): Promise<void> {
             // Bureau's only two genuinely-published, registry-safe
             // dependencies — the ONLY names this manifest lets resolve
             // from the public registry.
-            '@lostgradient/weft': '^0.23.1',
+            '@lostgradient/weft': '^0.24.1',
             zod: '^4.4.3',
           },
           devDependencies: {
