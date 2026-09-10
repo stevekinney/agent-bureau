@@ -195,7 +195,11 @@ describe('createLmdbStorageFixture', () => {
     const second = createLmdbStorageFixture({ runtime });
 
     expect(first.path).not.toBe(second.path);
-    expect(first.configuration).toEqual({ type: 'lmdb', path: first.path! });
+    expect(first.configuration).toEqual({
+      type: 'lmdb',
+      path: first.path!,
+      durability: 'relaxed',
+    });
     expect(first.owned).toBe(true);
   });
 

@@ -266,7 +266,9 @@ export function createSqliteStorageFixture(
  * A LMDB-backed `BureauStorageFixture`. LMDB's configuration names a
  * directory, not a file — when `options.path` is omitted, a fresh, unique
  * directory path under the OS temp directory is allocated (created lazily
- * by whatever later opens `configuration`). `dispose()` removes the
+ * by whatever later opens `configuration`). The fixture selects Weft's
+ * relaxed durability mode so native fsync latency cannot govern test progress.
+ * `dispose()` removes the
  * directory (recursively, if it exists) when, and only when, this fixture
  * allocated the path itself.
  */
@@ -277,7 +279,7 @@ export function createLmdbStorageFixture(
   const path = options.path ?? allocateFixturePath('lmdb', options.runtime);
 
   return {
-    configuration: { type: 'lmdb', path },
+    configuration: { type: 'lmdb', path, durability: 'relaxed' },
     path,
     owned,
     async dispose() {

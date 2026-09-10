@@ -351,11 +351,10 @@ describe('two concurrent harnesses are fully isolated', () => {
    * sqlite backends below even though AB-332 replaced their completion wait
    * with `waitForRunState` (event-driven, no real timer): construction cost
    * and the wait are still independent steps worth their own budget, and
-   * keeping the same shape as the lmdb variant
-   * (`harness-lmdb-isolation.test.ts`, AB-332) — which still needs a real
-   * wait per WFT-138 and so keeps its own `realRuntimeExemptions` entry —
-   * keeps the two files easy to compare and fold back together once WFT-138
-   * lands.
+   * keeping the same shape as the LMDB variant
+   * (`harness-lmdb-isolation.test.ts`, AB-332) keeps the backend isolation
+   * checks directly comparable. WFT-138's relaxed LMDB durability mode now
+   * lets that variant use the same event-driven completion helper.
    */
   describe.each([
     ['memory', () => createMemoryStorageFixture()],

@@ -1583,12 +1583,21 @@ describe('createBureau', () => {
       // prototype and read private fields via `this` — `{ ...realStorage }`
       // would silently drop every method, leaving only own enumerable
       // instance properties (there are none; the state is in `#private`
-      // fields). The proxy forwards everything except `batch` unmodified,
-      // bound to the real instance.
+      // fields). The proxy forwards everything except the workflow-start
+      // storage mutation unmodified, bound to the real instance. Weft 0.24.1
+      // uses `conditionalBatch` for explicit-id starts; retaining `batch`
+      // support keeps this fixture accurate for either start path.
       const gatedStorage = new Proxy(realStorage, {
         get(target, property, receiver) {
-          if (property === 'batch') {
-            return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+          if (property === 'batch' || property === 'conditionalBatch') {
+            const real = (target as unknown as Record<string, unknown>)[property] as (
+              ...args: unknown[]
+            ) => Promise<unknown>;
+            return async (...args: unknown[]) => {
+              const operations = (property === 'conditionalBatch' ? args[1] : args[0]) as {
+                type: string;
+                key: string;
+              }[];
               const isWorkflowStartWrite = operations.some(
                 (operation) => operation.type === 'put' && operation.key.startsWith('wf:run-'),
               );
@@ -1596,7 +1605,7 @@ describe('createBureau', () => {
                 gateArmed = false; // only THIS run's initial write is gated
                 await startGate;
               }
-              return target.batch(operations);
+              return real.apply(target, args);
             };
           }
           const value: unknown = Reflect.get(target, property, receiver);
@@ -1706,7 +1715,7 @@ describe('createBureau', () => {
 
   it('createRun rejects, unregisters the run, and persists an errored session when the durable workflow write itself fails (AB-361 review PRRT_kwDORvupsc6gWc39)', async () => {
     // Same gated-storage shape as the honesty proof above, but the
-    // intercepted `batch` call REJECTS instead of blocking — modelling a
+    // intercepted start mutation REJECTS instead of blocking — modelling a
     // genuine persistence failure inside `context.engine.start`. Before the
     // review fix, this rejection propagated out of `driveDurableRun`
     // uncaught: `durablyStarted` rejected (correct), but `result` ALSO
@@ -1721,15 +1730,22 @@ describe('createBureau', () => {
     const startFailure = new Error('AB-361 review: durable write persistence failure');
     const gatedStorage = new Proxy(realStorage, {
       get(target, property, receiver) {
-        if (property === 'batch') {
-          return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+        if (property === 'batch' || property === 'conditionalBatch') {
+          const real = (target as unknown as Record<string, unknown>)[property] as (
+            ...args: unknown[]
+          ) => Promise<unknown>;
+          return async (...args: unknown[]) => {
+            const operations = (property === 'conditionalBatch' ? args[1] : args[0]) as {
+              type: string;
+              key: string;
+            }[];
             const isWorkflowStartWrite = operations.some(
               (operation) => operation.type === 'put' && operation.key.startsWith('wf:'),
             );
             if (isWorkflowStartWrite) {
               throw startFailure;
             }
-            return target.batch(operations);
+            return real.apply(target, args);
           };
         }
         const value: unknown = Reflect.get(target, property, receiver);
@@ -1810,15 +1826,22 @@ describe('createBureau', () => {
     const startFailure = new Error('AB-361 review: durable write persistence failure');
     const gatedStorage = new Proxy(realStorage, {
       get(target, property, receiver) {
-        if (property === 'batch') {
-          return async (operations: Parameters<typeof realStorage.batch>[0]) => {
+        if (property === 'batch' || property === 'conditionalBatch') {
+          const real = (target as unknown as Record<string, unknown>)[property] as (
+            ...args: unknown[]
+          ) => Promise<unknown>;
+          return async (...args: unknown[]) => {
+            const operations = (property === 'conditionalBatch' ? args[1] : args[0]) as {
+              type: string;
+              key: string;
+            }[];
             const isWorkflowStartWrite = operations.some(
               (operation) => operation.type === 'put' && operation.key.startsWith('wf:'),
             );
             if (isWorkflowStartWrite) {
               throw startFailure;
             }
-            return target.batch(operations);
+            return real.apply(target, args);
           };
         }
         const value: unknown = Reflect.get(target, property, receiver);
