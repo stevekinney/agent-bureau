@@ -72,6 +72,7 @@ import { join } from 'node:path';
 import { $ } from 'bun';
 
 import { readPendingChangesets } from './check-changesets';
+import { PINNED_TYPE_DEPENDENCIES } from './pinned-type-dependencies';
 
 const root = join(import.meta.dir, '..');
 const packageDirectory = join(root, 'packages', 'operative');
@@ -1108,7 +1109,11 @@ async function writeConsumerManifest(
           ...CONSUMER_DEPENDENCY_RANGES,
           ...siblingSpecifiers,
         },
-        devDependencies: { typescript: '6.0.3', '@types/bun': '1.3.14' },
+        devDependencies: {
+          typescript: '6.0.3',
+          '@types/bun': '1.3.14',
+          ...PINNED_TYPE_DEPENDENCIES,
+        },
         // The packed `@lostgradient/operative` tarball's OWN manifest still
         // declares a plain semver range for each packed sibling (e.g.
         // `"conversationalist": "^1.1.0"`) — a range a REGISTRY-resolved
@@ -1120,7 +1125,11 @@ async function writeConsumerManifest(
         // transitive reference to a packed sibling's name onto its own
         // local tarball, matching `verify-bureau-tarball-boundary.ts`'s
         // established pattern for the identical problem.
-        ...(Object.keys(siblingSpecifiers).length > 0 ? { overrides: siblingSpecifiers } : {}),
+        // `PINNED_TYPE_DEPENDENCIES` rides in the same overrides map because a
+        // devDependency alone does not stop a NESTED range (bun-types declares
+        // `@types/node: "*"`) from resolving to whatever the registry published
+        // this morning; the override is what actually pins the transitive copy.
+        overrides: { ...siblingSpecifiers, ...PINNED_TYPE_DEPENDENCIES },
       },
       null,
       2,
