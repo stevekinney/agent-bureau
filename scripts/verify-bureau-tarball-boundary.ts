@@ -54,6 +54,8 @@ import { join } from 'node:path';
 
 import { $ } from 'bun';
 
+import { PINNED_TYPE_DEPENDENCIES } from './pinned-type-dependencies';
+
 const root = join(import.meta.dir, '..');
 
 async function run(command: string[], cwd: string): Promise<string> {
@@ -501,7 +503,11 @@ async function main(): Promise<void> {
             '@lostgradient/weft': '^0.23.1',
             zod: '^4.4.3',
           },
-          devDependencies: { typescript: '6.0.3', '@types/bun': '1.3.14' },
+          devDependencies: {
+            typescript: '6.0.3',
+            '@types/bun': '1.3.14',
+            ...PINNED_TYPE_DEPENDENCIES,
+          },
           // bureau's OWN packed manifest declares its private siblings at
           // their internal workspace-resolved semver (e.g. "0.0.1") — a
           // version that does not, and never will, exist on the registry.
@@ -510,9 +516,14 @@ async function main(): Promise<void> {
           // local tarballs declared above, regardless of what version range
           // was requested — the point being proved: nothing here is ever
           // satisfied by a registry lookup.
-          overrides: Object.fromEntries(
-            Object.entries(tarballs).map(([name, tarball]) => [name, `file:${tarball}`]),
-          ),
+          overrides: {
+            ...Object.fromEntries(
+              Object.entries(tarballs).map(([name, tarball]) => [name, `file:${tarball}`]),
+            ),
+            // See `PINNED_TYPE_DEPENDENCIES`: the override, not the
+            // devDependency, is what pins bun-types' nested `@types/node: "*"`.
+            ...PINNED_TYPE_DEPENDENCIES,
+          },
         },
         null,
         2,
