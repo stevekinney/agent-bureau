@@ -123,6 +123,27 @@ describe('findSkipFindingsInSource', () => {
     expect([...leafTestIdentifiers]).toEqual([`${filePath} > the only case that runs`]);
   });
 
+  it('leafTestIdentifiers excludes a case nested inside describe.skip/describe.todo even though its own call carries no skip modifier', () => {
+    const filePath = 'skipped-suites.ts';
+    const sourceText = `
+      import { describe, it } from 'bun:test';
+      describe.skip('a suite that never runs', () => {
+        it('inherits the suite skip', () => {});
+      });
+      describe.todo('another suite that never runs', () => {
+        it('inherits the suite todo', () => {});
+      });
+      describe('a suite that does run', () => {
+        it('runs for real', () => {});
+      });
+    `;
+    const { leafTestIdentifiers } = findSkipFindingsInSource(filePath, sourceText);
+
+    expect([...leafTestIdentifiers]).toEqual([
+      `${filePath} > a suite that does run > runs for real`,
+    ]);
+  });
+
   it('does not treat a conditional return nested past the first statement as a skip', () => {
     const filePath = 'inline.ts';
     const sourceText = `

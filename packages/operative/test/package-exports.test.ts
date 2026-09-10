@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import type { HandoffTarget } from '@lostgradient/operative';
 import { createHandoffTool } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import conversationalistPackageJson from 'conversationalist/package.json';
 
+import conversationalistPackageJson from '../../conversationalist/package.json';
 import packageJson from '../package.json';
 
 const packageRoot = join(import.meta.dir, '..');

@@ -6,19 +6,29 @@
  * unless a black-box test proves the same guarantee through that package's PUBLIC surface. This
  * script is that gate.
  *
- * WHAT COUNTS AS "INTERNAL". Every `packages/*\/test/**\/*.ts` or `packages/*\/src/**\/*.test.ts`
- * file is scanned for import specifiers (static `import`/`export … from`, and dynamic
- * `import('literal')`) that resolve to a DIFFERENT workspace package than the one the importing
- * file itself lives in. An import within the importing file's own package is never reported — a
- * package's unit tests legitimately import their own modules, and `packages/*\/src/test/` exists
- * precisely to wrap internals for external consumers. A cross-package import is permitted only
- * when it resolves through the target package's declared `package.json` `exports` map (a bare
- * package specifier, or one of its declared subpaths, e.g. `@lostgradient/operative/test`); a
- * cross-package import naming a subpath `exports` does not declare — a bare specifier, OR a
- * relative import that crosses into another package's directory on disk, held to the EXACT SAME
- * reachability check against the subpath a real consumer would have to name — is reported unless
- * `scripts/adapter-suite-manifest.json` names the importing file as a labeled adapter suite with a
- * real black-box pairing.
+ * WHAT COUNTS AS "INTERNAL". Every `packages/*\/test/**\/*.ts`, `packages/*\/src/**\/*.test.ts`,
+ * or `packages/*\/src/test/**\/*.ts` file is scanned for import specifiers (static
+ * `import`/`export … from`, and dynamic `import('literal')`, plus a TypeScript `import type`
+ * expression such as `type T = import('literal').T`) that resolve to a DIFFERENT workspace
+ * package than the one the importing file itself lives in. An import within the importing file's
+ * own package is never reported — a package's unit tests legitimately import their own modules,
+ * and `packages/*\/src/test/` exists precisely to wrap internals for external consumers; that
+ * directory's own non-`.test.ts` helper modules (e.g. a shared conformance suite registered by a
+ * real consumer's `.test.ts` file) are scanned in their own right so a cross-package import placed
+ * there cannot bypass the gate by never itself matching the `.test.ts` suffix. A cross-package
+ * import is permitted only when it resolves through the target package's declared `package.json`
+ * `exports` map (a bare package specifier, or one of its declared subpaths, e.g.
+ * `@lostgradient/operative/test`); a cross-package import naming a subpath `exports` does not
+ * declare — a bare specifier, OR a relative import that crosses into another package's directory
+ * on disk, held to the EXACT SAME reachability check against the subpath a real consumer would
+ * have to name — is reported unless `scripts/adapter-suite-manifest.json` names the importing file
+ * as a labeled adapter suite with a real black-box pairing. The one exception is a subpath naming
+ * the package MANIFEST ITSELF (`./package.json`, `isPackageManifestPath`): Node resolves a package's
+ * own `package.json` off disk regardless of what its `exports` map declares, and this repository's
+ * own tooling (`verify-conversationalist-consumer.ts`, `packages/operative/test/package-exports.test.ts`)
+ * reads a sibling package's manifest the same way — that is metadata, never a piece of internal
+ * SURFACE, so it is never reported and no package needs a `./package.json` export purely to
+ * satisfy this gate.
  *
  * WHY THE TYPESCRIPT COMPILER API. Same rationale as `scripts/check-skip-manifest.ts` and
  * `scripts/documentation-examples.test.ts`: a regular expression cannot tell an import inside a
@@ -123,6 +133,13 @@ export interface TestHelperParityGateResult extends TestHelperParityCheckResult 
 const TEST_FILE_GLOBS: readonly string[] = [
   'packages/*/test/**/*.ts',
   'packages/*/src/**/*.test.ts',
+  // A source-side test helper module doesn't end in `.test.ts` (e.g.
+  // `packages/operative/src/test/reactive-source-suite.ts`, which registers shared tests from a
+  // non-`.test.ts` module for a real consumer), so it is invisible to the two globs above unless
+  // scanned on its own — a cross-package internal-path import placed there would otherwise bypass
+  // this gate entirely. Overlap with the `.test.ts` glob above is deduplicated via the `Set` in
+  // `checkTestHelperParity` below.
+  'packages/*/src/test/**/*.ts',
 ];
 
 function isNonEmptyString(value: unknown): value is string {
@@ -167,6 +184,20 @@ export function parseAdapterSuiteManifest(value: unknown): AdapterSuiteManifest 
     );
   }
   return { entries, notRuled };
+}
+
+/**
+ * Whether a subpath names a package manifest (`./package.json`) rather than a piece of a
+ * package's actual public surface. `package.json` is metadata every package tool (Bun, Node,
+ * `changeset version`, this repository's own `verify-conversationalist-consumer.ts`) reads
+ * directly off disk regardless of whether the package's `exports` map declares a `./package.json`
+ * subpath — Node resolves it unconditionally even for packages with a restrictive `exports`
+ * field. Treating it as an internal-path violation would force every package to add a
+ * `./package.json` export purely to satisfy this gate, when the real fix is recognizing that a
+ * manifest read was never an internal-surface import in the first place.
+ */
+export function isPackageManifestPath(subpath: string): boolean {
+  return subpath === './package.json' || subpath.endsWith('/package.json');
 }
 
 /**
@@ -381,6 +412,7 @@ export function findCrossPackageFindings(
       // an undeclared deep subpath even when reached by a relative path instead of a bare one.
       const relativeSubpath = relative(targetPackage.directory, resolvedPath);
       const subpath = relativeSubpath === '' ? '.' : `./${relativeSubpath}`;
+      if (isPackageManifestPath(subpath)) continue;
       if (isSubpathReachable(targetPackage.exportsField, subpath)) continue;
 
       findings.push({
@@ -397,6 +429,7 @@ export function findCrossPackageFindings(
     if (!parsed) continue;
     const targetPackage = packagesByName.get(parsed.packageName);
     if (!targetPackage || targetPackage.directory === importingPackageDirectory) continue;
+    if (isPackageManifestPath(parsed.subpath)) continue;
     if (isSubpathReachable(targetPackage.exportsField, parsed.subpath)) continue;
 
     findings.push({

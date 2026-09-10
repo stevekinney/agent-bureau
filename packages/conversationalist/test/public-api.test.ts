@@ -26,7 +26,7 @@ describe('public API export map', () => {
       adapter: '@sveltejs/adapter-vercel',
       runtime: 'nodejs22.x',
     });
-    expect(Object.keys(exportsMap)).toHaveLength(20);
+    expect(Object.keys(exportsMap)).toHaveLength(19);
     expect(Object.keys(support?.subpaths ?? {}).sort()).toEqual(Object.keys(exportsMap).sort());
     for (const subpath of Object.keys(exportsMap)) {
       const browser = subpath !== './markdown' && subpath !== './export';

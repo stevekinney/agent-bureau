@@ -389,7 +389,7 @@ export function findSkipFindings(
   const importAliases = collectTestImportAliases(sourceFile);
   const functionBindings = collectFunctionBindings(sourceFile);
 
-  function visit(node: ts.Node, describeChain: readonly string[]): void {
+  function visit(node: ts.Node, describeChain: readonly string[], inheritedSkip: boolean): void {
     if (ts.isCallExpression(node)) {
       const callInfo = getTestCallInfo(node, importAliases, functionBindings);
       if (callInfo) {
@@ -399,15 +399,19 @@ export function findSkipFindings(
         allTestIdentifiers.add(testIdentifier);
         // '.skip'/'.todo' never execute at all, so they can never serve as a real black-box
         // proof; '.only' and a conditional-early-return DO still run (the latter only bails
-        // early under a runtime condition), so both remain leaf identifiers. Known limitation,
-        // matching this gate's own documented scope (see the module doc's ".skipIf"/".todoIf"
+        // early under a runtime condition), so both remain leaf identifiers. A case nested
+        // inside a `describe.skip`/`describe.todo` inherits that suite's non-execution even
+        // when its own call carries no skip modifier, so `inheritedSkip` blocks it from the
+        // leaf set the same as an explicit '.skip'/'.todo' would. Known limitation, matching
+        // this gate's own documented scope (see the module doc's ".skipIf"/".todoIf"
         // paragraph): a dynamic '.skipIf(condition)'/'.todoIf(condition)' is not analyzed here
         // either, for the same reason the skip gate itself does not classify it — the condition
         // is a runtime value this static AST walk cannot evaluate.
         if (
           (callInfo.rootName === 'it' || callInfo.rootName === 'test') &&
           callInfo.skipKind !== 'skip' &&
-          callInfo.skipKind !== 'todo'
+          callInfo.skipKind !== 'todo' &&
+          !inheritedSkip
         ) {
           leafTestIdentifiers.add(testIdentifier);
         }
@@ -424,14 +428,18 @@ export function findSkipFindings(
         }
 
         const nextChain = callInfo.rootName === 'describe' ? fullChain : describeChain;
-        node.forEachChild((child) => visit(child, nextChain));
+        const nextInheritedSkip =
+          inheritedSkip ||
+          (callInfo.rootName === 'describe' &&
+            (callInfo.skipKind === 'skip' || callInfo.skipKind === 'todo'));
+        node.forEachChild((child) => visit(child, nextChain, nextInheritedSkip));
         return;
       }
     }
-    node.forEachChild((child) => visit(child, describeChain));
+    node.forEachChild((child) => visit(child, describeChain, inheritedSkip));
   }
 
-  visit(sourceFile, []);
+  visit(sourceFile, [], false);
   return { findings, allTestIdentifiers, leafTestIdentifiers };
 }
 

@@ -9,6 +9,7 @@ import {
   findCrossPackageFindings,
   formatBrokenPairing,
   formatViolation,
+  isPackageManifestPath,
   isSubpathReachable,
   loadWorkspacePackages,
   parseAdapterSuiteManifest,
@@ -107,6 +108,26 @@ describe('isSubpathReachable', () => {
     const record = raw as { exports?: unknown };
     expect(isSubpathReachable(record.exports, './test')).toBe(true);
     expect(isSubpathReachable(record.exports, './src/create-run')).toBe(false);
+  });
+});
+
+describe('isPackageManifestPath', () => {
+  it('is true for the package root manifest subpath', () => {
+    expect(isPackageManifestPath('./package.json')).toBe(true);
+  });
+
+  it('is true for a manifest nested under a subdirectory subpath', () => {
+    expect(isPackageManifestPath('./nested/package.json')).toBe(true);
+  });
+
+  it('is false for a subpath that merely contains "package.json" as part of a longer name', () => {
+    expect(isPackageManifestPath('./package.json.bak')).toBe(false);
+    expect(isPackageManifestPath('./src/package.json.ts')).toBe(false);
+  });
+
+  it('is false for an ordinary internal subpath', () => {
+    expect(isPackageManifestPath('./src/internal')).toBe(false);
+    expect(isPackageManifestPath('.')).toBe(false);
   });
 });
 
@@ -221,6 +242,25 @@ describe('findCrossPackageFindings', () => {
         line: 1,
       },
     ]);
+  });
+
+  it('does not report a bare-specifier import of a package manifest even though the exports map declares no ./package.json subpath', () => {
+    // fixture-pkg-a's exports map (see loadWorkspacePackages tests above) declares only '.' and
+    // './test' — no './package.json' — yet a manifest read is metadata, not a piece of internal
+    // surface, and must never be reported regardless of what the exports map declares.
+    const findings = findingsFor(
+      'packages/pkg-b/test/reads-manifest.ts',
+      `import packageJson from 'fixture-pkg-a/package.json';\nexport const version = packageJson.version;\n`,
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it('does not report a relative import of a package manifest across a package boundary', () => {
+    const findings = findingsFor(
+      'packages/pkg-b/test/reads-manifest-relative.ts',
+      `import packageJson from '../../pkg-a/package.json';\nexport const version = packageJson.version;\n`,
+    );
+    expect(findings).toEqual([]);
   });
 
   it('does not report a same-package relative import', () => {
@@ -457,7 +497,21 @@ describe('checkTestHelperParity against the fixture repository', () => {
     // import is a violation.
     const result = await checkTestHelperParity(fixtureRoot);
     const violationFiles = result.violations.map((violation) => violation.importingFile).sort();
-    expect(violationFiles).toEqual(['packages/pkg-b/test/internal-no-manifest.ts']);
+    expect(violationFiles).toEqual([
+      'packages/pkg-b/src/test/shared-helper.ts',
+      'packages/pkg-b/test/internal-no-manifest.ts',
+    ]);
+  });
+
+  it('scans a non-.test.ts source-side test helper module under packages/*/src/test/', async () => {
+    // A source-side helper (like a real consumer's shared conformance suite) never matches
+    // `packages/*\/test/**\/*.ts` or `packages/*\/src/**\/*.test.ts` on its own filename, so it
+    // must be covered by the dedicated `packages/*\/src/test/**\/*.ts` glob or its internal-path
+    // import would bypass the gate entirely.
+    const result = await checkTestHelperParity(fixtureRoot);
+    expect(result.scannedFiles).toContain('packages/pkg-b/src/test/shared-helper.ts');
+    const violationFiles = new Set(result.violations.map((violation) => violation.importingFile));
+    expect(violationFiles.has('packages/pkg-b/src/test/shared-helper.ts')).toBe(true);
   });
 
   it('reports the one broken pairing', async () => {

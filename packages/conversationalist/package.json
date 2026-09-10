@@ -22,12 +22,6 @@
   "author": "Steve Kinney <hello@stevekinney.net>",
   "type": "module",
   "exports": {
-    "./package.json": {
-      "bun": "./package.json",
-      "browser": "./package.json",
-      "import": "./package.json",
-      "default": "./package.json"
-    },
     ".": {
       "bun": "./dist/index.js",
       "browser": "./dist/index.js",
@@ -352,12 +346,6 @@
         "ssr": true
       },
       "./composition": {
-        "browser": true,
-        "node": true,
-        "bun": true,
-        "ssr": true
-      },
-      "./package.json": {
         "browser": true,
         "node": true,
         "bun": true,
