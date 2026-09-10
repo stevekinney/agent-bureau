@@ -37,7 +37,7 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/weft": "^0.24.0",
+    "@lostgradient/weft": "^0.24.1",
     "interoperability": "workspace:*",
     "lifecycle": "workspace:*",
     "memory": "workspace:*",

@@ -62,7 +62,7 @@
   },
   "dependencies": {
     "@lostgradient/operative": "workspace:*",
-    "@lostgradient/weft": "^0.24.0",
+    "@lostgradient/weft": "^0.24.1",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "interoperability": "workspace:*",

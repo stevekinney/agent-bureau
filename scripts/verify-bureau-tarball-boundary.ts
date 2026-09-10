@@ -500,7 +500,7 @@ async function main(): Promise<void> {
             // Bureau's only two genuinely-published, registry-safe
             // dependencies — the ONLY names this manifest lets resolve
             // from the public registry.
-            '@lostgradient/weft': '^0.23.1',
+            '@lostgradient/weft': '^0.24.1',
             zod: '^4.4.3',
           },
           devDependencies: {

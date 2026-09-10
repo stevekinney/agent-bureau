@@ -58,8 +58,14 @@ describe('two concurrent harnesses are fully isolated', () => {
       // runtimeA/runtimeB — those are reserved for the harness's own run-id
       // minting, and the "mints identifiers independently" assertion below
       // depends on nothing else consuming from that counter first.
-      storageA = createLmdbStorageFixture({ runtime: createManualRuntimeServices() });
-      storageB = createLmdbStorageFixture({ runtime: createManualRuntimeServices() });
+      storageA = createLmdbStorageFixture({
+        runtime: createManualRuntimeServices(),
+        durability: 'relaxed',
+      });
+      storageB = createLmdbStorageFixture({
+        runtime: createManualRuntimeServices(),
+        durability: 'relaxed',
+      });
 
       harnessA = await createBureauTestHarness({
         agents: {},
