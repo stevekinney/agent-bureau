@@ -12,7 +12,6 @@ import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
-import { MissingRunOptionsError } from '../errors';
 import type { CombinedOperativeEventMap } from '../events';
 import { HumanWaitParkedEvent } from '../events';
 import type {
@@ -32,6 +31,7 @@ import {
   isTerminalRunEvent,
   runOutcomeFromResult,
 } from './session-handle-support';
+import { MissingRunOptionsError } from './session-handle-types';
 import type { SessionStore } from './types';
 export interface SessionRunState {
   currentRun: AgentRun | null;
@@ -109,7 +109,6 @@ export function createSessionRun(
       let reservation:
         | {
             runId: string;
-            runningRef: RunRef;
             userMessageId: string;
             baseConversationHistory: ConversationHistory;
             seededConversation: Conversation;
@@ -157,7 +156,6 @@ export function createSessionRun(
 
         reservation = {
           runId,
-          runningRef,
           userMessageId,
           baseConversationHistory,
           seededConversation,
@@ -173,8 +171,7 @@ export function createSessionRun(
         throw new Error(`Failed to reserve a run for session "${sessionId}".`);
       }
 
-      const { runId, runningRef, userMessageId, baseConversationHistory, seededConversation } =
-        reservation;
+      const { runId, userMessageId, baseConversationHistory, seededConversation } = reservation;
       state.currentRunId = runId;
       state.thisRunId = runId;
 
@@ -277,14 +274,43 @@ export function createSessionRun(
         // with a permanently-running ref that signal()/recover() would act on
         // after the run is already dead.
         subscription.unsubscribe();
-        await store.update(sessionId, (freshSession) => {
-          if (!freshSession) return undefined;
-          const errorRef: RunRef = { ...runningRef, status: 'error' };
-          return {
-            ...freshSession,
-            runs: freshSession.runs.map((r) => (r.runId === runId ? errorRef : r)),
-          };
-        });
+        try {
+          const committedSession = await store.update(sessionId, (freshSession) => {
+            if (!freshSession) return undefined;
+            const currentRef = freshSession.runs.find((run) => run.runId === runId);
+            if (!currentRef) return undefined;
+            if (currentRef.status !== 'running') {
+              if (
+                currentRef.status !== 'error' ||
+                (currentRef.outcome?.finishReason !== undefined &&
+                  currentRef.outcome.finishReason !== 'error')
+              ) {
+                throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
+              }
+              return freshSession;
+            }
+            const errorRef: RunRef = {
+              ...currentRef,
+              status: 'error',
+              outcome: { finishReason: 'error' },
+            };
+            return {
+              ...freshSession,
+              runs: freshSession.runs.map((r) => (r.runId === runId ? errorRef : r)),
+            };
+          });
+          if (committedSession === undefined) {
+            throw new Error(
+              `Session "${sessionId}" disappeared before run "${runId}" failure committed.`,
+              { cause: err },
+            );
+          }
+        } catch (commitError) {
+          outerEmitter.complete();
+          throw new Error(`Failed to persist terminal failure for run "${runId}".`, {
+            cause: commitError,
+          });
+        }
         outerEmitter.complete();
         throw err;
       }
@@ -294,10 +320,23 @@ export function createSessionRun(
       // Replace the 'running' ref with the terminal status. Re-load the
       // session in case a concurrent run completed, but replace by runId
       // rather than appending so the runs[] length stays correct.
-      await store.update(sessionId, (freshSession) => {
+      const committedSession = await store.update(sessionId, (freshSession) => {
         if (!freshSession) return undefined;
+        const currentRef = freshSession.runs.find((run) => run.runId === runId);
+        if (!currentRef) return undefined;
+        if (currentRef.status !== 'running') {
+          const localStatus = finishReasonToStatus(innerResult.finishReason);
+          if (
+            currentRef.status !== localStatus ||
+            (currentRef.outcome?.finishReason !== undefined &&
+              currentRef.outcome.finishReason !== innerResult.finishReason)
+          ) {
+            throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
+          }
+          return freshSession;
+        }
         const terminalRef: RunRef = {
-          ...(freshSession.runs.find((r) => r.runId === runId) ?? runningRef),
+          ...currentRef,
           status: finishReasonToStatus(innerResult.finishReason),
           userMessageId,
           outcome: runOutcomeFromResult(innerResult),
@@ -312,6 +351,10 @@ export function createSessionRun(
           runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
         };
       });
+      if (committedSession === undefined) {
+        outerEmitter.complete();
+        throw new Error(`Session "${sessionId}" disappeared before run "${runId}" committed.`);
+      }
 
       for (const event of pendingTerminalEvents) outerEmitter.dispatchEvent(event);
       outerEmitter.complete();

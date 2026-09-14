@@ -9,7 +9,7 @@ import { stopWhen } from '../conditions/index';
 import { createActiveRun } from '../create-run';
 import { spyEngine } from '../test/durable-engine';
 import type { RunOptions } from '../types';
-import { createDurableActiveRun } from './active-run-adapter';
+import { createDurableActiveRun } from './active-run-create';
 import { createCheckpointStore } from './checkpoint-store';
 import { createRunEngine } from './create-run-engine';
 import { createRunWorkflow } from './run-workflow';

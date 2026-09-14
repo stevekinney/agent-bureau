@@ -50,16 +50,15 @@ import type { RunnableAgent } from '../runnable-agent';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createManualCheckpointStore, createMockGenerate, waitForCondition } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
-import {
-  createDurableActiveRun,
-  createRecoveredRunEventSurface,
-  reattachDurableActiveRun,
-  startDurableRunResult,
-} from './active-run-adapter';
+import { createDurableActiveRun } from './active-run-create';
+import { createRecoveredRunEventSurface } from './active-run-event-surface';
+import { reattachDurableActiveRun } from './active-run-reattach';
+import { startDurableRunResult } from './active-run-result-entrypoints';
 import { createCheckpointStore } from './checkpoint-store';
 import type { RegistryAgnosticEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
-import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION, createRunWorkflow } from './run-workflow';
+import { createRunWorkflow } from './run-workflow';
+import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from './run-workflow-result';
 import type { DurableRunDeps } from './types';
 
 const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;

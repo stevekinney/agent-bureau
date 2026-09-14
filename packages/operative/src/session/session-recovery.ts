@@ -5,7 +5,7 @@ import type { AgentRun, RunEvent } from '../agent-run';
 import { createAgentRun } from '../agent-run';
 import type { RunRef } from '../agent-session';
 import type { ActiveRun } from '../create-run';
-import { reattachDurableActiveRun } from '../durable/active-run-adapter';
+import { reattachDurableActiveRun } from '../durable/active-run-reattach';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import type { CombinedOperativeEventMap, SessionRecoverFailure } from '../events';
@@ -118,10 +118,22 @@ export function createSessionRecovery(
             // Reload the session (may have been updated by concurrent activity)
             // and replace the RunRef with its terminal status.
             try {
-              await store.update(sessionId, (freshSession) => {
+              const committedSession = await store.update(sessionId, (freshSession) => {
                 if (!freshSession) return undefined;
+                const currentRef = freshSession.runs.find((run) => run.runId === runId);
+                if (!currentRef) return undefined;
+                if (currentRef.status !== 'running') {
+                  if (
+                    currentRef.status !== terminalStatus ||
+                    (currentRef.outcome?.finishReason !== undefined &&
+                      currentRef.outcome.finishReason !== terminalOutcome?.finishReason)
+                  ) {
+                    throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
+                  }
+                  return freshSession;
+                }
                 const terminalRef: RunRef = {
-                  ...(freshSession.runs.find((r) => r.runId === runId) ?? runningRef),
+                  ...currentRef,
                   status: terminalStatus,
                   outcome: terminalOutcome,
                 };
@@ -139,6 +151,11 @@ export function createSessionRecovery(
                   runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
                 };
               });
+              if (committedSession === undefined) {
+                throw new Error(
+                  `Session "${sessionId}" disappeared before recovered run "${runId}" committed.`,
+                );
+              }
             } catch (error) {
               recoveredSubscription.unsubscribe();
               recoveredEventBarrier.complete();

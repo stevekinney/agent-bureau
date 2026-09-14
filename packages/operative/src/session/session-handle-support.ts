@@ -7,7 +7,7 @@ import type { RunEvent } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
-import { normalizeAgentRunWorkflowResult } from '../durable/run-workflow';
+import { normalizeAgentRunWorkflowResult } from '../durable/run-workflow-result';
 import { toAgentRunError } from '../errors';
 import type { RunOutcome, RunResult } from '../types';
 import type { SessionStore } from './types';
@@ -27,6 +27,36 @@ function messagesAreEqual(
   right: ConversationHistory['messages'][string],
 ): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function metadataValuesAreEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function mergeConversationMetadata(
+  current: ConversationHistory['metadata'],
+  candidate: ConversationHistory['metadata'],
+  base: ConversationHistory['metadata'],
+): ConversationHistory['metadata'] {
+  const merged = { ...current };
+  const keys = new Set([...Object.keys(base), ...Object.keys(candidate)]);
+  for (const key of keys) {
+    const baseHasKey = Object.prototype.hasOwnProperty.call(base, key);
+    const candidateHasKey = Object.prototype.hasOwnProperty.call(candidate, key);
+    if (
+      baseHasKey === candidateHasKey &&
+      (!baseHasKey || metadataValuesAreEqual(base[key], candidate[key]))
+    ) {
+      continue;
+    }
+    if (!candidateHasKey) {
+      delete merged[key];
+    } else {
+      const candidateValue = candidate[key];
+      if (candidateValue !== undefined) merged[key] = candidateValue;
+    }
+  }
+  return merged;
 }
 
 export function appendConversationMessages(
@@ -60,10 +90,7 @@ export function appendConversationMessages(
 
   return {
     ...current,
-    metadata: {
-      ...current.metadata,
-      ...candidate.metadata,
-    },
+    metadata: mergeConversationMetadata(current.metadata, candidate.metadata, base.metadata),
     ids,
     messages,
     updatedAt: candidate.updatedAt,
@@ -175,7 +202,13 @@ async function readTerminalRunOutcome(
   const conversation = await loadTerminalConversationHistory(checkpointStore, runId);
 
   if (state.status !== 'completed') {
-    return { status: engineStatusToRunRefStatus(state.status), conversation };
+    return {
+      status: engineStatusToRunRefStatus(state.status),
+      conversation,
+      outcome: {
+        finishReason: state.status === 'cancelled' ? 'aborted' : 'error',
+      },
+    };
   }
 
   // The workflow's own declared return type — the same trusted-internal-
@@ -216,35 +249,34 @@ export async function reconcileTerminalRunRef(
   const outcome = await readTerminalRunOutcome(engine, checkpointStore, runningRef.runId);
   if (!outcome) return;
 
-  try {
-    await store.update(sessionId, (freshSession) => {
-      if (!freshSession) return undefined;
-      const current = freshSession.runs.find((r) => r.runId === runningRef.runId);
-      if (!current || current.status !== 'running') return undefined;
-      const terminalRef: RunRef = {
-        ...current,
-        status: outcome.status,
-        ...(outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
-      };
-      return {
-        ...freshSession,
-        ...(outcome.conversation !== undefined
-          ? {
-              conversationHistory: appendConversationMessages(
-                freshSession.conversationHistory,
-                outcome.conversation,
-                outcome.conversation,
-              ),
-            }
-          : {}),
-        runs: freshSession.runs.map((r) => (r.runId === runningRef.runId ? terminalRef : r)),
-      };
-    });
-  } catch {
-    // Store failure is non-fatal: the caller already returns null for this
-    // terminal run either way; a stale 'running' ref is tolerable vs.
-    // crashing the handle (mirrors the settle path in recover()'s success
-    // branch).
+  const committed = await store.update(sessionId, (freshSession) => {
+    if (!freshSession) return undefined;
+    const current = freshSession.runs.find((r) => r.runId === runningRef.runId);
+    if (!current) return undefined;
+    if (current.status !== 'running') return freshSession;
+    const terminalRef: RunRef = {
+      ...current,
+      status: outcome.status,
+      ...(outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
+    };
+    return {
+      ...freshSession,
+      ...(outcome.conversation !== undefined
+        ? {
+            conversationHistory: appendConversationMessages(
+              freshSession.conversationHistory,
+              outcome.conversation,
+              outcome.conversation,
+            ),
+          }
+        : {}),
+      runs: freshSession.runs.map((r) => (r.runId === runningRef.runId ? terminalRef : r)),
+    };
+  });
+  if (committed === undefined) {
+    throw new Error(
+      `Session "${sessionId}" disappeared while reconciling run "${runningRef.runId}".`,
+    );
   }
 }
 

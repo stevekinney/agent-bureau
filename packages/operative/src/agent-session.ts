@@ -27,9 +27,9 @@ export interface RunRef {
   sequence: number;
   /** Terminal or in-progress status, persisted so recovery can check it. */
   status: 'running' | 'completed' | 'error' | 'aborted';
-  /** Exact user message that started this run, when known. */
+  /** Exact user message that started this run, when known; older records may omit it. */
   userMessageId?: string;
-  /** Safe terminal classification, absent for in-progress and legacy runs. */
+  /** Safe terminal classification; absence means in-progress or legacy, never success. */
   outcome?: RunOutcome;
   /** ISO timestamp when this run was started. */
   startedAt: string;

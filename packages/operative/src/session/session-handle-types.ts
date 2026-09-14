@@ -324,6 +324,14 @@ export interface SessionHandleContext {
   runtime?: RuntimeServices;
 }
 
+/** Raised synchronously when a session run has no configured execution options. */
+export class MissingRunOptionsError extends Error {
+  constructor() {
+    super('Session run options are required to start a run.');
+    this.name = 'MissingRunOptionsError';
+  }
+}
+
 /**
  * Thrown when a durable verb (`signal`/`update`/`query`) is called on a session
  * that has no durable engine.

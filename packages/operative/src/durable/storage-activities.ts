@@ -25,7 +25,7 @@ export interface RecordStepInput {
 /**
  * Builds the durable storage WRITE activities over the given {@link CheckpointStore}.
  *
- * These commit run state at checkpoint boundaries so the {@link import('./active-run-adapter').createDurableActiveRun}
+ * These commit run state at checkpoint boundaries so the {@link import('./active-run-create').createDurableActiveRun}
  * adapter can reconstruct the `RunResult` after completion:
  *
  * - `saveCursor` commits the resume position (step + accumulators) every yield,

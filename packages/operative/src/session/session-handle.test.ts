@@ -12,8 +12,7 @@ import { createAgentSession } from '../agent-session';
 import { createCheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import { createRunEngine } from '../durable/create-run-engine';
-import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow';
-import { MissingRunOptionsError } from '../errors';
+import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow-result';
 import type {
   OperativeEventMap,
   SessionCancelEvent,
@@ -40,6 +39,8 @@ import {
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
+import { appendConversationMessages } from './session-handle-support';
+import { MissingRunOptionsError } from './session-handle-types';
 import type { SessionStore } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — prevents one test's
@@ -768,6 +769,78 @@ describe('session.run()', () => {
     expect(startedIds).toHaveLength(1);
     expect(startedIds[0]).toBe('f2-regression-session:0');
   });
+
+  it.each(['conflict', 'missing', 'matching'] as const)(
+    'preserves terminal authority after an engine rejection with a %s commit',
+    async (commitMode) => {
+      const fakeEngine = {
+        start: async (_type: string, _input: unknown, options: { id: string }) => ({
+          id: options.id,
+          result: () => Promise.reject(new Error('engine infrastructure failure')),
+          abort: () => {},
+          signal: AbortSignal.abort(),
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          [Symbol.asyncIterator]: async function* () {},
+        }),
+        cancel: async () => {},
+        signal: async () => {},
+        update: async () => {},
+        query: async () => {},
+      } as unknown as RegistryAgnosticEngine;
+      const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+      let updateCalls = 0;
+      const store: SessionStore = {
+        ...baseStore,
+        async update(...args) {
+          updateCalls += 1;
+          if (updateCalls === 2) {
+            if (commitMode === 'missing') return undefined;
+            await baseStore.update(args[0], (session) =>
+              session
+                ? {
+                    ...session,
+                    runs: session.runs.map((run) =>
+                      run.status === 'running'
+                        ? commitMode === 'conflict'
+                          ? { ...run, status: 'aborted', outcome: { finishReason: 'aborted' } }
+                          : { ...run, status: 'error', outcome: { finishReason: 'error' } }
+                        : run,
+                    ),
+                  }
+                : undefined,
+            );
+          }
+          return baseStore.update(...args);
+        },
+      };
+      const handle = createSessionHandle('reject-terminal-authority', {
+        store,
+        agentName: 'agent',
+        engine: fakeEngine,
+        checkpointStore: {
+          loadCheckpoint: async () => ({
+            conversation: null,
+            cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+            steps: [],
+          }),
+        } as unknown as import('../durable/checkpoint-store').CheckpointStore,
+        runOptions: createTestRunOptions(),
+      });
+
+      await expect(handle.run('prompt').result()).rejects.toThrow(
+        commitMode === 'matching'
+          ? 'engine infrastructure failure'
+          : 'Failed to persist terminal failure',
+      );
+      const rejectedSession = await baseStore.load('reject-terminal-authority');
+      expect(rejectedSession?.runs[0]?.outcome).toEqual(
+        commitMode === 'missing'
+          ? undefined
+          : { finishReason: commitMode === 'conflict' ? 'aborted' : 'error' },
+      );
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -3337,7 +3410,9 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
     expect(await h.recover()).toBeNull();
 
     const persisted = await store.load(sessionId);
-    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('aborted');
+    const run = persisted?.runs.find((r) => r.runId === runId);
+    expect(run?.status).toBe('aborted');
+    expect(run?.outcome).toEqual({ finishReason: 'aborted' });
   });
 
   it('reconciles a genuinely failed Weft-level workflow to "error"', async () => {
@@ -3368,7 +3443,9 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
     expect(await h.recover()).toBeNull();
 
     const persisted = await store.load(sessionId);
-    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('error');
+    const run = persisted?.runs.find((r) => r.runId === runId);
+    expect(run?.status).toBe('error');
+    expect(run?.outcome).toEqual({ finishReason: 'error' });
   });
 
   it('leaves the RunRef untouched when engine.get() reports it as still non-terminal', async () => {
@@ -4671,6 +4748,181 @@ describe('regression: recover() persists terminal state after recovered run sett
     } finally {
       engine2[Symbol.dispose]();
     }
+  });
+});
+
+describe('regression: session terminal commits preserve concurrent state', () => {
+  it('rejects the run when its terminal session update becomes a no-op', async () => {
+    const sessionId = 'terminal-commit-deleted-session';
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    let updateCount = 0;
+    const store: SessionStore = {
+      ...baseStore,
+      async update(...args) {
+        updateCount += 1;
+        if (updateCount === 2) return undefined;
+        return baseStore.update(...args);
+      },
+    };
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    await expect(handle.run('prompt').result()).rejects.toThrow('disappeared');
+    expect(await baseStore.load(sessionId)).toBeDefined();
+  });
+
+  it('keeps fresh conversation metadata while appending the run transcript', async () => {
+    const sessionId = 'terminal-commit-metadata-session';
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const seed = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(createInstantGenerate('seed')),
+    });
+    await seed.run('seed').result();
+    await store.update(sessionId, (session) =>
+      session
+        ? {
+            ...session,
+            conversationHistory: {
+              ...session.conversationHistory,
+              metadata: { version: 'old' },
+            },
+          }
+        : undefined,
+    );
+
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      runOptions: {
+        ...createTestRunOptions(),
+        generate: async () => {
+          entered.resolve();
+          await release.promise;
+          return { content: 'result', toolCalls: [] };
+        },
+      },
+    });
+    const run = handle.run('racing prompt');
+    await entered.promise;
+    await store.update(sessionId, (session) =>
+      session
+        ? {
+            ...session,
+            conversationHistory: {
+              ...session.conversationHistory,
+              metadata: { version: 'new', concurrent: true },
+            },
+          }
+        : undefined,
+    );
+    release.resolve();
+    await run.result();
+
+    const storedSession = await store.load(sessionId);
+    expect(storedSession?.conversationHistory.metadata).toEqual({
+      version: 'new',
+      concurrent: true,
+    });
+  });
+
+  it('applies candidate metadata additions, changes, and deletions against the reservation base', () => {
+    const base = {
+      ...createConversationHistory(),
+      metadata: { changed: 'base', removed: 'base' },
+    };
+    const current = {
+      ...base,
+      metadata: {
+        changed: 'concurrent',
+        removed: 'concurrent',
+        independent: 'current',
+      },
+    };
+    const candidate = {
+      ...base,
+      metadata: { changed: 'run', added: 'run' },
+    };
+
+    const merged = appendConversationMessages(current, candidate, base);
+    expect(merged.metadata).toEqual({
+      changed: 'run',
+      independent: 'current',
+      added: 'run',
+    });
+  });
+
+  it('rejects when a concurrent update removes the reserved RunRef', async () => {
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    let updateCount = 0;
+    const store: SessionStore = {
+      ...baseStore,
+      async update(...args) {
+        updateCount += 1;
+        if (updateCount >= 2) {
+          const current = await baseStore.load(args[0]);
+          if (!current) return undefined;
+          const missingRunSession = { ...current, runs: [] };
+          await baseStore.save(missingRunSession);
+          return args[1](missingRunSession);
+        }
+        return baseStore.update(...args);
+      },
+    };
+    const handle = createSessionHandle('terminal-commit-missing-ref', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    await expect(handle.run('prompt').result()).rejects.toThrow('disappeared');
+  });
+
+  it('rejects a conflicting local result when a concurrent terminal commit is authoritative', async () => {
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    let updateCount = 0;
+    const store: SessionStore = {
+      ...baseStore,
+      async update(...args) {
+        updateCount += 1;
+        if (updateCount >= 2) {
+          const current = await baseStore.load(args[0]);
+          if (!current) return undefined;
+          const authoritativeSession = {
+            ...current,
+            runs: current.runs.map((run) =>
+              run.status === 'running'
+                ? {
+                    ...run,
+                    status: 'aborted' as const,
+                    outcome: { finishReason: 'aborted' as const },
+                  }
+                : run,
+            ),
+          };
+          await baseStore.save(authoritativeSession);
+          return args[1](authoritativeSession);
+        }
+        return baseStore.update(...args);
+      },
+    };
+    const handle = createSessionHandle('terminal-commit-conflict', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    await expect(handle.run('prompt').result()).rejects.toThrow('conflicting terminal');
+    const conflictedSession = await baseStore.load('terminal-commit-conflict');
+    expect(conflictedSession?.runs[0]?.outcome).toEqual({
+      finishReason: 'aborted',
+    });
   });
 });
 

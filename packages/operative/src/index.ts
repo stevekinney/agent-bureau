@@ -168,7 +168,6 @@ export {
   ElicitationDeniedError,
   GuardrailTripwireError,
   MaximumStepsExceededError,
-  MissingRunOptionsError,
   NonJsonOutputError,
   OutputSchemaConversionError,
   OutputValidationError,
@@ -574,6 +573,7 @@ export {
   SessionConflictError,
   StaleSessionIncarnationError,
 } from './session/index';
+export { MissingRunOptionsError } from './session/session-handle-types';
 export { withStreaming } from './streaming';
 export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
 export type {

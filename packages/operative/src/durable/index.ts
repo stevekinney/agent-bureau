@@ -1,18 +1,11 @@
-export type {
-  DurableActiveRunContext,
-  DurableActiveRunOptions,
-  RecoveredRunHandle,
-  StartDurableRunResultOptions,
-} from './active-run-adapter';
-export {
-  createDurableActiveRun,
-  createRecoveredRunEventSurface,
-  reattachDurableActiveRun,
-  resumeDurableRunResult,
-  SCHEDULER_ORIGIN_TAG,
-  SCHEDULER_RUN_ID_PREFIX,
-  startDurableRunResult,
-} from './active-run-adapter';
+export type { DurableActiveRunContext, DurableActiveRunOptions } from './active-run-adapter';
+export { SCHEDULER_ORIGIN_TAG, SCHEDULER_RUN_ID_PREFIX } from './active-run-constants';
+export { createDurableActiveRun } from './active-run-create';
+export type { RecoveredRunHandle } from './active-run-event-surface';
+export { createRecoveredRunEventSurface } from './active-run-event-surface';
+export { reattachDurableActiveRun } from './active-run-reattach';
+export type { StartDurableRunResultOptions } from './active-run-result-entrypoints';
+export { resumeDurableRunResult, startDurableRunResult } from './active-run-result-entrypoints';
 export type { CheckpointStore } from './checkpoint-store';
 export { createCheckpointStore } from './checkpoint-store';
 export type { SignalContinuationInput, WakeupContinuationInput } from './continuation-input';
@@ -40,12 +33,10 @@ export type {
   DurableEventOwnerKind,
   DurableEventPage,
 } from './event-history-types';
-export type {
-  AgentRunWorkflowInput,
-  AgentRunWorkflowResult,
-  CreateRunWorkflowOptions,
-} from './run-workflow';
-export { createRunWorkflow, isAgentRunWorkflowInput } from './run-workflow';
+export { createRunWorkflow } from './run-workflow';
+export type { AgentRunWorkflowInput, CreateRunWorkflowOptions } from './run-workflow-input';
+export { isAgentRunWorkflowInput } from './run-workflow-input';
+export type { AgentRunWorkflowResult } from './run-workflow-result';
 export type {
   AgentScheduleHandle,
   AgentScheduleOptions,

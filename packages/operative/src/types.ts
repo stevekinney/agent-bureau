@@ -35,19 +35,29 @@ export interface ElicitationOptions {
 }
 
 export interface ElicitationRequest<T = unknown> {
+  /** Immutable identity for correlating the response to this request. */
   readonly requestId: string;
+  /** Tool identity when elicitation was requested during tool execution. */
   readonly toolCallId?: string;
-  message: string;
-  schema: ZodType<T>;
-  context: StepContext;
+  readonly message: string;
+  /** Parse the untrusted response payload before returning it. */
+  readonly schema: ZodType<T>;
+  readonly context: StepContext;
 }
 
 export type ElicitationResponse<T = unknown> = {
-  requestId: string;
-  toolCallId?: string;
-  data: T;
+  /** Must match the request's immutable requestId. */
+  readonly requestId: string;
+  readonly toolCallId?: string;
+  readonly data: T;
 } | null;
 
+/**
+ * Handles one request and returns validated data, or `null` when the caller
+ * declines or cancellation wins. A late response for an older request is
+ * ignored and cannot settle a replacement request; omission of the callback
+ * makes elicitation unavailable and leaves `elicit` undefined.
+ */
 export type OnElicitation = <T>(request: ElicitationRequest<T>) => Promise<ElicitationResponse<T>>;
 
 /**

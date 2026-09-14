@@ -16,11 +16,9 @@ import type { EventDispatcher } from '../run-step';
 import type { GenerateContext, GenerateFunction, SteeringGate } from '../types';
 import type { CheckpointStore } from './checkpoint-store';
 import { createCheckpointStore } from './checkpoint-store';
-import {
-  createRunWorkflow,
-  isAgentRunWorkflowInput,
-  normalizeAgentRunWorkflowResult,
-} from './run-workflow';
+import { createRunWorkflow } from './run-workflow';
+import { isAgentRunWorkflowInput } from './run-workflow-input';
+import { normalizeAgentRunWorkflowResult } from './run-workflow-result';
 import { createStorageActivities } from './storage-activities';
 import type { DurableRunDeps } from './types';
 
