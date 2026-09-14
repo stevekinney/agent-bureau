@@ -336,10 +336,11 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: (async (request) =>
-        elicitationResponse(request as ElicitationRequest<{ confirmed: boolean }>, {
-          confirmed: true,
-        })) as OnElicitation,
+      onElicitation: (async (request) => ({
+        requestId: `${request.requestId}-wrong`,
+        toolCallId: request.toolCallId,
+        data: { confirmed: true },
+      })) as OnElicitation,
       prepareStep: async ({ elicit }) => {
         await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
       },
@@ -347,6 +348,25 @@ describe('elicitation', () => {
 
     expect(result.finishReason).toBe('error');
     expect(result.error).toMatchObject({ kind: 'contract' });
+  });
+
+  it('keeps the request tool identity when the caller mutates options while awaiting', async () => {
+    const options: { toolCallId?: string } = { toolCallId: 'originating-call' };
+    const result = await run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation: async (request) => {
+        options.toolCallId = 'mutated-call';
+        return elicitationResponse(request, { confirmed: true });
+      },
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }), options);
+      },
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
   });
 
   it('ignores a late elicitation resolution after cancellation', async () => {

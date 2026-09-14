@@ -1,7 +1,7 @@
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, materializeToolCalls } from 'conversationalist';
 import type { ToolCall } from 'interoperability';
-import type { HookErrorHandler, HookRegistrationOptions, RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { SteeringDesiredState } from './durable/types';
@@ -21,7 +21,6 @@ import {
   ElicitationResolvedEvent,
   GenerateCompletedEvent,
   GenerateErrorEvent,
-  GenerateRetryEvent,
   GenerateStartedEvent,
   ResponseSchemaFailedEvent,
   ResponseValidatedEvent,
@@ -38,7 +37,14 @@ import {
   UsageAccumulatedEvent,
 } from './events';
 import type { ErrorRecoveryAction } from './hooks/types';
-import { addJitter } from './retry/jitter';
+import {
+  applyWaterfallHandlerErrorPolicy,
+  awaitResumeOrAbort,
+  callGenerateWithRetry,
+  evaluateStopConditions,
+  explicitAbortReason,
+  runHookSilently,
+} from './run-step-utilities';
 import type { SelectionGate } from './selection-gate';
 import { validateOutput } from './structured-output/response-schema';
 import type { ToolChoice } from './structured-output/types';
@@ -63,6 +69,8 @@ import type {
   ValidateResponseHook,
   ValidateToolResultHook,
 } from './types';
+
+export { awaitResumeOrAbort, normalizeToArray, runHookSilently } from './run-step-utilities';
 
 /**
  * Minimal structural type for an event emitter. The loop and step never depend
@@ -230,211 +238,6 @@ export type StepOutcome =
   | { kind: 'abort'; reason?: string }
   | { kind: 'error'; error: unknown; errorKind?: AgentRunErrorKind };
 
-function explicitAbortReason(signal: AbortSignal | undefined): string | undefined {
-  return typeof signal?.reason === 'string' ? signal.reason : undefined;
-}
-
-/**
- * Races a {@link SteeringGate}'s `awaitResume()` against the step's own
- * `AbortSignal` (AB-67's ratified pause/resume gate). Resolves `aborted:
- * true` the moment the signal fires — whether it was already aborted, fires
- * while the gate is awaited, or the gate resolves after an abort already
- * won the race — and `aborted: false` once a matching `resume` releases the
- * gate first. Removes its own abort listener in every case, so a step that
- * pauses and resumes repeatedly never accumulates listeners on a long-lived
- * run-level signal.
- *
- * Exported (alongside {@link normalizeToArray}) so its already-aborted
- * short-circuit is directly unit-testable: `runStep`'s own call site never
- * reaches this function with an already-aborted `signal` (its own abort
- * check immediately precedes the call, with no `await` between them), so
- * that branch needs a direct test of this function to exercise, not a
- * `runStep`-level one.
- */
-export async function awaitResumeOrAbort(
-  gate: SteeringGate,
-  signal: AbortSignal | undefined,
-): Promise<{ aborted: boolean }> {
-  if (signal?.aborted) {
-    return { aborted: true };
-  }
-
-  let onAbort: (() => void) | undefined;
-  const abortPromise = new Promise<'abort'>((resolve) => {
-    if (!signal) return;
-    onAbort = () => resolve('abort');
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-  // Pass `signal` through so a real gate implementation can drop its own
-  // registered waiter as soon as the signal fires, rather than leaving one
-  // registered indefinitely once the abort branch of this race has won.
-  const resumePromise = gate.awaitResume(signal).then((): 'resume' => 'resume');
-
-  try {
-    const outcome = await Promise.race([resumePromise, abortPromise]);
-    return { aborted: outcome === 'abort' };
-  } finally {
-    if (signal && onAbort) {
-      signal.removeEventListener('abort', onAbort);
-    }
-  }
-}
-
-export function normalizeToArray<T>(value: T | T[] | undefined): T[] {
-  if (!value) return [];
-  return Array.isArray(value) ? value : [value];
-}
-
-/**
- * Runs a hook via the registry in a fire-and-forget fashion.
- * All handlers execute via Promise.allSettled so individual failures
- * never block the caller. Most callers don't await the returned promise —
- * `void runHookSilently(...)` is the common shape — but AB-204's `closed()`
- * needs to know when a run-owned hook (`onRunComplete`/`onRunAbort`/
- * `onRunError`/`onLLMInput`/`onLLMOutput`) actually finishes, since none of
- * these are otherwise on the run's critical path. Callers that care pass the
- * returned promise to a `hookTracker` (see `StepDeps.hookTracker` and
- * `make*Result`'s `hookTracker` parameter in `run-lifecycle.ts`) so
- * `closed()` can await it before acknowledging cleanup.
- */
-export function runHookSilently<K extends string>(
-  hooks:
-    | {
-        has(name: K): boolean;
-        getHandlers(name: K): ReadonlyArray<{ handler: (...args: never[]) => unknown }>;
-      }
-    | undefined,
-  hookName: K,
-  ...args: unknown[]
-): Promise<void> {
-  if (!hooks?.has(hookName)) return Promise.resolve();
-  const handlers = hooks.getHandlers(hookName);
-  return Promise.allSettled(
-    handlers.map((entry) =>
-      Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
-    ),
-  ).then(() => undefined);
-}
-
-/**
- * Applies the same error-handling policy `HookRegistry.run()` applies to a
- * throwing handler — `entry.options.onError`, falling back to the
- * registry-level `onError` (AB-232) — to a handler invoked by a manual
- * `getHandlers()` loop such as `beforeGenerate`'s and `afterGenerate`'s
- * waterfalls below, which cannot use `run()` itself (see the comments at
- * each call site for why).
- *
- * Throws the original error when no error handler applies, or when the
- * resolved handler returns `'abort'` — the caller's `catch` block should let
- * that propagate. Returns normally (to skip to the next handler) when the
- * resolved handler returns `'continue'`.
- */
-function applyWaterfallHandlerErrorPolicy(
-  error: unknown,
-  hookName: string,
-  handlerIndex: number,
-  entryOptions: HookRegistrationOptions,
-  registryOnError: HookErrorHandler | undefined,
-): void {
-  const errorHandler = entryOptions.onError ?? registryOnError;
-  if (!errorHandler) {
-    throw error;
-  }
-  const decision = errorHandler(error, { hookName, handlerIndex });
-  if (decision === 'abort') {
-    throw error;
-  }
-  // 'continue' — skip to next handler
-}
-
-async function evaluateStopConditions(
-  conditions: StopCondition[],
-  context: StepResult,
-): Promise<boolean> {
-  for (const condition of conditions) {
-    const result = await condition(context);
-    if (result) return true;
-  }
-  return false;
-}
-
-async function callGenerateWithRetry(
-  generate: RunOptions['generate'],
-  context: GenerateContext,
-  retry: RetryOptions | undefined,
-  emitter: EventDispatcher | undefined,
-  runtime: RuntimeServices,
-): Promise<GenerateResponse> {
-  if (!retry || retry.attempts <= 1) {
-    return generate(context);
-  }
-
-  let currentContext = context;
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= retry.attempts; attempt++) {
-    try {
-      return await generate(currentContext);
-    } catch (error) {
-      lastError = error;
-
-      if (attempt >= retry.attempts) break;
-
-      if (retry.shouldRetry) {
-        const shouldContinue = await retry.shouldRetry(error, attempt);
-        if (!shouldContinue) break;
-      }
-
-      // Apply retry mutator if provided
-      let mutated = false;
-      let mutationDescription: string | undefined;
-      if (retry.mutate) {
-        const mutatedContext = await retry.mutate(currentContext, error, attempt);
-        if (mutatedContext !== undefined) {
-          // AB-67: steering desired-configuration is not mutator-overridable,
-          // the same rule `beforeGenerate` follows — reapply the value this
-          // retry loop started with (`context.steering`, the step's original
-          // boundary read) so a mutator that omits or replaces it can never
-          // make a later attempt within the same step ignore the override.
-          currentContext = { ...mutatedContext, steering: context.steering };
-          mutated = true;
-          mutationDescription = `Context mutated on attempt ${attempt}`;
-        }
-      }
-
-      emitter?.dispatch(
-        new GenerateRetryEvent(currentContext.step, attempt, error, mutated, mutationDescription),
-      );
-
-      const rawDelay =
-        typeof retry.delay === 'function' ? retry.delay(attempt) : (retry.delay ?? 0);
-      const delayMs = retry.jitter
-        ? addJitter(rawDelay, { maxJitter: retry.maxJitter, random: runtime.random.next })
-        : rawDelay;
-
-      if (delayMs > 0) {
-        if (currentContext.signal?.aborted) break;
-        await (
-          retry.sleep ??
-          ((milliseconds: number, signal?: AbortSignal) =>
-            new Promise<void>((resolve) => {
-              const timer = runtime.timers.setTimeout(resolve, milliseconds);
-              if (signal) {
-                const onAbort = () => {
-                  runtime.timers.clearTimeout(timer);
-                  resolve();
-                };
-                signal.addEventListener('abort', onAbort, { once: true });
-              }
-            }))
-        )(delayMs, currentContext.signal);
-        if (currentContext.signal?.aborted) break;
-      }
-    }
-  }
-
-  throw lastError;
-}
-
 function createElicit(
   step: number,
   onElicitation: OnElicitation,
@@ -449,14 +252,18 @@ function createElicit(
     options?: ElicitationOptions,
   ): Promise<T | null> => {
     const requestId = runtime.identifiers.next('elicitation');
+    // Capture the caller-supplied correlation before invoking the callback.
+    // Hooks may mutate their options object while the callback is pending;
+    // that must not change which request this invocation owns.
+    const toolCallId = options?.toolCallId;
     const request = Object.freeze({
       requestId,
-      ...(options?.toolCallId !== undefined ? { toolCallId: options.toolCallId } : {}),
+      ...(toolCallId !== undefined ? { toolCallId } : {}),
       message,
       schema,
       context: { conversation, step, signal },
     });
-    emitter?.dispatch(new ElicitationRequestedEvent(step, message, requestId, options?.toolCallId));
+    emitter?.dispatch(new ElicitationRequestedEvent(step, message, requestId, toolCallId));
     const elicitation = onElicitation(request).catch((error) => {
       if (signal?.aborted) return null;
       throw error;
@@ -477,12 +284,12 @@ function createElicit(
       removeAbortListener();
     }
     if (signal?.aborted) {
-      emitter?.dispatch(new ElicitationResolvedEvent(step, false, requestId, options?.toolCallId));
+      emitter?.dispatch(new ElicitationResolvedEvent(step, false, requestId, toolCallId));
       return null;
     }
     if (
       response !== null &&
-      (response.requestId !== requestId || response.toolCallId !== options?.toolCallId)
+      (response.requestId !== requestId || response.toolCallId !== toolCallId)
     ) {
       throw new AgentRunError('Elicitation response did not match its request.', {
         kind: 'contract',
@@ -490,7 +297,7 @@ function createElicit(
       });
     }
     const accepted = response !== null;
-    emitter?.dispatch(new ElicitationResolvedEvent(step, accepted, requestId, options?.toolCallId));
+    emitter?.dispatch(new ElicitationResolvedEvent(step, accepted, requestId, toolCallId));
     return response === null ? null : response.data;
   };
 }
@@ -536,6 +343,37 @@ async function sealDanglingToolCalls(
     conversation.appendToolResults(danglingResults);
   }
   return danglingResults;
+}
+
+function dispatchSettledResults(
+  emitter: EventDispatcher | undefined,
+  deps: StepDeps,
+  step: number,
+  calls: ReadonlyArray<ToolCall>,
+  results: ReadonlyArray<ToolExecutionResult>,
+  emittedCallIds: Set<string>,
+): void {
+  if (!emitter) return;
+  const callsById = new Map(calls.map((call) => [call.id, call]));
+  for (const result of results) {
+    const callId = result.toolCallId;
+    if (emittedCallIds.has(callId)) continue;
+    const call = callsById.get(callId);
+    if (!call) continue;
+    emittedCallIds.add(callId);
+    emitter.dispatch(
+      new ToolSettledBubbleEvent(
+        { agentName: deps.agentName ?? '', runId: deps.runId ?? '', step },
+        {
+          toolName: call.name,
+          toolCallId: call.id,
+          status: result.outcome === 'success' ? 'success' : 'error',
+          result: result.result,
+          error: result.outcome === 'success' ? undefined : result.result,
+        },
+      ),
+    );
+  }
 }
 
 /**
@@ -600,6 +438,7 @@ export async function runStep(
   emitter: EventDispatcher | undefined,
 ): Promise<StepOutcome> {
   const { signal, backpressure, hooks, hookTracker } = deps;
+  const emittedSettledCallIds = new Set<string>();
 
   if (signal?.aborted) {
     return { kind: 'abort', reason: explicitAbortReason(signal) };
@@ -1330,10 +1169,18 @@ export async function runStep(
           });
         }
       } catch (error) {
-        await sealDanglingToolCalls(
+        const sealedResults = await sealDanglingToolCalls(
           conversation,
           deps.collectAsync,
           'Tool execution aborted before a result could be produced (beforeToolExecution hook failed)',
+        );
+        dispatchSettledResults(
+          emitter,
+          deps,
+          step,
+          materializedToolCalls,
+          sealedResults,
+          emittedSettledCallIds,
         );
         emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
         return { kind: 'error', error, errorKind: 'tool' };
@@ -1352,10 +1199,18 @@ export async function runStep(
           callsToExecute = registryResult;
         }
       } catch (error) {
-        await sealDanglingToolCalls(
+        const sealedResults = await sealDanglingToolCalls(
           conversation,
           deps.collectAsync,
           'Tool execution aborted before a result could be produced (beforeToolExecution hook failed)',
+        );
+        dispatchSettledResults(
+          emitter,
+          deps,
+          step,
+          materializedToolCalls,
+          sealedResults,
+          emittedSettledCallIds,
         );
         emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
         return { kind: 'error', error, errorKind: 'tool' };
@@ -1376,24 +1231,15 @@ export async function runStep(
         'Tool execution skipped by beforeToolExecution hook',
         filteredOutCalls,
       );
+      dispatchSettledResults(
+        emitter,
+        deps,
+        step,
+        filteredOutCalls,
+        synthesizedResults,
+        emittedSettledCallIds,
+      );
       filteredResults = synthesizedResults;
-      for (const result of synthesizedResults) {
-        const call = filteredOutCalls.find((candidate) => candidate.id === result.toolCallId);
-        if (call) {
-          emitter?.dispatch(
-            new ToolSettledBubbleEvent(
-              { agentName: deps.agentName ?? '', runId: deps.runId ?? '', step },
-              {
-                toolName: call.name,
-                toolCallId: call.id,
-                status: 'error',
-                result: result.result,
-                error: result.result,
-              },
-            ),
-          );
-        }
-      }
     }
 
     if (callsToExecute.length > 0) {
@@ -1505,6 +1351,14 @@ export async function runStep(
                 content: 'Tool execution skipped by onError hook',
                 result: 'Tool execution skipped by onError hook',
               }));
+              dispatchSettledResults(
+                emitter,
+                deps,
+                step,
+                callsToExecute,
+                results,
+                emittedSettledCallIds,
+              );
               recovered = true;
             }
             // 'retry' and 'abort' both propagate for tool execution
@@ -1515,10 +1369,18 @@ export async function runStep(
           }
         }
         if (!recovered) {
-          await sealDanglingToolCalls(
+          const sealedResults = await sealDanglingToolCalls(
             conversation,
             deps.collectAsync,
             'Tool execution failed before a result could be produced',
+          );
+          dispatchSettledResults(
+            emitter,
+            deps,
+            step,
+            callsToExecute,
+            sealedResults,
+            emittedSettledCallIds,
           );
           // Re-classify a toolbox-level, failFast BUDGET_EXCEEDED rejection
           // to `BudgetExceededError` here, upstream of `makeErrorResult`'s
