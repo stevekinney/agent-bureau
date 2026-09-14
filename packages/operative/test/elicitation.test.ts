@@ -336,11 +336,13 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: (async (request) => ({
+      onElicitation: async <T>(
+        request: ElicitationRequest<T>,
+      ): Promise<ElicitationResponse<T>> => ({
         requestId: `${request.requestId}-wrong`,
         toolCallId: request.toolCallId,
-        data: { confirmed: true },
-      })) as OnElicitation,
+        data: request.schema.parse({ confirmed: true }),
+      }),
       prepareStep: async ({ elicit }) => {
         await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
       },
@@ -370,23 +372,58 @@ describe('elicitation', () => {
   });
 
   it('ignores a late elicitation resolution after cancellation', async () => {
-    let resolveElicitation!: (value: unknown) => void;
     const controller = new AbortController();
-    const resultPromise = run({
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let invocation = 0;
+    const requestIds: string[] = [];
+    const onElicitation: OnElicitation = async <T>(request: ElicitationRequest<T>) => {
+      requestIds.push(request.requestId);
+      await new Promise<void>((resolve) => {
+        if (invocation++ === 0) releaseFirst = resolve;
+        else releaseSecond = resolve;
+      });
+      return {
+        requestId: request.requestId,
+        toolCallId: request.toolCallId,
+        data: request.schema.parse({ confirmed: true }),
+      };
+    };
+    const firstResultPromise = run({
       generate: async () => textResponse('Done'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       signal: controller.signal,
-      onElicitation: (() =>
-        new Promise<unknown>((resolve) => (resolveElicitation = resolve))) as any,
+      onElicitation,
       prepareStep: async ({ elicit }) => {
         await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
       },
     });
+    while (!releaseFirst) await Promise.resolve();
     controller.abort('cancelled');
-    resolveElicitation?.(null);
-    const result = await resultPromise;
-    expect(result.finishReason).toBe('aborted');
+    releaseFirst();
+    const firstResult = await firstResultPromise;
+    expect(firstResult.finishReason).toBe('aborted');
+
+    const secondResultPromise = run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation,
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+    while (!releaseSecond) await Promise.resolve();
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[0]).not.toBe(requestIds[1]);
+    releaseFirst();
+    await Promise.resolve();
+    expect(releaseSecond).toBeFunction();
+    releaseSecond();
+    const secondResult = await secondResultPromise;
+    expect(secondResult.finishReason).toBe('stop-condition');
   });
 });
