@@ -1,4 +1,3 @@
-import type { WorkflowState } from '@lostgradient/weft';
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
 import type { RuntimeServices } from 'lifecycle';
@@ -19,11 +18,7 @@ import { createActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-adapter';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
-import {
-  type AgentRunWorkflowResult,
-  normalizeAgentRunWorkflowResult,
-} from '../durable/run-workflow';
-import { MissingRunOptionsError, toAgentRunError } from '../errors';
+import { MissingRunOptionsError } from '../errors';
 import type {
   CombinedOperativeEventMap,
   OperativeEventMap,
@@ -62,6 +57,15 @@ import type {
   RunOutcome,
   RunResult,
 } from '../types';
+import {
+  appendConversationMessages,
+  finishReasonToStatus,
+  historyOrEmpty,
+  isTerminalRunEvent,
+  newestRunningRunRef,
+  reconcileTerminalRunRef,
+  runOutcomeFromResult,
+} from './session-handle-support';
 import type { SessionStore } from './types';
 
 /**
@@ -461,246 +465,6 @@ export function deriveRunId(sessionId: string, sequence: number): string {
 /**
  * Parse a partial `ConversationHistory` into a `ConversationHistory`. The session
  * stores a full `ConversationHistory`; a brand-new session starts empty.
- */
-function historyOrEmpty(
-  history: ConversationHistory | undefined,
-  runtime: RuntimeServices,
-): ConversationHistory {
-  // AB-321: forwards the resolved runtime into the fresh history's own
-  // environment seam — only relevant on the `undefined` branch, since an
-  // existing `history`'s id is untouched either way.
-  return history ?? createConversationHistory(undefined, { runtime });
-}
-
-function messagesAreEqual(
-  left: ConversationHistory['messages'][string],
-  right: ConversationHistory['messages'][string],
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function appendConversationMessages(
-  current: ConversationHistory,
-  candidate: ConversationHistory,
-  base: ConversationHistory,
-): ConversationHistory {
-  const baseIds = new Set(base.ids);
-  const candidateIds = new Set(candidate.ids);
-  const currentIds = new Set(current.ids);
-  const currentPreservedIds = current.ids.filter((id) => candidateIds.has(id) || !baseIds.has(id));
-  const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
-  const ids = [...currentPreservedIds, ...candidateOnlyIds];
-  const messages: Record<string, ConversationHistory['messages'][string]> = {};
-
-  for (const id of ids) {
-    const candidateMessage = candidate.messages[id];
-    const baseMessage = base.messages[id];
-    const message =
-      candidateMessage &&
-      (!baseMessage || !messagesAreEqual(candidateMessage, baseMessage) || !current.messages[id])
-        ? candidateMessage
-        : (current.messages[id] ?? candidateMessage);
-    if (message) messages[id] = message;
-  }
-
-  for (const [position, id] of ids.entries()) {
-    const message = messages[id];
-    if (message) messages[id] = { ...message, position };
-  }
-
-  return {
-    ...current,
-    metadata: {
-      ...current.metadata,
-      ...candidate.metadata,
-    },
-    ids,
-    messages,
-    updatedAt: candidate.updatedAt,
-  };
-}
-
-function newestRunningRunRef(session: AgentSession | undefined): RunRef | undefined {
-  return [...(session?.runs ?? [])].reverse().find((runRef) => runRef.status === 'running');
-}
-
-/**
- * Map a `finishReason` to a `RunRef.status`.
- */
-function finishReasonToStatus(finishReason: string): RunRef['status'] {
-  if (finishReason === 'aborted') return 'aborted';
-  if (
-    finishReason === 'error' ||
-    finishReason === 'elicitation-denied' ||
-    finishReason === 'budget-exceeded' ||
-    finishReason === 'tripwire'
-  ) {
-    return 'error';
-  }
-  return 'completed';
-}
-
-function runOutcomeFromResult(result: RunResult): RunOutcome {
-  const error = result.error === undefined ? undefined : toAgentRunError(result.error);
-  return {
-    finishReason: result.finishReason,
-    ...(error ? { error: { kind: error.kind, code: error.code } } : {}),
-  };
-}
-
-function isTerminalRunEvent(event: RunEvent): boolean {
-  return (
-    event.type === 'run.completed' || event.type === 'run.error' || event.type === 'run.aborted'
-  );
-}
-
-/**
- * Map a genuine Weft-level terminal `WorkflowStatus` — one reached WITHOUT the
- * `agentRun` workflow ever returning an {@link AgentRunWorkflowResult} (a real
- * engine failure, an operator/adapter cancellation, or a circuit-breaker /
- * deadline timeout) — to the matching `RunRef` status. `run-workflow.ts`
- * always RETURNS normally, even for an operative-level failure (it encodes
- * that in `finishReason`, see `finishReasonToStatus`), so this only fires for
- * a failure the workflow itself could not have produced.
- */
-function engineStatusToRunRefStatus(
-  status: 'failed' | 'cancelled' | 'timed-out',
-): RunRef['status'] {
-  return status === 'cancelled' ? 'aborted' : 'error';
-}
-
-/**
- * Load a terminal run's conversation history straight from its checkpoint,
- * without resuming it. Returns `undefined` when no transcript was ever
- * checkpointed (e.g. the run failed before its first step) or the checkpoint
- * read fails — mirroring the "tolerate a missing conversation" behavior of
- * the settle path in `recover()`'s success branch.
- */
-async function loadTerminalConversationHistory(
-  checkpointStore: CheckpointStore,
-  runId: string,
-): Promise<ConversationHistory | undefined> {
-  try {
-    const checkpoint = await checkpointStore.loadCheckpoint(runId);
-    if (checkpoint.conversation === null) return undefined;
-    return Conversation.from(checkpoint.conversation).current;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Read a terminal run's outcome (status + conversation) directly from the
- * engine/checkpoint store, WITHOUT resuming it (AB-28). Used when
- * `engine.resume(runId)` rejects: that rejection means either the workflow is
- * already terminal, or the engine has no record of it at all — `engine.get()`
- * distinguishes the two (it never throws for a terminal run, and returns
- * `null` for an unknown one), so only a genuinely terminal run is reconciled.
- *
- * Returns `null` when the engine has no record of this workflow (an unknown
- * runId must NOT be marked terminal) or when `engine.get()` reports it as
- * still non-terminal (`resume()` should have succeeded in that case — leave
- * the RunRef alone rather than guessing at a status).
- */
-async function readTerminalRunOutcome(
-  engine: RegistryAgnosticEngine,
-  checkpointStore: CheckpointStore,
-  runId: string,
-): Promise<{
-  status: RunRef['status'];
-  conversation?: ConversationHistory;
-  outcome?: RunOutcome;
-} | null> {
-  let state: WorkflowState | null;
-  try {
-    state = await engine.get(runId);
-  } catch {
-    return null;
-  }
-  if (!state) return null;
-  if (state.status === 'pending' || state.status === 'running' || state.status === 'suspended') {
-    return null;
-  }
-
-  const conversation = await loadTerminalConversationHistory(checkpointStore, runId);
-
-  if (state.status !== 'completed') {
-    return { status: engineStatusToRunRefStatus(state.status), conversation };
-  }
-
-  // The workflow's own declared return type — the same trusted-internal-
-  // contract cast `active-run-adapter.ts` makes after `handle.result()`.
-  const summary = normalizeAgentRunWorkflowResult(state.result);
-  return {
-    status: finishReasonToStatus(summary.finishReason),
-    conversation,
-    outcome: {
-      finishReason: summary.finishReason,
-      ...(summary.errorKind !== undefined && summary.errorCode !== undefined
-        ? { error: { kind: summary.errorKind, code: summary.errorCode } }
-        : {}),
-    },
-  };
-}
-
-/**
- * Reconcile a stranded 'running' `RunRef` whose durable workflow already
- * reached a terminal state before `recover()` could resume it (AB-28) —
- * closing the gap the terminal-status write below (`recover()`'s success
- * branch) does not cover, and the gap left by a store failure in that same
- * write. Mirrors that write's conflict-aware `store.update` + conversation-
- * history reconciliation exactly, so a stranded session converges the same
- * way a live recovered run does.
- *
- * Idempotent: re-checks the ref's status inside the updater, so a session
- * already reconciled by a prior `recover()` call (or a concurrent one) is
- * left untouched rather than reprocessed.
- */
-async function reconcileTerminalRunRef(
-  store: SessionStore,
-  engine: RegistryAgnosticEngine,
-  checkpointStore: CheckpointStore,
-  sessionId: string,
-  runningRef: RunRef,
-): Promise<void> {
-  const outcome = await readTerminalRunOutcome(engine, checkpointStore, runningRef.runId);
-  if (!outcome) return;
-
-  try {
-    await store.update(sessionId, (freshSession) => {
-      if (!freshSession) return undefined;
-      const current = freshSession.runs.find((r) => r.runId === runningRef.runId);
-      if (!current || current.status !== 'running') return undefined;
-      const terminalRef: RunRef = {
-        ...current,
-        status: outcome.status,
-        ...(outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
-      };
-      return {
-        ...freshSession,
-        ...(outcome.conversation !== undefined
-          ? {
-              conversationHistory: appendConversationMessages(
-                freshSession.conversationHistory,
-                outcome.conversation,
-                outcome.conversation,
-              ),
-            }
-          : {}),
-        runs: freshSession.runs.map((r) => (r.runId === runningRef.runId ? terminalRef : r)),
-      };
-    });
-  } catch {
-    // Store failure is non-fatal: the caller already returns null for this
-    // terminal run either way; a stale 'running' ref is tolerable vs.
-    // crashing the handle (mirrors the settle path in recover()'s success
-    // branch).
-  }
-}
-
-/**
- * Parse an ISO-8601 duration string (e.g. `'PT1H'`, `'PT30S'`) into milliseconds.
- * Supports H (hours), M (minutes), S (seconds). Unrecognized strings fall back to 0.
  */
 function parseDuration(iso: string): number {
   const match = /^PT?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i.exec(iso);
