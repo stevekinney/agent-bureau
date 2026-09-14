@@ -1,3 +1,4 @@
+export { MissingRunOptionsError } from '../errors';
 export {
   createSessionStore,
   SessionConflictError,

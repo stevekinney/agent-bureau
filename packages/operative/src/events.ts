@@ -347,10 +347,14 @@ export class ElicitationRequestedEvent extends Event {
   static readonly type = 'elicitation.requested' as const;
   readonly step: number;
   readonly message: string;
-  constructor(step: number, message: string) {
+  readonly requestId: string;
+  readonly toolCallId?: string;
+  constructor(step: number, message: string, requestId: string, toolCallId?: string) {
     super(ElicitationRequestedEvent.type);
     this.step = step;
     this.message = message;
+    this.requestId = requestId;
+    this.toolCallId = toolCallId;
   }
 }
 
@@ -358,10 +362,14 @@ export class ElicitationResolvedEvent extends Event {
   static readonly type = 'elicitation.resolved' as const;
   readonly step: number;
   readonly accepted: boolean;
-  constructor(step: number, accepted: boolean) {
+  readonly requestId: string;
+  readonly toolCallId?: string;
+  constructor(step: number, accepted: boolean, requestId: string, toolCallId?: string) {
     super(ElicitationResolvedEvent.type);
     this.step = step;
     this.accepted = accepted;
+    this.requestId = requestId;
+    this.toolCallId = toolCallId;
   }
 }
 

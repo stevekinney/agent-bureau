@@ -418,23 +418,23 @@ interface RunResult {
 
 **`ActiveRun` interface** — returned by `createActiveRun`, the event-emitting entry point. Attach listeners before awaiting `result`:
 
-| Member                                | Description                                            |
-| ------------------------------------- | ------------------------------------------------------ |
-| `result: Promise<RunResult>`          | Resolves when the loop completes.                      |
-| `durablyStarted?: Promise<void>`      | AB-361 — durable branch only; see below.               |
-| `abort(reason?)`                      | Cancels the loop immediately.                          |
-| `closed(options?)`                    | Cleanup acknowledgement — see below.                   |
-| `complete()`                          | Completes the event stream without aborting the loop.  |
-| `addEventListener(type, listener)`    | Standard `EventTarget` listener.                       |
-| `removeEventListener(type, listener)` | Removes a listener.                                    |
-| `on(type)`                            | Returns an `ObservableLike` stream for the event type. |
-| `once(type, listener)`                | One-time listener.                                     |
-| `subscribe(type, observer)`           | RxJS-style subscription.                               |
-| `events(type, options?)`              | `AsyncIterableIterator` of typed events.               |
-| `toObservable()`                      | All events as a single `ObservableLike`.               |
-| `snapshot()`                          | Current `LivenessSnapshot` — see below.                |
-| `subscribeSnapshot(observer, opts?)`  | Non-consuming liveness observer — see below.           |
-| `[Symbol.dispose]()`                  | Aborts and completes—use with `using`.                 |
+| Member                                | Description                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `result: Promise<RunResult>`          | Resolves when the loop completes.                                                                             |
+| `durablyStarted?: Promise<void>`      | AB-361 — durable branch only; see below.                                                                      |
+| `abort(reason?)`                      | Cancels the loop immediately; `result` resolves with `finishReason: 'aborted'` when cancellation is observed. |
+| `closed(options?)`                    | Cleanup acknowledgement — see below.                                                                          |
+| `complete()`                          | Completes the event stream without aborting the loop.                                                         |
+| `addEventListener(type, listener)`    | Standard `EventTarget` listener.                                                                              |
+| `removeEventListener(type, listener)` | Removes a listener.                                                                                           |
+| `on(type)`                            | Returns an `ObservableLike` stream for the event type.                                                        |
+| `once(type, listener)`                | One-time listener.                                                                                            |
+| `subscribe(type, observer)`           | RxJS-style subscription.                                                                                      |
+| `events(type, options?)`              | `AsyncIterableIterator` of typed events.                                                                      |
+| `toObservable()`                      | All events as a single `ObservableLike`.                                                                      |
+| `snapshot()`                          | Current `LivenessSnapshot` — see below.                                                                       |
+| `subscribeSnapshot(observer, opts?)`  | Non-consuming liveness observer — see below.                                                                  |
+| `[Symbol.dispose]()`                  | Aborts and completes—use with `using`.                                                                        |
 
 **`durablyStarted` (AB-361).** On the durable branch (`createActiveRun(options, { engine, checkpointStore, runId })`), `durablyStarted` settles once this run's initial workflow record is durably committed — the write `context.engine.start(...)` performs — distinct from `result` (the run's own completion). A caller that needs the started-work control contract's durability guarantee (AB-34/AB-15: an acknowledged run is recoverable after any later crash) awaits it before treating a returned run identifier as durable; a caller that never reads it is unaffected, including when `engine.start` rejects. The in-memory branch leaves it `undefined` — there is no durable write to await.
 

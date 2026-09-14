@@ -114,7 +114,7 @@ describe('step hooks', () => {
     });
 
     expect(executedLocations).toEqual(['Denver']);
-    expect(result.steps[0].results).toHaveLength(1);
+    expect(result.steps[0].results).toHaveLength(2);
   });
 
   it('seals tool calls a beforeToolExecution hook filters out (tool-pair integrity)', async () => {

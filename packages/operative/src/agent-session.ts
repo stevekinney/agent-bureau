@@ -5,6 +5,7 @@ import type { RuntimeServices } from 'lifecycle';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { createSessionStore } from './session/create-session-store';
+import type { RunOutcome } from './types';
 
 /**
  * A lightweight reference to one run within a session.
@@ -26,6 +27,10 @@ export interface RunRef {
   sequence: number;
   /** Terminal or in-progress status, persisted so recovery can check it. */
   status: 'running' | 'completed' | 'error' | 'aborted';
+  /** Exact user message that started this run, when known. */
+  userMessageId?: string;
+  /** Safe terminal classification, absent for in-progress and legacy runs. */
+  outcome?: RunOutcome;
   /** ISO timestamp when this run was started. */
   startedAt: string;
   /**

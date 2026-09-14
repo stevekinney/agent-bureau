@@ -18,7 +18,11 @@ describe('createMcpElicitationResponder', () => {
     const responder = createMcpElicitationResponder({
       onElicitation: async (request) => {
         seen.push(request);
-        return { data: { approved: true } } as any;
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { approved: true },
+        } as any;
       },
       getContext: makeContext,
     });
@@ -65,7 +69,11 @@ describe('createMcpElicitationResponder', () => {
       onElicitation: async (request) => {
         capturedSchema = request.schema;
         capturedMessage = request.message;
-        return { data: { acknowledged: true } } as any;
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { acknowledged: true },
+        } as any;
       },
       getContext: makeContext,
     });
@@ -92,7 +100,12 @@ describe('createMcpElicitationResponder', () => {
     });
 
     const responder = createMcpElicitationResponder({
-      onElicitation: async () => ({ data: { approved: true } }) as any,
+      onElicitation: async (request) =>
+        ({
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { approved: true },
+        }) as any,
       getContext: makeContext,
       emitter,
     });
@@ -126,7 +139,12 @@ describe('createMcpElicitationResponder', () => {
 
   it('drops non-object accept data instead of forwarding it as content', async () => {
     const responder = createMcpElicitationResponder({
-      onElicitation: async () => ({ data: 'not-an-object' }) as any,
+      onElicitation: async (request) =>
+        ({
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: 'not-an-object',
+        }) as any,
       getContext: makeContext,
     });
 

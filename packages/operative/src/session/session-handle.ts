@@ -9,7 +9,7 @@ import {
   TypedEventTarget,
 } from 'lifecycle';
 
-import type { AgentRun } from '../agent-run';
+import type { AgentRun, RunEvent } from '../agent-run';
 import { createAgentRun } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
 import { createAgentSession } from '../agent-session';
@@ -23,6 +23,7 @@ import {
   type AgentRunWorkflowResult,
   normalizeAgentRunWorkflowResult,
 } from '../durable/run-workflow';
+import { MissingRunOptionsError, toAgentRunError } from '../errors';
 import type {
   CombinedOperativeEventMap,
   OperativeEventMap,
@@ -58,6 +59,7 @@ import type {
   ClosedOptions,
   FinishReason,
   RunOptions,
+  RunOutcome,
   RunResult,
 } from '../types';
 import type { SessionStore } from './types';
@@ -361,7 +363,7 @@ export interface SessionHandleContext {
    * The constant run behavior (generate fn, toolbox, hooks, etc.) for every
    * `run()` call in this session.
    */
-  runOptions: SessionRunOptions;
+  runOptions?: SessionRunOptions;
   /**
    * Optional event emitter for session-scoped events (session.recover,
    * session.cancel, session.fork, session.sleep, session.signal,
@@ -536,6 +538,20 @@ function finishReasonToStatus(finishReason: string): RunRef['status'] {
     return 'error';
   }
   return 'completed';
+}
+
+function runOutcomeFromResult(result: RunResult): RunOutcome {
+  const error = result.error === undefined ? undefined : toAgentRunError(result.error);
+  return {
+    finishReason: result.finishReason,
+    ...(error ? { error: { kind: error.kind, code: error.code } } : {}),
+  };
+}
+
+function isTerminalRunEvent(event: RunEvent): boolean {
+  return (
+    event.type === 'run.completed' || event.type === 'run.error' || event.type === 'run.aborted'
+  );
 }
 
 /**
@@ -1009,6 +1025,8 @@ export function createSessionHandle(
     },
 
     run(input: string): AgentRun {
+      if (!runOptions) throw new MissingRunOptionsError();
+      const configuredRunOptions = runOptions;
       // A shared emitter that bridges the outer ActiveRun surface (returned
       // synchronously) with the real inner run's events (created after session
       // load). Events dispatched by the inner ActiveRun are forwarded here so
@@ -1046,6 +1064,7 @@ export function createSessionHandle(
           | {
               runId: string;
               runningRef: RunRef;
+              userMessageId: string;
               baseConversationHistory: ConversationHistory;
               seededConversation: Conversation;
             }
@@ -1077,15 +1096,26 @@ export function createSessionHandle(
             { runtime },
           );
           seededConversation.appendUserMessage(input);
+          const userMessageId = seededConversation.current.ids.at(-1);
+          if (!userMessageId) {
+            throw new Error(`Failed to identify the user message for run "${runId}".`);
+          }
           const runningRef: RunRef = {
             runId,
             sequence,
             status: 'running',
             startedAt: runtime.clock.nowISO(),
             agentName,
+            userMessageId,
           };
 
-          reservation = { runId, runningRef, baseConversationHistory, seededConversation };
+          reservation = {
+            runId,
+            runningRef,
+            userMessageId,
+            baseConversationHistory,
+            seededConversation,
+          };
 
           return {
             ...session,
@@ -1097,7 +1127,8 @@ export function createSessionHandle(
           throw new Error(`Failed to reserve a run for session "${sessionId}".`);
         }
 
-        const { runId, runningRef, baseConversationHistory, seededConversation } = reservation;
+        const { runId, runningRef, userMessageId, baseConversationHistory, seededConversation } =
+          reservation;
         currentRunId = runId;
         thisRunId = runId;
 
@@ -1107,7 +1138,7 @@ export function createSessionHandle(
         // aborts via agentRun.abort(), abortController.abort() fires and the
         // combinedSignal inside the run loop drops the provider connection.
         const runOptionsWithSignal = {
-          ...runOptions,
+          ...configuredRunOptions,
           agentName,
           // Stamp the derived runId so tool.* bubble events (ToolStartedBubbleEvent,
           // ToolSettledBubbleEvent, etc.) carry the session run's stable id on the
@@ -1116,15 +1147,15 @@ export function createSessionHandle(
           // DurableRunRouting instead, so this is safe to include on both paths).
           runId,
           conversation: seededConversation.current,
-          signal: runOptions.signal
-            ? AbortSignal.any([runOptions.signal, abortController.signal])
+          signal: configuredRunOptions.signal
+            ? AbortSignal.any([configuredRunOptions.signal, abortController.signal])
             : abortController.signal,
           // AB-253: an explicit `runOptions.runtime` still wins; otherwise every
           // run() this session dispatches shares the SAME composed runtime the
           // handle itself was constructed with, so a session driven by a manual
           // runtime stays deterministic end-to-end rather than each run minting
           // its own default (real-globals) instance.
-          runtime: runOptions.runtime ?? runtime,
+          runtime: configuredRunOptions.runtime ?? runtime,
         };
 
         // Route through the durable engine when both engine and checkpointStore
@@ -1146,10 +1177,14 @@ export function createSessionHandle(
 
         // Forward all inner events to the outer emitter so for-await consumers
         // see the full event stream.
-        const completeOuterEmitter = outerEmitter.complete.bind(outerEmitter);
+        const pendingTerminalEvents: RunEvent[] = [];
         const subscription = innerRun.toObservable().subscribe({
           next: (e) => {
-            outerEmitter.dispatchEvent(e);
+            if (isTerminalRunEvent(e)) {
+              pendingTerminalEvents.push(e);
+            } else {
+              outerEmitter.dispatchEvent(e);
+            }
             // A `requestHumanInput` tool typically dispatches via its
             // `RuntimeToolContext.dispatch`, which lands on the toolbox's
             // own event target and reaches this run's emitter wrapped as a
@@ -1183,8 +1218,8 @@ export function createSessionHandle(
               });
             }
           },
-          error: completeOuterEmitter,
-          complete: completeOuterEmitter,
+          error: () => {},
+          complete: () => {},
         });
 
         let innerResult: RunResult;
@@ -1215,8 +1250,10 @@ export function createSessionHandle(
         await store.update(sessionId, (freshSession) => {
           if (!freshSession) return undefined;
           const terminalRef: RunRef = {
-            ...runningRef,
+            ...(freshSession.runs.find((r) => r.runId === runId) ?? runningRef),
             status: finishReasonToStatus(innerResult.finishReason),
+            userMessageId,
+            outcome: runOutcomeFromResult(innerResult),
           };
           return {
             ...freshSession,
@@ -1228,6 +1265,9 @@ export function createSessionHandle(
             runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
           };
         });
+
+        for (const event of pendingTerminalEvents) outerEmitter.dispatchEvent(event);
+        outerEmitter.complete();
 
         return innerResult;
       })();
@@ -1276,7 +1316,7 @@ export function createSessionHandle(
           disqualifiesFastPath: () =>
             cancelRequested ||
             abortController.signal.aborted ||
-            (runOptions.signal?.aborted ?? false) ||
+            (configuredRunOptions.signal?.aborted ?? false) ||
             activeInnerRun !== null,
           hasInFlightWork: () => false,
           resolveOutcome: () =>
@@ -1406,61 +1446,105 @@ export function createSessionHandle(
                 // through `RunOptions.childRegistry` — see the identical
                 // reasoning on `reattachDurableActiveRun`'s own
                 // `childRegistry` option.
-                childRegistry: runOptions.childRegistry,
+                childRegistry: runOptions?.childRegistry,
               },
             );
-            const agentRun = createAgentRun(activeRun);
-            currentRun = agentRun;
+            const rawAgentRun = createAgentRun(activeRun);
+            const recoveredEventBarrier = new CompletableEventTarget<CombinedOperativeEventMap>();
+            const pendingRecoveredTerminalEvents: RunEvent[] = [];
+            const recoveredSubscription = activeRun.toObservable().subscribe({
+              next: (event) => {
+                if (isTerminalRunEvent(event)) pendingRecoveredTerminalEvents.push(event);
+                else recoveredEventBarrier.dispatchEvent(event);
+              },
+              error: () => recoveredEventBarrier.complete(),
+              complete: () => {},
+            });
             currentRunId = runId;
             // Persist terminal state when the recovered run settles, mirroring
             // the conflict-aware update path in run(). Without this the persisted RunRef
             // stays 'running' after a recovered run completes, causing
             // subsequent recover()/signal() calls to target a terminal workflow
             // and leaving conversation history un-updated in the session store.
-            void (async () => {
+            const committedResult = (async () => {
               let terminalStatus: RunRef['status'] = 'error';
               let terminalConversation: ConversationHistory | undefined;
+              let terminalOutcome: RunOutcome | undefined;
+              let settledResult: RunResult | undefined;
+              let runError: unknown;
               try {
-                const settled = await agentRun.result();
+                const settled = await rawAgentRun.result();
+                settledResult = settled;
                 terminalStatus = finishReasonToStatus(settled.finishReason);
                 terminalConversation = settled.conversation.current;
-              } catch {
+                terminalOutcome = runOutcomeFromResult(settled);
+              } catch (error) {
+                runError = error;
                 // Recovered run rejected (e.g. engine failure). Leave status 'error';
                 // no conversation update — the run never produced a clean result.
-              } finally {
-                if (currentRun === agentRun) {
-                  currentRun = null;
-                  currentRunId = null;
-                }
-                // Reload the session (may have been updated by concurrent activity)
-                // and replace the RunRef with its terminal status.
-                try {
-                  await store.update(sessionId, (freshSession) => {
-                    if (!freshSession) return undefined;
-                    const terminalRef: RunRef = {
-                      ...runningRef,
-                      status: terminalStatus,
-                    };
-                    return {
-                      ...freshSession,
-                      ...(terminalConversation !== undefined
-                        ? {
-                            conversationHistory: appendConversationMessages(
-                              freshSession.conversationHistory,
-                              terminalConversation,
-                              terminalConversation,
-                            ),
-                          }
-                        : {}),
-                      runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
-                    };
-                  });
-                } catch {
-                  // Store failure is non-fatal: the in-process state (currentRun=null)
-                  // is correct; a stale 'running' ref is tolerable vs. crashing the handle.
-                }
               }
+              if (currentRunId === runId) {
+                currentRun = null;
+                currentRunId = null;
+              }
+              // Reload the session (may have been updated by concurrent activity)
+              // and replace the RunRef with its terminal status.
+              try {
+                await store.update(sessionId, (freshSession) => {
+                  if (!freshSession) return undefined;
+                  const terminalRef: RunRef = {
+                    ...(freshSession.runs.find((r) => r.runId === runId) ?? runningRef),
+                    status: terminalStatus,
+                    outcome: terminalOutcome,
+                  };
+                  return {
+                    ...freshSession,
+                    ...(terminalConversation !== undefined
+                      ? {
+                          conversationHistory: appendConversationMessages(
+                            freshSession.conversationHistory,
+                            terminalConversation,
+                            terminalConversation,
+                          ),
+                        }
+                      : {}),
+                    runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
+                  };
+                });
+              } catch (error) {
+                recoveredSubscription.unsubscribe();
+                recoveredEventBarrier.complete();
+                throw error;
+              }
+              recoveredSubscription.unsubscribe();
+              for (const event of pendingRecoveredTerminalEvents) {
+                recoveredEventBarrier.dispatchEvent(event);
+              }
+              recoveredEventBarrier.complete();
+              if (runError !== undefined) {
+                throw runError instanceof Error ? runError : new Error('Recovered run failed.');
+              }
+              if (!settledResult)
+                throw new Error(`Recovered run "${runId}" settled without a result.`);
+              return settledResult;
             })();
+            // Build the public handle only after the commit-barrier promise
+            // exists. Its inherited methods still delegate to the recovered
+            // run, while `result()` and every derived method (`unwrap()` and
+            // `output()`) observe the awaited terminal session write.
+            const committedActiveRun = Object.create(activeRun) as ActiveRun;
+            Object.defineProperty(committedActiveRun, 'result', {
+              configurable: true,
+              enumerable: true,
+              get: () => committedResult,
+            });
+            Object.defineProperty(committedActiveRun, 'toObservable', {
+              configurable: true,
+              enumerable: true,
+              value: () => recoveredEventBarrier.toObservable(),
+            });
+            const agentRun = createAgentRun(committedActiveRun);
+            currentRun = agentRun;
             // Pass along `failures` accumulated from any NEWER running refs
             // that rejected before this (older) one succeeded — a mixed
             // outcome must still surface those rejections, not just the

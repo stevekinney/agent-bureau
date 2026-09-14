@@ -42,6 +42,14 @@ export class AgentRunError extends Error {
   }
 }
 
+/** Raised synchronously when a session run has no configured execution options. */
+export class MissingRunOptionsError extends Error {
+  constructor() {
+    super('Session run options are required to start a run.');
+    this.name = 'MissingRunOptionsError';
+  }
+}
+
 export type SerializedAgentRunError = {
   name: string;
   message: string;

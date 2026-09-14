@@ -6,6 +6,7 @@ import type { ZodType } from 'zod';
 
 import type { SteeringDesiredState } from './durable/types';
 import {
+  AgentRunError,
   type AgentRunErrorKind,
   GuardrailTripwireError,
   reclassifyToolError,
@@ -31,6 +32,7 @@ import {
   StepGeneratedEvent,
   StepStartedEvent,
   ToolResultValidatedEvent,
+  ToolSettledBubbleEvent,
   ToolsExecutedEvent,
   ToolsExecutingEvent,
   UsageAccumulatedEvent,
@@ -44,6 +46,8 @@ import type {
   AfterToolExecutionHook,
   BeforeToolExecutionHook,
   ContextManagementOptions,
+  ElicitationOptions,
+  ElicitationResponse,
   GenerateContext,
   GenerateResponse,
   OnElicitation,
@@ -148,6 +152,7 @@ export interface StepDeps {
    * step goes through it, never a real global directly.
    */
   readonly runtime: RuntimeServices;
+  readonly agentName: string | undefined;
   /**
    * AB-204: when supplied, every run-owned hook's fire-and-forget promise
    * (`onLLMInput`/`onLLMOutput` here; `onRunComplete`/`onRunAbort`/
@@ -435,18 +440,58 @@ function createElicit(
   onElicitation: OnElicitation,
   conversation: Conversation,
   signal: AbortSignal | undefined,
+  runtime: RuntimeServices,
   emitter: EventDispatcher | undefined,
 ) {
-  return async <T>(message: string, schema: ZodType<T>): Promise<T | null> => {
-    emitter?.dispatch(new ElicitationRequestedEvent(step, message));
-    const response = await onElicitation({
+  return async <T>(
+    message: string,
+    schema: ZodType<T>,
+    options?: ElicitationOptions,
+  ): Promise<T | null> => {
+    const requestId = runtime.identifiers.next('elicitation');
+    const request = Object.freeze({
+      requestId,
+      ...(options?.toolCallId !== undefined ? { toolCallId: options.toolCallId } : {}),
       message,
       schema,
       context: { conversation, step, signal },
     });
+    emitter?.dispatch(new ElicitationRequestedEvent(step, message, requestId, options?.toolCallId));
+    const elicitation = onElicitation(request).catch((error) => {
+      if (signal?.aborted) return null;
+      throw error;
+    });
+    let removeAbortListener = (): void => {};
+    const aborted = signal
+      ? new Promise<null>((resolve) => {
+          const onAbort = () => resolve(null);
+          signal.addEventListener('abort', onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+          if (signal.aborted) onAbort();
+        })
+      : undefined;
+    let response: ElicitationResponse<T>;
+    try {
+      response = await (aborted ? Promise.race([elicitation, aborted]) : elicitation);
+    } finally {
+      removeAbortListener();
+    }
+    if (signal?.aborted) {
+      emitter?.dispatch(new ElicitationResolvedEvent(step, false, requestId, options?.toolCallId));
+      return null;
+    }
+    if (
+      response !== null &&
+      (response.requestId !== requestId || response.toolCallId !== options?.toolCallId)
+    ) {
+      throw new AgentRunError('Elicitation response did not match its request.', {
+        kind: 'contract',
+        code: 'UNKNOWN',
+      });
+    }
     const accepted = response !== null;
-    emitter?.dispatch(new ElicitationResolvedEvent(step, accepted));
-    return accepted ? response.data : null;
+    emitter?.dispatch(new ElicitationResolvedEvent(step, accepted, requestId, options?.toolCallId));
+    return response === null ? null : response.data;
   };
 }
 
@@ -473,8 +518,8 @@ async function sealDanglingToolCalls(
   collectAsync: boolean,
   reason: string,
   calls: ReadonlyArray<ToolCall> = conversation.getPendingToolCalls(),
-): Promise<void> {
-  if (calls.length === 0) return;
+): Promise<ToolExecutionResult[]> {
+  if (calls.length === 0) return [];
 
   const danglingResults = calls.map((tc) => ({
     callId: tc.id,
@@ -490,6 +535,7 @@ async function sealDanglingToolCalls(
   } else {
     conversation.appendToolResults(danglingResults);
   }
+  return danglingResults;
 }
 
 /**
@@ -761,7 +807,7 @@ export async function runStep(
   ) => void;
 
   const elicit = deps.onElicitation
-    ? createElicit(step, deps.onElicitation, conversation, stepSignal, emitter)
+    ? createElicit(step, deps.onElicitation, conversation, stepSignal, deps.runtime, emitter)
     : undefined;
 
   // Context management: compact if over token threshold
@@ -1271,6 +1317,7 @@ export async function runStep(
     conversation.appendToolCalls(materializedToolCalls);
 
     let callsToExecute = materializedToolCalls;
+    let filteredResults: ToolExecutionResult[] = [];
 
     if (deps.beforeToolExecutionHooks.length > 0) {
       try {
@@ -1323,16 +1370,35 @@ export async function runStep(
     if (callsToExecute.length < materializedToolCalls.length) {
       const executingIds = new Set(callsToExecute.map((tc) => tc.id));
       const filteredOutCalls = materializedToolCalls.filter((tc) => !executingIds.has(tc.id));
-      await sealDanglingToolCalls(
+      const synthesizedResults = await sealDanglingToolCalls(
         conversation,
         deps.collectAsync,
         'Tool execution skipped by beforeToolExecution hook',
         filteredOutCalls,
       );
+      filteredResults = synthesizedResults;
+      for (const result of synthesizedResults) {
+        const call = filteredOutCalls.find((candidate) => candidate.id === result.toolCallId);
+        if (call) {
+          emitter?.dispatch(
+            new ToolSettledBubbleEvent(
+              { agentName: deps.agentName ?? '', runId: deps.runId ?? '', step },
+              {
+                toolName: call.name,
+                toolCallId: call.id,
+                status: 'error',
+                result: result.result,
+                error: result.result,
+              },
+            ),
+          );
+        }
+      }
     }
 
     if (callsToExecute.length > 0) {
       emitter?.dispatch(new ToolsExecutingEvent(step, callsToExecute));
+      let executedResults: ToolExecutionResult[] = [];
 
       try {
         // AB-233/AB-300 — thread the active trace context and a
@@ -1395,7 +1461,8 @@ export async function runStep(
                 toolboxExecuteOptions,
               );
 
-        results = Array.isArray(executeResult) ? executeResult : [executeResult];
+        executedResults = Array.isArray(executeResult) ? executeResult : [executeResult];
+        results.push(...executedResults);
       } catch (error) {
         // onError recovery for tool execution phase.
         // Iterate handlers manually to avoid waterfall type mismatch.
@@ -1521,7 +1588,17 @@ export async function runStep(
         conversation.appendToolResults(results);
       }
 
-      emitter?.dispatch(new ToolsExecutedEvent(step, callsToExecute, results));
+      emitter?.dispatch(new ToolsExecutedEvent(step, callsToExecute, executedResults));
+
+      // Filtered calls were sealed above and must not be re-appended or sent
+      // through execution result validation. They remain part of the public
+      // step result alongside the actual executed results.
+      results.push(...filteredResults);
+
+      const resultByCallId = new Map(results.map((result) => [result.toolCallId, result]));
+      results = materializedToolCalls
+        .map((call) => resultByCallId.get(call.id))
+        .filter((result): result is ToolExecutionResult => result !== undefined);
 
       if (stepSignal.aborted && !signal?.aborted) {
         emitter?.dispatch(
@@ -1561,6 +1638,14 @@ export async function runStep(
         }
       }
     }
+
+    // Preserve provider call order for synthesized-only batches as well as
+    // mixed executed/skipped batches. StepResult and its terminal event must
+    // match the conversation's original tool-call order.
+    const resultByCallId = new Map(results.map((result) => [result.toolCallId, result]));
+    results = materializedToolCalls
+      .map((call) => resultByCallId.get(call.id))
+      .filter((result): result is ToolExecutionResult => result !== undefined);
   }
 
   emitter?.dispatch(

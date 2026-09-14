@@ -344,6 +344,18 @@ describe('session.run()', () => {
     expect(result.finishReason).toBe('maximum-steps');
   });
 
+  it('persists the exact user message id and safe terminal outcome on the run reference', async () => {
+    const { handle, store } = createSessionHandleFixture();
+
+    const result = await handle.run('first prompt').result();
+    const session = await store.load(handle.id);
+    const run = session?.runs[0];
+
+    expect(run?.userMessageId).toBeString();
+    expect(session?.conversationHistory.messages[run!.userMessageId!]?.role).toBe('user');
+    expect(run?.outcome?.finishReason).toBe(result.finishReason);
+  });
+
   it('F2: RunRef.agentName carries the name of the agent that ran the run', async () => {
     // The fixture uses 'test-agent' as the agentName for the session handle.
     const { handle, store } = createSessionHandleFixture();

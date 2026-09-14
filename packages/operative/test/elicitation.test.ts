@@ -34,6 +34,31 @@ function weatherToolCall(location = 'Denver') {
 }
 
 describe('elicitation', () => {
+  it('assigns an immutable request identity and validates the response correlation', async () => {
+    let seenRequest: ElicitationRequest | undefined;
+    const result = await run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation: async (request) => {
+        seenRequest = request;
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { confirmed: true },
+        } as any;
+      },
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Do you confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(seenRequest?.requestId).toBeString();
+    expect(Object.isFrozen(seenRequest)).toBe(true);
+  });
+
   it('callback receives correct request shape', async () => {
     const requests: ElicitationRequest[] = [];
     const confirmationSchema = z.object({ confirmed: z.boolean() });
@@ -45,7 +70,11 @@ describe('elicitation', () => {
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
         requests.push(request);
-        return { data: { confirmed: true } } as any;
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { confirmed: true },
+        } as any;
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -69,8 +98,12 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { approved: true } } as any;
+      onElicitation: async (request) => {
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { approved: true },
+        } as any;
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -113,8 +146,12 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { confirmed: true } } as any;
+      onElicitation: async (request) => {
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { confirmed: true },
+        } as any;
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -197,8 +234,12 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([weatherTool]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { proceed: true } } as any;
+      onElicitation: async (request) => {
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { proceed: true },
+        } as any;
       },
       beforeToolExecution: async ({ toolCalls, elicit }) => {
         if (elicit) {
@@ -228,8 +269,12 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([weatherTool]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { rating: 5 } } as any;
+      onElicitation: async (request) => {
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { rating: 5 },
+        } as any;
       },
       afterToolExecution: async ({ elicit }) => {
         if (elicit) {
@@ -251,8 +296,12 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { approved: true } } as any;
+      onElicitation: async (request) => {
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { approved: true },
+        } as any;
       },
       validateResponse: async (response, { elicit }) => {
         if (elicit) {
@@ -282,8 +331,12 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([weatherTool]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { accepted: true } } as any;
+      onElicitation: async (request) => {
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { accepted: true },
+        } as any;
       },
       validateToolResult: async (toolResult, { elicit }) => {
         if (elicit) {
