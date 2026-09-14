@@ -606,7 +606,11 @@ async function readTerminalRunOutcome(
   engine: RegistryAgnosticEngine,
   checkpointStore: CheckpointStore,
   runId: string,
-): Promise<{ status: RunRef['status']; conversation?: ConversationHistory } | null> {
+): Promise<{
+  status: RunRef['status'];
+  conversation?: ConversationHistory;
+  outcome?: RunOutcome;
+} | null> {
   let state: WorkflowState | null;
   try {
     state = await engine.get(runId);
@@ -627,7 +631,16 @@ async function readTerminalRunOutcome(
   // The workflow's own declared return type — the same trusted-internal-
   // contract cast `active-run-adapter.ts` makes after `handle.result()`.
   const summary = normalizeAgentRunWorkflowResult(state.result);
-  return { status: finishReasonToStatus(summary.finishReason), conversation };
+  return {
+    status: finishReasonToStatus(summary.finishReason),
+    conversation,
+    outcome: {
+      finishReason: summary.finishReason,
+      ...(summary.errorKind !== undefined && summary.errorCode !== undefined
+        ? { error: { kind: summary.errorKind, code: summary.errorCode } }
+        : {}),
+    },
+  };
 }
 
 /**
@@ -658,7 +671,11 @@ async function reconcileTerminalRunRef(
       if (!freshSession) return undefined;
       const current = freshSession.runs.find((r) => r.runId === runningRef.runId);
       if (!current || current.status !== 'running') return undefined;
-      const terminalRef: RunRef = { ...current, status: outcome.status };
+      const terminalRef: RunRef = {
+        ...current,
+        status: outcome.status,
+        ...(outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
+      };
       return {
         ...freshSession,
         ...(outcome.conversation !== undefined
@@ -1239,6 +1256,7 @@ export function createSessionHandle(
               runs: freshSession.runs.map((r) => (r.runId === runId ? errorRef : r)),
             };
           });
+          outerEmitter.complete();
           throw err;
         }
 

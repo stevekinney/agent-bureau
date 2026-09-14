@@ -2,7 +2,13 @@ import { workflow } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
-import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
+import type { AgentRunErrorCode, AgentRunErrorKind } from '../errors';
+import {
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+  toAgentRunError,
+} from '../errors';
 import { RunErrorEvent } from '../events';
 import { buildStepDeps, createRunState } from '../loop';
 import {
@@ -170,6 +176,9 @@ export interface AgentRunWorkflowResult {
    * real cause rather than a synthetic placeholder.
    */
   errorMessage?: string;
+  /** Safe error classifier retained across durable serialization. */
+  errorKind?: AgentRunErrorKind;
+  errorCode?: AgentRunErrorCode;
   /** The abort reason, when `finishReason` is `aborted`. */
   abortReason?: string;
   /**
@@ -467,6 +476,8 @@ export function createRunWorkflow(
 
         let finishReason: FinishReason = 'maximum-steps';
         let errorMessage: string | undefined;
+        let errorKind: AgentRunErrorKind | undefined;
+        let errorCode: AgentRunErrorCode | undefined;
         let abortReason: string | undefined;
         let schemaValidation: { success: boolean; error?: string } | undefined;
         let output: unknown;
@@ -647,6 +658,10 @@ export function createRunWorkflow(
                 errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
                 errorFinishReason:
                   outcome.kind === 'error' ? classifyErrorFinishReason(outcome.error) : undefined,
+                errorKind:
+                  outcome.kind === 'error' ? toAgentRunError(outcome.error).kind : undefined,
+                errorCode:
+                  outcome.kind === 'error' ? toAgentRunError(outcome.error).code : undefined,
                 tripwire: outcome.kind === 'error' ? tripwireDetailFrom(outcome.error) : undefined,
                 abortReason: outcome.kind === 'abort' ? outcome.reason : undefined,
                 stopFinishReason: outcome.kind === 'stop' ? outcome.finishReason : undefined,
@@ -743,6 +758,8 @@ export function createRunWorkflow(
               // the in-memory loop.
               finishReason = stepResult.errorFinishReason ?? 'error';
               errorMessage = stepResult.errorMessage;
+              errorKind = stepResult.errorKind;
+              errorCode = stepResult.errorCode;
               tripwire = stepResult.tripwire;
               stoppedEarly = true;
               break;
@@ -1029,6 +1046,8 @@ export function createRunWorkflow(
           content: cursor.lastContent,
           finishReason,
           ...(errorMessage !== undefined ? { errorMessage } : {}),
+          ...(errorKind !== undefined ? { errorKind } : {}),
+          ...(errorCode !== undefined ? { errorCode } : {}),
           ...(abortReason !== undefined ? { abortReason } : {}),
           ...(schemaValidation !== undefined ? { schemaValidation } : {}),
           ...(schemaValidation?.success ? { output } : {}),

@@ -240,6 +240,8 @@ async function reconstructRunResult(
     finishReason: summary.finishReason,
     steps: summary.steps,
     errorMessage: summary.errorMessage,
+    errorKind: summary.errorKind,
+    errorCode: summary.errorCode,
     abortReason: summary.abortReason,
     schemaValidation: summary.schemaValidation,
     tripwire: summary.tripwire,
@@ -268,6 +270,8 @@ interface ReconstructTerminalRunErrorArgs {
   finishReason: FinishReason;
   steps: number;
   errorMessage?: string;
+  errorKind?: AgentRunError['kind'];
+  errorCode?: AgentRunError['code'];
   abortReason?: string;
   schemaValidation?: { success: boolean; error?: string };
   tripwire?: AgentRunWorkflowResult['tripwire'];
@@ -300,8 +304,10 @@ function reconstructTerminalRunError(
   if (args.finishReason === 'error') {
     const message =
       args.errorMessage ?? args.schemaValidation?.error ?? `Durable run ${args.finishReason}`;
-    const kind = args.schemaValidation?.success === false ? 'output' : 'generate';
-    const code = args.schemaValidation?.success === false ? 'INVALID_OUTPUT' : 'UNKNOWN';
+    const kind =
+      args.errorKind ?? (args.schemaValidation?.success === false ? 'output' : 'generate');
+    const code =
+      args.errorCode ?? (args.schemaValidation?.success === false ? 'INVALID_OUTPUT' : 'UNKNOWN');
     return new AgentRunError(message, { kind, code });
   }
   return undefined;

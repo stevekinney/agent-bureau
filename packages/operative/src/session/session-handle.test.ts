@@ -13,6 +13,7 @@ import { createCheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import { createRunEngine } from '../durable/create-run-engine';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow';
+import { MissingRunOptionsError } from '../errors';
 import type {
   OperativeEventMap,
   SessionCancelEvent,
@@ -82,6 +83,7 @@ function createTestRunOptions(generate: GenerateFunction = createInstantGenerate
 function createSessionHandleFixture(overrides?: {
   sessionId?: string;
   engine?: RegistryAgnosticEngine;
+  withoutRunOptions?: boolean;
 }) {
   const sessionId = overrides?.sessionId ?? 'test-session';
   const kv = textValueStore(new MemoryStorage());
@@ -94,7 +96,7 @@ function createSessionHandleFixture(overrides?: {
       store,
       agentName: 'test-agent',
       engine: overrides?.engine,
-      runOptions: createTestRunOptions(),
+      runOptions: overrides?.withoutRunOptions ? undefined : createTestRunOptions(),
     }),
   };
 }
@@ -193,6 +195,11 @@ describe('session.run()', () => {
     expect(typeof run.result).toBe('function'); // AgentRun.result() is a method
     expect(typeof run.abort).toBe('function');
     expect(typeof run[Symbol.asyncIterator]).toBe('function');
+  });
+
+  it('fails synchronously when run options are absent', () => {
+    const { handle } = createSessionHandleFixture({ withoutRunOptions: true });
+    expect(() => handle.run('must fail before reservation')).toThrow(MissingRunOptionsError);
   });
 
   it('closed() resolves not-required for a clean completion — delegated straight through from the inner run, which is itself first asked only once it has already settled (AB-204)', async () => {
@@ -354,6 +361,54 @@ describe('session.run()', () => {
     expect(run?.userMessageId).toBeString();
     expect(session?.conversationHistory.messages[run!.userMessageId!]?.role).toBe('user');
     expect(run?.outcome?.finishReason).toBe(result.finishReason);
+  });
+
+  it('associates each run with its own appended user message after history exists', async () => {
+    const { handle, store } = createSessionHandleFixture();
+
+    await handle.run('first prompt').result();
+    await handle.run('second prompt').result();
+
+    const session = await store.load(handle.id);
+    const secondRun = session?.runs[1];
+    expect(secondRun?.userMessageId).toBeString();
+    expect(session?.conversationHistory.messages[secondRun!.userMessageId!]).toMatchObject({
+      role: 'user',
+      content: 'second prompt',
+    });
+  });
+
+  it('holds terminal run events until the terminal session write commits', async () => {
+    const { handle: baseHandle, store: baseStore } = createSessionHandleFixture();
+    let release!: () => void;
+    const terminalCommit = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const delayedStore: SessionStore = {
+      ...baseStore,
+      async update(...args) {
+        const updated = await baseStore.update(...args);
+        if (updated?.runs.at(-1)?.status !== 'running') await terminalCommit;
+        return updated;
+      },
+    };
+    const handle = createSessionHandle(baseHandle.id, {
+      store: delayedStore,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(),
+    });
+    const run = handle.run('commit barrier');
+    const events: string[] = [];
+    const consuming = (async () => {
+      for await (const event of run) events.push(event.type);
+    })();
+    await yieldToPortableEventLoop();
+    await yieldToPortableEventLoop();
+    expect(events).not.toContain('run.completed');
+    release();
+    await run.result();
+    await consuming;
+    expect(events).toContain('run.completed');
   });
 
   it('F2: RunRef.agentName carries the name of the agent that ran the run', async () => {

@@ -90,8 +90,8 @@ export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEv
 
     /**
      * Abort the in-flight run. The abort signal fires immediately; the provider
-     * connection drops within ~1s. Any pending `result()` promise rejects with
-     * an abort reason.
+     * connection drops within ~1s. The pending `result()` promise resolves with
+     * a terminal `RunResult` whose `finishReason` is `'aborted'`.
      */
     abort(reason?: string): void;
 

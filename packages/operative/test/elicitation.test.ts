@@ -8,8 +8,20 @@ import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
 import type { ElicitationRequestedEvent, ElicitationResolvedEvent } from '../src/events';
 import { createRunRecorder } from '../src/test/index';
-import type { ElicitationRequest, GenerateResponse } from '../src/types';
+import type {
+  ElicitationRequest,
+  ElicitationResponse,
+  GenerateResponse,
+  OnElicitation,
+} from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
+
+function elicitationResponse<T>(
+  request: ElicitationRequest<T>,
+  data: unknown,
+): ElicitationResponse<T> {
+  return { requestId: request.requestId, toolCallId: request.toolCallId, data: data as T };
+}
 
 const weatherTool = createTool({
   name: 'get_weather',
@@ -43,11 +55,7 @@ describe('elicitation', () => {
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
         seenRequest = request;
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { confirmed: true },
-        } as any;
+        return elicitationResponse(request, { confirmed: true });
       },
       prepareStep: async ({ elicit }) => {
         await elicit?.('Do you confirm?', z.object({ confirmed: z.boolean() }));
@@ -70,11 +78,7 @@ describe('elicitation', () => {
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
         requests.push(request);
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { confirmed: true },
-        } as any;
+        return elicitationResponse(request, { confirmed: true });
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -99,11 +103,7 @@ describe('elicitation', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { approved: true },
-        } as any;
+        return elicitationResponse(request, { approved: true });
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -147,11 +147,7 @@ describe('elicitation', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { confirmed: true },
-        } as any;
+        return elicitationResponse(request, { confirmed: true });
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -235,11 +231,7 @@ describe('elicitation', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { proceed: true },
-        } as any;
+        return elicitationResponse(request, { proceed: true });
       },
       beforeToolExecution: async ({ toolCalls, elicit }) => {
         if (elicit) {
@@ -270,11 +262,7 @@ describe('elicitation', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { rating: 5 },
-        } as any;
+        return elicitationResponse(request, { rating: 5 });
       },
       afterToolExecution: async ({ elicit }) => {
         if (elicit) {
@@ -297,11 +285,7 @@ describe('elicitation', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { approved: true },
-        } as any;
+        return elicitationResponse(request, { approved: true });
       },
       validateResponse: async (response, { elicit }) => {
         if (elicit) {
@@ -332,11 +316,7 @@ describe('elicitation', () => {
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
-        return {
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: { accepted: true },
-        } as any;
+        return elicitationResponse(request, { accepted: true });
       },
       validateToolResult: async (toolResult, { elicit }) => {
         if (elicit) {
@@ -348,5 +328,45 @@ describe('elicitation', () => {
 
     expect(result.finishReason).toBe('stop-condition');
     expect(elicitedValue).toEqual({ accepted: true });
+  });
+
+  it('rejects a response correlated to a different request', async () => {
+    const result = await run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation: (async (request) =>
+        elicitationResponse(request as ElicitationRequest<{ confirmed: boolean }>, {
+          confirmed: true,
+        })) as OnElicitation,
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toMatchObject({ kind: 'contract' });
+  });
+
+  it('ignores a late elicitation resolution after cancellation', async () => {
+    let resolveElicitation!: (value: unknown) => void;
+    const controller = new AbortController();
+    const resultPromise = run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      signal: controller.signal,
+      onElicitation: (() =>
+        new Promise<unknown>((resolve) => (resolveElicitation = resolve))) as any,
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+    controller.abort('cancelled');
+    resolveElicitation?.(null);
+    const result = await resultPromise;
+    expect(result.finishReason).toBe('aborted');
   });
 });
