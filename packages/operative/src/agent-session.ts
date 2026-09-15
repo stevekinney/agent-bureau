@@ -29,6 +29,11 @@ export interface RunRef {
   status: 'running' | 'completed' | 'error' | 'aborted';
   /** Exact user message that started this run, when known; older records may omit it. */
   userMessageId?: string;
+  /**
+   * Metadata at reservation time for durable recovery's three-way merge.
+   * Absent on older records; those recover with current-session precedence.
+   */
+  readonly baseConversationMetadata?: Readonly<Record<string, JSONValue>>;
   /** Safe terminal classification; absence means in-progress or legacy, never success. */
   outcome?: RunOutcome;
   /** ISO timestamp when this run was started. */

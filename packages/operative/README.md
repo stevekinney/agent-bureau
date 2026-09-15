@@ -304,9 +304,11 @@ const onElicitation: OnElicitation = async (request) => ({
 });
 ```
 
-Each persisted `RunRef` carries the exact `userMessageId` when available and a safe terminal `outcome`. Both fields are optional for older records, so an absent `outcome` does not mean the run completed successfully. Engine-level cancellation is recorded as `{ finishReason: 'aborted' }`; engine failure and timeout are recorded as `{ finishReason: 'error' }`.
+Each persisted `RunRef` carries the exact `userMessageId` when available and a safe terminal `outcome`. Both fields are optional for older records, so an absent `outcome` does not mean the run completed successfully. Engine-level cancellation is recorded as `{ finishReason: 'aborted' }`; engine failure and timeout are recorded as `{ finishReason: 'error' }`. Failed schema validation retains `finishReason: 'stop-condition'` and records the safe `output`/`INVALID_OUTPUT` classifier, so consumers must also inspect `outcome.error`.
 
-`session.cancel()` requests cancellation immediately. An attached run owns the terminal transaction: await its `result()` to observe the persisted outcome and final transcript. Without an attached run, cancellation reconciles the engine’s actual terminal state and available checkpoint history; without a checkpoint store, it retains the session’s existing history. A matching terminal record keeps its classification and known rows while accepting missing transcript rows from the same run. Cancellation cannot clear a newer run’s handle or overwrite another terminal classification.
+New `RunRef` records also retain `baseConversationMetadata`, captured when the run is reserved, so recovery can apply the checkpoint's metadata changes while preserving concurrent session edits. Older records without this snapshot use current-session precedence for conflicting metadata and apply only candidate-only additions; terminal records keep their current metadata during repeated reconciliation.
+
+`session.cancel()` requests cancellation immediately. An attached run owns the terminal transaction: await its `result()` to observe the persisted outcome and final transcript. Without an attached run, cancellation reconciles the engine’s actual terminal state and available checkpoint history; without a checkpoint store, it retains the session’s existing history. A matching terminal record keeps its classification and known rows while accepting missing transcript rows from the same run. Cancellation cannot clear a newer run’s handle or overwrite another terminal classification. For a recovered run, `closed()` and `session.closed()` wait for the terminal session commit; a failed commit yields a failed cleanup acknowledgement.
 
 Pass an `AbortSignal` to clear the active timer and stop the operation:
 

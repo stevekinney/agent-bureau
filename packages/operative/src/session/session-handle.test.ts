@@ -192,6 +192,33 @@ describe('createSessionHandle', () => {
 // ---------------------------------------------------------------------------
 
 describe('session.run()', () => {
+  it.each([false, true])(
+    'persists schema validation classification (success=%s)',
+    async (success) => {
+      const store = createSessionStore(textValueStore(new MemoryStorage()));
+      const handle = createSessionHandle('schema-outcome', {
+        store,
+        agentName: 'agent',
+        runOptions: {
+          generate: createInstantGenerate(success ? '{"answer":"valid"}' : '{"answer":42}'),
+          toolbox: createToolbox([]),
+          output: z.object({ answer: z.string() }),
+          stopWhen: () => true,
+          schemaRetries: 0,
+        },
+      });
+      const run = handle.run('answer');
+      const result = await run.result();
+      expect(result.schemaValidation?.success).toBe(success);
+      const schemaSession = await store.load('schema-outcome');
+      expect(schemaSession?.runs[0]?.outcome).toEqual({
+        finishReason: 'stop-condition',
+        ...(success ? {} : { error: { kind: 'output', code: 'INVALID_OUTPUT' } }),
+      });
+      if (!success) await expect(run.unwrap()).rejects.toThrow();
+    },
+  );
+
   it('returns an AgentRun handle immediately (synchronous)', () => {
     const { handle } = createSessionHandleFixture();
     const run = handle.run('hello');
@@ -2761,122 +2788,139 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     expect(conflictedSession?.runs[0]?.status).toBe('aborted');
   });
 
-  it('accepts an already committed matching terminal classification', async () => {
-    const sessionId = 'recovery-terminal-idempotent-session';
-    const runId = `${sessionId}:0`;
-    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
-    const knownConversation = new Conversation(
-      createConversationHistory({ metadata: { known: true } }),
-    );
-    knownConversation.appendAssistantMessage('known answer');
-    const knownMessageId = knownConversation.current.ids[0]!;
-    const checkpointConversation = new Conversation({
-      ...knownConversation.current,
-      metadata: { checkpoint: true },
-    });
-    checkpointConversation.appendUserMessage('recovered user');
-    checkpointConversation.appendAssistantMessage('recovered answer');
-    const checkpointHistory = checkpointConversation.snapshot();
-    expect(Conversation.from(checkpointHistory).current.ids).toEqual(
-      checkpointConversation.current.ids,
-    );
-    const checkpointUserMessageId = checkpointConversation.current.ids.find(
-      (id) => checkpointConversation.current.messages[id]?.role === 'user',
-    );
-    if (!checkpointUserMessageId) throw new Error('Expected checkpoint user message');
-    await baseStore.save(
-      createAgentSession({
-        agentName: 'agent',
-        conversationHistory: knownConversation.current,
-        id: sessionId,
-        runs: [
-          {
-            runId,
-            sequence: 0,
-            status: 'running',
-            startedAt: fixtureRuntime.clock.nowISO(),
-            agentName: 'agent',
-            userMessageId: checkpointUserMessageId,
-          },
-        ],
-      }),
-    );
-    const store: SessionStore = {
-      ...baseStore,
-      async update(id, mutate) {
-        const current = await baseStore.load(id);
-        if (!current) return undefined;
-        const concurrentHistory = {
-          ...current.conversationHistory,
-          messages: {
-            ...current.conversationHistory.messages,
-            [knownMessageId]: {
-              ...current.conversationHistory.messages[knownMessageId]!,
-              content: 'updated known answer',
+  it.each(['terminal', 'recorded-base', 'legacy'])(
+    'accepts an already committed matching terminal classification (%s)',
+    async (mode) => {
+      const sessionId = 'recovery-terminal-idempotent-session';
+      const runId = `${sessionId}:0`;
+      const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+      const knownConversation = new Conversation(
+        createConversationHistory({ metadata: { known: 'base', removed: true } }),
+      );
+      knownConversation.appendAssistantMessage('known answer');
+      const knownMessageId = knownConversation.current.ids[0]!;
+      const checkpointConversation = new Conversation({
+        ...knownConversation.current,
+        metadata: { known: 'run', checkpoint: true },
+      });
+      checkpointConversation.appendUserMessage('recovered user');
+      checkpointConversation.appendAssistantMessage('recovered answer');
+      const checkpointHistory = checkpointConversation.snapshot();
+      expect(Conversation.from(checkpointHistory).current.ids).toEqual(
+        checkpointConversation.current.ids,
+      );
+      const checkpointUserMessageId = checkpointConversation.current.ids.find(
+        (id) => checkpointConversation.current.messages[id]?.role === 'user',
+      );
+      if (!checkpointUserMessageId) throw new Error('Expected checkpoint user message');
+      await baseStore.save(
+        createAgentSession({
+          agentName: 'agent',
+          conversationHistory: knownConversation.current,
+          id: sessionId,
+          runs: [
+            {
+              runId,
+              sequence: 0,
+              status: 'running',
+              startedAt: fixtureRuntime.clock.nowISO(),
+              agentName: 'agent',
+              userMessageId: checkpointUserMessageId,
+              ...(mode === 'legacy'
+                ? {}
+                : {
+                    baseConversationMetadata: structuredClone(knownConversation.current.metadata),
+                  }),
             },
-          },
-          metadata: { known: true, concurrent: true },
-        };
-        const concurrent = {
-          ...current,
-          conversationHistory: concurrentHistory,
-          runs: current.runs.map((run) =>
-            run.runId === runId
-              ? {
-                  ...run,
-                  status: 'completed' as const,
-                  outcome: { finishReason: 'stop-condition' as const },
-                }
-              : run,
-          ),
-        };
-        await baseStore.save(concurrent);
-        return baseStore.update(id, mutate);
-      },
-    };
-    const fakeEngine = {
-      resume: async () => ({
-        id: runId,
-        result: async () => ({
-          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
-          runId,
-          steps: 1,
-          content: 'done',
-          finishReason: 'stop-condition',
+          ],
         }),
-      }),
-    } as unknown as RegistryAgnosticEngine;
-    const fakeCheckpointStore = {
-      loadCheckpoint: async () => ({
-        conversation: checkpointHistory,
-        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
-        steps: [],
-      }),
-    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+      );
+      const store: SessionStore = {
+        ...baseStore,
+        async update(id, mutate) {
+          const current = await baseStore.load(id);
+          if (!current) return undefined;
+          const concurrentHistory = {
+            ...current.conversationHistory,
+            messages: {
+              ...current.conversationHistory.messages,
+              [knownMessageId]: {
+                ...current.conversationHistory.messages[knownMessageId]!,
+                content: 'updated known answer',
+              },
+            },
+            metadata: { known: 'current', removed: true, concurrent: true },
+          };
+          const concurrent = {
+            ...current,
+            conversationHistory: concurrentHistory,
+            runs: current.runs.map((run) =>
+              run.runId === runId && mode === 'terminal'
+                ? {
+                    ...run,
+                    status: 'completed' as const,
+                    outcome: { finishReason: 'stop-condition' as const },
+                  }
+                : run,
+            ),
+          };
+          await baseStore.save(concurrent);
+          return baseStore.update(id, mutate);
+        },
+      };
+      const fakeEngine = {
+        resume: async () => ({
+          id: runId,
+          result: async () => ({
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId,
+            steps: 1,
+            content: 'done',
+            finishReason: 'stop-condition',
+          }),
+        }),
+      } as unknown as RegistryAgnosticEngine;
+      const fakeCheckpointStore = {
+        loadCheckpoint: async () => ({
+          conversation: checkpointHistory,
+          cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+          steps: [],
+        }),
+      } as unknown as import('../durable/checkpoint-store').CheckpointStore;
 
-    const handle = createSessionHandle(sessionId, {
-      store,
-      agentName: 'agent',
-      engine: fakeEngine,
-      checkpointStore: fakeCheckpointStore,
-      runOptions: createTestRunOptions(),
-    });
-    const recovered = await handle.recover();
-    expect(recovered).not.toBeNull();
-    await expect(recovered!.result()).resolves.toMatchObject({
-      finishReason: 'stop-condition',
-    });
-    const persisted = await baseStore.load(sessionId);
-    const messages = Object.values(persisted!.conversationHistory.messages);
-    expect(persisted!.conversationHistory.messages[knownMessageId]?.content).toBe(
-      'updated known answer',
-    );
-    expect(messages.filter((message) => message.content === 'known answer')).toHaveLength(0);
-    expect(messages.filter((message) => message.content === 'recovered user')).toHaveLength(1);
-    expect(messages.filter((message) => message.content === 'recovered answer')).toHaveLength(1);
-    expect(persisted!.conversationHistory.metadata).toEqual({ known: true, concurrent: true });
-    expect(persisted!.runs[0]!.outcome).toEqual({ finishReason: 'stop-condition' });
-  });
+      const handle = createSessionHandle(sessionId, {
+        store,
+        agentName: 'agent',
+        engine: fakeEngine,
+        checkpointStore: fakeCheckpointStore,
+        runOptions: createTestRunOptions(),
+      });
+      const recovered = await handle.recover();
+      expect(recovered).not.toBeNull();
+      await expect(recovered!.result()).resolves.toMatchObject({
+        finishReason: 'stop-condition',
+      });
+      const closedAfterCommit = await recovered!.closed();
+      expect(closedAfterCommit.status).not.toBe('failed');
+      expect(await recovered!.closed()).toBe(closedAfterCommit);
+      const persisted = await baseStore.load(sessionId);
+      const messages = Object.values(persisted!.conversationHistory.messages);
+      expect(persisted!.conversationHistory.messages[knownMessageId]?.content).toBe(
+        'updated known answer',
+      );
+      expect(messages.filter((message) => message.content === 'known answer')).toHaveLength(0);
+      expect(messages.filter((message) => message.content === 'recovered user')).toHaveLength(1);
+      expect(messages.filter((message) => message.content === 'recovered answer')).toHaveLength(1);
+      expect(persisted!.conversationHistory.metadata).toEqual(
+        mode === 'terminal'
+          ? { known: 'current', removed: true, concurrent: true }
+          : mode === 'legacy'
+            ? { known: 'current', removed: true, concurrent: true, checkpoint: true }
+            : { known: 'run', concurrent: true, checkpoint: true },
+      );
+      expect(persisted!.runs[0]!.outcome).toEqual({ finishReason: 'stop-condition' });
+    },
+  );
 
   it('rejects recovered completion when the session disappears before commit', async () => {
     const sessionId = 'recovery-disappeared-session';
@@ -3389,84 +3433,113 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     }
   });
 
-  it('holds recovered terminal events until the terminal session write commits', async () => {
-    const sessionId = 'recovered-event-commit-barrier-session';
-    const runId = `${sessionId}:0`;
-    const store = createSessionStore(textValueStore(new MemoryStorage()));
-    await store.save(
-      createAgentSession({
-        agentName: 'agent',
-        conversationHistory: createConversationHistory(),
-        id: sessionId,
-        runs: [
-          {
-            runId,
-            sequence: 0,
-            status: 'running',
-            startedAt: fixtureRuntime.clock.nowISO(),
-            agentName: 'agent',
-          },
-        ],
-      }),
-    );
+  it.each([false, true])(
+    'holds recovered cleanup and events through terminal commit (failure=%s)',
+    async (failCommit) => {
+      const sessionId = 'recovered-event-commit-barrier-session';
+      const runId = `${sessionId}:0`;
+      const store = createSessionStore(textValueStore(new MemoryStorage()));
+      await store.save(
+        createAgentSession({
+          agentName: 'agent',
+          conversationHistory: createConversationHistory(),
+          id: sessionId,
+          runs: [
+            {
+              runId,
+              sequence: 0,
+              status: 'running',
+              startedAt: fixtureRuntime.clock.nowISO(),
+              agentName: 'agent',
+            },
+          ],
+        }),
+      );
 
-    const terminalCommit = Promise.withResolvers<void>();
-    const delayedStore: SessionStore = {
-      ...store,
-      async update(...args) {
-        const updated = await store.update(...args);
-        if (updated?.runs.find((run) => run.runId === runId)?.status !== 'running') {
+      const terminalCommit = Promise.withResolvers<void>();
+      const commitStarted = Promise.withResolvers<void>();
+      const commitFailure = new Error('terminal store failed');
+      const delayedStore: SessionStore = {
+        ...store,
+        async update(...args) {
+          commitStarted.resolve();
           await terminalCommit.promise;
-        }
-        return updated;
-      },
-    };
-    const resultReady = Promise.withResolvers<void>();
-    const engine = {
-      resume: async () => ({
-        id: runId,
-        result: async () => {
-          resultReady.resolve();
-          return {
-            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
-            runId,
-            steps: 1,
-            content: 'recovered answer',
-            finishReason: 'stop-condition',
-          };
+          if (failCommit) throw commitFailure;
+          return store.update(...args);
         },
-      }),
-    } as unknown as RegistryAgnosticEngine;
-    const checkpointStore = {
-      loadCheckpoint: async () => ({
-        conversation: null,
-        cursor: { totalUsage: {}, lastContent: 'recovered answer', schemaAttempts: 0 },
-        steps: [],
-      }),
-    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
-    const handle = createSessionHandle(sessionId, {
-      store: delayedStore,
-      agentName: 'agent',
-      engine,
-      checkpointStore,
-      runOptions: createTestRunOptions(),
-    });
+      };
+      const resultReady = Promise.withResolvers<void>();
+      const engine = {
+        resume: async () => ({
+          id: runId,
+          result: async () => {
+            resultReady.resolve();
+            return {
+              schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+              runId,
+              steps: 1,
+              content: 'recovered answer',
+              finishReason: 'stop-condition',
+            };
+          },
+        }),
+      } as unknown as RegistryAgnosticEngine;
+      const checkpointStore = {
+        loadCheckpoint: async () => ({
+          conversation: null,
+          cursor: { totalUsage: {}, lastContent: 'recovered answer', schemaAttempts: 0 },
+          steps: [],
+        }),
+      } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+      const handle = createSessionHandle(sessionId, {
+        store: delayedStore,
+        agentName: 'agent',
+        engine,
+        checkpointStore,
+        runOptions: createTestRunOptions(),
+      });
 
-    const recovered = await handle.recover();
-    expect(recovered).not.toBeNull();
-    const events: string[] = [];
-    const consuming = (async () => {
-      for await (const event of recovered!) events.push(event.type);
-    })();
-    await resultReady.promise;
-    await yieldToPortableEventLoop();
-    expect(events).not.toContain('run.completed');
+      const recovered = await handle.recover();
+      expect(recovered).not.toBeNull();
+      let cleanupSettled = false;
+      const closed = recovered!.closed().then((acknowledgement) => {
+        cleanupSettled = true;
+        return acknowledgement;
+      });
+      const result = recovered!.result();
+      void result.catch(() => undefined);
+      const events: string[] = [];
+      const consuming = (async () => {
+        for await (const event of recovered!) events.push(event.type);
+      })();
+      await resultReady.promise;
+      await commitStarted.promise;
+      await yieldToPortableEventLoop();
+      expect(events).not.toContain('run.completed');
+      expect(cleanupSettled).toBe(false);
+      expect(await handle.recover()).toBe(recovered);
+      const sessionClosed = handle.closed();
+      const pendingSession = await store.load(sessionId);
+      expect(pendingSession?.runs[0]?.status).toBe('running');
 
-    terminalCommit.resolve();
-    await recovered!.result();
-    await consuming;
-    expect(events).toContain('run.completed');
-  });
+      terminalCommit.resolve();
+      if (failCommit) {
+        await expect(result).rejects.toBe(commitFailure);
+        expect(await closed).toEqual({ status: 'failed', error: commitFailure });
+        expect(events).not.toContain('run.completed');
+      } else {
+        await result;
+        const acknowledgement = await closed;
+        const committedSession = await store.load(sessionId);
+        expect(acknowledgement.status).not.toBe('failed');
+        expect(committedSession?.runs[0]?.status).toBe('completed');
+        expect(events).toContain('run.completed');
+      }
+      await consuming;
+      expect(await recovered!.closed()).toBe(await closed);
+      expect(await sessionClosed).toBe(await closed);
+    },
+  );
 
   it('AB-29: a mixed outcome reports the newer rejection alongside the older successful reattach', async () => {
     const storage = new MemoryStorage();
@@ -3889,59 +3962,112 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
     ).rejects.toThrow('disappeared while reconciling');
   });
 
-  it('reconciles a completed recovered run to "completed" and applies its conversation history', async () => {
-    const sessionId = 'ab-28-completed-session';
-    const runId = `${sessionId}:0`;
-    const store = await seedRunningSession(sessionId, runId);
+  it.each([undefined, true, false])(
+    'reconciles completed checkpoints with schema validation=%s',
+    async (schemaSuccess) => {
+      const sessionId = 'ab-28-completed-session';
+      const runId = `${sessionId}:0`;
+      const store = await seedRunningSession(sessionId, runId);
 
-    const recoveredConversation = new Conversation(createConversationHistory());
-    recoveredConversation.appendUserMessage('hi');
-    recoveredConversation.appendAssistantMessage('hello');
+      await store.update(sessionId, (session) =>
+        session
+          ? {
+              ...session,
+              conversationHistory: {
+                ...session.conversationHistory,
+                metadata: { changed: 'current', removed: true, concurrent: true },
+              },
+              runs: session.runs.map((run) => ({
+                ...run,
+                baseConversationMetadata: { changed: 'base', removed: true },
+              })),
+            }
+          : undefined,
+      );
+      const recoveredConversation = new Conversation(
+        createConversationHistory({ metadata: { changed: 'run', added: true } }),
+      );
+      recoveredConversation.appendUserMessage('hi');
+      recoveredConversation.appendAssistantMessage('hello');
 
-    const fakeEngine = {
-      resume: async () => {
-        throw alreadyTerminalError(runId, 'completed');
-      },
-      get: async (id: string) => ({
-        id,
-        status: 'completed',
-        result: {
-          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
-          runId: id,
-          steps: 1,
-          content: 'hello',
-          finishReason: 'stop-condition',
+      const fakeEngine = {
+        resume: async () => {
+          throw alreadyTerminalError(runId, 'completed');
         },
-      }),
-    } as unknown as RegistryAgnosticEngine;
-    const fakeCheckpointStore = {
-      loadCheckpoint: async (_id: string) => ({
-        conversation: recoveredConversation.snapshot(),
-        cursor: { totalUsage: {}, lastContent: 'hello', schemaAttempts: 0 },
-        steps: [],
-      }),
-    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+        get: async (id: string) => ({
+          id,
+          status: 'completed',
+          result: {
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId: id,
+            steps: 1,
+            content: 'hello',
+            finishReason: 'stop-condition',
+            ...(schemaSuccess === undefined
+              ? {}
+              : {
+                  schemaValidation: { success: schemaSuccess, error: 'private-validation-canary' },
+                }),
+          },
+        }),
+      } as unknown as RegistryAgnosticEngine;
+      const fakeCheckpointStore = {
+        loadCheckpoint: async (_id: string) => ({
+          conversation: recoveredConversation.snapshot(),
+          cursor: { totalUsage: {}, lastContent: 'hello', schemaAttempts: 0 },
+          steps: [],
+        }),
+      } as unknown as import('../durable/checkpoint-store').CheckpointStore;
 
-    const h = createSessionHandle(sessionId, {
-      store,
-      agentName: 'agent',
-      engine: fakeEngine,
-      checkpointStore: fakeCheckpointStore,
-      runOptions: createTestRunOptions(),
-    });
+      const h = createSessionHandle(sessionId, {
+        store,
+        agentName: 'agent',
+        engine: fakeEngine,
+        checkpointStore: fakeCheckpointStore,
+        runOptions: createTestRunOptions(),
+      });
 
-    // Reconciliation is a side effect — recover() still returns null for a
-    // terminal run; it does not resurrect it into a live AgentRun.
-    expect(await h.recover()).toBeNull();
+      // Reconciliation is a side effect — recover() still returns null for a
+      // terminal run; it does not resurrect it into a live AgentRun.
+      expect(await h.recover()).toBeNull();
 
-    const persisted = await store.load(sessionId);
-    expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('completed');
-    const contents = Object.values(persisted?.conversationHistory.messages ?? {}).map(
-      (m) => m.content,
-    );
-    expect(contents).toContain('hi');
-    expect(contents).toContain('hello');
-  });
+      const persisted = await store.load(sessionId);
+      expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('completed');
+      expect(persisted?.runs[0]?.outcome).toEqual({
+        finishReason: 'stop-condition',
+        ...(schemaSuccess === false ? { error: { kind: 'output', code: 'INVALID_OUTPUT' } } : {}),
+      });
+      expect(JSON.stringify(persisted?.runs[0]?.outcome)).not.toContain(
+        'private-validation-canary',
+      );
+      const contents = Object.values(persisted?.conversationHistory.messages ?? {}).map(
+        (m) => m.content,
+      );
+      expect(contents).toContain('hi');
+      expect(contents).toContain('hello');
+      expect(persisted?.conversationHistory.metadata).toEqual({
+        changed: 'run',
+        added: true,
+        concurrent: true,
+      });
+      await store.update(sessionId, (session) =>
+        session
+          ? {
+              ...session,
+              conversationHistory: {
+                ...session.conversationHistory,
+                metadata: { changed: 'later' },
+              },
+            }
+          : undefined,
+      );
+      expect(await h.recover()).toBeNull();
+      const laterSession = await store.load(sessionId);
+      expect(laterSession?.conversationHistory.metadata).toEqual({
+        changed: 'later',
+      });
+    },
+  );
 
   it('reconciles a recovered run whose finishReason was "error" to "error", not "completed"', async () => {
     const sessionId = 'ab-28-error-session';
@@ -5685,6 +5811,10 @@ describe('regression: session terminal commits preserve concurrent state', () =>
     });
     const run = handle.run('racing prompt');
     await entered.promise;
+    const reservedSession = await store.load(sessionId);
+    expect(reservedSession?.runs.at(-1)?.baseConversationMetadata).toEqual({
+      version: 'old',
+    });
     await store.update(sessionId, (session) =>
       session
         ? {

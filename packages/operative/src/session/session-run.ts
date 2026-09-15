@@ -152,6 +152,7 @@ export function createSessionRun(
           startedAt: runtime.clock.nowISO(),
           agentName,
           userMessageId,
+          baseConversationMetadata: structuredClone(session.conversationHistory.metadata),
         };
 
         reservation = {

@@ -4,6 +4,7 @@ import { CompletableEventTarget } from 'lifecycle';
 import type { AgentRun, RunEvent } from '../agent-run';
 import { createAgentRun } from '../agent-run';
 import type { RunRef } from '../agent-session';
+import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
 import { reattachDurableActiveRun } from '../durable/active-run-reattach';
 import type { CheckpointStore } from '../durable/checkpoint-store';
@@ -13,7 +14,7 @@ import { SessionRecoverEvent } from '../events';
 import type { RunOutcome, RunResult } from '../types';
 import type { SessionRunOptions } from './session-handle';
 import {
-  appendConversationMessages,
+  appendRecoveredConversation,
   finishReasonToStatus,
   isTerminalRunEvent,
   reconcileTerminalRunRef,
@@ -110,10 +111,6 @@ export function createSessionRecovery(
               // Recovered run rejected (e.g. engine failure). Leave status 'error';
               // no conversation update — the run never produced a clean result.
             }
-            if (state.currentRunId === runId) {
-              state.currentRun = null;
-              state.currentRunId = null;
-            }
             // Reload the session (may have been updated by concurrent activity)
             // and replace the RunRef with its terminal status.
             try {
@@ -142,10 +139,10 @@ export function createSessionRecovery(
                   ...freshSession,
                   ...(terminalConversation !== undefined
                     ? {
-                        conversationHistory: appendConversationMessages(
+                        conversationHistory: appendRecoveredConversation(
                           freshSession.conversationHistory,
                           terminalConversation,
-                          terminalConversation,
+                          currentRef,
                         ),
                       }
                     : {}),
@@ -173,7 +170,12 @@ export function createSessionRecovery(
             if (!settledResult)
               throw new Error(`Recovered run "${runId}" settled without a result.`);
             return settledResult;
-          })();
+          })().finally(() => {
+            if (state.currentRunId === runId) {
+              state.currentRun = null;
+              state.currentRunId = null;
+            }
+          });
           // Build the public handle only after the commit-barrier promise
           // exists. Its inherited methods still delegate to the recovered
           // run, while `result()` and every derived method (`unwrap()` and
@@ -183,6 +185,16 @@ export function createSessionRecovery(
             configurable: true,
             enumerable: true,
             get: () => committedResult,
+          });
+          Object.defineProperty(committedActiveRun, 'closed', {
+            configurable: true,
+            enumerable: true,
+            value: createClosedAcknowledgement({
+              result: committedResult,
+              disqualifiesFastPath: () => true,
+              hasInFlightWork: () => false,
+              resolveOutcome: () => activeRun.closed(),
+            }),
           });
           Object.defineProperty(committedActiveRun, 'toObservable', {
             configurable: true,

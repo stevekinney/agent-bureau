@@ -80,13 +80,17 @@ export function runStepMemo(
           final: pushed.final,
         }
       : null;
+    const normalizedError =
+      outcome.kind === 'error'
+        ? toAgentRunError(outcome.error, { kind: outcome.errorKind })
+        : undefined;
     return {
       outcome: { kind: outcome.kind },
       errorMessage: outcome.kind === 'error' ? serializeError(outcome.error) : undefined,
       errorFinishReason:
         outcome.kind === 'error' ? classifyErrorFinishReason(outcome.error) : undefined,
-      errorKind: outcome.kind === 'error' ? toAgentRunError(outcome.error).kind : undefined,
-      errorCode: outcome.kind === 'error' ? toAgentRunError(outcome.error).code : undefined,
+      errorKind: normalizedError?.kind,
+      errorCode: normalizedError?.code,
       tripwire: outcome.kind === 'error' ? tripwireDetailFrom(outcome.error) : undefined,
       abortReason: outcome.kind === 'abort' ? outcome.reason : undefined,
       stopFinishReason: outcome.kind === 'stop' ? outcome.finishReason : undefined,

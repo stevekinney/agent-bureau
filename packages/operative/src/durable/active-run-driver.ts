@@ -164,7 +164,11 @@ export async function driveDurableRun(
   // by construction (tool execution runs in-process via `runStep`), so the
   // constraint is always satisfied here.
   const services: DurableRunDeps = {
-    options: { ...options, signal },
+    // Keep the resolved durable option on the per-run options object used by
+    // each `runStep` invocation. `durableRun.agentName` is authoritative when
+    // the caller supplied it separately from `RunOptions`; without copying it
+    // here, step-synthesized tool events lose the run identity.
+    options: { ...options, agentName, signal },
     toolbox: options.toolbox,
     emitter,
     onStepToolbox,

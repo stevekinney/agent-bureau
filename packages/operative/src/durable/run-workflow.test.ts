@@ -292,6 +292,46 @@ afterEach(async () => {
 });
 
 describe('durable agentRun workflow', () => {
+  it('preserves the tool error kind when tool-result validation throws a plain Error', async () => {
+    const { engine } = await buildEngine(new MemoryStorage(), false);
+    const failingTool = createTool({
+      name: 'fail',
+      description: 'Fail',
+      input: z.object({}),
+      execute: async () => {
+        throw new Error('tool failed');
+      },
+    });
+    const toolbox = createToolbox([failingTool]);
+    try {
+      const result = await runToCompletion(
+        engine,
+        { runId: 'plain-tool-error-kind', prompt: 'Go', maximumSteps: 1 },
+        {
+          toolbox,
+          options: {
+            generate: async () => ({
+              content: '',
+              toolCalls: [{ name: 'fail', arguments: {} }],
+            }),
+            toolbox,
+            conversation: createConversationHistory(),
+            stopWhen: noToolCalls(),
+            validateToolResult: async () => {
+              throw new Error('tool validation failed');
+            },
+          },
+        },
+      );
+
+      expect(result.finishReason).toBe('error');
+      expect(result.errorMessage).toBe('tool validation failed');
+      expect(result.errorKind).toBe('tool');
+    } finally {
+      engine[Symbol.dispose]();
+    }
+  });
+
   it('treats malformed checkpoint JSON as absent data', async () => {
     const checkpointStore = createCheckpointStore({
       get: async () => '{',

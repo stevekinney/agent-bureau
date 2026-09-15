@@ -97,6 +97,39 @@ export function appendConversationMessages(
   };
 }
 
+/**
+ * Merge a recovered terminal transcript into the current session body.
+ * Message reconciliation keeps current edits for known rows and appends
+ * missing candidate rows. A running ref's reservation metadata supplies the
+ * three-way baseline; legacy refs have no provenance, so current metadata wins
+ * and only candidate-only additions are observable and applied. A ref already
+ * terminal is authoritative for metadata and keeps current accepted edits.
+ */
+export function appendRecoveredConversation(
+  current: ConversationHistory,
+  candidate: ConversationHistory,
+  runRef: RunRef,
+): ConversationHistory {
+  const merged = appendConversationMessages(current, candidate, candidate);
+  if (runRef.status !== 'running') return merged;
+
+  const baseMetadata = runRef.baseConversationMetadata;
+  if (baseMetadata === undefined) {
+    const metadata = { ...current.metadata };
+    for (const [key, value] of Object.entries(candidate.metadata)) {
+      if (!Object.prototype.hasOwnProperty.call(current.metadata, key) && value !== undefined) {
+        metadata[key] = value;
+      }
+    }
+    return { ...merged, metadata };
+  }
+
+  return {
+    ...merged,
+    metadata: mergeConversationMetadata(current.metadata, candidate.metadata, baseMetadata),
+  };
+}
+
 export function newestRunningRunRef(session: AgentSession | undefined): RunRef | undefined {
   return [...(session?.runs ?? [])].reverse().find((runRef) => runRef.status === 'running');
 }
@@ -118,7 +151,12 @@ export function finishReasonToStatus(finishReason: string): RunRef['status'] {
 }
 
 export function runOutcomeFromResult(result: RunResult): RunOutcome {
-  const error = result.error === undefined ? undefined : toAgentRunError(result.error);
+  const error =
+    result.error !== undefined
+      ? toAgentRunError(result.error)
+      : result.schemaValidation?.success === false
+        ? { kind: 'output' as const, code: 'INVALID_OUTPUT' as const }
+        : undefined;
   return {
     finishReason: result.finishReason,
     ...(error ? { error: { kind: error.kind, code: error.code } } : {}),
@@ -222,7 +260,9 @@ async function readTerminalRunOutcome(
       finishReason: summary.finishReason,
       ...(summary.errorKind !== undefined && summary.errorCode !== undefined
         ? { error: { kind: summary.errorKind, code: summary.errorCode } }
-        : {}),
+        : summary.schemaValidation?.success === false
+          ? { error: { kind: 'output', code: 'INVALID_OUTPUT' } }
+          : {}),
     },
   };
 }
@@ -264,10 +304,10 @@ export async function reconcileTerminalRunRef(
       ...freshSession,
       ...(outcome.conversation !== undefined
         ? {
-            conversationHistory: appendConversationMessages(
+            conversationHistory: appendRecoveredConversation(
               freshSession.conversationHistory,
               outcome.conversation,
-              outcome.conversation,
+              current,
             ),
           }
         : {}),

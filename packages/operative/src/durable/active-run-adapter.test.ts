@@ -1159,6 +1159,44 @@ describe('createRun with durable routing', () => {
     }
   });
 
+  it('stamps curated tool events with the durable run agentName', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+      let generation = 0;
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'durable-option-agent-name',
+        sessionId: 'durable-option-agent-name',
+        agentName: 'option-agent',
+        options: {
+          ...runOptions(async () =>
+            generation++ === 0
+              ? { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] }
+              : { content: 'done', toolCalls: [] },
+          ),
+          beforeToolExecution: async () => [],
+          toolbox: createToolbox([echoTool]) as unknown as RunOptions['toolbox'],
+        },
+        emitter,
+      });
+      const settled: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.settled', (event) => settled.push(event));
+
+      await activeRun.result;
+
+      expect(settled).toHaveLength(1);
+      expect(settled[0]?.agentName).toBe('option-agent');
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
   // AB-253's own completion criterion: two durable `createActiveRun` calls in
   // one process, each given its own `ManualRuntimeServices` pinned to a
   // different origin and identifier seed, driven to completion, carry
