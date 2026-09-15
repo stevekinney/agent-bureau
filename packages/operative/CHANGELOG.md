@@ -1,5 +1,12 @@
 # @lostgradient/operative
 
+## 0.12.0
+
+### Minor Changes
+
+- aee7a2d: Persist run terminal outcomes and originating user message identities, expose correlated elicitation requests, and keep synthesized tool settlements aligned with public step results and session event streams.
+- 0cc3adb: Bump the `@lostgradient/weft` dependency range to `^0.24.1` to pick up the LMDB storage `durability` option (weft WFT-138) that AB-355's harness isolation fixture depends on while excluding the declaration leak fixed by WFT-155.
+
 ## 0.11.0
 
 ### Minor Changes
