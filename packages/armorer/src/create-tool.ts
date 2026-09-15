@@ -877,6 +877,7 @@ export function createTool<
     toolCall: ToolCall & { arguments: unknown },
     options: InternalToolExecuteOptions = {},
   ): Promise<ToolExecutionResult> => {
+    let callbackPending = false;
     // AB-290: executionId/ownerId ride along on every `execute-start`,
     // `settled`, and `progress` event this call emits, spread from here so
     // the emit call sites below don't each have to remember to attach them.
@@ -1101,6 +1102,11 @@ export function createTool<
           finishTelemetry('paused', { reason });
 
           const callId = typedToolCall.id;
+          emit('settled', {
+            ...parsedDetail,
+            result: undefined,
+            callbackCompletion: options.executionHandle?.whenSettled(),
+          });
           return {
             callId,
             outcome: 'action_required',
@@ -1335,7 +1341,9 @@ export function createTool<
 
       options[executionCallbackStartSymbol]?.();
       const runner = Promise.resolve(resolvedExecute(parsed, toolContext as unknown as TContext));
+      callbackPending = true;
       const stopTrackingProgress = () => {
+        callbackPending = false;
         options.signal?.removeEventListener('abort', deactivateProgress);
         deactivateProgress();
       };
@@ -1650,7 +1658,13 @@ export function createTool<
         outputDigest,
       };
     } catch (error) {
-      if (options.executionHandle && (isTimeoutError(error) || options.signal?.aborted)) {
+      // Only an unfinished callback can own later completion. Pre-execution
+      // cancellation must let the outer invocation settle its handle.
+      if (
+        callbackPending &&
+        options.executionHandle &&
+        (isTimeoutError(error) || options.signal?.aborted)
+      ) {
         options.executionHandle.cleanupPending(error);
       }
       if (
