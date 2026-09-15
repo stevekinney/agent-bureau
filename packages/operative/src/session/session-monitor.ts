@@ -155,20 +155,22 @@ export function createSessionMonitor(dependencies: SessionMonitorDependencies) {
         getWatchdog()?.recordPulse('host-reachability', 0);
         setLivenessState('running');
         emitter.dispatchEvent(new SessionMonitorTickEvent(sessionId, tick, null));
-        const run = runAgent(input);
-        const abortRun = () => run.abort('session monitor aborted');
-        signal?.addEventListener('abort', abortRun, { once: true });
         let result: RunResult;
         try {
-          result = await run.result();
+          const run = runAgent(input);
+          const abortRun = () => run.abort('session monitor aborted');
+          signal?.addEventListener('abort', abortRun, { once: true });
+          try {
+            result = await run.result();
+          } finally {
+            signal?.removeEventListener('abort', abortRun);
+          }
         } catch (err) {
           // A run error is treated as a non-met tick — we emit done(false) and
           // propagate. The caller should handle this as an error condition.
           emitter.dispatchEvent(new SessionMonitorDoneEvent(sessionId, false, tick + 1));
           if (signal?.aborted) throw processLocalAbortError();
           throw err;
-        } finally {
-          signal?.removeEventListener('abort', abortRun);
         }
 
         // Surface terminal run FAILURES as errors instead of feeding them to the

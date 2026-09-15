@@ -411,13 +411,15 @@ export async function executeTools(
           return { kind: 'error', error, errorKind: 'tool' };
         }
       }
-
-      // Filtered calls were sealed above and must not be re-appended or sent
-      // through execution result validation. They remain part of the public
-      // step result alongside the actual executed results, after hooks have
-      // observed only the calls and results that actually executed.
-      results.push(...filteredResults);
     }
+
+    // Filtered calls were sealed above and must not be re-appended or sent
+    // through execution result validation. They remain part of the public
+    // step result alongside the actual executed results, after hooks have
+    // observed only the calls and results that actually executed. Keep this
+    // merge outside the execution guard so an all-filtered batch still exposes
+    // its sealed results through StepResult and step.completed.
+    results.push(...filteredResults);
 
     // Preserve provider call order for synthesized-only batches as well as
     // mixed executed/skipped batches. StepResult and its terminal event must

@@ -14,6 +14,7 @@ import { createCheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import { createRunEngine } from '../durable/create-run-engine';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow-result';
+import { GuardrailTripwireError } from '../errors';
 import type {
   OperativeEventMap,
   SessionCancelEvent,
@@ -441,6 +442,60 @@ describe('session.run()', () => {
     await consuming;
     expect(events).toContain('run.completed');
   });
+
+  it.each([false, true])(
+    'holds terminal tripwire events through session commit (failure=%s)',
+    async (failCommit) => {
+      const store = createSessionStore(textValueStore(new MemoryStorage()));
+      const enteredCommit = Promise.withResolvers<void>();
+      const releaseCommit = Promise.withResolvers<void>();
+      const persistenceFailure = new Error('commit failed');
+      let updates = 0;
+      const delayedStore: SessionStore = {
+        ...store,
+        async update(...args) {
+          if (++updates === 2) {
+            enteredCommit.resolve();
+            await releaseCommit.promise;
+            if (failCommit) throw persistenceFailure;
+          }
+          return store.update(...args);
+        },
+      };
+      const handle = createSessionHandle('tripwire-commit', {
+        store: delayedStore,
+        agentName: 'agent',
+        runOptions: createTestRunOptions(async () => {
+          throw new GuardrailTripwireError('guardrail blocked', {
+            guardrailName: 'test',
+            category: 'test',
+            phase: 'input',
+            confidence: 1,
+          });
+        }),
+      });
+      const run = handle.run('commit barrier');
+      const result = run.result();
+      void result.catch(() => undefined);
+      const events: string[] = [];
+      const consuming = (async () => {
+        for await (const event of run) events.push(event.type);
+      })();
+      await enteredCommit.promise;
+      await yieldToPortableEventLoop();
+      expect(events).not.toContain('run.tripwire');
+      expect(events).not.toContain('run.completed');
+      releaseCommit.resolve();
+      if (failCommit) {
+        await expect(result).rejects.toBe(persistenceFailure);
+      } else {
+        await expect(result).resolves.toMatchObject({ finishReason: 'tripwire' });
+      }
+      await consuming;
+      expect(events.filter((type) => type === 'run.tripwire')).toHaveLength(failCommit ? 0 : 1);
+      expect(events.filter((type) => type === 'run.completed')).toHaveLength(failCommit ? 0 : 1);
+    },
+  );
 
   it('F2: RunRef.agentName carries the name of the agent that ran the run', async () => {
     // The fixture uses 'test-agent' as the agentName for the session handle.
@@ -3433,9 +3488,14 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     }
   });
 
-  it.each([false, true])(
-    'holds recovered cleanup and events through terminal commit (failure=%s)',
-    async (failCommit) => {
+  it.each([
+    { failCommit: false, tripwire: false },
+    { failCommit: true, tripwire: false },
+    { failCommit: false, tripwire: true },
+    { failCommit: true, tripwire: true },
+  ])(
+    'holds recovered cleanup and events through terminal commit (case=%j)',
+    async ({ failCommit, tripwire }) => {
       const sessionId = 'recovered-event-commit-barrier-session';
       const runId = `${sessionId}:0`;
       const store = createSessionStore(textValueStore(new MemoryStorage()));
@@ -3479,7 +3539,20 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
               runId,
               steps: 1,
               content: 'recovered answer',
-              finishReason: 'stop-condition',
+              finishReason: tripwire ? 'tripwire' : 'stop-condition',
+              ...(tripwire
+                ? {
+                    tripwire: {
+                      guardrailName: 'test',
+                      category: 'test',
+                      phase: 'input',
+                      confidence: 1,
+                    },
+                    errorMessage: 'guardrail blocked',
+                    errorKind: 'policy',
+                    errorCode: 'TRIPWIRE',
+                  }
+                : {}),
             };
           },
         }),
@@ -3516,6 +3589,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       await commitStarted.promise;
       await yieldToPortableEventLoop();
       expect(events).not.toContain('run.completed');
+      expect(events).not.toContain('run.tripwire');
       expect(cleanupSettled).toBe(false);
       expect(await handle.recover()).toBe(recovered);
       const sessionClosed = handle.closed();
@@ -3532,10 +3606,13 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
         const acknowledgement = await closed;
         const committedSession = await store.load(sessionId);
         expect(acknowledgement.status).not.toBe('failed');
-        expect(committedSession?.runs[0]?.status).toBe('completed');
+        expect(committedSession?.runs[0]?.status).toBe(tripwire ? 'error' : 'completed');
         expect(events).toContain('run.completed');
       }
       await consuming;
+      expect(events.filter((type) => type === 'run.tripwire')).toHaveLength(
+        tripwire && !failCommit ? 1 : 0,
+      );
       expect(await recovered!.closed()).toBe(await closed);
       expect(await sessionClosed).toBe(await closed);
     },
@@ -4387,6 +4464,30 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
 // ---------------------------------------------------------------------------
 
 describe('session.monitor()', () => {
+  it('emits done when a recover-only handle cannot create a monitor run', async () => {
+    const emitter = new TypedEventTarget<OperativeEventMap>();
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const handle = createSessionHandle('recover-only-monitor', {
+      store,
+      agentName: 'agent',
+      emitter,
+    });
+    const events: string[] = [];
+    const done: SessionMonitorDoneEvent[] = [];
+    emitter.addEventListener('session.monitor.tick', () => events.push('tick'));
+    emitter.addEventListener('session.monitor.done', (event) => {
+      events.push('done');
+      done.push(event);
+    });
+    await expect(
+      handle.monitor({ every: 1, input: 'check', until: () => false }),
+    ).rejects.toBeInstanceOf(MissingRunOptionsError);
+    expect(events).toEqual(['tick', 'done']);
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ met: false, ticks: 1 });
+    expect(await store.load('recover-only-monitor')).toBeUndefined();
+  });
+
   function createMonitorForRun(run: unknown) {
     const runtime = createManualRuntimeServices();
     const watchdog = {
@@ -4852,6 +4953,7 @@ describe('session.monitor()', () => {
   });
 
   it('dispatches SessionMonitorDoneEvent(met=false) when maxDuration expires', async () => {
+    const runtime = createManualRuntimeServices();
     const emitter = new TypedEventTarget<OperativeEventMap>();
     const kv = textValueStore(new MemoryStorage());
     const store = createSessionStore(kv);
@@ -4859,7 +4961,11 @@ describe('session.monitor()', () => {
       store,
       agentName: 'agent',
       emitter,
-      runOptions: createTestRunOptions(),
+      runtime,
+      runOptions: createTestRunOptions(async () => {
+        await runtime.advance(5);
+        return { content: 'checked', toolCalls: [] };
+      }),
     });
 
     const doneEvents: SessionMonitorDoneEvent[] = [];
@@ -4876,6 +4982,8 @@ describe('session.monitor()', () => {
 
     expect(doneEvents).toHaveLength(1);
     expect(doneEvents[0]!.met).toBe(false);
+    expect(doneEvents[0]!.ticks).toBe(1);
+    expect(runtime.pendingTimers()).toHaveLength(0);
   });
 
   it('accumulates runs in the session for each tick', async () => {

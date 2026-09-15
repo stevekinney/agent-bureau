@@ -165,7 +165,10 @@ export function runOutcomeFromResult(result: RunResult): RunOutcome {
 
 export function isTerminalRunEvent(event: RunEvent): boolean {
   return (
-    event.type === 'run.completed' || event.type === 'run.error' || event.type === 'run.aborted'
+    event.type === 'run.completed' ||
+    event.type === 'run.error' ||
+    event.type === 'run.aborted' ||
+    event.type === 'run.tripwire'
   );
 }
 
