@@ -6,6 +6,7 @@ import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { createActiveRun } from './create-run';
+import type { ToolSettledBubbleEvent } from './events';
 import { createMockGenerate } from './test/index';
 import type { GenerateResponse } from './types';
 
@@ -14,47 +15,60 @@ function approvalResponse(callId: string): GenerateResponse {
 }
 
 describe('approval drain contract', () => {
-  it('disposes an approval-gated maximum-steps run and drains its toolbox listeners', async () => {
-    let callbackCount = 0;
-    const tool = createTool({
-      name: 'approval-tool',
-      description: 'Approval drain test tool',
-      input: z.object({}),
-      policy: { beforeExecute: () => ({ status: 'needs_approval', reason: 'Approve this call' }) },
-      execute: async () => {
-        callbackCount += 1;
-        return 'must not execute';
-      },
-    });
-    const toolbox = createToolbox([tool]);
-    const activeRun = createActiveRun({
-      generate: createMockGenerate([approvalResponse('approval-call')]),
-      toolbox,
-      conversation: new Conversation(),
-      maximumSteps: 1,
-      runId: 'approval-run',
-      executeOptions: { ownerId: 'approval-run' },
-    });
-    let executeStarts = 0;
-    let settlements = 0;
-    toolbox.addEventListener('execute-start', () => {
-      executeStarts += 1;
-    });
-    toolbox.addEventListener('settled', () => {
-      settlements += 1;
-    });
-    const closed = activeRun.closed();
+  it.each(['needs_approval', 'needs_input'] as const)(
+    'disposes a %s maximum-steps run with one paused settlement',
+    async (gateStatus) => {
+      let callbackCount = 0;
+      const tool = createTool({
+        name: 'approval-tool',
+        description: 'Approval drain test tool',
+        input: z.object({}),
+        policy: { beforeExecute: () => ({ status: gateStatus, reason: 'Approve this call' }) },
+        execute: async () => {
+          callbackCount += 1;
+          return 'must not execute';
+        },
+      });
+      const toolbox = createToolbox([tool]);
+      const activeRun = createActiveRun({
+        generate: createMockGenerate([approvalResponse('approval-call')]),
+        toolbox,
+        conversation: new Conversation(),
+        maximumSteps: 1,
+        runId: 'approval-run',
+        executeOptions: { ownerId: 'approval-run' },
+      });
+      const curatedSettlements: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.settled', (event) => curatedSettlements.push(event));
+      let executeStarts = 0;
+      let settlements = 0;
+      toolbox.addEventListener('execute-start', () => {
+        executeStarts += 1;
+      });
+      toolbox.addEventListener('settled', () => {
+        settlements += 1;
+      });
+      const closed = activeRun.closed();
 
-    const result = await activeRun.result;
+      const result = await activeRun.result;
 
-    expect(result.finishReason).toBe('maximum-steps');
-    expect(result.steps[0]?.results[0]?.outcome).toBe('action_required');
-    expect(callbackCount).toBe(0);
-    expect(executeStarts).toBe(1);
-    expect(settlements).toBe(1);
-    activeRun[Symbol.dispose]();
-    expect(await closed).toEqual({ status: 'completed' });
-  });
+      expect(result.finishReason).toBe('maximum-steps');
+      expect(result.steps[0]?.results[0]?.outcome).toBe('action_required');
+      expect(callbackCount).toBe(0);
+      expect(executeStarts).toBe(1);
+      expect(settlements).toBe(1);
+      expect(curatedSettlements).toHaveLength(1);
+      expect(curatedSettlements[0]).toMatchObject({
+        status: 'paused',
+        toolCallId: 'approval-call',
+        runId: 'approval-run',
+        result: undefined,
+        error: undefined,
+      });
+      activeRun[Symbol.dispose]();
+      expect(await closed).toEqual({ status: 'completed' });
+    },
+  );
 
   it('drains three sequential and three concurrent approval runs on one toolbox', async () => {
     const callbackCounts = { value: 0 };

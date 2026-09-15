@@ -1104,6 +1104,7 @@ export function createTool<
           const callId = typedToolCall.id;
           emit('settled', {
             ...parsedDetail,
+            status: 'paused',
             result: undefined,
             callbackCompletion: options.executionHandle?.whenSettled(),
           });

@@ -175,6 +175,7 @@ export class ToolExecuteErrorEvent extends Event {
 
 export class ToolSettledEvent extends Event {
   static readonly type = 'settled' as const;
+  readonly status: ToolFinishedEvent['status'];
   readonly result?: unknown;
   readonly error?: unknown;
   readonly toolCall: ToolCall;
@@ -193,6 +194,7 @@ export class ToolSettledEvent extends Event {
   readonly ownerId?: string;
   constructor(
     detail: {
+      status?: ToolFinishedEvent['status'];
       result?: unknown;
       error?: unknown;
       callbackCompletion?: Promise<ExecutionSnapshot>;
@@ -200,6 +202,7 @@ export class ToolSettledEvent extends Event {
       ToolExecutionIdentity,
   ) {
     super(ToolSettledEvent.type);
+    this.status = detail.status ?? (detail.error !== undefined ? 'error' : 'success');
     this.result = detail.result;
     this.error = detail.error;
     this.toolCall = detail.toolCall;
@@ -756,6 +759,7 @@ export class ToolboxExecuteErrorEvent extends Event {
 
 export class ToolboxSettledEvent extends Event {
   static readonly type = 'settled' as const;
+  readonly status: ToolSettledEvent['status'];
   readonly tool: Tool;
   readonly call: ToolCall;
   readonly result?: unknown;
@@ -775,6 +779,7 @@ export class ToolboxSettledEvent extends Event {
   readonly ownerId?: string;
   constructor(
     detail: {
+      status?: ToolSettledEvent['status'];
       tool: Tool;
       call: ToolCall;
       result?: unknown;
@@ -783,6 +788,7 @@ export class ToolboxSettledEvent extends Event {
     } & ToolExecutionIdentity,
   ) {
     super(ToolboxSettledEvent.type);
+    this.status = detail.status ?? (detail.error !== undefined ? 'error' : 'success');
     this.tool = detail.tool;
     this.call = detail.call;
     this.result = detail.result;

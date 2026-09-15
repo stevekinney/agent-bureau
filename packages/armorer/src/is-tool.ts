@@ -6,7 +6,7 @@ import type { ToolErrorCategory } from './core/errors';
 import type { SerializedToolDefinition } from './core/serialization';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
-import type { ToolEventMap, ToolExecutionIdentity } from './events';
+import type { ToolEventMap, ToolExecutionIdentity, ToolFinishedEvent } from './events';
 import type { EffectiveToolExecutionContext, ToolRequestContext } from './execution-context';
 import type { ExecutionHandle, ExecutionLifecycle, ExecutionSnapshot } from './execution-lifecycle';
 import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
@@ -220,6 +220,7 @@ export type DefaultToolEvents = {
   'execute-success': { result: unknown } & ToolEventDetailContext;
   'execute-error': { error: unknown } & ToolEventDetailContext;
   settled: {
+    status?: ToolFinishedEvent['status'];
     result?: unknown;
     error?: unknown;
     /**

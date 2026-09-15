@@ -3,11 +3,45 @@ import { z } from 'zod';
 
 import { createTool, createToolCall } from './create-tool';
 import { createToolbox } from './create-toolbox';
+import { ToolboxSettledEvent, ToolSettledEvent } from './events';
 import type { SignedPendingToolApproval } from './types';
 
 const ownerId = 'approval-test-owner';
 
 describe('approval settlement contract', () => {
+  it('preserves ToolSettledEvent constructor defaults and accepts paused', async () => {
+    const tool = createTool({
+      name: 'constructor-defaults',
+      description: 'Settlement constructor test tool',
+      input: z.object({}),
+      execute: async () => 'ok',
+    });
+    let emitted: ToolSettledEvent | undefined;
+    tool.addEventListener('settled', (event) => {
+      emitted = event;
+    });
+    const call = createToolCall(tool.name, {});
+    await tool.execute(call, { ownerId });
+    if (!emitted) throw new Error('missing settled event');
+    expect(
+      new ToolSettledEvent({ toolCall: emitted.toolCall, configuration: emitted.configuration })
+        .status,
+    ).toBe('success');
+    expect(
+      new ToolSettledEvent({
+        toolCall: emitted.toolCall,
+        configuration: emitted.configuration,
+        status: 'paused',
+      }).status,
+    ).toBe('paused');
+    expect(
+      new ToolSettledEvent({
+        toolCall: emitted.toolCall,
+        configuration: emitted.configuration,
+        error: new Error('failed'),
+      }).status,
+    ).toBe('error');
+  });
   it.each([
     ['needs_approval', 'Approval required'],
     ['needs_input', 'Input required'],
@@ -30,6 +64,7 @@ describe('approval settlement contract', () => {
       executionId?: string;
       ownerId?: string;
       callId: string;
+      status?: string;
       callbackCompletion?: Promise<unknown>;
     }> = [];
     tool.addEventListener('execute-start', (event) => {
@@ -45,6 +80,7 @@ describe('approval settlement contract', () => {
         executionId: event.executionId,
         ownerId: event.ownerId,
         callId: event.toolCall.id,
+        status: event.status,
         callbackCompletion: event.callbackCompletion,
       });
     });
@@ -66,58 +102,79 @@ describe('approval settlement contract', () => {
     expect(settlements[0]?.executionId).toBe(starts[0]?.executionId);
     expect(settlements[0]?.executionId).toBeTruthy();
     expect(settlements[0]?.ownerId).toBe(ownerId);
+    expect(settlements[0]?.status).toBe('paused');
     const callbackCompletion = settlements[0]?.callbackCompletion;
     expect(callbackCompletion).toBeInstanceOf(Promise);
     if (!(callbackCompletion instanceof Promise)) throw new Error('missing callback completion');
     await callbackCompletion;
   });
 
-  it('keeps direct and toolbox settlement identities aligned', async () => {
-    const tool = createTool({
-      name: 'toolbox-approval',
-      description: 'Toolbox approval settlement test tool',
-      input: z.object({}),
-      policy: { beforeExecute: () => ({ status: 'needs_approval', reason: 'Approve this call' }) },
-      execute: async () => 'must not execute',
-    });
-    const toolbox = createToolbox([tool]);
-    const registeredTool = toolbox.tools()[0]!;
-    const call = createToolCall(tool.name, {}, 'toolbox-call');
-    const directStarts: string[] = [];
-    const directSettlements: string[] = [];
-    const starts: Array<{ executionId?: string; ownerId?: string }> = [];
-    const settlements: Array<{ callId: string; executionId?: string; ownerId?: string }> = [];
-    toolbox.addEventListener('execute-start', (event) => {
-      starts.push({ executionId: event.executionId, ownerId: event.ownerId });
-    });
-    toolbox.addEventListener('settled', (event) => {
-      settlements.push({
-        callId: event.call.id,
-        executionId: event.executionId,
-        ownerId: event.ownerId,
+  it.each(['needs_approval', 'needs_input'] as const)(
+    'keeps direct and toolbox %s settlement identities aligned',
+    async (gateStatus) => {
+      const tool = createTool({
+        name: 'toolbox-approval',
+        description: 'Toolbox approval settlement test tool',
+        input: z.object({}),
+        policy: { beforeExecute: () => ({ status: gateStatus, reason: 'Approve this call' }) },
+        execute: async () => 'must not execute',
       });
-    });
-    registeredTool.addEventListener('execute-start', (event) => {
-      directStarts.push(event.executionId ?? '');
-    });
-    registeredTool.addEventListener('settled', (event) => {
-      directSettlements.push(event.executionId ?? '');
-    });
+      const toolbox = createToolbox([tool]);
+      const registeredTool = toolbox.tools()[0]!;
+      const call = createToolCall(tool.name, {}, 'toolbox-call');
+      expect(new ToolboxSettledEvent({ tool: registeredTool, call }).status).toBe('success');
+      expect(
+        new ToolboxSettledEvent({ tool: registeredTool, call, error: new Error('failed') }).status,
+      ).toBe('error');
+      expect(new ToolboxSettledEvent({ tool: registeredTool, call, status: 'paused' }).status).toBe(
+        'paused',
+      );
+      const directStarts: string[] = [];
+      const directSettlements: string[] = [];
+      const directStatuses: string[] = [];
+      const starts: Array<{ executionId?: string; ownerId?: string }> = [];
+      const settlements: Array<{
+        callId: string;
+        executionId?: string;
+        ownerId?: string;
+        status?: string;
+      }> = [];
+      toolbox.addEventListener('execute-start', (event) => {
+        starts.push({ executionId: event.executionId, ownerId: event.ownerId });
+      });
+      toolbox.addEventListener('settled', (event) => {
+        settlements.push({
+          callId: event.call.id,
+          executionId: event.executionId,
+          ownerId: event.ownerId,
+          status: event.status,
+        });
+      });
+      registeredTool.addEventListener('execute-start', (event) => {
+        directStarts.push(event.executionId ?? '');
+      });
+      registeredTool.addEventListener('settled', (event) => {
+        directSettlements.push(event.executionId ?? '');
+        directStatuses.push(event.status);
+      });
 
-    const result = await toolbox.execute(call, { ownerId });
+      const result = await toolbox.execute(call, { ownerId });
 
-    expect(result.outcome).toBe('action_required');
-    expect(settlements).toHaveLength(1);
-    expect(settlements[0]?.callId).toBe(call.id);
-    expect(settlements[0]?.executionId).toBe(starts[0]?.executionId);
-    expect(settlements[0]?.executionId).toBeTruthy();
-    expect(settlements[0]?.ownerId).toBe(ownerId);
-    const executionId = starts[0]?.executionId;
-    const settlementExecutionId = settlements[0]?.executionId;
-    if (!executionId || !settlementExecutionId) throw new Error('missing execution identity');
-    expect(directStarts).toEqual([executionId]);
-    expect(directSettlements).toEqual([settlementExecutionId]);
-  });
+      expect(result.outcome).toBe('action_required');
+      expect(settlements).toHaveLength(1);
+      expect(settlements[0]?.callId).toBe(call.id);
+      expect(settlements[0]?.executionId).toBe(starts[0]?.executionId);
+      expect(settlements[0]?.executionId).toBeTruthy();
+      expect(settlements[0]?.ownerId).toBe(ownerId);
+      expect(settlements[0]?.status).toBe('paused');
+      expect(directStatuses).toEqual(['paused']);
+      const executionId = starts[0]?.executionId;
+      const settlementExecutionId = settlements[0]?.executionId;
+      if (!executionId || !settlementExecutionId) throw new Error('missing execution identity');
+      expect(directStarts).toEqual([executionId]);
+      expect(directSettlements).toEqual([settlementExecutionId]);
+    },
+  );
 
   it('settles an approved resume once for the parked and resumed invocations', async () => {
     let callbackCount = 0;
@@ -147,12 +204,16 @@ describe('approval settlement contract', () => {
     };
     const call = createToolCall(tool.name, { value: 'approved' }, 'resume-call');
     const starts: string[] = [];
-    const settlements: string[] = [];
+    const settlements: Array<{ executionId: string; status?: string; callId: string }> = [];
     toolbox.addEventListener('execute-start', (event) => {
       starts.push(event.executionId ?? '');
     });
     toolbox.addEventListener('settled', (event) => {
-      settlements.push(event.executionId ?? '');
+      settlements.push({
+        executionId: event.executionId ?? '',
+        status: event.status,
+        callId: event.call.id,
+      });
     });
 
     const parked = await toolbox.execute(call, { ownerId, requestContext });
@@ -175,7 +236,9 @@ describe('approval settlement contract', () => {
     expect(starts).toHaveLength(2);
     expect(settlements).toHaveLength(2);
     expect(starts[0]).not.toBe(starts[1]);
-    expect(settlements).toEqual(starts);
+    expect(settlements.map(({ executionId }) => executionId)).toEqual(starts);
+    expect(settlements.map(({ status }) => status)).toEqual(['paused', 'success']);
+    expect(settlements.every(({ callId }) => callId === call.id)).toBe(true);
   });
 
   it('settles policy denial with the existing permission error and no callback', async () => {

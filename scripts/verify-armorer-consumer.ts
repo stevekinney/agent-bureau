@@ -50,7 +50,11 @@ if (!nodeBinary) throw new Error('Could not locate genuine Node.js on PATH');
 
 async function run(command: string[], cwd: string): Promise<string> {
   const [executable, ...arguments_] = command;
-  const result = await $`${executable} ${arguments_}`.cwd(cwd).nothrow().quiet();
+  const result = await $`${executable} ${arguments_}`
+    .cwd(cwd)
+    .env({ ...process.env, ...(realNodePath ? { PATH: realNodePath } : {}) })
+    .nothrow()
+    .quiet();
   const output = `${result.stdout}${result.stderr}`;
   if (result.exitCode !== 0)
     throw new Error(`${command.join(' ')} exited ${result.exitCode}:\n${output}`);

@@ -131,7 +131,7 @@ export function createRecoveredRunEventSurface(
             {
               toolName: event.call.name,
               toolCallId: event.call.id,
-              status: hasError ? 'error' : 'success',
+              status: event.status,
               result: event.result,
               error: event.error,
             },
