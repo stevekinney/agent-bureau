@@ -16,7 +16,11 @@ import {
 } from '../events';
 import type { Subscription } from '../liveness';
 import type { CleanupAcknowledgement, ClosedOptions } from '../types';
-import { historyOrEmpty, newestRunningRunRef } from './session-handle-support';
+import {
+  historyOrEmpty,
+  newestRunningRunRef,
+  reconcileTerminalRunRef,
+} from './session-handle-support';
 import type {
   SessionHandle,
   SessionHandleContext,
@@ -35,8 +39,8 @@ import { createSessionRun, type SessionRunState } from './session-run';
 export * from './session-handle-types';
 
 /**
- * Parse a partial `ConversationHistory` into a `ConversationHistory`. The session
- * stores a full `ConversationHistory`; a brand-new session starts empty.
+ * Parse an ISO-8601 duration into milliseconds. Supports hours, minutes and
+ * seconds; unrecognized strings fall back to zero.
  */
 function parseDuration(iso: string): number {
   const match = /^PT?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i.exec(iso);
@@ -252,9 +256,8 @@ export function createSessionHandle(
         run.abort('cancelled');
       }
 
-      // Step 2: Terminate the Weft workflow in parallel (stops the next step).
-      // Fire-and-forget — a failure here is non-fatal (we already aborted the
-      // generate signal in step 1). Load the session once and reuse.
+      // Request durable cancellation after signalling the attached run.
+      // Engine failures remain non-fatal; load the session once and reuse.
       const cancelSession = await store.load(sessionId);
       const targetRun = targetRunId
         ? cancelSession?.runs.find((runRef) => runRef.runId === targetRunId)
@@ -270,30 +273,21 @@ export function createSessionHandle(
         if (targetRun && targetRun.status === 'running') {
           try {
             await engine.cancel(targetRun.runId);
-            // Persist the aborted status only after the durable cancel succeeds.
-            // If engine.cancel() throws (e.g. storage fault or stale engine), the
-            // Weft workflow may still be running, so marking the session 'aborted'
-            // would be incorrect — leave the store in its current state and let
-            // the non-fatal catch below swallow the error.
-            await store.update(sessionId, (latestSession) => {
-              if (!latestSession) return undefined;
-              const runs = [...latestSession.runs];
-              const runIndex = runs.findIndex((runRef) => runRef.runId === targetRun.runId);
-              if (runIndex < 0 || !runs[runIndex]) return undefined;
-              runs[runIndex] = { ...runs[runIndex], status: 'aborted' };
-              return {
-                ...latestSession,
-                runs,
-              };
-            });
+            // An attached run owns its atomic transcript/outcome commit. A
+            // detached cancellation reconciles the actual durable terminal state.
+            if (!run) {
+              await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, targetRun);
+            }
           } catch {
-            // Non-fatal: the generate abort already stopped the work.
+            // Preserve cancellation's non-throwing engine/reconciliation contract.
           }
         }
       }
 
-      sessionRunState.currentRun = null;
-      sessionRunState.currentRunId = null;
+      if (sessionRunState.currentRun === run && sessionRunState.currentRunId === targetRunId) {
+        sessionRunState.currentRun = null;
+        sessionRunState.currentRunId = null;
+      }
     },
 
     async fork(options?: { throughRun?: number }): Promise<SessionHandle> {
@@ -420,7 +414,6 @@ export function createSessionHandle(
       parseDuration,
       getWatchdog,
       setWatchdog,
-      getWatchdogCadence: () => undefined,
       setWatchdogCadence,
       advanceLiveness,
     }),

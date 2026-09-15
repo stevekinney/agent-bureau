@@ -60,6 +60,82 @@ function createSessionHandleFixture() {
 }
 
 describe('createSessionHandle — sleep() against an injected manual runtime', () => {
+  it('handles a signal aborted by the monitor predicate before delay registration', async () => {
+    const controller = new AbortController();
+    const { handle } = createSessionHandleFixture();
+
+    await expect(
+      handle.monitor({
+        every: 1,
+        input: 'check',
+        until: () => {
+          controller.abort();
+          return false;
+        },
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('cleans up when an earlier abort listener stops delay notification', async () => {
+    const controller = new AbortController();
+    controller.signal.addEventListener('abort', (event) => event.stopImmediatePropagation(), {
+      once: true,
+    });
+    let cleared = false;
+    const { sessionId, store, runtime } = createSessionHandleFixture();
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(),
+      runtime,
+      setTimeoutFunction: () => {
+        controller.abort();
+        return 'timer';
+      },
+      clearTimeoutFunction: () => {
+        cleared = true;
+      },
+    });
+
+    await expect(handle.sleep(10, { signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(cleared).toBe(true);
+  });
+
+  it('rejects immediately when the sleep signal is already aborted', async () => {
+    const { handle } = createSessionHandleFixture();
+
+    await expect(handle.sleep(10, { signal: AbortSignal.abort() })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
+
+  it('clears a timer when the signal aborts during timer registration', async () => {
+    const { store, sessionId, runtime } = createSessionHandleFixture();
+    const controller = new AbortController();
+    let cleared = false;
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(),
+      runtime,
+      setTimeoutFunction: () => {
+        controller.abort();
+        return 'timer';
+      },
+      clearTimeoutFunction: () => {
+        cleared = true;
+      },
+    });
+
+    await expect(handle.sleep(10, { signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+    expect(cleared).toBe(true);
+  });
+
   it('resolves only after the manual clock advances past the requested milliseconds', async () => {
     const { handle, runtime } = createSessionHandleFixture();
     let resolved = false;

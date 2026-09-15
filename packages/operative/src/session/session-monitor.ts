@@ -30,7 +30,6 @@ export interface SessionMonitorDependencies {
   parseDuration: (iso: string) => number;
   getWatchdog: () => StallWatchdog | undefined;
   setWatchdog: (watchdog: StallWatchdog | undefined) => void;
-  getWatchdogCadence: () => number | undefined;
   setWatchdogCadence: (cadence: number | undefined) => void;
   advanceLiveness: () => void;
 }

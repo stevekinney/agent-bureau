@@ -154,9 +154,10 @@ function engineStatusToRunRefStatus(
  * the settle path in `recover()`'s success branch.
  */
 async function loadTerminalConversationHistory(
-  checkpointStore: CheckpointStore,
+  checkpointStore: CheckpointStore | undefined,
   runId: string,
 ): Promise<ConversationHistory | undefined> {
+  if (!checkpointStore) return undefined;
   try {
     const checkpoint = await checkpointStore.loadCheckpoint(runId);
     if (checkpoint.conversation === null) return undefined;
@@ -181,7 +182,7 @@ async function loadTerminalConversationHistory(
  */
 async function readTerminalRunOutcome(
   engine: RegistryAgnosticEngine,
-  checkpointStore: CheckpointStore,
+  checkpointStore: CheckpointStore | undefined,
   runId: string,
 ): Promise<{
   status: RunRef['status'];
@@ -242,7 +243,7 @@ async function readTerminalRunOutcome(
 export async function reconcileTerminalRunRef(
   store: SessionStore,
   engine: RegistryAgnosticEngine,
-  checkpointStore: CheckpointStore,
+  checkpointStore: CheckpointStore | undefined,
   sessionId: string,
   runningRef: RunRef,
 ): Promise<void> {
@@ -279,8 +280,3 @@ export async function reconcileTerminalRunRef(
     );
   }
 }
-
-/**
- * Parse an ISO-8601 duration string (e.g. `'PT1H'`, `'PT30S'`) into milliseconds.
- * Supports H (hours), M (minutes), S (seconds). Unrecognized strings fall back to 0.
- */

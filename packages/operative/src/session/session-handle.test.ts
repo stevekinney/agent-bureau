@@ -8,6 +8,7 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { createManualRuntimeServices, TypedEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
+import type { AgentRun } from '../agent-run';
 import { createAgentSession } from '../agent-session';
 import { createCheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
@@ -39,8 +40,9 @@ import {
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
-import { appendConversationMessages } from './session-handle-support';
+import { appendConversationMessages, reconcileTerminalRunRef } from './session-handle-support';
 import { MissingRunOptionsError } from './session-handle-types';
+import { createSessionMonitor } from './session-monitor';
 import type { SessionStore } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — prevents one test's
@@ -839,6 +841,12 @@ describe('session.run()', () => {
           ? undefined
           : { finishReason: commitMode === 'conflict' ? 'aborted' : 'error' },
       );
+      if (commitMode === 'matching') {
+        const promptMessages = Object.values(
+          rejectedSession?.conversationHistory.messages ?? {},
+        ).filter((message) => message.role === 'user' && message.content === 'prompt');
+        expect(promptMessages).toHaveLength(1);
+      }
     },
   );
 });
@@ -1046,7 +1054,7 @@ describe('session.cancel()', () => {
       },
     });
 
-    h.run('please stop me');
+    const agentRun = h.run('please stop me');
 
     // Wait until the generate function is actually being called (which happens
     // after the session is loaded asynchronously). Only then is the abort
@@ -1063,6 +1071,25 @@ describe('session.cancel()', () => {
 
     // Allow the run to finish so we don't leave dangling promises.
     resolveGenerate?.();
+    await expect(agentRun.result()).resolves.toMatchObject({ finishReason: 'aborted' });
+
+    const persisted = await store.load('cancel-session');
+    const persistedRun = persisted?.runs[0];
+    expect(persistedRun?.status).toBe('aborted');
+    expect(persistedRun?.outcome).toMatchObject({
+      finishReason: 'aborted',
+      error: { kind: 'abort', code: 'ABORTED' },
+    });
+    if (!persistedRun || !persisted) throw new Error('Expected the cancelled run to persist');
+    expect(persistedRun?.userMessageId).toBeDefined();
+    expect(persistedRun?.userMessageId).toBe(
+      persisted?.conversationHistory.ids.find(
+        (id) => persisted.conversationHistory.messages[id]?.role === 'user',
+      ),
+    );
+    expect(persisted?.conversationHistory.messages[persistedRun.userMessageId!]?.content).toBe(
+      'please stop me',
+    );
   });
 
   it('is a no-op when no run is in flight', async () => {
@@ -1077,6 +1104,7 @@ describe('session.cancel()', () => {
       cancel: async (id: string) => {
         cancelledIds.push(id);
       },
+      get: async (id: string) => ({ id, status: 'cancelled' }),
       signal: async () => {},
       update: async () => {},
       query: async () => {},
@@ -1119,6 +1147,74 @@ describe('session.cancel()', () => {
     // Verify the session's run status was updated to 'aborted'.
     const updated = await store.load('durable-session');
     expect(updated!.runs[0]!.status).toBe('aborted');
+  });
+
+  it('reconciles a detached durable cancellation from engine outcome and checkpoint history', async () => {
+    const sessionId = 'detached-cancel-reconcile-session';
+    const runId = `${sessionId}:0`;
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(
+      createAgentSession({
+        agentName: 'durable-agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'durable-agent',
+            userMessageId: 'checkpoint-user-message',
+          },
+        ],
+      }),
+    );
+
+    const checkpointConversation = new Conversation(createConversationHistory());
+    checkpointConversation.appendUserMessage('from checkpoint');
+    checkpointConversation.appendAssistantMessage('checkpoint answer');
+    const engine = {
+      cancel: async () => {},
+      get: async (id: string) => ({
+        id,
+        status: 'completed',
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId: id,
+          steps: 2,
+          content: 'checkpoint answer',
+          finishReason: 'stop-condition',
+        },
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const checkpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: checkpointConversation.snapshot(),
+        cursor: { totalUsage: {}, lastContent: 'checkpoint answer', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'durable-agent',
+      engine,
+      checkpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    await handle.cancel();
+
+    const persisted = await store.load(sessionId);
+    const run = persisted?.runs[0];
+    expect(run?.status).toBe('completed');
+    expect(run?.outcome).toEqual({ finishReason: 'stop-condition' });
+    expect(run?.userMessageId).toBe('checkpoint-user-message');
+    const contents = Object.values(persisted?.conversationHistory.messages ?? {}).map(
+      (message) => message.content,
+    );
+    expect(contents).toContain('from checkpoint');
+    expect(contents).toContain('checkpoint answer');
   });
 
   it('cancels the current handle run instead of the last session run', async () => {
@@ -1180,13 +1276,21 @@ describe('session.cancel()', () => {
     expect(cancelledIds).toEqual(['shared-cancel-session:0']);
     const updated = await store.load('shared-cancel-session');
     expect(updated!.runs.map((run) => [run.runId, run.status])).toEqual([
-      ['shared-cancel-session:0', 'aborted'],
+      ['shared-cancel-session:0', 'running'],
       ['shared-cancel-session:1', 'running'],
     ]);
 
     resolveGenerate[0]?.();
     resolveGenerate[1]?.();
     await Promise.allSettled([firstRun.result(), secondRun.result()]);
+
+    const settled = await store.load('shared-cancel-session');
+    expect(settled!.runs.map((run) => [run.runId, run.status])).toEqual([
+      ['shared-cancel-session:0', 'aborted'],
+      ['shared-cancel-session:1', 'completed'],
+    ]);
+    expect(settled!.runs[0]!.outcome?.finishReason).toBe('aborted');
+    expect(settled!.runs[1]!.outcome?.finishReason).toBe('maximum-steps');
   });
 
   it('does not cancel another run while this handle is reserving a run id', async () => {
@@ -2465,6 +2569,274 @@ function makeParkingWorkflow(sleepMs: number) {
 }
 
 describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', () => {
+  it('persists a safe error outcome when the recovered result rejects', async () => {
+    const sessionId = 'recovery-result-rejection-session';
+    const runId = `${sessionId}:0`;
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'agent',
+            userMessageId: 'originating-user-message',
+          },
+        ],
+      }),
+    );
+    const fakeEngine = {
+      resume: async () => ({
+        id: runId,
+        result: async () => {
+          throw new UnsupportedRunResultVersionError(999);
+        },
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    const recovered = await handle.recover();
+    expect(recovered).not.toBeNull();
+    await expect(recovered!.result()).rejects.toBeInstanceOf(UnsupportedRunResultVersionError);
+
+    const persisted = await store.load(sessionId);
+    const run = persisted?.runs[0];
+    expect(run?.status).toBe('error');
+    expect(run?.userMessageId).toBe('originating-user-message');
+    expect(run?.outcome).toEqual({ finishReason: 'error' });
+    expect(JSON.stringify(run?.outcome)).not.toContain('UnsupportedRunResultVersionError');
+  });
+
+  it('rejects recovered completion when a concurrent terminal classification wins', async () => {
+    const sessionId = 'recovery-terminal-conflict-session';
+    const runId = `${sessionId}:0`;
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    await baseStore.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'agent',
+            userMessageId: 'originating-user-message',
+          },
+        ],
+      }),
+    );
+    const store: SessionStore = {
+      ...baseStore,
+      async update(id, mutate) {
+        const current = await baseStore.load(id);
+        if (!current) return undefined;
+        const concurrent = {
+          ...current,
+          runs: current.runs.map((run) =>
+            run.runId === runId
+              ? {
+                  ...run,
+                  status: 'aborted' as const,
+                  outcome: { finishReason: 'aborted' as const },
+                }
+              : run,
+          ),
+        };
+        await baseStore.save(concurrent);
+        return mutate(concurrent);
+      },
+    };
+    const fakeEngine = {
+      resume: async () => ({
+        id: runId,
+        result: async () => ({
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        }),
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+    const recovered = await handle.recover();
+    expect(recovered).not.toBeNull();
+    await expect(recovered!.result()).rejects.toThrow('conflicting terminal');
+    const conflictedSession = await baseStore.load(sessionId);
+    expect(conflictedSession?.runs[0]?.status).toBe('aborted');
+  });
+
+  it('accepts an already committed matching terminal classification', async () => {
+    const sessionId = 'recovery-terminal-idempotent-session';
+    const runId = `${sessionId}:0`;
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    await baseStore.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'agent',
+            userMessageId: 'originating-user-message',
+          },
+        ],
+      }),
+    );
+    const store: SessionStore = {
+      ...baseStore,
+      async update(id, mutate) {
+        const current = await baseStore.load(id);
+        if (!current) return undefined;
+        const concurrent = {
+          ...current,
+          runs: current.runs.map((run) =>
+            run.runId === runId
+              ? {
+                  ...run,
+                  status: 'completed' as const,
+                  outcome: { finishReason: 'stop-condition' as const },
+                }
+              : run,
+          ),
+        };
+        await baseStore.save(concurrent);
+        return mutate(concurrent);
+      },
+    };
+    const fakeEngine = {
+      resume: async () => ({
+        id: runId,
+        result: async () => ({
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        }),
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+    const recovered = await handle.recover();
+    expect(recovered).not.toBeNull();
+    await expect(recovered!.result()).resolves.toMatchObject({
+      finishReason: 'stop-condition',
+    });
+  });
+
+  it('rejects recovered completion when the session disappears before commit', async () => {
+    const sessionId = 'recovery-disappeared-session';
+    const runId = `${sessionId}:0`;
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    await baseStore.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'agent',
+            userMessageId: 'originating-user-message',
+          },
+        ],
+      }),
+    );
+    const store: SessionStore = {
+      ...baseStore,
+      async update() {
+        return undefined;
+      },
+    };
+    const fakeEngine = {
+      resume: async () => ({
+        id: runId,
+        result: async () => ({
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        }),
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+    const recovered = await handle.recover();
+    expect(recovered).not.toBeNull();
+    await expect(recovered!.result()).rejects.toThrow('disappeared');
+  });
+
   it('returns null when engine is present but session has no running run', async () => {
     const storage = new MemoryStorage();
     const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
@@ -2853,6 +3225,85 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     }
   });
 
+  it('holds recovered terminal events until the terminal session write commits', async () => {
+    const sessionId = 'recovered-event-commit-barrier-session';
+    const runId = `${sessionId}:0`;
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'agent',
+          },
+        ],
+      }),
+    );
+
+    const terminalCommit = Promise.withResolvers<void>();
+    const delayedStore: SessionStore = {
+      ...store,
+      async update(...args) {
+        const updated = await store.update(...args);
+        if (updated?.runs.find((run) => run.runId === runId)?.status !== 'running') {
+          await terminalCommit.promise;
+        }
+        return updated;
+      },
+    };
+    const resultReady = Promise.withResolvers<void>();
+    const engine = {
+      resume: async () => ({
+        id: runId,
+        result: async () => {
+          resultReady.resolve();
+          return {
+            schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+            runId,
+            steps: 1,
+            content: 'recovered answer',
+            finishReason: 'stop-condition',
+          };
+        },
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const checkpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: 'recovered answer', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+    const handle = createSessionHandle(sessionId, {
+      store: delayedStore,
+      agentName: 'agent',
+      engine,
+      checkpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    const recovered = await handle.recover();
+    expect(recovered).not.toBeNull();
+    const events: string[] = [];
+    const consuming = (async () => {
+      for await (const event of recovered!) events.push(event.type);
+    })();
+    await resultReady.promise;
+    await yieldToPortableEventLoop();
+    expect(events).not.toContain('run.completed');
+
+    terminalCommit.resolve();
+    await recovered!.result();
+    await consuming;
+    expect(events).toContain('run.completed');
+  });
+
   it('AB-29: a mixed outcome reports the newer rejection alongside the older successful reattach', async () => {
     const storage = new MemoryStorage();
     const sessionId = 'd2-mixed-outcome-session';
@@ -3232,6 +3683,48 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
     return store;
   }
 
+  it('surfaces a session disappearance during terminal reconciliation', async () => {
+    const sessionId = 'ab-28-reconcile-disappeared-session';
+    const runId = `${sessionId}:0`;
+    const baseStore = await seedRunningSession(sessionId, runId);
+    const store: SessionStore = {
+      ...baseStore,
+      async update() {
+        return undefined;
+      },
+    };
+    const engine = {
+      get: async () => ({
+        id: runId,
+        status: 'completed',
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        },
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const checkpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    await expect(
+      reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, {
+        runId,
+        sequence: 0,
+        status: 'running',
+        startedAt: fixtureRuntime.clock.nowISO(),
+        agentName: 'agent',
+      }),
+    ).rejects.toThrow('disappeared while reconciling');
+  });
+
   it('reconciles a completed recovered run to "completed" and applies its conversation history', async () => {
     const sessionId = 'ab-28-completed-session';
     const runId = `${sessionId}:0`;
@@ -3592,6 +4085,85 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
 // ---------------------------------------------------------------------------
 
 describe('session.monitor()', () => {
+  function createMonitorForRun(run: unknown) {
+    const runtime = createManualRuntimeServices();
+    const watchdog = {
+      recordPulse() {},
+      assess: () => ({
+        reachability: 'unknown' as const,
+        progress: 'unknown' as const,
+        missedPulseCount: 0,
+        evidence: [],
+      }),
+      dispose() {},
+    };
+    return createSessionMonitor({
+      sessionId: 'direct-monitor-test',
+      emitter: new TypedEventTarget<OperativeEventMap>(),
+      runtime,
+      livenessClock: {
+        now: () => 0,
+        setTimeout: () => 'watchdog',
+        clearTimeout: () => {},
+      },
+      setTimeoutFunction: () => 'timer',
+      clearTimeoutFunction: () => {},
+      run: () => run as AgentRun,
+      setLivenessState: () => {},
+      processLocalDelay: async () => {},
+      processLocalAbortError: () => new DOMException('aborted', 'AbortError'),
+      parseDuration: () => 1,
+      getWatchdog: () => watchdog,
+      setWatchdog: () => {},
+      setWatchdogCadence: () => {},
+      advanceLiveness: () => {},
+    });
+  }
+
+  it('propagates an infrastructure rejection from the monitored run', async () => {
+    const error = new Error('infrastructure failure');
+    const monitor = createMonitorForRun({
+      result: async () => {
+        throw error;
+      },
+      abort: () => {},
+    });
+
+    await expect(monitor({ every: 1, input: 'check', until: () => false })).rejects.toBe(error);
+  });
+
+  it('synthesizes an error when a monitored run reports a failed finish reason without one', async () => {
+    const monitor = createMonitorForRun({
+      result: async () => ({ finishReason: 'error' }),
+      abort: () => {},
+    });
+
+    await expect(monitor({ every: 1, input: 'check', until: () => false })).rejects.toThrow(
+      "monitor tick ended with finishReason 'error'",
+    );
+  });
+
+  it('propagates a rejected run result and emits a failed monitor completion', async () => {
+    const error = new Error('monitor run failed');
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const handle = createSessionHandle('monitor-run-error', {
+      store,
+      agentName: 'test-agent',
+      runOptions: createTestRunOptions(async () => {
+        throw error;
+      }),
+    });
+    const doneEvents: SessionMonitorDoneEvent[] = [];
+    handle.emitter.addEventListener(SessionMonitorDoneEvent.type, (event) => {
+      doneEvents.push(event);
+    });
+
+    await expect(
+      handle.monitor({ every: 'PT1H', input: 'check', until: () => false }),
+    ).rejects.toMatchObject({ message: error.message, kind: 'generate' });
+    expect(doneEvents.at(-1)?.met).toBe(false);
+  });
+
   it('does not emit a monitor tick when the signal is already aborted', async () => {
     const { handle } = createSessionHandleFixture();
     let tickEvents = 0;
@@ -4228,6 +4800,111 @@ describe('regression: [Symbol.dispose]() forwards to the durable inner run (PRRT
 // ---------------------------------------------------------------------------
 
 describe('regression: cancel() only persists aborted status when engine.cancel() succeeds (PRRT_kwDORvupsc6MZ-vp)', () => {
+  it('persists a safe aborted outcome and preserves the originating user message id', async () => {
+    const sessionId = 'cancel-success-session';
+    const runId = `${sessionId}:0`;
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(
+      createAgentSession({
+        agentName: 'durable-agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'durable-agent',
+            userMessageId: 'originating-user-message',
+          },
+        ],
+      }),
+    );
+    const engine = {
+      cancel: async () => {},
+      get: async () => ({ id: runId, status: 'cancelled' }),
+    } as unknown as RegistryAgnosticEngine;
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'durable-agent',
+      engine,
+      runOptions: { generate: createInstantGenerate(), toolbox: createToolbox([]) },
+    });
+
+    await handle.cancel();
+
+    const persisted = await store.load(sessionId);
+    const run = persisted?.runs[0];
+    expect(run?.status).toBe('aborted');
+    expect(run?.userMessageId).toBe('originating-user-message');
+    expect(run?.outcome).toEqual({ finishReason: 'aborted' });
+  });
+
+  it('preserves a fresh terminal status written while engine.cancel is pending', async () => {
+    const sessionId = 'cancel-concurrent-terminal-session';
+    const runId = `${sessionId}:0`;
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(
+      createAgentSession({
+        agentName: 'durable-agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'durable-agent',
+            userMessageId: 'originating-user-message',
+          },
+        ],
+      }),
+    );
+    const cancelStarted = Promise.withResolvers<void>();
+    const releaseCancel = Promise.withResolvers<void>();
+    const engine = {
+      cancel: async () => {
+        cancelStarted.resolve();
+        await releaseCancel.promise;
+      },
+      get: async () => ({ id: runId, status: 'cancelled' }),
+    } as unknown as RegistryAgnosticEngine;
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'durable-agent',
+      engine,
+      runOptions: { generate: createInstantGenerate(), toolbox: createToolbox([]) },
+    });
+
+    const cancelling = handle.cancel();
+    await cancelStarted.promise;
+    await store.update(sessionId, (session) =>
+      session
+        ? {
+            ...session,
+            runs: session.runs.map((run) =>
+              run.runId === runId
+                ? {
+                    ...run,
+                    status: 'completed' as const,
+                    outcome: { finishReason: 'stop-condition' as const },
+                  }
+                : run,
+            ),
+          }
+        : undefined,
+    );
+    releaseCancel.resolve();
+    await cancelling;
+
+    const persisted = await store.load(sessionId);
+    const run = persisted?.runs[0];
+    expect(run?.status).toBe('completed');
+    expect(run?.outcome).toEqual({ finishReason: 'stop-condition' });
+  });
+
   it('does not update the session store to aborted when engine.cancel() throws', async () => {
     const fakeEngine = {
       cancel: async (_id: string) => {
@@ -4752,6 +5429,39 @@ describe('regression: recover() persists terminal state after recovered run sett
 });
 
 describe('regression: session terminal commits preserve concurrent state', () => {
+  it('rejects when the reservation update does not invoke its mutator', async () => {
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    const store: SessionStore = {
+      ...baseStore,
+      async update() {
+        return undefined;
+      },
+    };
+    const handle = createSessionHandle('reservation-noop-session', {
+      store,
+      agentName: 'agent',
+      runOptions: createTestRunOptions(),
+    });
+
+    await expect(handle.run('prompt').result()).rejects.toThrow('Failed to reserve a run');
+  });
+
+  it('rejects when the runtime cannot mint an originating user message id', async () => {
+    const runtime = createManualRuntimeServices();
+    Object.defineProperty(runtime.identifiers, 'next', { value: () => '' });
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const handle = createSessionHandle('reservation-empty-user-id', {
+      store,
+      agentName: 'agent',
+      runtime,
+      runOptions: createTestRunOptions(),
+    });
+
+    await expect(handle.run('prompt').result()).rejects.toThrow(
+      'Failed to identify the user message',
+    );
+  });
+
   it('rejects the run when its terminal session update becomes a no-op', async () => {
     const sessionId = 'terminal-commit-deleted-session';
     const baseStore = createSessionStore(textValueStore(new MemoryStorage()));

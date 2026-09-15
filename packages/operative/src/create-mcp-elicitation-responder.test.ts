@@ -137,23 +137,96 @@ describe('createMcpElicitationResponder', () => {
     expect(resolved[0]?.accepted).toBe(false);
   });
 
-  it('drops non-object accept data instead of forwarding it as content', async () => {
+  it.each(['not-an-object', null])(
+    'drops non-object accept data %p without treating acceptance as decline',
+    async (data) => {
+      const responder = createMcpElicitationResponder({
+        onElicitation: async (request) =>
+          ({
+            requestId: request.requestId,
+            toolCallId: request.toolCallId,
+            data,
+          }) as any,
+        getContext: makeContext,
+      });
+
+      const result = await responder({
+        message: 'Approve?',
+        mode: 'form',
+        schema: { type: 'object' },
+      });
+
+      expect(result).toEqual({ action: 'accept', content: undefined });
+    },
+  );
+
+  it.each(['request', 'tool'] as const)(
+    'rejects a mismatched %s identity without an accepted event',
+    async (identity) => {
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      const resolved: ElicitationResolvedEvent[] = [];
+      emitter.addEventListener(ElicitationResolvedEvent.type, (event) => resolved.push(event));
+      const responder = createMcpElicitationResponder({
+        getContext: makeContext,
+        emitter,
+        onElicitation: async (request) => ({
+          requestId: identity === 'request' ? 'retired-request' : request.requestId,
+          ...(identity === 'tool' ? { toolCallId: 'unrelated-tool' } : {}),
+          data: request.schema.parse({ approved: true }),
+        }),
+      });
+      await expect(
+        responder({ message: 'Approve?', mode: 'form', schema: { type: 'object' } }),
+      ).rejects.toThrow('Elicitation response did not match its request.');
+      expect(resolved).toHaveLength(0);
+    },
+  );
+
+  it('freezes each logical request and preserves the host context', async () => {
+    const context = makeContext();
+    const identities: string[] = [];
     const responder = createMcpElicitationResponder({
-      onElicitation: async (request) =>
-        ({
-          requestId: request.requestId,
-          toolCallId: request.toolCallId,
-          data: 'not-an-object',
-        }) as any,
-      getContext: makeContext,
+      getContext: () => context,
+      onElicitation: async (request) => {
+        expect(Object.isFrozen(request)).toBe(true);
+        expect(Reflect.set(request, 'requestId', 'replacement')).toBe(false);
+        expect(request.context).toBe(context);
+        identities.push(request.requestId);
+        return { requestId: request.requestId, data: request.schema.parse({}) };
+      },
     });
+    await Promise.all([
+      responder({ message: 'Repeat', mode: 'form' }),
+      responder({ message: 'Repeat', mode: 'form' }),
+    ]);
+    expect(new Set(identities).size).toBe(2);
+  });
 
-    const result = await responder({
-      message: 'Approve?',
-      mode: 'form',
-      schema: { type: 'object' },
+  it('retires a cancelled request before a late answer arrives', async () => {
+    const controller = new AbortController();
+    const context = { ...makeContext(), signal: controller.signal };
+    const entered = Promise.withResolvers<void>();
+    const answer = Promise.withResolvers<void>();
+    const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+    const resolved: ElicitationResolvedEvent[] = [];
+    emitter.addEventListener(ElicitationResolvedEvent.type, (event) => resolved.push(event));
+    const responder = createMcpElicitationResponder({
+      getContext: () => context,
+      emitter,
+      onElicitation: async (request) => {
+        entered.resolve();
+        await answer.promise;
+        return { requestId: request.requestId, data: request.schema.parse({}) };
+      },
     });
-
-    expect(result).toEqual({ action: 'accept', content: undefined });
+    const result = responder({ message: 'Approve?', mode: 'form' });
+    await entered.promise;
+    controller.abort();
+    expect(await result).toEqual({ action: 'decline' });
+    expect(resolved.map((event) => event.accepted)).toEqual([false]);
+    answer.resolve();
+    await answer.promise;
+    await Promise.resolve();
+    expect(resolved.map((event) => event.accepted)).toEqual([false]);
   });
 });

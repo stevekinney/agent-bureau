@@ -142,7 +142,10 @@ export interface SessionHandle {
    * Deliberate stop — abort the `generate` `AbortController` IMMEDIATELY (stops the
    * provider call and stops billing), AND terminate the Weft workflow in parallel
    * (stops the next step from starting). Does NOT rely on Weft termination reaching
-   * the in-flight call.
+   * the in-flight call. The attached run owns its terminal persistence;
+   * await that run's result() to observe the committed outcome and transcript.
+   * Without an attached run, reconcile the actual durable terminal state and
+   * checkpoint history when configured, retaining existing history otherwise.
    *
    * "Disconnect ≠ stop" is resolved by having both `recover()` (keep going) and
    * `cancel()` (deliberate stop) as distinct verbs.

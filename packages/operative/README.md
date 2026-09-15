@@ -306,6 +306,8 @@ const onElicitation: OnElicitation = async (request) => ({
 
 Each persisted `RunRef` carries the exact `userMessageId` when available and a safe terminal `outcome`. Both fields are optional for older records, so an absent `outcome` does not mean the run completed successfully. Engine-level cancellation is recorded as `{ finishReason: 'aborted' }`; engine failure and timeout are recorded as `{ finishReason: 'error' }`.
 
+`session.cancel()` requests cancellation immediately. An attached run owns the terminal transaction: await its `result()` to observe the persisted outcome and final transcript. Without an attached run, cancellation reconciles the engine’s actual terminal state and available checkpoint history; without a checkpoint store, it retains the session’s existing history. A matching terminal record keeps its classification and known rows while accepting missing transcript rows from the same run. Cancellation cannot clear a newer run’s handle or overwrite another terminal classification.
+
 Pass an `AbortSignal` to clear the active timer and stop the operation:
 
 ```typescript

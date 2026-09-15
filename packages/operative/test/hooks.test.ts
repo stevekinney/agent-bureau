@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
+import { ToolSettledBubbleEvent } from '../src/events';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -115,6 +116,60 @@ describe('step hooks', () => {
 
     expect(executedLocations).toEqual(['Denver']);
     expect(result.steps[0].results).toHaveLength(2);
+  });
+
+  it('seals all-filtered, mixed, and hook-failed tool calls with exact event payload parity', async () => {
+    for (const mode of ['all-filtered', 'mixed', 'hook-failure'] as const) {
+      let executions = 0;
+      const trackingTool = createTool({
+        name: 'lookup',
+        description: 'Lookup fixture',
+        input: z.object({}),
+        execute: async () => {
+          executions += 1;
+          return 'found';
+        },
+      });
+      const conversation = new Conversation();
+      const activeRun = createActiveRun({
+        generate: async () => ({
+          content: '',
+          toolCalls: [
+            { id: 'call-a', name: 'lookup', arguments: {} },
+            { id: 'call-b', name: 'lookup', arguments: {} },
+          ],
+        }),
+        toolbox: createTestToolbox([trackingTool]),
+        conversation,
+        maximumSteps: 1,
+        beforeToolExecution: async ({ toolCalls }) => {
+          if (mode === 'hook-failure') throw new Error('hook failure');
+          return mode === 'mixed' ? toolCalls.slice(0, 1) : [];
+        },
+      });
+      const settled: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.settled', (event) => {
+        settled.push(event);
+      });
+
+      const result = await activeRun.result;
+      const toolResults = conversation
+        .getMessages({ includeHidden: true })
+        .filter((message) => message.role === 'tool-result');
+      expect(toolResults).toHaveLength(2);
+      expect(settled).toHaveLength(2);
+      expect(settled.map((event) => event.toolCallId).toSorted()).toEqual(['call-a', 'call-b']);
+      for (const message of toolResults) {
+        const toolResult = message.toolResult;
+        expect(toolResult).toBeDefined();
+        const event = settled.find((candidate) => candidate.toolCallId === toolResult?.callId);
+        expect(event).toBeDefined();
+        expect(event?.status).toBe(toolResult?.outcome === 'success' ? 'success' : 'error');
+        expect(event?.result).toEqual(toolResult?.content);
+      }
+      expect(result.steps[0]?.results ?? []).toHaveLength(mode === 'mixed' ? 2 : 0);
+      expect(executions).toBe(mode === 'mixed' ? 1 : 0);
+    }
   });
 
   it('seals tool calls a beforeToolExecution hook filters out (tool-pair integrity)', async () => {

@@ -85,8 +85,6 @@ export function createSessionRecovery(
               if (isTerminalRunEvent(event)) pendingRecoveredTerminalEvents.push(event);
               else recoveredEventBarrier.dispatchEvent(event);
             },
-            error: () => recoveredEventBarrier.complete(),
-            complete: () => {},
           });
           state.currentRunId = runId;
           // Persist terminal state when the recovered run settles, mirroring
@@ -108,6 +106,7 @@ export function createSessionRecovery(
               terminalOutcome = runOutcomeFromResult(settled);
             } catch (error) {
               runError = error;
+              terminalOutcome = { finishReason: 'error' };
               // Recovered run rejected (e.g. engine failure). Leave status 'error';
               // no conversation update — the run never produced a clean result.
             }
@@ -130,13 +129,15 @@ export function createSessionRecovery(
                   ) {
                     throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
                   }
-                  return freshSession;
                 }
-                const terminalRef: RunRef = {
-                  ...currentRef,
-                  status: terminalStatus,
-                  outcome: terminalOutcome,
-                };
+                const terminalRef: RunRef =
+                  currentRef.status !== 'running'
+                    ? currentRef
+                    : {
+                        ...currentRef,
+                        status: terminalStatus,
+                        outcome: terminalOutcome,
+                      };
                 return {
                   ...freshSession,
                   ...(terminalConversation !== undefined

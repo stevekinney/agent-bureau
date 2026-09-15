@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
-import type { ElicitationRequestedEvent, ElicitationResolvedEvent } from '../src/events';
+import { type ElicitationRequestedEvent, ElicitationResolvedEvent } from '../src/events';
 import { createRunRecorder } from '../src/test/index';
 import type {
   ElicitationRequest,
@@ -377,6 +377,8 @@ describe('elicitation', () => {
     let releaseSecond!: () => void;
     let invocation = 0;
     const requestIds: string[] = [];
+    const resolvedEvents: ElicitationResolvedEvent[] = [];
+    let cancelledAnswer: unknown = 'unsettled';
     const onElicitation: OnElicitation = async <T>(request: ElicitationRequest<T>) => {
       requestIds.push(request.requestId);
       await new Promise<void>((resolve) => {
@@ -389,7 +391,7 @@ describe('elicitation', () => {
         data: request.schema.parse({ confirmed: true }),
       };
     };
-    const firstResultPromise = run({
+    const firstActiveRun = createActiveRun({
       generate: async () => textResponse('Done'),
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
@@ -397,14 +399,22 @@ describe('elicitation', () => {
       signal: controller.signal,
       onElicitation,
       prepareStep: async ({ elicit }) => {
-        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
+        cancelledAnswer = await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
       },
     });
+    firstActiveRun.addEventListener(ElicitationResolvedEvent.type, (event) => {
+      resolvedEvents.push(event);
+    });
+    const firstResultPromise = firstActiveRun.result;
     while (!releaseFirst) await Promise.resolve();
     controller.abort('cancelled');
     releaseFirst();
     const firstResult = await firstResultPromise;
     expect(firstResult.finishReason).toBe('aborted');
+    expect(cancelledAnswer).toBeNull();
+    expect(resolvedEvents).toHaveLength(1);
+    expect(resolvedEvents[0]?.accepted).toBe(false);
+    expect(resolvedEvents[0]?.requestId).toBe(requestIds[0]);
 
     const secondResultPromise = run({
       generate: async () => textResponse('Done'),

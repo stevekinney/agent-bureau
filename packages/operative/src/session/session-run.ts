@@ -261,18 +261,13 @@ export function createSessionRun(
             });
           }
         },
-        error: () => {},
-        complete: () => {},
       });
 
       let innerResult: RunResult;
       try {
         innerResult = await innerRun.result;
       } catch (err) {
-        // The inner run threw (e.g. engine rejected). Transition the
-        // persisted ref from 'running' → 'error' so the store is not left
-        // with a permanently-running ref that signal()/recover() would act on
-        // after the run is already dead.
+        // Persist infrastructure failure and its originating turn before rejection.
         subscription.unsubscribe();
         try {
           const committedSession = await store.update(sessionId, (freshSession) => {
@@ -287,15 +282,18 @@ export function createSessionRun(
               ) {
                 throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
               }
-              return freshSession;
             }
-            const errorRef: RunRef = {
-              ...currentRef,
-              status: 'error',
-              outcome: { finishReason: 'error' },
-            };
+            const errorRef: RunRef =
+              currentRef.status === 'running'
+                ? { ...currentRef, status: 'error', outcome: { finishReason: 'error' } }
+                : currentRef;
             return {
               ...freshSession,
+              conversationHistory: appendConversationMessages(
+                freshSession.conversationHistory,
+                seededConversation.current,
+                seededConversation.current,
+              ),
               runs: freshSession.runs.map((r) => (r.runId === runId ? errorRef : r)),
             };
           });
@@ -324,29 +322,29 @@ export function createSessionRun(
         if (!freshSession) return undefined;
         const currentRef = freshSession.runs.find((run) => run.runId === runId);
         if (!currentRef) return undefined;
-        if (currentRef.status !== 'running') {
-          const localStatus = finishReasonToStatus(innerResult.finishReason);
-          if (
-            currentRef.status !== localStatus ||
+        const alreadyTerminal = currentRef.status !== 'running';
+        if (
+          alreadyTerminal &&
+          (currentRef.status !== finishReasonToStatus(innerResult.finishReason) ||
             (currentRef.outcome?.finishReason !== undefined &&
-              currentRef.outcome.finishReason !== innerResult.finishReason)
-          ) {
-            throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
-          }
-          return freshSession;
+              currentRef.outcome.finishReason !== innerResult.finishReason))
+        ) {
+          throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
         }
-        const terminalRef: RunRef = {
-          ...currentRef,
-          status: finishReasonToStatus(innerResult.finishReason),
-          userMessageId,
-          outcome: runOutcomeFromResult(innerResult),
-        };
+        const terminalRef: RunRef = alreadyTerminal
+          ? currentRef
+          : {
+              ...currentRef,
+              status: finishReasonToStatus(innerResult.finishReason),
+              userMessageId,
+              outcome: runOutcomeFromResult(innerResult),
+            };
         return {
           ...freshSession,
           conversationHistory: appendConversationMessages(
             freshSession.conversationHistory,
             innerResult.conversation.current,
-            baseConversationHistory,
+            alreadyTerminal ? innerResult.conversation.current : baseConversationHistory,
           ),
           runs: freshSession.runs.map((r) => (r.runId === runId ? terminalRef : r)),
         };

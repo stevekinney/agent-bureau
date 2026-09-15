@@ -14,7 +14,7 @@ import {
 import type { EventDispatcher, RunState, StepDeps } from './run-step';
 import type { ElicitationOptions, ElicitationResponse, OnElicitation, TokenUsage } from './types';
 
-export function createElicit(
+export function createElicitationRequester(
   step: number,
   onElicitation: OnElicitation,
   conversation: Conversation,
@@ -26,7 +26,7 @@ export function createElicit(
     message: string,
     schema: ZodType<T>,
     options?: ElicitationOptions,
-  ): Promise<T | null> => {
+  ): Promise<ElicitationResponse<T>> => {
     const requestId = runtime.identifiers.next('elicitation');
     // Capture the caller-supplied correlation before invoking the callback.
     // Hooks may mutate their options object while the callback is pending;
@@ -74,6 +74,19 @@ export function createElicit(
     }
     const accepted = response !== null;
     emitter?.dispatch(new ElicitationResolvedEvent(step, accepted, requestId, toolCallId));
+    return response;
+  };
+}
+
+/** Projects the shared request lifecycle to the hook's data-or-null contract. */
+export function createElicit(...parameters: Parameters<typeof createElicitationRequester>) {
+  const request = createElicitationRequester(...parameters);
+  return async <T>(
+    message: string,
+    schema: ZodType<T>,
+    options?: ElicitationOptions,
+  ): Promise<T | null> => {
+    const response = await request(message, schema, options);
     return response === null ? null : response.data;
   };
 }
