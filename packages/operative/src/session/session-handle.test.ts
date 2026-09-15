@@ -4284,8 +4284,169 @@ describe('AB-28: recover() reconciles a RunRef whose recovered run is already te
     const persisted = await store.load(sessionId);
     const run = persisted?.runs.find((r) => r.runId === runId);
     expect(run?.status).toBe('aborted');
-    expect(run?.outcome).toEqual({ finishReason: 'aborted' });
+    expect(run?.outcome).toEqual({
+      finishReason: 'aborted',
+      error: { kind: 'abort', code: 'ABORTED' },
+    });
   });
+
+  it.each([
+    {
+      name: 'maximum-steps',
+      finishReason: 'maximum-steps',
+      expected: {
+        finishReason: 'maximum-steps',
+        error: { kind: 'policy', code: 'MAXIMUM_STEPS' },
+      },
+    },
+    {
+      name: 'aborted',
+      finishReason: 'aborted',
+      expected: { finishReason: 'aborted', error: { kind: 'abort', code: 'ABORTED' } },
+    },
+    {
+      name: 'elicitation denied',
+      finishReason: 'elicitation-denied',
+      expected: {
+        finishReason: 'elicitation-denied',
+        error: { kind: 'policy', code: 'ELICITATION_DENIED' },
+      },
+    },
+    {
+      name: 'budget exceeded',
+      finishReason: 'budget-exceeded',
+      expected: {
+        finishReason: 'budget-exceeded',
+        error: { kind: 'policy', code: 'BUDGET_EXCEEDED' },
+      },
+    },
+    {
+      name: 'tripwire',
+      finishReason: 'tripwire',
+      expected: { finishReason: 'tripwire', error: { kind: 'policy', code: 'TRIPWIRE' } },
+    },
+    {
+      name: 'default error classifier',
+      finishReason: 'error',
+      errorMessage: 'private default error canary',
+      expected: { finishReason: 'error', error: { kind: 'generate', code: 'UNKNOWN' } },
+    },
+    {
+      name: 'maximum-steps precedence',
+      finishReason: 'maximum-steps',
+      errorKind: 'generate',
+      errorCode: 'UNKNOWN',
+      expected: {
+        finishReason: 'maximum-steps',
+        error: { kind: 'policy', code: 'MAXIMUM_STEPS' },
+      },
+    },
+    {
+      name: 'explicit classifier',
+      finishReason: 'error',
+      errorMessage: 'private classifier canary',
+      errorKind: 'policy',
+      errorCode: 'TRIPWIRE',
+      expected: { finishReason: 'error', error: { kind: 'policy', code: 'TRIPWIRE' } },
+    },
+    {
+      name: 'schema failure fallback',
+      finishReason: 'stop-condition',
+      schemaValidation: { success: false, error: 'private schema canary' },
+      expected: {
+        finishReason: 'stop-condition',
+        error: { kind: 'output', code: 'INVALID_OUTPUT' },
+      },
+    },
+    {
+      name: 'successful stop',
+      finishReason: 'stop-condition',
+      expected: { finishReason: 'stop-condition' },
+    },
+  ])('preserves detached completed classifier: $name', async (caseData) => {
+    const sessionId = `ab-28-completed-classifier-${caseData.name.replaceAll(' ', '-')}`;
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+    const fakeEngine = {
+      get: async (id: string) => ({
+        id,
+        status: 'completed',
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId: id,
+          steps: 1,
+          content: 'done',
+          finishReason: caseData.finishReason,
+          ...('errorMessage' in caseData ? { errorMessage: caseData.errorMessage } : {}),
+          ...('errorKind' in caseData ? { errorKind: caseData.errorKind } : {}),
+          ...('errorCode' in caseData ? { errorCode: caseData.errorCode } : {}),
+          ...('schemaValidation' in caseData
+            ? { schemaValidation: caseData.schemaValidation }
+            : {}),
+        },
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const checkpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+    await reconcileTerminalRunRef(store, fakeEngine, checkpointStore, sessionId, {
+      runId,
+      sequence: 0,
+      status: 'running',
+      startedAt: fixtureRuntime.clock.nowISO(),
+      agentName: 'agent',
+    });
+
+    const persisted = await store.load(sessionId);
+    expect(persisted?.runs[0]?.outcome).toEqual(caseData.expected);
+    expect(JSON.stringify(persisted?.runs[0]?.outcome)).not.toContain('private');
+  });
+
+  it.each([
+    {
+      status: 'cancelled',
+      expected: { finishReason: 'aborted', error: { kind: 'abort', code: 'ABORTED' } },
+    },
+    { status: 'failed', expected: { finishReason: 'error' } },
+    {
+      status: 'timed-out',
+      expected: { finishReason: 'error', error: { kind: 'generate', code: 'UNKNOWN' } },
+    },
+  ] as const)(
+    'preserves detached engine-state classifier: $status',
+    async ({ status, expected }) => {
+      const sessionId = `ab-28-engine-classifier-${status}`;
+      const runId = `${sessionId}:0`;
+      const store = await seedRunningSession(sessionId, runId);
+      const fakeEngine = {
+        get: async (id: string) => ({ id, status, error: 'private engine canary' }),
+      } as unknown as RegistryAgnosticEngine;
+      const checkpointStore = {
+        loadCheckpoint: async () => ({
+          conversation: null,
+          cursor: { totalUsage: {}, lastContent: '', schemaAttempts: 0 },
+          steps: [],
+        }),
+      } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+
+      await reconcileTerminalRunRef(store, fakeEngine, checkpointStore, sessionId, {
+        runId,
+        sequence: 0,
+        status: 'running',
+        startedAt: fixtureRuntime.clock.nowISO(),
+        agentName: 'agent',
+      });
+
+      const persisted = await store.load(sessionId);
+      expect(persisted?.runs[0]?.outcome).toEqual(expected);
+      expect(JSON.stringify(persisted?.runs[0]?.outcome)).not.toContain('private');
+    },
+  );
 
   it('reconciles a genuinely failed Weft-level workflow to "error"', async () => {
     const sessionId = 'ab-28-failed-session';
@@ -5248,7 +5409,10 @@ describe('regression: cancel() only persists aborted status when engine.cancel()
     const run = persisted?.runs[0];
     expect(run?.status).toBe('aborted');
     expect(run?.userMessageId).toBe('originating-user-message');
-    expect(run?.outcome).toEqual({ finishReason: 'aborted' });
+    expect(run?.outcome).toEqual({
+      finishReason: 'aborted',
+      error: { kind: 'abort', code: 'ABORTED' },
+    });
   });
 
   it('preserves a fresh terminal status written while engine.cancel is pending', async () => {

@@ -5,6 +5,7 @@ import type { RuntimeServices } from 'lifecycle';
 
 import type { RunEvent } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
+import { reconstructTerminalRunError } from '../durable/active-run-result-reconstruction';
 import type { CheckpointStore } from '../durable/checkpoint-store';
 import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import { normalizeAgentRunWorkflowResult } from '../durable/run-workflow-result';
@@ -244,11 +245,17 @@ async function readTerminalRunOutcome(
   const conversation = await loadTerminalConversationHistory(checkpointStore, runId);
 
   if (state.status !== 'completed') {
+    const finishReason = state.status === 'cancelled' ? 'aborted' : 'error';
+    const terminalError =
+      state.status === 'cancelled' || state.status === 'timed-out'
+        ? reconstructTerminalRunError({ finishReason, steps: 0 })
+        : undefined;
     return {
       status: engineStatusToRunRefStatus(state.status),
       conversation,
       outcome: {
-        finishReason: state.status === 'cancelled' ? 'aborted' : 'error',
+        finishReason,
+        ...(terminalError ? { error: { kind: terminalError.kind, code: terminalError.code } } : {}),
       },
     };
   }
@@ -256,15 +263,25 @@ async function readTerminalRunOutcome(
   // The workflow's own declared return type — the same trusted-internal-
   // contract cast `active-run-adapter.ts` makes after `handle.result()`.
   const summary = normalizeAgentRunWorkflowResult(state.result);
+  const terminalError = reconstructTerminalRunError({
+    finishReason: summary.finishReason,
+    steps: summary.steps,
+    errorMessage: summary.errorMessage,
+    errorKind: summary.errorKind,
+    errorCode: summary.errorCode,
+    abortReason: summary.abortReason,
+    schemaValidation: summary.schemaValidation,
+    tripwire: summary.tripwire,
+  });
   return {
     status: finishReasonToStatus(summary.finishReason),
     conversation,
     outcome: {
       finishReason: summary.finishReason,
-      ...(summary.errorKind !== undefined && summary.errorCode !== undefined
-        ? { error: { kind: summary.errorKind, code: summary.errorCode } }
+      ...(terminalError
+        ? { error: { kind: terminalError.kind, code: terminalError.code } }
         : summary.schemaValidation?.success === false
-          ? { error: { kind: 'output', code: 'INVALID_OUTPUT' } }
+          ? { error: { kind: 'output' as const, code: 'INVALID_OUTPUT' as const } }
           : {}),
     },
   };
