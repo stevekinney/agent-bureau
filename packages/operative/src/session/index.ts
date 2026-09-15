@@ -16,6 +16,7 @@ export {
   NoDurableEngineError,
   NoRunningRunError,
 } from './session-handle';
+export { MissingRunOptionsError } from './session-handle-types';
 export type { ResumeSessionOptions, ResumeSessionResult } from './session-resume';
 export { resumeSession } from './session-resume';
 export type {

@@ -3,7 +3,7 @@ import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import {
   AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
   type AgentRunWorkflowResult,
-} from '../durable/run-workflow';
+} from '../durable/run-workflow-result';
 
 /**
  * Counts calls to an engine's `suspend`/`resume`/`cancel` so tests can prove

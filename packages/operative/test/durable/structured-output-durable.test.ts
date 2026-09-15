@@ -8,11 +8,11 @@ import { z } from 'zod';
 import { createCheckpointStore } from '../../src/durable/checkpoint-store';
 import { createRunEngine } from '../../src/durable/create-run-engine';
 import { resumeDurableRunResult, startDurableRunResult } from '../../src/durable/index';
+import { createRunWorkflow } from '../../src/durable/run-workflow';
 import {
   AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
-  createRunWorkflow,
   normalizeAgentRunWorkflowResult,
-} from '../../src/durable/run-workflow';
+} from '../../src/durable/run-workflow-result';
 import { stopWhen } from '../../src/index';
 import { UnsupportedRunResultVersionError } from '../../src/run-envelope';
 

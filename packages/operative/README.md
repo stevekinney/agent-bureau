@@ -100,6 +100,8 @@ console.log(result.finishReason); // "stop-condition"
 
 `createAgent().run()` returns a non-thenable `AgentRun` handle: iterate it directly for events, or call `.result()` for the terminal `RunResult`. For the full event-emitting surface (`addEventListener`, `on`, `subscribe`, …) reach for `createActiveRun()` — the lower-level factory `createAgent` builds on — which returns an `ActiveRun` instead. Attach listeners before awaiting `result`—the loop defers its first microtask so you never miss the opening events:
 
+`result()` resolves for an ordinary completed, errored, or cancelled run and carries the classification in `finishReason`; `abort()` is therefore observed as `finishReason: 'aborted'`. A persistence or infrastructure failure rejects `result()` so a caller cannot mistake an uncommitted terminal run for success. The promise remains cached, including after rejection. `abort()` is synchronous request signaling; await `result()` when the caller needs the terminal outcome.
+
 ```typescript
 import { Conversation } from 'conversationalist';
 import { createActiveRun, stopWhen } from '@lostgradient/operative';
@@ -278,6 +280,36 @@ const resumedResult = await toolbox.resumeApproval(signedApproval, {
 
 `SessionHandle.sleep()` and `SessionHandle.monitor()` are host-process conveniences. Both use local timers, so process exit loses the outstanding delay or monitor loop even when the session has a durable engine. Individual monitor ticks can still be durable runs; the monitor controller itself is not persisted or recovered.
 
+For a process that only needs to reconnect to an existing durable run, construct the handle with the same session store, engine, and checkpoint store, then call `await session.recover()` without calling `run()` first. Recovery returns `null` when no run is available or when an engine resume fails, and emits `session.recover` failures for inspection, including a reconciliation persistence failure. `run()` requires configured `runOptions` and throws `MissingRunOptionsError` synchronously before reserving a run when they are absent.
+
+```typescript
+const session = createSessionHandle(sessionId, {
+  store,
+  agentName: 'assistant',
+  engine,
+  checkpointStore,
+  // No runOptions are needed for this recover-only path.
+});
+const recovered = await session.recover();
+if (recovered) await recovered.result();
+```
+
+An elicitation callback returns a response carrying the same immutable request identity and schema-validated data, or `null` to decline/cancel:
+
+```typescript
+const onElicitation: OnElicitation = async (request) => ({
+  requestId: request.requestId,
+  ...(request.toolCallId ? { toolCallId: request.toolCallId } : {}),
+  data: request.schema.parse({ approved: true }),
+});
+```
+
+Each persisted `RunRef` carries the exact `userMessageId` when available and a safe terminal `outcome`. Both fields are optional for older records, so an absent `outcome` does not mean the run completed successfully. Engine-level cancellation is recorded as `{ finishReason: 'aborted' }`; engine failure and timeout are recorded as `{ finishReason: 'error' }`. Failed schema validation retains `finishReason: 'stop-condition'` and records the safe `output`/`INVALID_OUTPUT` classifier, so consumers must also inspect `outcome.error`.
+
+New `RunRef` records also retain `baseConversationMetadata`, captured when the run is reserved, so recovery can apply the checkpoint's metadata changes while preserving concurrent session edits. Older records without this snapshot use current-session precedence for conflicting metadata and apply only candidate-only additions; terminal records keep their current metadata during repeated reconciliation.
+
+`session.cancel()` requests cancellation immediately. An attached run owns the terminal transaction: await its `result()` to observe the persisted outcome and final transcript. Without an attached run, cancellation reconciles the engine’s actual terminal state and available checkpoint history; without a checkpoint store, it retains the session’s existing history. A matching terminal record keeps its classification and known rows while accepting missing transcript rows from the same run. Cancellation cannot clear a newer run’s handle or overwrite another terminal classification. For a recovered run, `closed()` and `session.closed()` wait for the terminal session commit; a failed commit yields a failed cleanup acknowledgement.
+
 Pass an `AbortSignal` to clear the active timer and stop the operation:
 
 ```typescript
@@ -418,23 +450,23 @@ interface RunResult {
 
 **`ActiveRun` interface** — returned by `createActiveRun`, the event-emitting entry point. Attach listeners before awaiting `result`:
 
-| Member                                | Description                                            |
-| ------------------------------------- | ------------------------------------------------------ |
-| `result: Promise<RunResult>`          | Resolves when the loop completes.                      |
-| `durablyStarted?: Promise<void>`      | AB-361 — durable branch only; see below.               |
-| `abort(reason?)`                      | Cancels the loop immediately.                          |
-| `closed(options?)`                    | Cleanup acknowledgement — see below.                   |
-| `complete()`                          | Completes the event stream without aborting the loop.  |
-| `addEventListener(type, listener)`    | Standard `EventTarget` listener.                       |
-| `removeEventListener(type, listener)` | Removes a listener.                                    |
-| `on(type)`                            | Returns an `ObservableLike` stream for the event type. |
-| `once(type, listener)`                | One-time listener.                                     |
-| `subscribe(type, observer)`           | RxJS-style subscription.                               |
-| `events(type, options?)`              | `AsyncIterableIterator` of typed events.               |
-| `toObservable()`                      | All events as a single `ObservableLike`.               |
-| `snapshot()`                          | Current `LivenessSnapshot` — see below.                |
-| `subscribeSnapshot(observer, opts?)`  | Non-consuming liveness observer — see below.           |
-| `[Symbol.dispose]()`                  | Aborts and completes—use with `using`.                 |
+| Member                                | Description                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `result: Promise<RunResult>`          | Resolves when the loop completes.                                                                             |
+| `durablyStarted?: Promise<void>`      | AB-361 — durable branch only; see below.                                                                      |
+| `abort(reason?)`                      | Cancels the loop immediately; `result` resolves with `finishReason: 'aborted'` when cancellation is observed. |
+| `closed(options?)`                    | Cleanup acknowledgement — see below.                                                                          |
+| `complete()`                          | Completes the event stream without aborting the loop.                                                         |
+| `addEventListener(type, listener)`    | Standard `EventTarget` listener.                                                                              |
+| `removeEventListener(type, listener)` | Removes a listener.                                                                                           |
+| `on(type)`                            | Returns an `ObservableLike` stream for the event type.                                                        |
+| `once(type, listener)`                | One-time listener.                                                                                            |
+| `subscribe(type, observer)`           | RxJS-style subscription.                                                                                      |
+| `events(type, options?)`              | `AsyncIterableIterator` of typed events.                                                                      |
+| `toObservable()`                      | All events as a single `ObservableLike`.                                                                      |
+| `snapshot()`                          | Current `LivenessSnapshot` — see below.                                                                       |
+| `subscribeSnapshot(observer, opts?)`  | Non-consuming liveness observer — see below.                                                                  |
+| `[Symbol.dispose]()`                  | Aborts and completes—use with `using`.                                                                        |
 
 **`durablyStarted` (AB-361).** On the durable branch (`createActiveRun(options, { engine, checkpointStore, runId })`), `durablyStarted` settles once this run's initial workflow record is durably committed — the write `context.engine.start(...)` performs — distinct from `result` (the run's own completion). A caller that needs the started-work control contract's durability guarantee (AB-34/AB-15: an acknowledged run is recoverable after any later crash) awaits it before treating a returned run identifier as durable; a caller that never reads it is unaffected, including when `engine.start` rejects. The in-memory branch leaves it `undefined` — there is no durable write to await.
 
@@ -450,6 +482,8 @@ terminal snapshot exactly once for already-terminal work. See
 **Event types** emitted on `ActiveRun` (all prefixed by their lifecycle stage):
 
 `run.started`, `run.completed`, `run.error`, `run.aborted`, `step.started`, `step.generated`, `step.completed`, `step.aborted`, `generate.started`, `generate.completed`, `generate.error`, `generate.retry`, `tools.executing`, `tools.executed`, `response.validated`, `tool-result.validated`, `context.compacted`, `context.budget-warning`, `elicitation.requested`, `elicitation.resolved`, `backpressure.applied`, `backpressure.released`, `usage.accumulated`, `session.saved`, `session.loaded`, `steering.applied` (AB-67/AB-221 — dispatched at the `runStep` boundary; see the `SteeringGate`/steering command table above and `documentation/operative-type-safe-api.md`'s "Steering commands" section for `steering.accepted`/`rejected`/`superseded`/`failed` — exported here, documented as Bureau's `submitSteeringCommand` (AB-199) events to dispatch, but not yet actually dispatched by anything: `ActiveRun`'s in-memory driver exposes no external `dispatchEvent` surface for an owner outside the run to use, a named gap `documentation/operative-type-safe-api.md`'s "Steering commands" section tracks). `budget.threshold` and `budget.exceeded` are also exported members of `OperativeEventMap`, but neither has a production dispatch site: `createCostBudgetMonitor` (below) reports threshold and exhaustion through its own plain `onThreshold`/`onExceeded` callbacks, not by dispatching these events, so a subscriber never receives either one. `budget.exceeded` (`BudgetExceededEvent`) is additionally `@deprecated` — AB-231 settled budget-exceeded accounting through a `run.completed` event whose `finishReason` is `'budget-exceeded'` instead, reached only via a thrown `BudgetExceededError` (not `createCostBudgetMonitor`'s `stopCondition`, which resolves with `finishReason: 'stop-condition'`) (AB-365).
+
+Tool settlement is represented by the run's sealed `tool-result.validated` event and corresponding `StepResult` tool result. Filtering occurs before execution, so a filtered tool has no scripted settlement call; hook and validation failures preserve their final result payload and outcome in the emitted step result.
 
 ```typescript
 // Iterate events as an async stream

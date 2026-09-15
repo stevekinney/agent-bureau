@@ -4,10 +4,12 @@ import type {
   ToolElicitationResult,
 } from 'armorer';
 import { jsonSchemaToZod } from 'armorer';
+import type { RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
-import { ElicitationRequestedEvent, ElicitationResolvedEvent } from './events';
 import type { EventDispatcher } from './loop';
+import { createElicitationRequester } from './run-step-support';
 import type { OnElicitation, StepContext } from './types';
 
 /**
@@ -29,6 +31,7 @@ export interface CreateMcpElicitationResponderOptions {
    * events the in-loop `elicit()` helper already emits (see `run-step.ts`).
    */
   emitter?: EventDispatcher;
+  runtime?: RuntimeServices;
 }
 
 /**
@@ -63,21 +66,24 @@ export function createMcpElicitationResponder(
   options: CreateMcpElicitationResponderOptions,
 ): ToolElicitationRequester {
   const { onElicitation, getContext, emitter } = options;
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
 
   return async (request: ToolElicitationRequest): Promise<ToolElicitationResult> => {
     const context = getContext();
     const schema = toZodSchema(request);
     const message = toElicitationMessage(request);
-
-    emitter?.dispatch(new ElicitationRequestedEvent(context.step, message));
-    const response = await onElicitation({ message, schema, context });
-    const accepted = response !== null;
-    emitter?.dispatch(new ElicitationResolvedEvent(context.step, accepted));
-
-    if (!accepted) {
-      return { action: 'decline' };
-    }
-    return { action: 'accept', content: toContentRecord(response.data) };
+    const elicit = createElicitationRequester(
+      context.step,
+      (question) => onElicitation(Object.freeze({ ...question, context })),
+      context.conversation,
+      context.signal,
+      runtime,
+      emitter,
+    );
+    const response = await elicit(message, schema);
+    return response === null
+      ? { action: 'decline' }
+      : { action: 'accept', content: toContentRecord(response.data) };
   };
 }
 

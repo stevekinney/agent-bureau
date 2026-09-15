@@ -65,8 +65,12 @@ describe('loop helper coverage', () => {
       conversation,
       stopWhen: noToolCalls(),
       hooks,
-      onElicitation: async () => {
-        return { data: { approved: true } } as never;
+      onElicitation: async (request) => {
+        return {
+          requestId: request.requestId,
+          toolCallId: request.toolCallId,
+          data: { approved: true },
+        } as never;
       },
       prepareStep: async ({ elicit }) => {
         if (!elicit) return;

@@ -75,9 +75,12 @@ export type UnwrappedValue<O, H extends boolean> = [H] extends [true] ? O : stri
 export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEvent> &
   OutputMethod<O, H> & {
     /**
-     * Returns a `Promise` that resolves to the terminal `RunResult`. The promise
-     * is cached after first resolution — calling `result()` multiple times,
-     * before/during/after iteration, always returns the same promise.
+     * Returns a cached `Promise` for the terminal `RunResult`. Ordinary model,
+     * tool, and caller cancellation outcomes resolve with a `finishReason`,
+     * including `'aborted'` after `abort()`. Infrastructure failures such as a
+     * missing terminal session commit reject the promise; they are not reported
+     * as successful results. Calling `result()` multiple times, before/during/
+     * after iteration, always returns the same promise.
      *
      * This is the ONLY path to a `RunResult`. `AgentRun` is non-thenable by
      * design; `await agentRun` is a type error (it doesn't extend
@@ -89,9 +92,10 @@ export type AgentRun<O = never, H extends boolean = false> = AsyncIterable<RunEv
     unwrap(): Promise<UnwrappedValue<O, H>>;
 
     /**
-     * Abort the in-flight run. The abort signal fires immediately; the provider
-     * connection drops within ~1s. Any pending `result()` promise rejects with
-     * an abort reason.
+     * Abort the in-flight run. The abort signal fires immediately and the
+     * provider connection is asked to stop. When cancellation is observed, the
+     * pending `result()` promise resolves with `finishReason: 'aborted'`;
+     * a later infrastructure failure can still reject that promise.
      */
     abort(reason?: string): void;
 

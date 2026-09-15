@@ -35,6 +35,7 @@ import type { OutputValidator } from './guardrails/types';
 import type { OperativeHookMap } from './hooks';
 import { buildStepDeps, executeLoop } from './loop';
 import { awaitResumeOrAbort, type EventDispatcher, type RunState, runStep } from './run-step';
+import { createElicit } from './run-step-support';
 import type { GenerateContext, GenerateResponse, RunOptions, SteeringGate } from './types';
 
 /** A minimal {@link EventDispatcher} test double that records every dispatched event. */
@@ -52,6 +53,41 @@ function createEventRecorder(): EventDispatcher & { events: Event[] } {
 function textResponse(content: string): GenerateResponse {
   return { content, toolCalls: [] };
 }
+
+describe('createElicit callback failures', () => {
+  it('returns null when a callback rejects after the signal is aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const elicit = createElicit(
+      0,
+      async () => {
+        throw new Error('callback failed');
+      },
+      new Conversation(),
+      controller.signal,
+      createManualRuntimeServices(),
+      undefined,
+    );
+
+    await expect(elicit('Confirm?', z.object({ confirmed: z.boolean() }))).resolves.toBeNull();
+  });
+
+  it('propagates a callback rejection while the signal remains active', async () => {
+    const error = new Error('callback failed');
+    const elicit = createElicit(
+      0,
+      async () => {
+        throw error;
+      },
+      new Conversation(),
+      undefined,
+      createManualRuntimeServices(),
+      undefined,
+    );
+
+    await expect(elicit('Confirm?', z.object({ confirmed: z.boolean() }))).rejects.toBe(error);
+  });
+});
 
 /**
  * A manually-controlled `SteeringGate` double. `setDesiredState` is the

@@ -573,6 +573,7 @@ export {
   SessionConflictError,
   StaleSessionIncarnationError,
 } from './session/index';
+export { MissingRunOptionsError } from './session/session-handle-types';
 export { withStreaming } from './streaming';
 export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
 export type {
@@ -615,6 +616,7 @@ export type {
   ContextManagementOptions,
   Conversation,
   ConversationHistory,
+  ElicitationOptions,
   ElicitationRequest,
   ElicitationResponse,
   FinishReason,
@@ -637,6 +639,7 @@ export type {
   RetryOptions,
   RunOptions,
   RunOptionsBase,
+  RunOutcome,
   RunResult,
   RunResultBase,
   SelectToolsHook,

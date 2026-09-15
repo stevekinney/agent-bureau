@@ -50,16 +50,15 @@ import type { RunnableAgent } from '../runnable-agent';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createManualCheckpointStore, createMockGenerate, waitForCondition } from '../test/index';
 import type { RunOptions, RunResult } from '../types';
-import {
-  createDurableActiveRun,
-  createRecoveredRunEventSurface,
-  reattachDurableActiveRun,
-  startDurableRunResult,
-} from './active-run-adapter';
+import { createDurableActiveRun } from './active-run-create';
+import { createRecoveredRunEventSurface } from './active-run-event-surface';
+import { reattachDurableActiveRun } from './active-run-reattach';
+import { startDurableRunResult } from './active-run-result-entrypoints';
 import { createCheckpointStore } from './checkpoint-store';
 import type { RegistryAgnosticEngine } from './create-run-engine';
 import { createRunEngine } from './create-run-engine';
-import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION, createRunWorkflow } from './run-workflow';
+import { createRunWorkflow } from './run-workflow';
+import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from './run-workflow-result';
 import type { DurableRunDeps } from './types';
 
 const run = (...args: Parameters<typeof createActiveRun>) => createActiveRun(...args).result;
@@ -1155,6 +1154,44 @@ describe('createRun with durable routing', () => {
       expect(settled[0]?.toolName).toBe('echo');
       expect(settled[0]?.status).toBe('success');
       expect(settled[0]?.step).toBe(0);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
+
+  it('stamps curated tool events with the durable run agentName', async () => {
+    const context = await buildContext();
+    try {
+      const echoTool = createTool({
+        name: 'echo',
+        description: 'Echo the input',
+        input: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => message,
+      });
+      let generation = 0;
+      const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
+      const activeRun = createDurableActiveRun(context, {
+        runId: 'durable-option-agent-name',
+        sessionId: 'durable-option-agent-name',
+        agentName: 'option-agent',
+        options: {
+          ...runOptions(async () =>
+            generation++ === 0
+              ? { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] }
+              : { content: 'done', toolCalls: [] },
+          ),
+          beforeToolExecution: async () => [],
+          toolbox: createToolbox([echoTool]) as unknown as RunOptions['toolbox'],
+        },
+        emitter,
+      });
+      const settled: ToolSettledBubbleEvent[] = [];
+      activeRun.addEventListener('tool.settled', (event) => settled.push(event));
+
+      await activeRun.result;
+
+      expect(settled).toHaveLength(1);
+      expect(settled[0]?.agentName).toBe('option-agent');
     } finally {
       context.engine[Symbol.dispose]();
     }

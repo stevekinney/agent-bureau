@@ -8,6 +8,7 @@ import type { BackpressureStrategy } from './backpressure';
 import type { ChildRunRegistry } from './child-run';
 import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { SteeringDesiredState } from './durable/types';
+import type { AgentRunErrorCode, AgentRunErrorKind } from './errors';
 import type { OperativeHookMap } from './hooks';
 import type { DelegatedAuthority } from './providers/policy.ts';
 import type { RetryMutator } from './retry/types';
@@ -29,14 +30,34 @@ export type OperativeExecuteOptions = Omit<ToolExecuteOptions, 'durableOperation
   durableOperationKey?: string | ((call: ToolCall, index: number) => string | undefined);
 };
 
-export interface ElicitationRequest<T = unknown> {
-  message: string;
-  schema: ZodType<T>;
-  context: StepContext;
+export interface ElicitationOptions {
+  readonly toolCallId?: string;
 }
 
-export type ElicitationResponse<T = unknown> = { data: T } | null;
+export interface ElicitationRequest<T = unknown> {
+  /** Immutable identity for correlating the response to this request. */
+  readonly requestId: string;
+  /** Tool identity when elicitation was requested during tool execution. */
+  readonly toolCallId?: string;
+  readonly message: string;
+  /** Parse the untrusted response payload before returning it. */
+  readonly schema: ZodType<T>;
+  readonly context: StepContext;
+}
 
+export type ElicitationResponse<T = unknown> = {
+  /** Must match the request's immutable requestId. */
+  readonly requestId: string;
+  readonly toolCallId?: string;
+  readonly data: T;
+} | null;
+
+/**
+ * Handles one request and returns validated data, or `null` when the caller
+ * declines or cancellation wins. A late response for an older request is
+ * ignored and cannot settle a replacement request; omission of the callback
+ * makes elicitation unavailable and leaves `elicit` undefined.
+ */
 export type OnElicitation = <T>(request: ElicitationRequest<T>) => Promise<ElicitationResponse<T>>;
 
 /**
@@ -199,6 +220,11 @@ export interface StepResult {
   final: boolean;
 }
 
+export interface RunOutcome {
+  readonly finishReason: FinishReason;
+  readonly error?: { readonly kind: AgentRunErrorKind; readonly code: AgentRunErrorCode };
+}
+
 /**
  * Context passed to the prepareStep hook.
  */
@@ -207,7 +233,11 @@ export interface StepContext {
   step: number;
   signal?: AbortSignal;
   abortStep?: (reason?: string) => void;
-  elicit?: <T>(message: string, schema: ZodType<T>) => Promise<T | null>;
+  elicit?: <T>(
+    message: string,
+    schema: ZodType<T>,
+    options?: ElicitationOptions,
+  ) => Promise<T | null>;
 }
 
 /**
@@ -217,7 +247,11 @@ export interface ToolExecutionHookContext {
   conversation: Conversation;
   step: number;
   toolCalls: ToolCall[];
-  elicit?: <T>(message: string, schema: ZodType<T>) => Promise<T | null>;
+  elicit?: <T>(
+    message: string,
+    schema: ZodType<T>,
+    options?: ElicitationOptions,
+  ) => Promise<T | null>;
 }
 
 /**
@@ -228,7 +262,11 @@ export interface ToolExecutionResultContext {
   step: number;
   toolCalls: readonly ToolCall[];
   results: readonly ToolExecutionResult[];
-  elicit?: <T>(message: string, schema: ZodType<T>) => Promise<T | null>;
+  elicit?: <T>(
+    message: string,
+    schema: ZodType<T>,
+    options?: ElicitationOptions,
+  ) => Promise<T | null>;
 }
 
 /**

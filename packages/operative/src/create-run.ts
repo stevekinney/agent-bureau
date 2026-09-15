@@ -5,7 +5,7 @@ import { CompletableEventTarget, createDefaultRuntimeServices, forwardEvents } f
 
 import { createClosedAcknowledgement } from './closed-acknowledgement';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
-import { createDurableActiveRun } from './durable/active-run-adapter';
+import { createDurableActiveRun } from './durable/active-run-create';
 import type { DurableRunDeps } from './durable/types';
 import type {
   CombinedOperativeEventMap,

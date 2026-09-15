@@ -79,6 +79,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     // built its own `RunOptions` without going through `createActiveRun` —
     // never a second resolution on the in-memory run path.
     runtime: options.runtime ?? createDefaultRuntimeServices(),
+    agentName: options.agentName,
   };
 }
 

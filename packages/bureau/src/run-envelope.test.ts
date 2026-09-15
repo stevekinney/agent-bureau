@@ -313,7 +313,7 @@ describe('createRunFrameForwarder', () => {
       frames.push(frame),
     );
 
-    dispatch(new ElicitationRequestedEvent(1, 'Do you want to proceed?'));
+    dispatch(new ElicitationRequestedEvent(1, 'Do you want to proceed?', 'elicitation:test'));
     dispose();
 
     const notification = frames.find((frame) => frame.type === 'notification');

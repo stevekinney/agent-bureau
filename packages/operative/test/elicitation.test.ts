@@ -6,10 +6,22 @@ import { z } from 'zod';
 
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
-import type { ElicitationRequestedEvent, ElicitationResolvedEvent } from '../src/events';
+import { type ElicitationRequestedEvent, ElicitationResolvedEvent } from '../src/events';
 import { createRunRecorder } from '../src/test/index';
-import type { ElicitationRequest, GenerateResponse } from '../src/types';
+import type {
+  ElicitationRequest,
+  ElicitationResponse,
+  GenerateResponse,
+  OnElicitation,
+} from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
+
+function elicitationResponse<T>(
+  request: ElicitationRequest<T>,
+  data: unknown,
+): ElicitationResponse<T> {
+  return { requestId: request.requestId, toolCallId: request.toolCallId, data: data as T };
+}
 
 const weatherTool = createTool({
   name: 'get_weather',
@@ -34,6 +46,27 @@ function weatherToolCall(location = 'Denver') {
 }
 
 describe('elicitation', () => {
+  it('assigns an immutable request identity and validates the response correlation', async () => {
+    let seenRequest: ElicitationRequest | undefined;
+    const result = await run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation: async (request) => {
+        seenRequest = request;
+        return elicitationResponse(request, { confirmed: true });
+      },
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Do you confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+    expect(seenRequest?.requestId).toBeString();
+    expect(Object.isFrozen(seenRequest)).toBe(true);
+  });
+
   it('callback receives correct request shape', async () => {
     const requests: ElicitationRequest[] = [];
     const confirmationSchema = z.object({ confirmed: z.boolean() });
@@ -45,7 +78,7 @@ describe('elicitation', () => {
       stopWhen: noToolCalls(),
       onElicitation: async (request) => {
         requests.push(request);
-        return { data: { confirmed: true } } as any;
+        return elicitationResponse(request, { confirmed: true });
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -69,8 +102,8 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { approved: true } } as any;
+      onElicitation: async (request) => {
+        return elicitationResponse(request, { approved: true });
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -113,8 +146,8 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { confirmed: true } } as any;
+      onElicitation: async (request) => {
+        return elicitationResponse(request, { confirmed: true });
       },
       prepareStep: async ({ elicit }) => {
         if (elicit) {
@@ -197,8 +230,8 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([weatherTool]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { proceed: true } } as any;
+      onElicitation: async (request) => {
+        return elicitationResponse(request, { proceed: true });
       },
       beforeToolExecution: async ({ toolCalls, elicit }) => {
         if (elicit) {
@@ -228,8 +261,8 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([weatherTool]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { rating: 5 } } as any;
+      onElicitation: async (request) => {
+        return elicitationResponse(request, { rating: 5 });
       },
       afterToolExecution: async ({ elicit }) => {
         if (elicit) {
@@ -251,8 +284,8 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { approved: true } } as any;
+      onElicitation: async (request) => {
+        return elicitationResponse(request, { approved: true });
       },
       validateResponse: async (response, { elicit }) => {
         if (elicit) {
@@ -282,8 +315,8 @@ describe('elicitation', () => {
       toolbox: createTestToolbox([weatherTool]),
       conversation: new Conversation(),
       stopWhen: noToolCalls(),
-      onElicitation: async () => {
-        return { data: { accepted: true } } as any;
+      onElicitation: async (request) => {
+        return elicitationResponse(request, { accepted: true });
       },
       validateToolResult: async (toolResult, { elicit }) => {
         if (elicit) {
@@ -295,5 +328,112 @@ describe('elicitation', () => {
 
     expect(result.finishReason).toBe('stop-condition');
     expect(elicitedValue).toEqual({ accepted: true });
+  });
+
+  it('rejects a response correlated to a different request', async () => {
+    const result = await run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation: async <T>(
+        request: ElicitationRequest<T>,
+      ): Promise<ElicitationResponse<T>> => ({
+        requestId: `${request.requestId}-wrong`,
+        toolCallId: request.toolCallId,
+        data: request.schema.parse({ confirmed: true }),
+      }),
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toMatchObject({ kind: 'contract' });
+  });
+
+  it('keeps the request tool identity when the caller mutates options while awaiting', async () => {
+    const options: { toolCallId?: string } = { toolCallId: 'originating-call' };
+    const result = await run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation: async (request) => {
+        options.toolCallId = 'mutated-call';
+        return elicitationResponse(request, { confirmed: true });
+      },
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }), options);
+      },
+    });
+
+    expect(result.finishReason).toBe('stop-condition');
+  });
+
+  it('ignores a late elicitation resolution after cancellation', async () => {
+    const controller = new AbortController();
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    let invocation = 0;
+    const requestIds: string[] = [];
+    const resolvedEvents: ElicitationResolvedEvent[] = [];
+    let cancelledAnswer: unknown = 'unsettled';
+    const onElicitation: OnElicitation = async <T>(request: ElicitationRequest<T>) => {
+      requestIds.push(request.requestId);
+      await new Promise<void>((resolve) => {
+        if (invocation++ === 0) releaseFirst = resolve;
+        else releaseSecond = resolve;
+      });
+      return {
+        requestId: request.requestId,
+        toolCallId: request.toolCallId,
+        data: request.schema.parse({ confirmed: true }),
+      };
+    };
+    const firstActiveRun = createActiveRun({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      signal: controller.signal,
+      onElicitation,
+      prepareStep: async ({ elicit }) => {
+        cancelledAnswer = await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+    firstActiveRun.addEventListener(ElicitationResolvedEvent.type, (event) => {
+      resolvedEvents.push(event);
+    });
+    const firstResultPromise = firstActiveRun.result;
+    while (!releaseFirst) await Promise.resolve();
+    controller.abort('cancelled');
+    releaseFirst();
+    const firstResult = await firstResultPromise;
+    expect(firstResult.finishReason).toBe('aborted');
+    expect(cancelledAnswer).toBeNull();
+    expect(resolvedEvents).toHaveLength(1);
+    expect(resolvedEvents[0]?.accepted).toBe(false);
+    expect(resolvedEvents[0]?.requestId).toBe(requestIds[0]);
+
+    const secondResultPromise = run({
+      generate: async () => textResponse('Done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      onElicitation,
+      prepareStep: async ({ elicit }) => {
+        await elicit?.('Confirm?', z.object({ confirmed: z.boolean() }));
+      },
+    });
+    while (!releaseSecond) await Promise.resolve();
+    expect(requestIds).toHaveLength(2);
+    expect(requestIds[0]).not.toBe(requestIds[1]);
+    releaseFirst();
+    await Promise.resolve();
+    expect(releaseSecond).toBeFunction();
+    releaseSecond();
+    const secondResult = await secondResultPromise;
+    expect(secondResult.finishReason).toBe('stop-condition');
   });
 });

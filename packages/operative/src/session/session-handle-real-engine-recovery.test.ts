@@ -10,7 +10,7 @@ import { createManualRuntimeServices } from 'lifecycle';
 import { createAgentSession } from '../agent-session';
 import { createCheckpointStore } from '../durable/checkpoint-store';
 import { createRunEngine } from '../durable/create-run-engine';
-import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow';
+import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow-result';
 import { createSessionStore } from './create-session-store';
 import { createSessionHandle } from './session-handle';
 
@@ -118,7 +118,9 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path — 
     await firstStore.save(session);
 
     const firstHandle = await engine1.start('agentRun', {}, { id: runId });
-    for (let i = 0; i < 10; i++) await yieldToPortableEventLoop();
+    // Wait for the durable sleep timer before simulating a process crash.
+    // Event-loop turns alone do not prove that the timer commit has finished.
+    await waitForEventLoop(() => storage.has(`timer-idx:sleep:${runId}:0`));
     engine1[Symbol.dispose]();
     void firstHandle.result().catch(() => {});
 
