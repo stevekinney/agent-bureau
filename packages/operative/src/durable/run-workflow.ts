@@ -2,7 +2,7 @@ import { workflow } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
 import { createDefaultRuntimeServices } from 'lifecycle';
 
-import type { AgentRunErrorCode, AgentRunErrorKind } from '../errors';
+import { type AgentRunErrorCode, type AgentRunErrorKind, toAgentRunError } from '../errors';
 import { RunErrorEvent } from '../events';
 import { DEFAULT_MAXIMUM_STEPS } from '../run-step';
 import type { FinishReason } from '../types';
@@ -385,10 +385,13 @@ export function createRunWorkflow(
                 };
               } catch (error) {
                 deps.emitter?.dispatch(new RunErrorEvent(finalStep, error, 'policy'));
+                const runError = toAgentRunError(error, { kind: 'policy' });
                 return {
                   kind: 'error' as const,
                   errorMessage: serializeError(error),
                   errorFinishReason: classifyErrorFinishReason(error),
+                  errorKind: runError.kind,
+                  errorCode: runError.code,
                 };
               }
             });
@@ -401,6 +404,8 @@ export function createRunWorkflow(
             } else if (tail.kind === 'error') {
               finishReason = tail.errorFinishReason;
               errorMessage = tail.errorMessage;
+              errorKind = tail.errorKind;
+              errorCode = tail.errorCode;
             }
           }
 

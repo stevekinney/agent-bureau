@@ -43,6 +43,7 @@ import {
 import { appendConversationMessages, reconcileTerminalRunRef } from './session-handle-support';
 import { MissingRunOptionsError } from './session-handle-types';
 import { createSessionMonitor } from './session-monitor';
+import { createSessionRun, type SessionRunState } from './session-run';
 import type { SessionStore } from './types';
 
 // Drain Weft's deferred inline-launch queue between tests — prevents one test's
@@ -1291,6 +1292,64 @@ describe('session.cancel()', () => {
     ]);
     expect(settled!.runs[0]!.outcome?.finishReason).toBe('aborted');
     expect(settled!.runs[1]!.outcome?.finishReason).toBe('maximum-steps');
+  });
+
+  it('keeps a newer same-handle run current while an older cancel is pending', async () => {
+    const cancelStarted = Promise.withResolvers<void>();
+    const releaseCancel = Promise.withResolvers<void>();
+    const generateStarted = [0, 1].map(() => Promise.withResolvers<void>());
+    const releaseGenerate = [0, 1].map(() => Promise.withResolvers<void>());
+    let generateIndex = 0;
+    const generate: GenerateFunction = async ({ signal }) => {
+      const index = generateIndex++;
+      generateStarted[index]!.resolve();
+      await Promise.race([
+        releaseGenerate[index]!.promise,
+        new Promise<never>((_resolve, reject) =>
+          signal?.addEventListener('abort', () => reject(new Error('cancelled')), {
+            once: true,
+          }),
+        ),
+      ]);
+      return { content: `done ${index}`, toolCalls: [] };
+    };
+    const engine = {
+      cancel: async () => {
+        cancelStarted.resolve();
+        await releaseCancel.promise;
+      },
+    } as unknown as RegistryAgnosticEngine;
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    const handle = createSessionHandle('same-handle-cancel-race', {
+      store,
+      agentName: 'agent',
+      engine,
+      runOptions: { ...createTestRunOptions(generate), maximumSteps: 1 },
+    });
+
+    const oldRun = handle.run('old');
+    await generateStarted[0]!.promise;
+    const cancelPromise = handle.cancel();
+    await cancelStarted.promise;
+
+    const newRun = handle.run('new');
+    await generateStarted[1]!.promise;
+    releaseCancel.resolve();
+    await cancelPromise;
+
+    expect(await handle.recover()).toBe(newRun);
+    const during = await store.load('same-handle-cancel-race');
+    expect(during?.runs.map((run) => [run.runId, run.status])).toEqual([
+      ['same-handle-cancel-race:0', 'running'],
+      ['same-handle-cancel-race:1', 'running'],
+    ]);
+
+    releaseGenerate[1]!.resolve();
+    await Promise.allSettled([oldRun.result(), newRun.result()]);
+    const settled = await store.load('same-handle-cancel-race');
+    expect(settled?.runs[0]?.status).toBe('aborted');
+    expect(settled?.runs[1]?.status).toBe('completed');
+    expect(settled?.runs[1]?.outcome?.finishReason).not.toBe('aborted');
   });
 
   it('does not cancel another run while this handle is reserving a run id', async () => {
@@ -2706,10 +2765,29 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     const sessionId = 'recovery-terminal-idempotent-session';
     const runId = `${sessionId}:0`;
     const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    const knownConversation = new Conversation(
+      createConversationHistory({ metadata: { known: true } }),
+    );
+    knownConversation.appendAssistantMessage('known answer');
+    const knownMessageId = knownConversation.current.ids[0]!;
+    const checkpointConversation = new Conversation({
+      ...knownConversation.current,
+      metadata: { checkpoint: true },
+    });
+    checkpointConversation.appendUserMessage('recovered user');
+    checkpointConversation.appendAssistantMessage('recovered answer');
+    const checkpointHistory = checkpointConversation.snapshot();
+    expect(Conversation.from(checkpointHistory).current.ids).toEqual(
+      checkpointConversation.current.ids,
+    );
+    const checkpointUserMessageId = checkpointConversation.current.ids.find(
+      (id) => checkpointConversation.current.messages[id]?.role === 'user',
+    );
+    if (!checkpointUserMessageId) throw new Error('Expected checkpoint user message');
     await baseStore.save(
       createAgentSession({
         agentName: 'agent',
-        conversationHistory: createConversationHistory(),
+        conversationHistory: knownConversation.current,
         id: sessionId,
         runs: [
           {
@@ -2718,7 +2796,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
             status: 'running',
             startedAt: fixtureRuntime.clock.nowISO(),
             agentName: 'agent',
-            userMessageId: 'originating-user-message',
+            userMessageId: checkpointUserMessageId,
           },
         ],
       }),
@@ -2728,8 +2806,20 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       async update(id, mutate) {
         const current = await baseStore.load(id);
         if (!current) return undefined;
+        const concurrentHistory = {
+          ...current.conversationHistory,
+          messages: {
+            ...current.conversationHistory.messages,
+            [knownMessageId]: {
+              ...current.conversationHistory.messages[knownMessageId]!,
+              content: 'updated known answer',
+            },
+          },
+          metadata: { known: true, concurrent: true },
+        };
         const concurrent = {
           ...current,
+          conversationHistory: concurrentHistory,
           runs: current.runs.map((run) =>
             run.runId === runId
               ? {
@@ -2741,7 +2831,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
           ),
         };
         await baseStore.save(concurrent);
-        return mutate(concurrent);
+        return baseStore.update(id, mutate);
       },
     };
     const fakeEngine = {
@@ -2758,7 +2848,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     } as unknown as RegistryAgnosticEngine;
     const fakeCheckpointStore = {
       loadCheckpoint: async () => ({
-        conversation: null,
+        conversation: checkpointHistory,
         cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
         steps: [],
       }),
@@ -2776,6 +2866,16 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     await expect(recovered!.result()).resolves.toMatchObject({
       finishReason: 'stop-condition',
     });
+    const persisted = await baseStore.load(sessionId);
+    const messages = Object.values(persisted!.conversationHistory.messages);
+    expect(persisted!.conversationHistory.messages[knownMessageId]?.content).toBe(
+      'updated known answer',
+    );
+    expect(messages.filter((message) => message.content === 'known answer')).toHaveLength(0);
+    expect(messages.filter((message) => message.content === 'recovered user')).toHaveLength(1);
+    expect(messages.filter((message) => message.content === 'recovered answer')).toHaveLength(1);
+    expect(persisted!.conversationHistory.metadata).toEqual({ known: true, concurrent: true });
+    expect(persisted!.runs[0]!.outcome).toEqual({ finishReason: 'stop-condition' });
   });
 
   it('rejects recovered completion when the session disappears before commit', async () => {
@@ -2835,6 +2935,70 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     const recovered = await handle.recover();
     expect(recovered).not.toBeNull();
     await expect(recovered!.result()).rejects.toThrow('disappeared');
+  });
+
+  it('does not recreate a recovered RunRef removed by a concurrent terminal update', async () => {
+    const sessionId = 'recovery-run-ref-removed-session';
+    const runId = `${sessionId}:0`;
+    const baseStore = createSessionStore(textValueStore(new MemoryStorage()));
+    await baseStore.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'agent',
+          },
+        ],
+      }),
+    );
+    const store: SessionStore = {
+      ...baseStore,
+      async update(id, mutate) {
+        const current = await baseStore.load(id);
+        if (!current) return undefined;
+        const removed = { ...current, runs: [] };
+        await baseStore.save(removed);
+        return mutate(removed);
+      },
+    };
+    const fakeEngine = {
+      resume: async () => ({
+        id: runId,
+        result: async () => ({
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        }),
+      }),
+    } as unknown as RegistryAgnosticEngine;
+    const fakeCheckpointStore = {
+      loadCheckpoint: async () => ({
+        conversation: null,
+        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+        steps: [],
+      }),
+    } as unknown as import('../durable/checkpoint-store').CheckpointStore;
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+
+    const recovered = await handle.recover();
+    expect(recovered).not.toBeNull();
+    await expect(recovered!.result()).rejects.toThrow('disappeared');
+    const persisted = await baseStore.load(sessionId);
+    expect(persisted?.runs).toHaveLength(0);
   });
 
   it('returns null when engine is present but session has no running run', async () => {
@@ -5840,6 +6004,63 @@ function dispatchOnToolboxContext(context: unknown, event: Event): void {
 }
 
 describe('SessionHandle liveness — declared waits for parked human input (AB-215 / AC4)', () => {
+  it('resumes the watchdog when an older parked invocation settles after a newer reservation', async () => {
+    const sessionId = 'concurrent-parked-invocations';
+    const runtime = createManualRuntimeServices();
+    const state: SessionRunState = { currentRun: null, currentRunId: null };
+    const parked = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    const resume = mock(() => {});
+    const pause = mock(() => {});
+    const tool = createTool({
+      name: 'park',
+      description: 'Wait for release',
+      input: z.object({}),
+      execute: async (_input, context) => {
+        dispatchOnToolboxContext(context, new HumanWaitParkedEvent('answer', `${sessionId}:0`));
+        parked.resolve();
+        await released.promise;
+        return 'released';
+      },
+    });
+    let generation = 0;
+    const run = createSessionRun({
+      sessionId,
+      store: createSessionStore(textValueStore(new MemoryStorage())),
+      engine: undefined,
+      checkpointStore: undefined,
+      agentName: 'agent',
+      runOptions: {
+        generate: async () => ({
+          content: 'done',
+          toolCalls: generation++ === 0 ? [{ name: 'park', arguments: {} }] : [],
+        }),
+        toolbox: createToolbox([tool]),
+        maximumSteps: 1,
+      },
+      runtime,
+      state,
+      setLivenessState: () => {},
+      livenessClock: {
+        now: runtime.monotonic.now,
+        setTimeout: runtime.timers.setTimeout,
+        clearTimeout: runtime.timers.clearTimeout,
+      },
+      pauseSessionWatchdogForWait: pause,
+      resumeSessionWatchdogAfterWait: resume,
+    });
+    const older = run('first');
+    await parked.promise;
+    expect(pause).toHaveBeenCalledTimes(1);
+    await run('second').result();
+    expect(resume).not.toHaveBeenCalled();
+    released.resolve();
+    await older.result();
+    await yieldToPortableEventLoop();
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(state.parkedRunId).toBeUndefined();
+  });
+
   it('pauses missedPulseCount accrual for an unbounded review wait and resumes it once session.signal() releases it', async () => {
     const sessionId = 'human-wait-liveness-session';
     const runId = deriveRunId(sessionId, 0);

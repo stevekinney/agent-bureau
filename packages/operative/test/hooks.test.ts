@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { noToolCalls } from '../src/conditions/predicates';
 import { createActiveRun } from '../src/create-run';
 import { ToolSettledBubbleEvent } from '../src/events';
+import { executeLoop } from '../src/loop';
 import { createMockGenerate } from '../src/test/index';
 import type { GenerateResponse } from '../src/types';
 const run = (options: Parameters<typeof createActiveRun>[0]) => createActiveRun(options).result;
@@ -294,6 +295,63 @@ describe('step hooks', () => {
     expect(afterCalls[0].step).toBe(0);
     expect(afterCalls[0].toolCallNames).toEqual(['get_weather']);
     expect(afterCalls[0].resultCount).toBe(1);
+  });
+
+  it('afterToolExecution pairs only executed calls with their executed results', async () => {
+    const pairs: Array<{ callId: string; resultId: string }> = [];
+    const generate = createMockGenerate([
+      toolCallResponse([
+        { id: 'denver-call', ...weatherToolCall('Denver') },
+        { id: 'seattle-call', ...weatherToolCall('Seattle') },
+      ]),
+      textResponse('Done'),
+    ]);
+
+    await run({
+      generate,
+      toolbox: createTestToolbox([tool]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      beforeToolExecution: async ({ toolCalls }) => toolCalls.slice(0, 1),
+      afterToolExecution: async ({ toolCalls, results }) => {
+        pairs.push({
+          callId: `${toolCalls.length}:${toolCalls[0]?.id ?? ''}`,
+          resultId: `${results.length}:${results[0]?.toolCallId ?? ''}`,
+        });
+      },
+    });
+
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].callId).toBe('1:denver-call');
+    expect(pairs[0].resultId).toBe(pairs[0].callId);
+  });
+
+  it('low-level executeLoop still emits synthesized settlements with an explicit runId', async () => {
+    const events: Event[] = [];
+    const trackingTool = createTool({
+      name: 'low-level-tool',
+      description: 'Low-level fixture',
+      input: z.object({}),
+      execute: async () => {
+        throw new Error('low-level failure');
+      },
+    });
+
+    await executeLoop(
+      {
+        generate: createMockGenerate([
+          toolCallResponse([{ id: 'low-level-call', name: 'low-level-tool', arguments: {} }]),
+        ]),
+        toolbox: createTestToolbox([trackingTool]),
+        conversation: new Conversation(),
+        stopWhen: noToolCalls(),
+        runId: 'low-level-run',
+        executeOptions: { errorMode: 'failFast' },
+      },
+      { dispatch: (event) => (events.push(event), true) },
+    );
+
+    expect(events.filter((event) => event instanceof ToolSettledBubbleEvent)).toHaveLength(1);
   });
 
   it('onStep called after each step with correct StepResult', async () => {

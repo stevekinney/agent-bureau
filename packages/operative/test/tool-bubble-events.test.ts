@@ -185,6 +185,46 @@ describe('curated tool.* bubble events (C3)', () => {
     expect(settled[0]?.status).toBe('error');
   });
 
+  it('emits exactly one settled event for a fail-fast tool rejection', async () => {
+    const failingTool = createTool({
+      name: 'fail-fast',
+      description: 'Always fails',
+      input: z.object({}),
+      execute: async () => {
+        throw new Error('fail-fast');
+      },
+    });
+    const conversation = new Conversation();
+    const run = createActiveRun({
+      generate: createMockGenerate([
+        toolCallResponse([{ id: 'fail-fast-call', name: 'fail-fast', arguments: {} }]),
+      ]),
+      toolbox: createToolbox([failingTool]),
+      conversation,
+      stopWhen: noToolCalls(),
+      executeOptions: { errorMode: 'failFast' },
+      runId: 'fail-fast-run',
+      agentName: 'fail-fast-agent',
+    });
+    const settled: ToolSettledBubbleEvent[] = [];
+    run.addEventListener('tool.settled', (event) => settled.push(event));
+
+    const result = await run.result;
+
+    expect(result.finishReason).toBe('error');
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.toolCallId).toBe('fail-fast-call');
+    expect(settled[0]?.status).toBe('error');
+    expect(settled[0]?.runId).toBe('fail-fast-run');
+    expect(settled[0]?.agentName).toBe('fail-fast-agent');
+    const toolResult = conversation
+      .getMessages({ includeHidden: true })
+      .find((message) => message.role === 'tool-result')?.toolResult;
+    expect(toolResult?.callId).toBe('fail-fast-call');
+    expect(toolResult?.outcome).toBe('error');
+    expect(settled[0]?.error).toBeDefined();
+  });
+
   it('defaults agentName to empty string, but mints a runId, when not supplied (AB-214)', async () => {
     const generate = createMockGenerate([
       toolCallResponse([{ name: 'echo', arguments: { message: 'test' } }]),

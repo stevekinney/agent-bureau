@@ -3429,6 +3429,8 @@ describe('durable agentRun workflow', () => {
 
         expect(result.finishReason).toBe('error');
         expect(result.errorMessage).toBe('handler exploded');
+        expect(result.errorKind).toBe('policy');
+        expect(result.errorCode).toBe('UNKNOWN');
       } finally {
         engine[Symbol.dispose]();
       }

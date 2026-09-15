@@ -7,6 +7,7 @@ import {
   RunErrorEvent,
   StepAbortedEvent,
   ToolResultValidatedEvent,
+  ToolSettledBubbleEvent,
   ToolsExecutedEvent,
   ToolsExecutingEvent,
 } from './events';
@@ -199,18 +200,34 @@ export async function executeTools(
             : {}),
         };
 
-        const executeResult =
-          deps.parentContext !== undefined && deps.withTraceContext !== undefined
-            ? await deps.withTraceContext(deps.parentContext, () =>
-                stepToolbox.execute(
+        const onForwardedSettled = (event: Event) => {
+          if (!(event instanceof ToolSettledBubbleEvent)) return;
+          if (
+            event.runId === deps.runId &&
+            callsToExecute.some((call) => call.id === event.toolCallId)
+          ) {
+            emittedSettledCallIds.add(event.toolCallId);
+          }
+        };
+        const eventTarget = emitter instanceof EventTarget ? emitter : undefined;
+        eventTarget?.addEventListener(ToolSettledBubbleEvent.type, onForwardedSettled);
+        let executeResult: ToolExecutionResult | ToolExecutionResult[];
+        try {
+          executeResult =
+            deps.parentContext !== undefined && deps.withTraceContext !== undefined
+              ? await deps.withTraceContext(deps.parentContext, () =>
+                  stepToolbox.execute(
+                    callsToExecute as Parameters<typeof stepToolbox.execute>[0],
+                    toolboxExecuteOptions,
+                  ),
+                )
+              : await stepToolbox.execute(
                   callsToExecute as Parameters<typeof stepToolbox.execute>[0],
                   toolboxExecuteOptions,
-                ),
-              )
-            : await stepToolbox.execute(
-                callsToExecute as Parameters<typeof stepToolbox.execute>[0],
-                toolboxExecuteOptions,
-              );
+                );
+        } finally {
+          eventTarget?.removeEventListener(ToolSettledBubbleEvent.type, onForwardedSettled);
+        }
 
         executedResults = Array.isArray(executeResult) ? executeResult : [executeResult];
         results.push(...executedResults);
@@ -357,16 +374,6 @@ export async function executeTools(
 
       emitter?.dispatch(new ToolsExecutedEvent(step, callsToExecute, executedResults));
 
-      // Filtered calls were sealed above and must not be re-appended or sent
-      // through execution result validation. They remain part of the public
-      // step result alongside the actual executed results.
-      results.push(...filteredResults);
-
-      const resultByCallId = new Map(results.map((result) => [result.toolCallId, result]));
-      results = materializedToolCalls
-        .map((call) => resultByCallId.get(call.id))
-        .filter((result): result is ToolExecutionResult => result !== undefined);
-
       if (stepSignal.aborted && !signal?.aborted) {
         emitter?.dispatch(
           new StepAbortedEvent(step, explicitAbortReason(stepAbortController.signal)),
@@ -404,6 +411,12 @@ export async function executeTools(
           return { kind: 'error', error, errorKind: 'tool' };
         }
       }
+
+      // Filtered calls were sealed above and must not be re-appended or sent
+      // through execution result validation. They remain part of the public
+      // step result alongside the actual executed results, after hooks have
+      // observed only the calls and results that actually executed.
+      results.push(...filteredResults);
     }
 
     // Preserve provider call order for synthesized-only batches as well as

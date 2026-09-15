@@ -36,7 +36,6 @@ import type { SessionStore } from './types';
 export interface SessionRunState {
   currentRun: AgentRun | null;
   currentRunId: string | null;
-  thisRunId?: string;
   parkedRunId?: string;
   parkedSignalName?: string;
 }
@@ -100,6 +99,7 @@ export function createSessionRun(
     // This call's own run id, once the reservation resolves — used to
     // correlate a `HumanWaitParkedEvent` and to clean up park bookkeeping
     // when this run settles (liveness, AB-215).
+    let thisRunId: string | undefined;
 
     // Eagerly reflect this run as the session's own current activity.
     // Clears any leftover declared wait from a prior run.
@@ -173,7 +173,7 @@ export function createSessionRun(
 
       const { runId, userMessageId, baseConversationHistory, seededConversation } = reservation;
       state.currentRunId = runId;
-      state.thisRunId = runId;
+      thisRunId = runId;
 
       // Thread the eager AbortController's signal into the run options so
       // abort() works immediately — even before the inner run's own
@@ -485,7 +485,7 @@ export function createSessionRun(
         // paused watchdog is not stranded, then reflect the session as
         // idle again — a monitor tick's own pulse/wait overrides this
         // immediately if this run() call was one of its ticks.
-        if (state.thisRunId !== undefined && state.parkedRunId === state.thisRunId) {
+        if (thisRunId !== undefined && state.parkedRunId === thisRunId) {
           state.parkedRunId = undefined;
           state.parkedSignalName = undefined;
           resumeSessionWatchdogAfterWait();
