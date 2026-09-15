@@ -3547,7 +3547,18 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     const olderRunId = `${sessionId}:0`;
     // Never actually started durably — engine.resume() will reject for this one.
     const newerRunId = `${sessionId}:1`;
-    const SLEEP_MS = 50;
+    const enteredWorkflow = Promise.withResolvers<void>();
+    const parkedWorkflow = workflow({ name: 'agentRun' }).execute(async function* (ctx) {
+      enteredWorkflow.resolve();
+      yield* ctx.waitForSignal('release-recovery-control');
+      return {
+        schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+        runId: olderRunId,
+        steps: 1,
+        content: 'resumed',
+        finishReason: 'stop-condition' as const,
+      };
+    });
 
     const kv = textValueStore(storage, { disposeUnderlyingStorage: false });
     const store = createSessionStore(kv);
@@ -3578,12 +3589,12 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     // Only the OLDER run is actually started durably and parked.
     const { engine: engine1 } = await createRunEngine({
       storage,
-      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      runWorkflow: parkedWorkflow,
       recover: false,
       startScheduler: false,
     });
     const firstHandle = await engine1.start('agentRun', {}, { id: olderRunId });
-    for (let i = 0; i < 10; i++) await yieldToPortableEventLoop();
+    await enteredWorkflow.promise;
     engine1[Symbol.dispose]();
     void firstHandle.result().catch(() => {});
 
@@ -3592,9 +3603,9 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
     const cs2 = createCheckpointStore(textValueStore(storage, { disposeUnderlyingStorage: false }));
     const { engine: engine2 } = await createRunEngine({
       storage,
-      runWorkflow: makeParkingWorkflow(SLEEP_MS),
+      runWorkflow: parkedWorkflow,
       recover: false,
-      startScheduler: true,
+      startScheduler: false,
     });
 
     try {
@@ -3627,6 +3638,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path', ()
       expect(recoverEvents[0]!.failures).toHaveLength(1);
       expect(recoverEvents[0]!.failures[0]!.runId).toBe(newerRunId);
 
+      await engine2.signal(olderRunId, 'release-recovery-control', { released: true });
       await reattached!.result();
     } finally {
       engine2[Symbol.dispose]();
