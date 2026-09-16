@@ -45,16 +45,19 @@ const realNodePath = inheritedPath
   ?.split(delimiter)
   .filter((segment) => !segment.includes('bun-node-'))
   .join(delimiter);
-const nodeBinary = (await Bun.file('/opt/homebrew/bin/node').exists())
-  ? '/opt/homebrew/bin/node'
-  : Bun.which('node', realNodePath ? { PATH: realNodePath } : undefined);
+const nodeBinary = Bun.which('node', realNodePath ? { PATH: realNodePath } : undefined);
 if (!nodeBinary) throw new Error('Could not locate genuine Node.js on PATH');
 
 async function run(command: string[], cwd: string): Promise<string> {
   const [executable, ...arguments_] = command;
-  const result = await $`${executable} ${arguments_}`.cwd(cwd).nothrow().quiet();
+  const result = await $`${executable} ${arguments_}`
+    .cwd(cwd)
+    .env({ ...process.env, ...(realNodePath ? { PATH: realNodePath } : {}) })
+    .nothrow()
+    .quiet();
   const output = `${result.stdout}${result.stderr}`;
-  if (result.exitCode !== 0) throw new Error(`${command.join(' ')} failed:\n${output}`);
+  if (result.exitCode !== 0)
+    throw new Error(`${command.join(' ')} exited ${result.exitCode}:\n${output}`);
   return output;
 }
 
@@ -165,11 +168,16 @@ console.log('armorer browser-global consumer: all assertions passed');
 
   await Bun.write(
     join(directory, 'esm.mjs'),
-    `const surfaces = await Promise.all(${JSON.stringify(allSpecifiers)}.map((specifier) => import(specifier)));
+    `console.log(JSON.stringify({ runtime: process.version, executable: process.execPath, armorer: import.meta.resolve('armorer') }));
+const surfaces = await Promise.all(${JSON.stringify(allSpecifiers)}.map(async (specifier) => {
+  const surface = await import(specifier);
+  console.log('Imported ' + specifier);
+  return surface;
+}));
 if (surfaces.length !== ${allSpecifiers.length}) process.exit(1);`,
   );
   await run([nodeBinary, 'esm.mjs'], directory);
-  await run(['npx', '--yes', 'node@20.16.0', 'esm.mjs'], directory);
+  console.log((await run(['npx', '--yes', 'node@22.0.0', 'esm.mjs'], directory)).trim());
 
   await Bun.write(
     join(directory, 'bun.mjs'),
@@ -296,7 +304,7 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
   for (const subpath of serverOnlySubpaths)
     if (manifest.exports[subpath]?.browser)
       throw new Error(`${subpath} must not declare browser support`);
-  if (manifest.engines.bun !== '>=1.4.0' || manifest.engines.node !== '^20.16.0 || >=22.3.0')
+  if (manifest.engines.bun !== '>=1.4.0' || manifest.engines.node !== '>=22')
     throw new Error('engine boundaries changed unexpectedly');
 
   const installedPackage = join(directory, 'node_modules', 'armorer');
@@ -312,12 +320,12 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
 
   const expectedNodeSupport = new Map([
     ['20.15.1', false],
-    ['20.16.0', true],
-    ['20.19.9', true],
+    ['20.16.0', false],
+    ['20.19.9', false],
     ['21.0.0', false],
     ['21.7.3', false],
-    ['22.0.0', false],
-    ['22.2.0', false],
+    ['22.0.0', true],
+    ['22.2.0', true],
     ['22.3.0', true],
   ]);
   for (const [version, expected] of expectedNodeSupport) {
@@ -334,6 +342,9 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
 async function main(): Promise<void> {
   if (Bun.argv.at(-2) !== '--mode' || Bun.argv.at(-1) !== 'local')
     throw new Error('Usage: bun run scripts/verify-armorer-consumer.ts --mode local');
+  console.log(
+    `Node consumer runtime: ${nodeBinary} (${(await run([nodeBinary, '--version'], root)).trim()})`,
+  );
   await run(['turbo', 'run', 'build', '--filter=armorer'], root);
   const staging = await mkdtemp(join(tmpdir(), 'armorer-consumer-pack-'));
   const tarball = await pack(staging);

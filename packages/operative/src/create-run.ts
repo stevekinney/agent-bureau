@@ -437,7 +437,7 @@ export function createActiveRun(
         release();
       }
       const hasError = e.error !== undefined;
-      const status: 'success' | 'error' = hasError ? 'error' : 'success';
+      const status = e.status;
       emitter.dispatchEvent(
         new ToolSettledBubbleEvent(
           { agentName, runId, step: currentStep },

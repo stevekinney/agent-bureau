@@ -1102,62 +1102,80 @@ describe('createRun with durable routing', () => {
   // tool.* bubble events; only raw toolbox:* events were forwarded. The audit trail
   // sinks tool.started / tool.settled / tool.error, so durable tool calls were
   // absent from the curated run stream and /api/v1/audit for persistent bureaus.
-  it('emits curated tool.started and tool.settled events on the durable path', async () => {
-    const context = await buildContext();
-    try {
-      const echoTool = createTool({
-        name: 'echo',
-        description: 'Echo the input',
-        input: z.object({ message: z.string() }),
-        execute: async ({ message }: { message: string }) => message,
-      });
+  it.each([
+    ['success', undefined],
+    ['paused', 'needs_approval'],
+    ['paused', 'needs_input'],
+  ] as const)(
+    'emits curated tool.started and %s tool.settled events on the durable path (%s)',
+    async (expectedStatus, gateStatus) => {
+      const context = await buildContext();
+      try {
+        const echoTool = createTool({
+          name: 'echo',
+          description: 'Echo the input',
+          input: z.object({ message: z.string() }),
+          ...(gateStatus === undefined
+            ? {}
+            : {
+                policy: {
+                  beforeExecute: () => ({ status: gateStatus, reason: 'Approve this call' }),
+                },
+              }),
+          execute: async ({ message }: { message: string }) => message,
+        });
 
-      const toolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
+        const toolbox = createToolbox([echoTool]) as unknown as RunOptions['toolbox'];
 
-      const generate = createMockGenerate([
-        { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] },
-        { content: 'done', toolCalls: [] },
-      ]);
+        const generate = createMockGenerate([
+          { content: '', toolCalls: [{ name: 'echo', arguments: { message: 'hi' } }] },
+          { content: 'done', toolCalls: [] },
+        ]);
 
-      const activeRun = createRun(
-        {
-          generate,
-          toolbox,
-          conversation: createConversationHistory(),
-          stopWhen: stopWhen.noToolCalls(),
-          agentName: 'durable-agent',
-          runId: 'durable-tool-run',
-        },
-        { ...context, runId: 'durable-tool-run', prompt: 'Start' },
-      );
+        const activeRun = createRun(
+          {
+            generate,
+            toolbox,
+            conversation: createConversationHistory(),
+            stopWhen: stopWhen.noToolCalls(),
+            agentName: 'durable-agent',
+            runId: 'durable-tool-run',
+          },
+          { ...context, runId: 'durable-tool-run', prompt: 'Start' },
+        );
 
-      const started: ToolStartedBubbleEvent[] = [];
-      const settled: ToolSettledBubbleEvent[] = [];
-      activeRun.addEventListener('tool.started', (e) => started.push(e));
-      activeRun.addEventListener('tool.settled', (e) => settled.push(e));
+        const started: ToolStartedBubbleEvent[] = [];
+        const settled: ToolSettledBubbleEvent[] = [];
+        activeRun.addEventListener('tool.started', (e) => started.push(e));
+        activeRun.addEventListener('tool.settled', (e) => settled.push(e));
 
-      await activeRun.result;
+        const result = await activeRun.result;
+        expect(result.steps[0]?.results[0]?.outcome).toBe(
+          expectedStatus === 'paused' ? 'action_required' : 'success',
+        );
 
-      expect(started).toHaveLength(1);
-      expect(started[0]).toBeInstanceOf(ToolStartedBubbleEvent);
-      expect(started[0]?.toolName).toBe('echo');
-      expect(started[0]?.agentName).toBe('durable-agent');
-      expect(started[0]?.runId).toBe('durable-tool-run');
-      // step stamp must be a non-negative integer — confirms StepStartedEvent fired
-      // on the durable emitter before execute-start (not stuck at default 0 from a
-      // missing listener, which would also be 0 for step 0, so assert type).
-      expect(typeof started[0]?.step).toBe('number');
-      expect(started[0]?.step).toBe(0); // tool runs on step 0
+        expect(started).toHaveLength(1);
+        expect(started[0]).toBeInstanceOf(ToolStartedBubbleEvent);
+        expect(started[0]?.toolName).toBe('echo');
+        expect(started[0]?.agentName).toBe('durable-agent');
+        expect(started[0]?.runId).toBe('durable-tool-run');
+        // step stamp must be a non-negative integer — confirms StepStartedEvent fired
+        // on the durable emitter before execute-start (not stuck at default 0 from a
+        // missing listener, which would also be 0 for step 0, so assert type).
+        expect(typeof started[0]?.step).toBe('number');
+        expect(started[0]?.step).toBe(0); // tool runs on step 0
 
-      expect(settled).toHaveLength(1);
-      expect(settled[0]).toBeInstanceOf(ToolSettledBubbleEvent);
-      expect(settled[0]?.toolName).toBe('echo');
-      expect(settled[0]?.status).toBe('success');
-      expect(settled[0]?.step).toBe(0);
-    } finally {
-      context.engine[Symbol.dispose]();
-    }
-  });
+        expect(settled).toHaveLength(1);
+        expect(settled[0]).toBeInstanceOf(ToolSettledBubbleEvent);
+        expect(settled[0]?.toolName).toBe('echo');
+        expect(settled[0]?.status).toBe(expectedStatus);
+        expect(settled[0]?.toolCallId).toBe(result.steps[0]?.results[0]?.toolCallId);
+        expect(settled[0]?.step).toBe(0);
+      } finally {
+        context.engine[Symbol.dispose]();
+      }
+    },
+  );
 
   it('stamps curated tool events with the durable run agentName', async () => {
     const context = await buildContext();
@@ -2933,6 +2951,14 @@ describe('createRecoveredRunEventSurface', () => {
     toolbox.dispatchEvent(
       new ToolboxSettledEvent({ tool, call, error: failure, ownerId: 'recovered-run-id' }),
     );
+    toolbox.dispatchEvent(
+      new ToolboxSettledEvent({
+        tool,
+        call: { ...call, id: 'paused-recovered-call' },
+        status: 'paused',
+        ownerId: 'recovered-run-id',
+      }),
+    );
 
     expect(services.options.toolbox).toBe(toolbox);
     expect(services.options.signal).not.toBe(callerAbortController.signal);
@@ -2964,9 +2990,17 @@ describe('createRecoveredRunEventSurface', () => {
       message: 'halfway',
     });
     expect(denials[0]).toMatchObject({ step: 3, reason: 'approval required' });
-    expect(settled).toHaveLength(2);
+    expect(settled).toHaveLength(3);
     expect(settled[0]).toMatchObject({ step: 3, status: 'success', result: { value: 'hello' } });
     expect(settled[1]).toMatchObject({ step: 3, status: 'error', error: failure });
+    expect(settled[2]).toMatchObject({
+      step: 3,
+      status: 'paused',
+      toolCallId: 'paused-recovered-call',
+      runId: 'recovered-run-id',
+      result: undefined,
+      error: undefined,
+    });
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ step: 3, error: failure });
 

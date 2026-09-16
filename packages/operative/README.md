@@ -1517,6 +1517,8 @@ with its own bounded wait (`closed({ signal })`) still observes
 `{ status: 'unresolved', reason: 'timed-out' }` if that signal fires before
 the callback returns.
 
+Approval- and input-gated invocations also settle: their `tool.settled` status is `paused`, and their authoritative tool result remains `action_required` with its pending-approval descriptor. Live, fresh durable, and recovered event projections preserve this status. Pausing does not execute the callback or represent tool success; it allows the owning run to drain the completed invocation without losing the pending approval. A later approved invocation settles separately.
+
 **Parent `closed()` awaits child cleanup (AB-211/AB-304).** When a run was
 started with `childRegistry` (the same `ChildRunRegistry` backing
 `children()` / `abortChild()`), its `closed()` does not resolve `completed`

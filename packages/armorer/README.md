@@ -1223,6 +1223,8 @@ tool.addEventListener('progress', (event) => {
 });
 ```
 
+`ToolSettledEvent` and `ToolboxSettledEvent` expose `status` using the existing tool-finished status vocabulary. An invocation returning `action_required` emits one `settled` event with `status: 'paused'`, unchanged call/execution/owner identity, and its `callbackCompletion` promise. The tool callback has not run. Approved resumption keeps the logical call ID, creates a new execution ID, and settles that execution separately. When manually constructing either settled event, omitted `status` defaults to `error` when `error` is present and `success` otherwise.
+
 Every per-call event — one fired for a specific execution, as opposed to a toolbox-wide event like `query` or `search` — carries `executionId`, a fresh id armorer mints for every execution, plus an `ownerId` field that echoes back whatever `ownerId` (or `requestContext.authority.ownerId`) the caller supplied to `execute()`, verbatim. `ownerId` stays `undefined` when nothing was supplied — it is never fabricated from armorer's own internal bookkeeping default. A caller sharing one `Tool`/`Toolbox` across more than one concurrent owner (a runtime that reuses a toolbox across separate agent runs, for instance) uses `ownerId` (or `executionId`, for finer-grained scoping) to attribute its own accounting and bubble events to just its own calls, since the provider-supplied `ToolCall.id` is not guaranteed unique across owners.
 
 | Event                                                                                                                             | Per call?                    | Carries `executionId`/`ownerId`                                                                                        |

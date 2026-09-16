@@ -100,6 +100,7 @@ import {
   ToolboxValidateErrorEvent,
   ToolboxValidateSuccessEvent,
   type ToolExecutionIdentity,
+  type ToolSettledEvent,
 } from './events';
 import {
   type EffectiveToolExecutionContext,
@@ -360,6 +361,7 @@ export interface ToolboxEvents {
   'execute-success': { tool: Tool; call: ToolCall; result: unknown } & ToolExecutionIdentity;
   'execute-error': { tool: Tool; call: ToolCall; error: unknown } & ToolExecutionIdentity;
   settled: {
+    status?: ToolSettledEvent['status'];
     tool: Tool;
     call: ToolCall;
     result?: unknown;
