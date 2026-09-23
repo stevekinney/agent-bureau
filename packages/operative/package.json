@@ -1,7 +1,7 @@
 {
   "name": "@lostgradient/operative",
   "version": "0.12.0",
-  "description": "A composable agent loop that wires Armorer and Conversationalist into the standard agentic cycle. Includes provider subpaths for Anthropic, OpenAI, and Gemini (dynamically imported — zero-SDK-if-unused).",
+  "description": "A composable agent loop that wires Armorer and Conversationalist into the standard agentic cycle. Includes provider subpaths for Anthropic, OpenAI, and Gemini (dynamically imported \u2014 zero-SDK-if-unused).",
   "keywords": [
     "ai",
     "llm",
@@ -257,6 +257,7 @@
   "scripts": {
     "build": "tsdown",
     "check-types": "tsc --noEmit --incremental false && tsc -p tsconfig.test.json --incremental false",
+    "typecheck": "bun run check-types",
     "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
     "ci": "bun run validate && bun run build",
     "coverage:check": "bun run ../../scripts/check-coverage.ts",
