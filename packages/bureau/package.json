@@ -65,7 +65,6 @@
     "@lostgradient/weft": "^0.24.1",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
-    "interoperability": "workspace:*",
     "lifecycle": "workspace:*",
     "memory": "workspace:*",
     "skills": "workspace:*",

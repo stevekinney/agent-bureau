@@ -68,7 +68,6 @@
   "dependencies": {
     "@lostgradient/weft": "^0.24.1",
     "armorer": "workspace:*",
-    "interoperability": "workspace:*",
     "lifecycle": "workspace:*",
     "zod": "^4.4.3"
   },
