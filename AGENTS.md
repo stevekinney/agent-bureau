@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to Codex when working with code in the agent-bureau monorepo.
+This repository is a **publication mirror** of the private corvidae workspace, which is its source of truth. Pull requests are welcome, but they are ported into corvidae by hand and arrive back here through a sync — this file's guidance applies to that hand-authored porting work and to work on the mirror tooling itself, not to library source, which is edited in corvidae.
 
 ## Fix Problems, Do Not Report Them
 
