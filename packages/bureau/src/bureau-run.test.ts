@@ -13,6 +13,9 @@ import {
   type AgentRun,
   createAgent,
   createLazyAgent,
+  createSubagentTool,
+  type DefinitionResolvingAgent,
+  OPERATIVE_RESOLVE_RUN_OPTIONS,
   type RunnableAgent,
 } from '@lostgradient/operative';
 import { createToolbox, type Toolbox } from 'armorer';
@@ -159,6 +162,28 @@ describe('bureau.run', () => {
     }
   });
 
+  it('reads the resolver capability before the direct-dispatch durability branch', async () => {
+    let resolverReads = 0;
+    const base = createAgent({ generate: mockGenerate() });
+    const agent: RunnableAgent & DefinitionResolvingAgent = {
+      name: base.name,
+      hasOutput: base.hasOutput,
+      run: base.run,
+      get [OPERATIVE_RESOLVE_RUN_OPTIONS]() {
+        resolverReads += 1;
+        return undefined;
+      },
+    };
+    const bureau = await createBureau({ agents: { echo: agent } });
+    try {
+      const run = bureau.run('echo', 'hi');
+      expect(resolverReads).toBe(1);
+      await run.result();
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('settles a direct-dispatch agent whose run() throws synchronously through the returned handle, not as a synchronous throw from bureau.run() itself', async () => {
     // AB-22's synchronous-throw allowlist is unknown name / disposed /
     // malformed input-options only — a hand-written catalog RunnableAgent
@@ -286,7 +311,7 @@ describe('bureau.run', () => {
   });
 
   it('falls back to direct (in-memory) execution for a durable bureau when the agent does not support definition resolution', async () => {
-    const nonResolvingAgent: RunnableAgent<never, false> = {
+    const nonResolvingAgent: RunnableAgent = {
       name: 'plain',
       hasOutput: false,
       run: (input, context) =>
@@ -320,7 +345,7 @@ describe('bureau.run', () => {
     // though the non-lazy version of the same agent (the test above)
     // correctly falls back to direct dispatch.
     const lazyNonResolvingAgent = createLazyAgent(() =>
-      Promise.resolve<RunnableAgent<never, false>>({
+      Promise.resolve<RunnableAgent>({
         name: 'plain',
         hasOutput: false,
         run: (input, context) =>
@@ -500,7 +525,7 @@ describe('bureau.run', () => {
 
     it('forwards options.principal to the agent as AgentRunContext.principal on the direct (non-durable) dispatch branch', async () => {
       let sawContextPrincipal: string | undefined;
-      const capturingAgent: RunnableAgent<never, false> = {
+      const capturingAgent: RunnableAgent = {
         name: 'capturing',
         hasOutput: false,
         run: (input, context) => {
@@ -520,7 +545,7 @@ describe('bureau.run', () => {
 
     it('leaves AgentRunContext.principal undefined on the direct dispatch branch when options omits it, behaving exactly as before this field existed', async () => {
       let sawContextPrincipal: string | undefined = 'not-yet-observed';
-      const capturingAgent: RunnableAgent<never, false> = {
+      const capturingAgent: RunnableAgent = {
         name: 'capturing',
         hasOutput: false,
         run: (input, context) => {
@@ -582,7 +607,7 @@ describe('bureau.run', () => {
       // that entry to avoid a permanent phantom. `context.principal` must
       // still reach the agent either way.
       let sawContextPrincipal: string | undefined;
-      const nonResolvingAgent: RunnableAgent<never, false> = {
+      const nonResolvingAgent: RunnableAgent = {
         name: 'plain',
         hasOutput: false,
         run: (input, context) => {
@@ -730,6 +755,478 @@ describe('bureau.run', () => {
     try {
       expect(bureau.agents.names()).toEqual(['echo']);
       expect(bureau.agents.has('mutated')).toBe(false);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('Bureau invariants on catalog-agent dispatch (COR-1265, COR-1277)', () => {
+  // A catalog agent resolves its own provider, toolbox, memory and skills
+  // (AB-240), so Bureau's tier can only reach it where an options bag exists
+  // outside the agent to merge into. COR-1277 made that true of every dispatch
+  // whose agent exposes `OPERATIVE_RESOLVE_RUN_OPTIONS`, durable or not, so
+  // `durableExecution` is no longer part of the answer — only the resolver is.
+  //
+  // Observed behaviorally rather than by introspection: `AgentRun` exposes no
+  // `describeHookPlan` (that is on `ActiveRun`), and behavior is the stronger
+  // assertion anyway. `bureau:identity` appends its system message on step 0,
+  // and a tripped guardrail halts the run, so a generate that sees the message
+  // and a run that halts are both runs whose plan composed Bureau's tier.
+  function captureSystemMessages(seen: string[]) {
+    return async (request: { conversation?: { getMessages?: () => readonly unknown[] } }) => {
+      const messages = request.conversation?.getMessages?.() ?? [];
+      for (const message of messages as ReadonlyArray<{ role?: string; content?: unknown }>) {
+        if (message.role === 'system' && typeof message.content === 'string') {
+          seen.push(message.content);
+        }
+      }
+      return { content: 'ok', toolCalls: [] };
+    };
+  }
+
+  /** A detector that always trips, so the assertion is about composition and not about detection. */
+  const alwaysTrip = {
+    mode: 'tripwire' as const,
+    input: {
+      detectors: [
+        {
+          name: 'always-trip',
+          detect: async () => ({ triggered: true, confidence: 1, category: 'test' }),
+        },
+      ],
+    },
+  };
+
+  it('applies them to a durably dispatched catalog agent', async () => {
+    const seen: string[] = [];
+    const bureau = await createBureau({
+      agents: {
+        echo: createAgent({
+          generate: captureSystemMessages(seen),
+        }),
+      },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      await bureau.run('echo', 'hi').result();
+      expect(seen).toContain('You are the house agent.');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // COR-1277 criterion 13. The case the whole issue exists for: a bureau that
+  // was simply not built durable, dispatching an ordinary `createAgent` result.
+  it('applies them to a NON-durable dispatch of a resolver-capable agent', async () => {
+    const seen: string[] = [];
+    const bureau = await createBureau({
+      agents: { echo: createAgent({ name: 'echo', generate: captureSystemMessages(seen) }) },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const result = await bureau.run('echo', 'hi').result();
+      expect(seen).toContain('You are the house agent.');
+      // Not vacuous, and not a run that merely failed early: it completed with
+      // the agent's own answer.
+      expect(result.content).toBe('ok');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('applies the guardrail tier to a NON-durable dispatch, not just identity', async () => {
+    let generateCalls = 0;
+    const bureau = await createBureau({
+      agents: {
+        echo: createAgent({
+          name: 'echo',
+          generate: async () => {
+            generateCalls += 1;
+            return { content: 'ok', toolCalls: [] };
+          },
+        }),
+      },
+      guardrails: alwaysTrip,
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const result = await bureau.run('echo', 'hi').result();
+      // `bureau:guardrails-prepare-step` runs before generate and hard-halts,
+      // so the provider is never reached. Identity alone would not prove this —
+      // it is a different registration on the same tier.
+      expect(result.finishReason).toBe('tripwire');
+      expect(generateCalls).toBe(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('leaves the agent’s own provider and toolbox in place on a NON-durable dispatch', async () => {
+    // AB-240's rollback trigger. Bureau contributes a hook tier and nothing
+    // else: the answer still comes from the agent's own generate, not from any
+    // Bureau default — this bureau has none to fall back to.
+    const bureau = await createBureau({
+      agents: {
+        echo: createAgent({
+          name: 'echo',
+          generate: async () => ({ content: 'from the agent', toolCalls: [] }),
+        }),
+      },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const result = await bureau.run('echo', 'hi').result();
+      expect(result.content).toBe('from the agent');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // COR-1277 criterion 2. The load-bearing design claim: `createActiveRun` is
+  // called from the synthetic agent's `run()`, which `createDeferredAgentRun`
+  // invokes only AFTER its `isTerminal()` check. Put it in the resolver instead
+  // and this test fails — the run would already have started by the time the
+  // abort arrived, which is exactly why the durable branch needs a hundred
+  // lines of abort-forwarding machinery that this path does not.
+  it('starts no run when an abort arrives during the resolution window', async () => {
+    let generateCalls = 0;
+    const bureau = await createBureau({
+      agents: {
+        echo: createAgent({
+          name: 'echo',
+          generate: async () => {
+            generateCalls += 1;
+            return { content: 'ok', toolCalls: [] };
+          },
+        }),
+      },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const run = bureau.run('echo', 'hi');
+      // Synchronously, before the deferred resolution has had a microtask.
+      run.abort('cancelled during resolution');
+      await run.result().catch(() => undefined);
+
+      // Drain before asserting. The handle settles synthetically the moment
+      // `abort()` lands, so its `result()` resolves without waiting for
+      // anything the resolver may still be doing — assert immediately and an
+      // ORPHANED run started inside the resolver would not have reached
+      // `generate` yet, and this test would pass while leaking one. Verified:
+      // moving `createActiveRun` into the resolver makes this fail only with
+      // the drain, and pass without it.
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      expect(generateCalls).toBe(0);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // COR-1277 criterion 3. `createActiveRun` derives `LivenessSnapshot.owner`
+  // from its third argument alone, never from `RunOptions.principal`.
+  // `agent.run()` used to supply it internally; now this path builds the run
+  // itself and has to pass it, or every principal-carrying non-durable catalog
+  // run silently reports no owner.
+  it('attributes a NON-durable catalog run to its principal', async () => {
+    const bureau = await createBureau({
+      agents: { echo: createAgent({ name: 'echo', generate: mockGenerate('ok') }) },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const run = bureau.run('echo', 'hi', { principal: 'api-key:alice' });
+      await run.result();
+      expect(run.snapshot().owner).toBe('api-key:alice');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // COR-1277 criterion 8. A resolver-capable agent whose resolver REJECTS with
+  // `AgentContractError` — the `createLazyAgent` shape, which exposes the
+  // symbol unconditionally and only discovers on invocation whether the module
+  // behind it supports resolution. Not the no-resolver case, which never
+  // reaches this branch.
+  it('falls back to the agent’s own run() when its resolver reports no support', async () => {
+    let ranThroughOwnRun = false;
+    const base = createAgent({ name: 'lazyish', generate: mockGenerate('from own run') });
+    const agent: RunnableAgent & DefinitionResolvingAgent = {
+      name: base.name,
+      hasOutput: base.hasOutput,
+      run: (input, context) => {
+        ranThroughOwnRun = true;
+        return base.run(input, context);
+      },
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: () => {
+        throw new AgentContractError('definition resolution is not supported', undefined);
+      },
+    };
+    const bureau = await createBureau({
+      agents: { lazyish: agent },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const result = await bureau.run('lazyish', 'hi').result();
+      expect(result.content).toBe('from own run');
+      expect(ranThroughOwnRun).toBe(true);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // COR-1277 criterion 7. A genuine resolver failure settled as it does today.
+  // Before this change the same failure happened inside `agent.run()` and
+  // `createDeferredAgentRun` classified it "threw synchronously from run()";
+  // rethrowing from the resolver instead would reclassify it as a LOAD_FAILED
+  // load error, which is a different thing for a caller to branch on.
+  it('settles a genuine resolver failure with its existing classification', async () => {
+    const base = createAgent({ name: 'broken', generate: mockGenerate() });
+    const agent: RunnableAgent & DefinitionResolvingAgent = {
+      name: base.name,
+      hasOutput: base.hasOutput,
+      run: base.run,
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: () => {
+        throw new Error('resolution exploded');
+      },
+    };
+    const bureau = await createBureau({
+      agents: { broken: agent },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const run = bureau.run('broken', 'hi'); // must not throw synchronously
+      const result = await run.result();
+      expect(result.finishReason).not.toBe('stop-condition');
+      // The classification, not merely "an error": `run()`-synchronous, which
+      // is what a caller sees today, rather than a load failure.
+      expect(String(result.error)).toContain('threw synchronously from run()');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // COR-1277 criterion 5. The AB-260 stamp is parity with the durable branch,
+  // and its effect is deliberately invisible for an ordinary `createAgent`
+  // agent: `buildRunOptions` always populates `runtime`, so the spread leaves
+  // the agent's value in place. Only a hand-written resolver that omits the
+  // field can reach the stamp at all.
+  //
+  // What this pins is survivability, not the stamp's effect. Nothing on this
+  // dispatch path's public surface reports which `RuntimeServices` instance a
+  // run used, so a test asserting the stamp took hold cannot be written here
+  // without reaching into internals — stated rather than faked with an
+  // assertion that would pass either way.
+  it('dispatches a resolver that omits runtime, which is the only shape the stamp reaches', async () => {
+    const base = createAgent({ name: 'bare', generate: mockGenerate('bare ok') });
+    const agent: RunnableAgent & DefinitionResolvingAgent = {
+      name: base.name,
+      hasOutput: base.hasOutput,
+      run: base.run,
+      [OPERATIVE_RESOLVE_RUN_OPTIONS]: async (input, context) => {
+        const resolved = await base[OPERATIVE_RESOLVE_RUN_OPTIONS]!(input, context);
+        const { runtime: _dropped, ...withoutRuntime } = resolved;
+        return withoutRuntime;
+      },
+    };
+    const bureau = await createBureau({
+      agents: { bare: agent },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const result = await bureau.run('bare', 'hi').result();
+      expect(result.content).toBe('bare ok');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  // COR-1277 criterion 9. The residue: the resolver is what this path needs,
+  // so an agent exposing none is uncovered whether or not the bureau is
+  // durable. Both halves are pinned so the documentation cannot drift back to
+  // describing this as a durability question.
+  it('cannot reach a durable dispatch of an agent that resolves no run options', async () => {
+    const seen: string[] = [];
+    const nonResolvingAgent: RunnableAgent = {
+      name: 'plain',
+      hasOutput: false,
+      run: (input, context) =>
+        createAgent({ generate: captureSystemMessages(seen) }).run(input, context),
+    };
+    const bureau = await createBureau({
+      agents: { plain: nonResolvingAgent },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      await bureau.run('plain', 'hi').result();
+      expect(seen).not.toContain('You are the house agent.');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('cannot reach a NON-durable dispatch of an agent that resolves no run options', async () => {
+    const seen: string[] = [];
+    const nonResolvingAgent: RunnableAgent = {
+      name: 'plain',
+      hasOutput: false,
+      run: (input, context) =>
+        createAgent({ generate: captureSystemMessages(seen) }).run(input, context),
+    };
+    const bureau = await createBureau({
+      agents: { plain: nonResolvingAgent },
+      identity: { resolve: async () => 'You are the house agent.' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const result = await bureau.run('plain', 'hi').result();
+      expect(result.content).toBe('ok');
+      expect(seen).not.toContain('You are the house agent.');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('every Bureau hook hand-off is a merge (COR-1265 criterion 3)', () => {
+  // Three of the five sites build `RunOptions` for a handle no public surface
+  // returns — `bureau.createRun()` resolves a `RunSummary`, and the scheduler
+  // and mocked-reattach paths produce no caller-visible run at all — so
+  // `describeHookPlan()` cannot reach them the way it reaches the scheduled and
+  // recovered paths tested in `runtime-composition.test.ts`.
+  //
+  // This is the assertion that does reach all five: no site hands a run the
+  // live registry. It is a source invariant rather than a behavior, and it is
+  // stated as one rather than dressed up as coverage it is not.
+  it('leaves no site handing a run the live runRuntime registry', async () => {
+    const sources = ['./create-bureau.ts', './runtime-composition.ts'];
+    for (const source of sources) {
+      const text = await Bun.file(new URL(source, import.meta.url).pathname).text();
+      // The raw hand-off, in any whitespace shape. A match means a run received
+      // the registry Bureau keeps mutating instead of a snapshot of it.
+      expect(text, source).not.toMatch(/hooks:\s*runRuntime\.hooks\b/u);
+      expect(text, source).not.toMatch(/hooks:\s*registerTrailingOnStep\(/u);
+    }
+  });
+
+  it('carries Bureau’s tier into an interactive bureau.createRun run', async () => {
+    const seen: string[] = [];
+    const bureau = await createBureau({
+      agents: {},
+      generate: async (request) => {
+        for (const message of request.conversation.getMessages()) {
+          if (message.role === 'system' && typeof message.content === 'string') {
+            seen.push(message.content);
+          }
+        }
+        return { content: 'ok', toolCalls: [] };
+      },
+      identity: { resolve: async () => 'BUREAU-TIER-REACHED' },
+      storage: { type: 'memory' },
+    });
+
+    try {
+      const run = await bureau.createRun({ message: 'hi' });
+      for (let attempt = 0; attempt < 50 && seen.length === 0; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(bureau.getRun(run.id)).toBeDefined();
+      expect(seen).toContain('BUREAU-TIER-REACHED');
+    } finally {
+      await bureau.dispose();
+    }
+  });
+});
+
+describe('a child run is outside Bureau’s hook authority (COR-1269)', () => {
+  it('does not carry the dispatching Bureau’s invariants into a child run', async () => {
+    const supervisorSaw: string[] = [];
+    const childSaw: string[] = [];
+    function recordInto(seen: string[]) {
+      return async (request: {
+        conversation: { getMessages: () => ReadonlyArray<{ role?: string; content?: unknown }> };
+      }) => {
+        for (const message of request.conversation.getMessages()) {
+          if (message.role === 'system' && typeof message.content === 'string') {
+            seen.push(message.content);
+          }
+        }
+        return { content: 'done', toolCalls: [] };
+      };
+    }
+
+    const child = createAgent({ name: 'researcher', generate: recordInto(childSaw) });
+    const delegate = createSubagentTool({
+      name: 'delegate',
+      description: 'Delegate',
+      agent: child,
+      agentName: 'researcher',
+      input: z.object({ q: z.string() }),
+    });
+
+    let step = 0;
+    const bureau = await createBureau({
+      agents: {
+        supervisor: createAgent({
+          name: 'supervisor',
+          toolbox: createToolbox([delegate]),
+          generate: async (request) => {
+            const settled = await recordInto(supervisorSaw)(request);
+            return step++ === 0
+              ? {
+                  content: '',
+                  toolCalls: [{ id: 'c1', name: 'delegate', arguments: { q: 'hi' } }],
+                }
+              : settled;
+          },
+        }),
+      },
+      identity: { resolve: async () => 'BUREAU-IDENTITY' },
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      await bureau.run('supervisor', 'go').result();
+
+      // The supervisor is Bureau-owned and carries the invariant. Its child does
+      // not, and cannot: `dispatchChildRun` calls `agent.run()`, which builds
+      // its `RunOptions` inside the agent, so there is no options bag for a
+      // Bureau tier to be merged into — structurally the same gap as the two
+      // catalog rows above, closed only by a caller-facing hook field that
+      // COR-567 Decision 4 declines.
+      //
+      // Pinned rather than left implicit. COR-1269's criterion 1 originally
+      // claimed a child of a Bureau-owned agent DOES receive that child's
+      // Bureau invariants; it was amended to match reality once this was
+      // verified by probe. If this ever starts failing, the gap closed: delete
+      // the test and update the child section of
+      // `documentation/hierarchical-hook-composition.md`.
+      expect(supervisorSaw).toContain('BUREAU-IDENTITY');
+      expect(childSaw).not.toContain('BUREAU-IDENTITY');
     } finally {
       await bureau.dispose();
     }

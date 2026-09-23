@@ -1,9 +1,9 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 import type { Message } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
 
 import type { TokenBudget } from '../context/token-budget.ts';
 import type { ContextAssembler } from '../context/types.ts';
-import type { ResponseFormat, ToolChoice } from './structured-output/types.ts';
+import type { ResponseFormat, ToolChoice } from '../structured-output/types.ts';
 
 export type {
   GenerateContext,
@@ -47,13 +47,13 @@ export interface BaseProviderOptions {
    * `providers/shared/effort.ts`. The actually-used tier is reported back
    * on `GenerateResponse.metadata.effectiveEffort`.
    */
-  effort?: Effort;
-  maximumTokens?: number;
-  temperature?: number;
-  topP?: number;
-  stopSequences?: string[];
-  toolChoice?: ToolChoice;
-  responseFormat?: ResponseFormat;
+  effort?: Effort | undefined;
+  maximumTokens?: number | undefined;
+  temperature?: number | undefined;
+  topP?: number | undefined;
+  stopSequences?: string[] | undefined;
+  toolChoice?: ToolChoice | undefined;
+  responseFormat?: ResponseFormat | undefined;
   /**
    * Provider-neutral per-run request metadata, attached to every generate
    * request of the run. Mapped to each provider's native field: Anthropic
@@ -70,7 +70,7 @@ export interface BaseProviderOptions {
    * request rejected. Only pass extra keys when a proxy will translate or
    * strip them before forwarding.
    */
-  requestMetadata?: Record<string, string>;
+  requestMetadata?: Record<string, string> | undefined;
 }
 
 /**
@@ -108,7 +108,7 @@ export interface AnthropicClient {
  */
 export interface AnthropicRequestOptions {
   /** Aborts the in-flight HTTP request, closing a streaming response early. */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -185,14 +185,22 @@ export interface AnthropicMessageCreateRequest {
  * `anthropic-client-assignability.test-d.ts` is what caught this.
  */
 export interface AnthropicMessageResponse {
-  content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_creation_input_tokens?: number | null;
-    cache_read_input_tokens?: number | null;
-  };
-  stop_reason?: string | null;
+  content: Array<{
+    type: string;
+    text?: string | undefined;
+    id?: string | undefined;
+    name?: string | undefined;
+    input?: unknown;
+  }>;
+  usage?:
+    | {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number | null;
+        cache_read_input_tokens?: number | null;
+      }
+    | undefined;
+  stop_reason?: (string | null) | undefined;
 }
 
 /**
@@ -238,21 +246,21 @@ export type AnthropicThinkingConfig =
  * Options for createAnthropicProvider.
  */
 export interface AnthropicProviderOptions extends BaseProviderOptions {
-  client?: AnthropicClient;
-  apiKey?: string;
+  client?: AnthropicClient | undefined;
+  apiKey?: string | undefined;
   /**
    * Overrides the Anthropic SDK's default base URL. Accepts any string —
    * including a credential-injecting proxy origin — with no shape
    * validation. Passed straight to the `Anthropic` client constructor.
    */
-  baseURL?: string;
+  baseURL?: string | undefined;
   /**
    * Opts every `cache_control` breakpoint lowered from a conversation
    * `cacheBoundary` into Anthropic's extended one-hour cache TTL instead of
    * the default 5-minute one. No effect unless `assembler`/`contextBudget`
    * (or an already-marked conversation) actually produce a cache boundary.
    */
-  extendedCacheTtl?: boolean;
+  extendedCacheTtl?: boolean | undefined;
   /**
    * Enables prompt-cache-aware context assembly. When set (together with
    * {@link AnthropicProviderOptions.contextBudget}), each call runs
@@ -262,11 +270,11 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
    * `toAnthropicMessages` lowers it to a `cache_control` breakpoint — see
    * `createContextAssembler`'s `stablePrefix` option.
    */
-  assembler?: ContextAssembler;
+  assembler?: ContextAssembler | undefined;
   /** Token budget passed to `assembler`. Required when `assembler` is set. */
-  contextBudget?: TokenBudget;
+  contextBudget?: TokenBudget | undefined;
   /** Passed through to `assembler` as `pinnedMessages` (e.g. reference docs, tool usage notes). */
-  pinnedMessages?: ReadonlyArray<Message>;
+  pinnedMessages?: ReadonlyArray<Message> | undefined;
   /**
    * Requests Anthropic's extended-thinking mode, mirroring the native
    * `thinking` request field shape directly — see
@@ -320,7 +328,7 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
    * named tool). Forced tool use is fine with `{ type: 'adaptive' }`, which
    * Anthropic explicitly supports.
    */
-  thinking?: AnthropicThinkingConfig;
+  thinking?: AnthropicThinkingConfig | undefined;
 }
 
 /**
@@ -335,7 +343,7 @@ export interface AnthropicProviderOptions extends BaseProviderOptions {
  */
 export interface OpenAIRequestOptions {
   /** Aborts the in-flight HTTP request, closing a streaming response early. */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -358,35 +366,39 @@ export interface OpenAIClient {
 export interface OpenAIChatCompletion {
   choices: Array<{
     message: {
-      content?: string | null;
-      tool_calls?: Array<{
-        id: string;
-        type: 'function';
-        function: { name: string; arguments: string };
-      }>;
+      content?: (string | null) | undefined;
+      tool_calls?:
+        | Array<{
+            id: string;
+            type: 'function';
+            function: { name: string; arguments: string };
+          }>
+        | undefined;
     };
-    finish_reason?: string;
+    finish_reason?: string | undefined;
   }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
-  };
+  usage?:
+    | {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number };
+      }
+    | undefined;
 }
 
 /**
  * Options for createOpenAIProvider.
  */
 export interface OpenAIProviderOptions extends BaseProviderOptions {
-  client?: OpenAIClient;
-  apiKey?: string;
+  client?: OpenAIClient | undefined;
+  apiKey?: string | undefined;
   /**
    * Overrides the OpenAI SDK's default base URL. Accepts any string —
    * including a credential-injecting proxy origin — with no shape
    * validation. Enables LM Studio, Ollama, Groq, etc.
    */
-  baseURL?: string;
+  baseURL?: string | undefined;
 }
 
 /**
@@ -436,15 +448,17 @@ export interface GeminiGenerativeModel {
  * handed to armorer's stricter `GeminiPart` union.
  */
 export interface GeminiGenerateContentResult {
-  candidates?: Array<{
-    content?: {
-      parts?: Array<{
-        text?: string;
-        functionCall?: { name?: string; args?: Record<string, unknown> };
-      }>;
-    };
-  }>;
-  usageMetadata?: GeminiUsageMetadata;
+  candidates?:
+    | Array<{
+        content?: {
+          parts?: Array<{
+            text?: string;
+            functionCall?: { name?: string; args?: Record<string, unknown> };
+          }>;
+        };
+      }>
+    | undefined;
+  usageMetadata?: GeminiUsageMetadata | undefined;
 }
 
 /**
@@ -459,11 +473,11 @@ export interface GeminiGenerateContentResult {
  * `cacheCreationTokens`.
  */
 export interface GeminiUsageMetadata {
-  promptTokenCount?: number;
-  candidatesTokenCount?: number;
-  totalTokenCount?: number;
+  promptTokenCount?: number | undefined;
+  candidatesTokenCount?: number | undefined;
+  totalTokenCount?: number | undefined;
   /** Tokens of the prompt served from a context cache, per the SDK's own docs. */
-  cachedContentTokenCount?: number;
+  cachedContentTokenCount?: number | undefined;
 }
 
 /**
@@ -490,14 +504,14 @@ export interface GeminiCreateCachedContentRequest {
  */
 export interface GeminiCachedContent {
   /** Server-generated resource name — the handle passed back as `cachedContent`. */
-  name?: string;
-  displayName?: string;
-  model?: string;
-  createTime?: string;
-  updateTime?: string;
-  expireTime?: string;
+  name?: string | undefined;
+  displayName?: string | undefined;
+  model?: string | undefined;
+  createTime?: string | undefined;
+  updateTime?: string | undefined;
+  expireTime?: string | undefined;
   /** `CachedContentUsageMetadata` in the SDK, carrying `totalTokenCount`. */
-  usageMetadata?: { totalTokenCount?: number };
+  usageMetadata?: { totalTokenCount?: number } | undefined;
 }
 
 /**
@@ -521,20 +535,28 @@ export interface GeminiCacheCreatingClient {
  *
  * Replaces the two provisional, SDK-shaped response types this package
  * shipped ahead of AB-64 (Gemini's `{ totalTokens?, cachedContentTokenCount? }`
- * and Anthropic's `{ input_tokens? }`) with one shape both
+ * and Anthropic's `{ input_tokens }`) with one shape both
  * `createGeminiTokenCounter` and `createAnthropicTokenCounter` map onto at
- * their own boundary. `totalTokens` is required here even though both SDKs
- * declare their own field optional: AB-64 requires it, so each adapter
- * normalizes the absent case to `0` once, at the mapping boundary, rather
- * than pushing a `?? 0` onto every caller. `cachedTokens` stays optional and
- * is never fabricated as `0` — Anthropic's `messages.countTokens` reports no
- * cache attribution at all, so its adapter always omits the field, and
- * Gemini's adapter omits it whenever the SDK response omits
+ * their own boundary. The two SDKs do not agree on optionality here: `@google/genai`'s
+ * `CountTokensResponse.totalTokens` is optional (the whole response is a
+ * loosely-typed class with every field optional), but `@anthropic-ai/sdk`'s
+ * `MessageTokensCount.input_tokens` is required—Anthropic's `countTokens`
+ * response always carries a count. `totalTokens` is still required here, for
+ * both adapters uniformly: AB-64 requires it, and normalizing Gemini's
+ * genuinely-absent case to `0` once, at the mapping boundary, is simpler than
+ * pushing a `?? 0` onto every caller. Against the official SDK response type
+ * `createAnthropicTokenCounter` never actually observes an absent count to
+ * normalize—but {@link AnthropicTokenCountingClient} deliberately keeps
+ * `input_tokens` optional too, for a caller-supplied client or proxy `baseURL`
+ * that omits it, and the `?? 0` fallback does cover that boundary. `cachedTokens` stays
+ * optional and is never fabricated as `0`—Anthropic's `messages.countTokens`
+ * reports no cache attribution at all, so its adapter always omits the field,
+ * and Gemini's adapter omits it whenever the SDK response omits
  * `cachedContentTokenCount`.
  */
 export interface TokenCountResult {
   readonly totalTokens: number;
-  readonly cachedTokens?: number;
+  readonly cachedTokens?: number | undefined;
   readonly provider: ProviderName;
   readonly model: string;
 }
@@ -580,9 +602,9 @@ export interface GeminiTokenCountingClient {
   models: {
     countTokens(params: GeminiCountTokensRequest): Promise<{
       /** Total token count for `contents` (and `config`, when supplied). */
-      totalTokens?: number;
+      totalTokens?: number | undefined;
       /** Tokens attributable to a referenced context cache. */
-      cachedContentTokenCount?: number;
+      cachedContentTokenCount?: number | undefined;
     }>;
   };
 }
@@ -591,14 +613,14 @@ export interface GeminiTokenCountingClient {
  * Options for createGeminiProvider.
  */
 export interface GeminiProviderOptions extends BaseProviderOptions {
-  client?: GeminiGenerativeModel;
-  apiKey?: string;
+  client?: GeminiGenerativeModel | undefined;
+  apiKey?: string | undefined;
   /**
    * Overrides the Gemini SDK's default base URL (`HttpOptions.baseUrl`).
    * Accepts any string — including a credential-injecting proxy origin —
    * with no shape validation.
    */
-  baseURL?: string;
+  baseURL?: string | undefined;
   /**
    * Names an already-created `CachedContent` resource to serve this run's
    * prompt prefix from, lowered verbatim to `config.cachedContent`.
@@ -640,7 +662,7 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * the other has the provider create and own one. Setting both is rejected at
    * factory-construction time rather than silently resolved.
    */
-  cachedContent?: string;
+  cachedContent?: string | undefined;
   /**
    * Enables prompt-cache-aware context assembly. When set (together with
    * {@link GeminiProviderOptions.contextBudget}), each call runs `assembler`
@@ -675,11 +697,11 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * to. The mark is still the mechanism here; it just steers an out-of-band
    * `caches.create` call rather than a `cache_control` field.
    */
-  assembler?: ContextAssembler;
+  assembler?: ContextAssembler | undefined;
   /** Token budget passed to `assembler`. Required when `assembler` is set. */
-  contextBudget?: TokenBudget;
+  contextBudget?: TokenBudget | undefined;
   /** Passed through to `assembler` as `pinnedMessages` (e.g. reference docs, tool usage notes). */
-  pinnedMessages?: ReadonlyArray<Message>;
+  pinnedMessages?: ReadonlyArray<Message> | undefined;
   /**
    * TTL for the provider-created cache resource, as the SDK's duration string
    * (`'3600s'`, up to nine fractional digits). Passed to `caches.create` as
@@ -702,7 +724,7 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * default when this is unset, which nothing here could otherwise know. This
    * value is used only when the response reports no usable `expireTime`.
    */
-  cacheTtl?: string;
+  cacheTtl?: string | undefined;
   /**
    * Cache-capable client used for the `caches.create` calls the `assembler` +
    * `contextBudget` path makes.
@@ -721,7 +743,7 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * neither, with the assembler path enabled and an injected client that has
    * no `caches`, is rejected at factory-construction time.
    */
-  cacheClient?: GeminiCacheCreatingClient;
+  cacheClient?: GeminiCacheCreatingClient | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam: wall time
    * (`managedCaches` entry `createdAt`/expiry comparisons). Resolved exactly
@@ -730,7 +752,7 @@ export interface GeminiProviderOptions extends BaseProviderOptions {
    * instance with `createManualRuntimeServices()` so cache-expiry timing is
    * fully time-controlled.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 // ── Streaming Types ─────────────────────────────────────────────────
@@ -746,29 +768,33 @@ export interface AnthropicStreamEvent {
     | 'content_block_stop'
     | 'message_delta'
     | 'message_stop';
-  message?: {
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      cache_creation_input_tokens?: number | null;
-      cache_read_input_tokens?: number | null;
-    };
-  };
-  index?: number;
-  content_block?: { type: string; id?: string; name?: string; text?: string };
-  delta?: {
-    type?: string;
-    text?: string;
-    thinking?: string;
-    partial_json?: string;
-    /**
-     * Widened to allow `null`: the SDK's `RawMessageDeltaEvent.Delta.stop_reason`
-     * is `StopReason | null`, not merely optional.
-     */
-    stop_reason?: string | null;
-    usage?: { output_tokens?: number };
-  };
-  usage?: { output_tokens?: number };
+  message?:
+    | {
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number | null;
+          cache_read_input_tokens?: number | null;
+        };
+      }
+    | undefined;
+  index?: number | undefined;
+  content_block?: { type: string; id?: string; name?: string; text?: string } | undefined;
+  delta?:
+    | {
+        type?: string;
+        text?: string;
+        thinking?: string;
+        partial_json?: string;
+        /**
+         * Widened to allow `null`: the SDK's `RawMessageDeltaEvent.Delta.stop_reason`
+         * is `StopReason | null`, not merely optional.
+         */
+        stop_reason?: string | null;
+        usage?: { output_tokens?: number };
+      }
+    | undefined;
+  usage?: { output_tokens?: number } | undefined;
 }
 
 /**
@@ -777,22 +803,26 @@ export interface AnthropicStreamEvent {
 export interface OpenAIChatCompletionChunk {
   choices: Array<{
     delta: {
-      content?: string | null;
-      tool_calls?: Array<{
-        index: number;
-        id?: string;
-        type?: 'function';
-        function?: { name?: string; arguments?: string };
-      }>;
+      content?: (string | null) | undefined;
+      tool_calls?:
+        | Array<{
+            index: number;
+            id?: string;
+            type?: 'function';
+            function?: { name?: string; arguments?: string };
+          }>
+        | undefined;
     };
-    finish_reason?: string | null;
+    finish_reason?: (string | null) | undefined;
   }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-    prompt_tokens_details?: { cached_tokens?: number };
-  } | null;
+  usage?:
+    | ({
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+        prompt_tokens_details?: { cached_tokens?: number };
+      } | null)
+    | undefined;
 }
 
 /**
@@ -1065,7 +1095,7 @@ export interface AnthropicTokenCountingClient {
        * Total tokens across the request's messages, system prompt, and tools.
        * Absent when the response genuinely omits it; never fabricated as `0`.
        */
-      input_tokens?: number;
+      input_tokens?: number | undefined;
     }>;
   };
 }
@@ -1090,7 +1120,7 @@ export interface OpenAIBatchCreateRequest {
   endpoint: string;
   /** Id of an uploaded JSONL file containing the batched requests. */
   input_file_id: string;
-  metadata?: Record<string, string> | null;
+  metadata?: (Record<string, string> | null) | undefined;
 }
 
 /**
@@ -1132,10 +1162,10 @@ export interface OpenAIBatch {
     | 'cancelling'
     | 'cancelled';
   /** Id of the file holding results for the requests that succeeded. */
-  output_file_id?: string;
+  output_file_id?: string | undefined;
   /** Id of the file holding results for the requests that errored. */
-  error_file_id?: string;
-  request_counts?: OpenAIBatchRequestCounts;
+  error_file_id?: string | undefined;
+  request_counts?: OpenAIBatchRequestCounts | undefined;
 }
 
 /**
@@ -1164,7 +1194,7 @@ export interface OpenAIBatchClient {
  */
 export interface GeminiCreateBatchJobRequest {
   /** Provider-native model id. Optional in the SDK — see the type's note. */
-  model?: string;
+  model?: string | undefined;
   /**
    * `BatchJobSourceUnion` in the SDK: inline requests, a GCS/BigQuery URI, or
    * an uploaded file name. Widened so fakes need not model the union.
@@ -1201,15 +1231,15 @@ export interface GeminiListBatchJobsRequest {
  */
 export interface GeminiBatchJob {
   /** Server-generated resource name — the handle for `get`/`cancel`/`delete`. */
-  name?: string;
-  displayName?: string;
+  name?: string | undefined;
+  displayName?: string | undefined;
   /** `JobState` in the SDK, a string enum such as `'JOB_STATE_SUCCEEDED'`. */
-  state?: string;
-  createTime?: string;
-  startTime?: string;
-  endTime?: string;
-  updateTime?: string;
-  model?: string;
+  state?: string | undefined;
+  createTime?: string | undefined;
+  startTime?: string | undefined;
+  endTime?: string | undefined;
+  updateTime?: string | undefined;
+  model?: string | undefined;
   /** `BatchJobDestination` in the SDK: where the results were written. */
   dest?: unknown;
   /** `JobError` in the SDK; set only for failed or cancelled jobs. */
@@ -1221,8 +1251,8 @@ export interface GeminiBatchJob {
  * `batches.delete`.
  */
 export interface GeminiDeleteResourceJob {
-  name?: string;
-  done?: boolean;
+  name?: string | undefined;
+  done?: boolean | undefined;
   /** `JobError` in the SDK. */
   error?: unknown;
 }

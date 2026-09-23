@@ -1,6 +1,5 @@
 {
-  "name": "lifecycle",
-  "private": true,
+  "name": "@lostgradient/lifecycle",
   "version": "0.0.1",
   "description": "Typed EventTarget, async iterators, observables, hooks, and lifecycle utilities for agent-bureau.",
   "keywords": [
@@ -25,21 +24,25 @@
   "exports": {
     ".": {
       "bun": "./dist/index.js",
-      "browser": "./dist/index.js",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "default": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "default": "./dist/index.js"
     }
   },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "bun run scripts/build.ts",
+    "build": "tsdown",
     "check-types": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist coverage tsconfig.tsbuildinfo",
+    "clean": "rm -rf dist coverage",
     "ci": "bun run validate && bun run build",
     "coverage:check": "bun run ../../scripts/check-coverage.ts",
     "dev": "bun --watch run src/index.ts",
@@ -69,9 +72,22 @@
     "eslint-plugin-unicorn": "^73.0.0",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.11.0",
+    "oxlint": "^1.83.0",
+    "tsdown": "^0.22.14",
+    "typescript": "6.0.3",
     "typescript-eslint": "^8.67.0"
   },
   "engines": {
     "bun": ">=1.4.0"
-  }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false
 }

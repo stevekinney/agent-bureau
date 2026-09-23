@@ -27,14 +27,14 @@ export interface RequestHumanInputInput {
    * Optional prompt to surface to the human reviewer. This is returned in the
    * tool result and in the `HumanWaitParkedEvent` so callers can display it.
    */
-  prompt?: string;
+  prompt?: string | undefined;
 }
 
 /** Output returned to the LLM when `requestHumanInput` is called. */
 export interface RequestHumanInputResult {
   parked: true;
   signalName: string;
-  prompt?: string;
+  prompt?: string | undefined;
   /** Human-readable message the LLM can use in its response. */
   message: string;
 }
@@ -52,7 +52,7 @@ export interface RequestHumanInputContext {
    * Optional run id, used in the emitted event so observers can correlate the
    * park event to a specific run. Falls back to `''` when omitted.
    */
-  runId?: string;
+  runId?: string | undefined;
   /**
    * Whether this run has a compatible durable execution context attached
    * (a bureau with a durable engine, regardless of whether its checkpoint
@@ -84,7 +84,7 @@ export interface CreateRequestHumanInputToolOptions {
    * dispatched each time the tool executes (C3 completeness rule — every state
    * transition emits an event).
    */
-  emitter?: HumanInputEventDispatcher;
+  emitter?: HumanInputEventDispatcher | undefined;
 }
 
 /**

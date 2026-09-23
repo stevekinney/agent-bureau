@@ -1,6 +1,6 @@
+import type { ToolCall } from '@lostgradient/tool-protocol';
 import type { ToolExecutionResult } from 'armorer';
 import { Conversation } from 'conversationalist';
-import type { ToolCall } from 'interoperability';
 
 import {
   ResponseSchemaFailedEvent,
@@ -81,16 +81,6 @@ export async function finalizeStep(input: StepFinalizationDependencies): Promise
 
   emitter?.dispatch(new StepCompletedEvent(stepResult));
 
-  if (deps.onStepHooks.length > 0) {
-    try {
-      for (const hook of deps.onStepHooks) {
-        await hook(stepResult);
-      }
-    } catch (error) {
-      emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
-      return { kind: 'error', error, errorKind: 'policy' };
-    }
-  }
   if (hooks?.has('onStep')) {
     try {
       await hooks.run('onStep', stepResult);

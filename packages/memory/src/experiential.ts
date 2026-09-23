@@ -116,8 +116,12 @@ export function createRunCaptureHook(options: RunCaptureHookOptions): {
 
       const summary = customSummarize ? customSummarize(context) : summarizeRun(context);
 
-      const finishReason = context.metadata?.['finishReason'] as string | undefined;
-      const agentId = context.metadata?.['agentId'] as string | undefined;
+      const finishReason =
+        typeof context.metadata?.['finishReason'] === 'string'
+          ? context.metadata['finishReason']
+          : undefined;
+      const agentId =
+        typeof context.metadata?.['agentId'] === 'string' ? context.metadata['agentId'] : undefined;
 
       await memory.remember(summary, {
         source: 'experiential',

@@ -1,27 +1,8 @@
 import { type ConversationEnvironment, defaultConversationRuntime } from '../environment';
 import { Conversation } from '../history';
 import type { ToMarkdownOptions } from '../types';
-import {
-  fromMarkdown,
-  getRoleFromLabel,
-  getRoleLabel,
-  LABEL_TO_ROLE,
-  MarkdownParseError,
-  ROLE_LABELS,
-  toMarkdown,
-} from '../utilities/markdown';
-
-export type { ToMarkdownOptions } from '../types';
-
-export {
-  fromMarkdown,
-  getRoleFromLabel,
-  getRoleLabel,
-  LABEL_TO_ROLE,
-  MarkdownParseError,
-  ROLE_LABELS,
-  toMarkdown,
-};
+import { toMarkdown } from '../utilities/markdown';
+import { fromMarkdown } from '../utilities/markdown-parsing';
 
 /**
  * Converts a Conversation instance to Markdown.

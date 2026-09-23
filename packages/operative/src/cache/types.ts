@@ -5,7 +5,7 @@
  * events, and metrics tracking.
  */
 
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { TextValueStore } from '@lostgradient/weft';
 
 import type { GenerateContext, GenerateResponse } from '../types';
 
@@ -17,21 +17,21 @@ export type CacheOptions = {
   /** Storage backend for cached responses. */
   store: TextValueStore;
   /** TTL in seconds. 0 means no expiry. Default: `3600`. */
-  ttl?: number;
+  ttl?: number | undefined;
   /** Strategy for generating cache keys. Default: `'conversation-hash'`. */
-  keyStrategy?: 'conversation-hash' | 'last-message' | CacheKeyFunction;
+  keyStrategy?: ('conversation-hash' | 'last-message' | CacheKeyFunction) | undefined;
   /** Namespace prefix for cache keys. Default: `'llm-cache:'`. */
-  namespace?: string;
+  namespace?: string | undefined;
   /** When true, responses with tool calls are not cached. Default: `false`. */
-  invalidateOnToolCalls?: boolean;
+  invalidateOnToolCalls?: boolean | undefined;
   /** Called on cache hit. */
-  onHit?: (event: CacheHitEvent) => void;
+  onHit?: ((event: CacheHitEvent) => void) | undefined;
   /** Called on cache miss. */
-  onMiss?: (event: CacheMissEvent) => void;
+  onMiss?: ((event: CacheMissEvent) => void) | undefined;
   /** Maximum number of entries. When exceeded, oldest entries are evicted. Default: `1000`. */
-  maxEntries?: number;
+  maxEntries?: number | undefined;
   /** Injectable clock for deterministic tests. Defaults to Date.now. */
-  now?: () => number;
+  now?: (() => number) | undefined;
 };
 
 /** Event dispatched when a cached response is found and returned. */

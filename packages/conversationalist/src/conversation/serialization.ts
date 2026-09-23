@@ -7,11 +7,11 @@ import { assertConversationHistoryIntegrity } from './integrity';
 import { assertToolReference, registerToolUse, type ToolUseIndex } from './tool-tracking';
 
 function normalizeLegacyToolCall(toolCall: unknown): unknown {
-  if (!toolCall || typeof toolCall !== 'object') {
+  if (!isRecord(toolCall)) {
     return toolCall;
   }
 
-  const record = { ...(toolCall as Record<string, unknown>) };
+  const record = { ...toolCall };
 
   if (!('arguments' in record) && 'args' in record) {
     record['arguments'] = record['args'];
@@ -23,11 +23,11 @@ function normalizeLegacyToolCall(toolCall: unknown): unknown {
 }
 
 function normalizeLegacyToolResult(toolResult: unknown): unknown {
-  if (!toolResult || typeof toolResult !== 'object') {
+  if (!isRecord(toolResult)) {
     return toolResult;
   }
 
-  const record = { ...(toolResult as Record<string, unknown>) };
+  const record = { ...toolResult };
 
   if (!('content' in record) && 'result' in record) {
     record['content'] = record['result'];
@@ -39,44 +39,39 @@ function normalizeLegacyToolResult(toolResult: unknown): unknown {
 }
 
 function normalizeLegacyConversationData(json: unknown): unknown {
-  if (!json || typeof json !== 'object') {
+  if (!isRecord(json)) {
     return json;
   }
 
-  const conversation = { ...(json as Record<string, unknown>) };
-  const messagesValue = conversation['messages'];
-  if (!messagesValue || typeof messagesValue !== 'object') {
+  const conversation = { ...json };
+  if (!isRecord(conversation['messages'])) {
     return conversation;
   }
-
-  const normalizedMessages: Record<string, unknown> = {};
-
-  for (const [messageId, messageValue] of Object.entries(
-    messagesValue as Record<string, unknown>,
-  )) {
-    if (!messageValue || typeof messageValue !== 'object') {
-      normalizedMessages[messageId] = messageValue;
-      continue;
-    }
-
-    const message = { ...(messageValue as Record<string, unknown>) };
-    if (message['role'] === 'tool-use') {
-      message['role'] = 'tool-call';
-    }
-
-    if ('toolCall' in message) {
-      message['toolCall'] = normalizeLegacyToolCall(message['toolCall']);
-    }
-
-    if ('toolResult' in message) {
-      message['toolResult'] = normalizeLegacyToolResult(message['toolResult']);
-    }
-
-    normalizedMessages[messageId] = message;
-  }
-
-  conversation['messages'] = normalizedMessages;
+  conversation['messages'] = normalizeLegacyMessages(conversation['messages']);
   return conversation;
+}
+
+function normalizeLegacyMessages(messages: Record<string, unknown>): Record<string, unknown> {
+  const normalizedMessages: Record<string, unknown> = {};
+  for (const [messageId, messageValue] of Object.entries(messages)) {
+    normalizedMessages[messageId] = normalizeLegacyMessage(messageValue);
+  }
+  return normalizedMessages;
+}
+
+function normalizeLegacyMessage(messageValue: unknown): unknown {
+  if (!isRecord(messageValue)) return messageValue;
+  const message = { ...messageValue };
+  if (message['role'] === 'tool-use') message['role'] = 'tool-call';
+  if ('toolCall' in message) message['toolCall'] = normalizeLegacyToolCall(message['toolCall']);
+  if ('toolResult' in message) {
+    message['toolResult'] = normalizeLegacyToolResult(message['toolResult']);
+  }
+  return message;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function normalizeToolResult(toolResult: Message['toolResult']): ToolResult | undefined {
@@ -189,7 +184,7 @@ export function deserializeConversationHistory(json: unknown): ConversationHisto
       `failed to deserialize conversation: ${
         error instanceof Error ? error.message : String(error)
       }`,
-      error as Error,
+      error instanceof Error ? error : undefined,
     );
   }
 }

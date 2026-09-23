@@ -1,13 +1,14 @@
-import { isStandardSchema } from 'interoperability';
+import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { z } from 'zod';
 
 import {
+  isStandardSchema,
   isWrappedStandardSchema,
   isZodObjectSchema,
   isZodSchema,
   wrapStandardSchema,
 } from '../core/schema-utilities';
-import type { ToolParametersSchema } from '../is-tool';
+import type { InferSchemaInput, SchemaInput } from '../create-tool/options';
 
 /**
  * Normalizes a schema input into a `z.ZodType`:
@@ -24,24 +25,38 @@ import type { ToolParametersSchema } from '../is-tool';
  *   pipeline as every other tool schema
  * - Anything else throws
  */
-export function normalizeSchema(schema: unknown): ToolParametersSchema {
+export function normalizeSchema<Output>(
+  schema: z.ZodType<Output> | StandardSchemaV1<unknown, Output>,
+): z.ZodType<Output>;
+export function normalizeSchema<Shape extends z.ZodRawShape>(schema: Shape): z.ZodObject<Shape>;
+export function normalizeSchema(schema: undefined): z.ZodObject<{}>;
+export function normalizeSchema(schema: unknown): z.ZodType;
+export function normalizeSchema(schema: unknown): z.ZodType {
   if (schema === undefined) {
     return z.object({});
   }
-  if (isWrappedStandardSchema(schema)) {
-    return schema as ToolParametersSchema;
-  }
-  if (isZodObjectSchema(schema)) {
-    return schema;
-  }
   if (isZodSchema(schema)) {
+    if (isWrappedStandardSchema(schema) || isZodObjectSchema(schema)) return schema;
     throw new Error('Tool input must be a Zod object schema');
   }
   if (isStandardSchema(schema)) {
     return wrapStandardSchema(schema);
   }
-  if (schema && typeof schema === 'object') {
-    return z.object(schema as Record<string, z.ZodType>);
-  }
+  if (isZodRawShape(schema)) return z.object(schema);
   throw new Error('Tool input must be a Zod object schema or an object of Zod schemas');
+}
+
+/** Normalizes the factory's schema input while preserving its validated input type. */
+export function normalizeToolSchema<TSchema extends SchemaInput | undefined>(
+  schema: TSchema,
+): z.ZodType<InferSchemaInput<TSchema>>;
+export function normalizeToolSchema(schema: unknown): z.ZodType {
+  return schema === undefined ? z.object({}) : normalizeSchema(schema);
+}
+
+function isZodRawShape(value: unknown): value is z.ZodRawShape {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  return Object.values(value).every((field) => field instanceof z.ZodType);
 }

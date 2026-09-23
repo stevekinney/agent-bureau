@@ -1,5 +1,5 @@
-import { hmacSha256HexSync, timingSafeEqualHex } from 'interoperability';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { hmacSha256HexSync, timingSafeEqualHex } from '@lostgradient/cryptography';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { JsonValue } from './core/serialization/json';
 import { stableStringifyJson } from './core/serialization/json';
@@ -196,6 +196,7 @@ export function createProcessLocalApprovalStateStore(
           );
         }
         issued.set(key, snapshotApprovalBinding(binding));
+        return undefined;
       });
     },
     reserve(binding, context, now = nowFunction()) {
@@ -224,6 +225,7 @@ export function createProcessLocalApprovalStateStore(
         }
         issued.delete(key);
         reserved.set(key, issuedBinding);
+        return undefined;
       });
     },
     commit(binding) {
@@ -249,6 +251,7 @@ export function createProcessLocalApprovalStateStore(
           expiresAt: reservedBinding.expiresAt,
           binding: reservedBinding,
         });
+        return undefined;
       });
     },
     release(binding) {
@@ -258,19 +261,21 @@ export function createProcessLocalApprovalStateStore(
         if (reservedBinding) {
           reserved.delete(key);
           issued.set(key, reservedBinding);
-          return;
+          return undefined;
         }
         const terminalEntry = terminal.get(key);
         if (terminalEntry?.state === 'consumed') {
           terminal.delete(key);
           issued.set(key, terminalEntry.binding ?? snapshotApprovalBinding(binding));
         }
+        return undefined;
       });
     },
     consume(binding, context, now = nowFunction()) {
       return Promise.resolve().then(async () => {
         await this.reserve(binding, context, now);
         await this.commit(binding);
+        return undefined;
       });
     },
     revoke(binding) {
@@ -287,17 +292,18 @@ export function createProcessLocalApprovalStateStore(
         }
         const issuedBinding = issued.get(key);
         if (!issuedBinding) {
-          if (terminalEntry?.state === 'revoked') return;
+          if (terminalEntry?.state === 'revoked') return undefined;
           const reservedBinding = reserved.get(key);
           if (reservedBinding) {
             reserved.delete(key);
             terminal.set(key, { state: 'revoked', expiresAt: reservedBinding.expiresAt });
-            return;
+            return undefined;
           }
           throw new ApprovalBindingError('Approval binding was not found.', 'not-found');
         }
         issued.delete(key);
         terminal.set(key, { state: 'revoked', expiresAt: issuedBinding.expiresAt });
+        return undefined;
       });
     },
     state(binding) {
@@ -430,13 +436,15 @@ export function createProcessLocalGrantStateStore(): GrantStateStore {
         // `issue()` after the call (or an object returned from `get`/`list`)
         // can never reach or change this store's internal state.
         grants.set(grant.id, cloneGrant({ ...grant, usesRemaining: grant.maxUses }));
+        return undefined;
       });
     },
     revoke(id) {
       return Promise.resolve().then(() => {
         const grant = grants.get(id);
-        if (!grant) return;
+        if (!grant) return undefined;
         grants.set(id, cloneGrant({ ...grant, revoked: true }));
+        return undefined;
       });
     },
     get(id) {

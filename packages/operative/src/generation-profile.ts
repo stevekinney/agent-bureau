@@ -49,10 +49,10 @@ export type GenerationMode = 'fixed' | 'routed' | 'selectable' | 'opaque';
  * omission and is a distinct, later layer.
  */
 export interface AgentPreferences {
-  readonly requiredCapabilities?: readonly (keyof BackendDescriptor)[];
-  readonly preferredProviders?: readonly ProviderName[];
-  readonly preferredModels?: readonly string[];
-  readonly minimumContextWindowTokens?: number;
+  readonly requiredCapabilities?: readonly (keyof BackendDescriptor)[] | undefined;
+  readonly preferredProviders?: readonly ProviderName[] | undefined;
+  readonly preferredModels?: readonly string[] | undefined;
+  readonly minimumContextWindowTokens?: number | undefined;
 }
 
 /**
@@ -67,11 +67,13 @@ export interface AgentGenerationProfile {
   readonly revision: number;
   readonly projection: CatalogProjection;
   readonly descriptors: readonly BackendDescriptor[];
-  readonly preferences?: AgentPreferences;
-  readonly allowedCandidates?: readonly {
-    readonly provider: ProviderName;
-    readonly model: string;
-  }[];
+  readonly preferences?: AgentPreferences | undefined;
+  readonly allowedCandidates?:
+    | readonly {
+        readonly provider: ProviderName;
+        readonly model: string;
+      }[]
+    | undefined;
   readonly freshness: string;
   readonly selector: 'available' | 'unavailable';
 }
@@ -106,6 +108,8 @@ const DEFAULT_OPAQUE_PROFILE: AgentGenerationProfile = Object.freeze({
  * nothing more. Repeated reads before a represented change return the
  * identical object by reference in both branches.
  */
-export function readGenerationProfile(agent: RunnableAgent): AgentGenerationProfile {
+export function readGenerationProfile(
+  agent: Pick<RunnableAgent, 'generationProfile'>,
+): AgentGenerationProfile {
   return agent.generationProfile ?? DEFAULT_OPAQUE_PROFILE;
 }

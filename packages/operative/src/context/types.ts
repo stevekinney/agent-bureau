@@ -14,17 +14,17 @@ export interface AssemblyOptions {
   conversation: Conversation;
   budget: TokenBudget;
   /** Number of most-recent messages to always include. Default: `4`. */
-  recentMessageCount?: number;
+  recentMessageCount?: number | undefined;
   /** Fraction of allocatable budget reserved for system messages. Default: `0.25`. */
-  systemBudgetRatio?: number;
+  systemBudgetRatio?: number | undefined;
   /** Fraction of allocatable budget reserved for conversation history. Default: `0.60`. */
-  historyBudgetRatio?: number;
+  historyBudgetRatio?: number | undefined;
   /** Fraction of allocatable budget reserved for retrieved messages. Default: `0.15`. */
-  retrievedBudgetRatio?: number;
+  retrievedBudgetRatio?: number | undefined;
   /** Additional retrieved messages (e.g. from memory) to include when budget allows. */
-  retrievedMessages?: ReadonlyArray<Message>;
+  retrievedMessages?: ReadonlyArray<Message> | undefined;
   /** Override the per-text token estimator. */
-  tokenEstimator?: (text: string) => number;
+  tokenEstimator?: ((text: string) => number) | undefined;
   /**
    * Enables prompt-cache-aware assembly. When `true`, system messages and
    * `pinnedMessages` are assembled into a stable prefix that stays
@@ -37,7 +37,7 @@ export interface AssemblyOptions {
    * their per-step re-ranking never touches the cached region.
    * Default: `false`.
    */
-  stablePrefix?: boolean;
+  stablePrefix?: boolean | undefined;
   /**
    * Messages always included, verbatim and in order, immediately after the
    * system messages and before conversation history. Unlike
@@ -45,7 +45,7 @@ export interface AssemblyOptions {
    * pressure — they are part of the stable prefix (e.g. pinned reference
    * material). Only consulted when `stablePrefix` is `true`.
    */
-  pinnedMessages?: ReadonlyArray<Message>;
+  pinnedMessages?: ReadonlyArray<Message> | undefined;
 }
 
 /** Breakdown of token usage across context slices. */
@@ -69,11 +69,11 @@ export type ContextAssembler = (options: AssemblyOptions) => AssemblyResult;
 /** Options controlling how compaction strategies operate. */
 export interface CompactionOptions {
   /** Number of recent messages to always retain. Default: `4`. */
-  retainRecentMessages?: number;
+  retainRecentMessages?: number | undefined;
   /** Summarizer function for strategies that need it. */
-  summarize?: (messages: ReadonlyArray<Message>) => Promise<string>;
+  summarize?: ((messages: ReadonlyArray<Message>) => Promise<string>) | undefined;
   /** Maximum age (in turns) for tool results before they are eligible for pruning. */
-  maxToolResultAge?: number;
+  maxToolResultAge?: number | undefined;
   /**
    * Preserve tool-result messages with `toolResult.outcome === 'error'` or
    * `metadata.error === true`, regardless of age. Default: `true`. Mirrors
@@ -83,7 +83,7 @@ export interface CompactionOptions {
    * age-based pruning would otherwise discard. Set to `false` to opt back
    * into pruning errors purely by age.
    */
-  preserveErrorToolResults?: boolean;
+  preserveErrorToolResults?: boolean | undefined;
 }
 
 /** A function that compacts a conversation to free tokens. */
@@ -97,13 +97,13 @@ export type CompactionStrategy = (
 export interface ContextEngineOptions {
   maxTokens: number;
   /** Minimum tokens reserved for the model response. Default: `1500`. */
-  minimumResponseTokens?: number;
+  minimumResponseTokens?: number | undefined;
   /** Warning when remaining tokens drop to this level. Default: 20% of `maxTokens`. */
-  warningThreshold?: number;
+  warningThreshold?: number | undefined;
   /** Compaction triggered when used tokens reach this level. Default: 80% of `maxTokens`. */
-  compactionThreshold?: number;
+  compactionThreshold?: number | undefined;
   /** Override the per-text token estimator. */
-  tokenEstimator?: (text: string) => number;
+  tokenEstimator?: ((text: string) => number) | undefined;
   /** Override the context assembler. */
-  assembler?: ContextAssembler;
+  assembler?: ContextAssembler | undefined;
 }

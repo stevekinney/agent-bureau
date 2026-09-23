@@ -1,4 +1,8 @@
-import type { HookErrorHandler, HookRegistrationOptions, RuntimeServices } from 'lifecycle';
+import type {
+  HookErrorHandler,
+  HookRegistrationOptions,
+  RuntimeServices,
+} from '@lostgradient/lifecycle';
 
 import { GenerateRetryEvent } from './events';
 import { addJitter } from './retry/jitter';
@@ -92,11 +96,13 @@ export function runHookSilently<K extends string>(
 ): Promise<void> {
   if (!hooks?.has(hookName)) return Promise.resolve();
   const handlers = hooks.getHandlers(hookName);
-  return Promise.allSettled(
-    handlers.map((entry) =>
-      Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args)),
-    ),
-  ).then(() => undefined);
+  const settled = Promise.allSettled(
+    handlers.map((entry) => {
+      const normalized = Promise.resolve((entry.handler as (...a: unknown[]) => unknown)(...args));
+      return normalized;
+    }),
+  );
+  return settled.then(() => undefined);
 }
 
 /**
@@ -118,12 +124,14 @@ export function applyWaterfallHandlerErrorPolicy(
   handlerIndex: number,
   entryOptions: HookRegistrationOptions,
   registryOnError: HookErrorHandler | undefined,
+  /** Stable registration identity (COR-567), from the entry being invoked. */
+  id: string,
 ): void {
   const errorHandler = entryOptions.onError ?? registryOnError;
   if (!errorHandler) {
     throw error;
   }
-  const decision = errorHandler(error, { hookName, handlerIndex });
+  const decision = errorHandler(error, { hookName, handlerIndex, id });
   if (decision === 'abort') {
     throw error;
   }
@@ -147,6 +155,16 @@ export async function callGenerateWithRetry(
   retry: RetryOptions | undefined,
   emitter: EventDispatcher | undefined,
   runtime: RuntimeServices,
+  /**
+   * COR-581 — seals a successor effective-context epoch for a retry whose
+   * `RetryMutator` genuinely changed the request, and returns its id.
+   *
+   * Only called when a mutation actually occurred. An unmutated retry
+   * re-issues the identical request and correctly consumes the epoch
+   * sealed before `generate.started`; minting a successor for it would
+   * claim a context change that did not happen.
+   */
+  sealMutatedEpoch?: (mutatedContext: GenerateContext, attempt: number) => string,
 ): Promise<GenerateResponse> {
   if (!retry || retry.attempts <= 1) {
     return generate(context);
@@ -184,8 +202,19 @@ export async function callGenerateWithRetry(
         }
       }
 
+      // Seal before dispatching, so the event can carry the epoch the
+      // retry will actually be issued under rather than referring
+      // forward to one that does not exist yet.
+      const mutatedEpochId = mutated ? sealMutatedEpoch?.(currentContext, attempt) : undefined;
       emitter?.dispatch(
-        new GenerateRetryEvent(currentContext.step, attempt, error, mutated, mutationDescription),
+        new GenerateRetryEvent(
+          currentContext.step,
+          attempt,
+          error,
+          mutated,
+          mutationDescription,
+          mutatedEpochId,
+        ),
       );
 
       const rawDelay =

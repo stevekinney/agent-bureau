@@ -110,9 +110,9 @@ function formatUnknownErrorMessage(error: unknown): string {
 export function toAgentRunError(
   error: unknown,
   options: {
-    kind?: AgentRunErrorKind;
-    code?: AgentRunErrorCode;
-    message?: string;
+    kind?: AgentRunErrorKind | undefined;
+    code?: AgentRunErrorCode | undefined;
+    message?: string | undefined;
   } = {},
 ): AgentRunError {
   if (error instanceof AgentRunError) return error;
@@ -301,7 +301,7 @@ export interface GuardrailTripwireDetail {
   /** Whether the tripwire fired on the input (pre-generate) or output (post-generate) side. */
   phase: 'input' | 'output';
   confidence: number;
-  detail?: string;
+  detail?: string | undefined;
 }
 
 /**
@@ -317,7 +317,7 @@ export class GuardrailTripwireError extends AgentRunError implements GuardrailTr
   readonly category: string;
   readonly phase: 'input' | 'output';
   readonly confidence: number;
-  readonly detail?: string;
+  readonly detail?: string | undefined;
 
   constructor(message: string, info: GuardrailTripwireDetail) {
     super(message, { kind: 'policy', code: 'TRIPWIRE' });
@@ -374,8 +374,8 @@ export type ErrorCategory =
 export interface ClassifiedError {
   category: ErrorCategory;
   retryable: boolean;
-  statusCode?: number;
-  provider?: string;
+  statusCode?: number | undefined;
+  provider?: string | undefined;
   original: unknown;
 }
 

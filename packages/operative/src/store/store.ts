@@ -3,7 +3,7 @@ import {
   createDefaultRuntimeServices,
   type Observer,
   type Subscription,
-} from 'lifecycle';
+} from '@lostgradient/lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import type { RunResult, StepResult, TokenUsage } from '../types';
@@ -159,7 +159,7 @@ export function createStore(options: StoreOptions = {}): Store {
 
         switch (eventType) {
           case 'step.generated': {
-            const stepEvent = event as Event & { usage?: TokenUsage };
+            const stepEvent = event as Event & { usage?: TokenUsage | undefined };
             updated = {
               ...updated,
               usage: addUsage(updated.usage, stepEvent.usage),

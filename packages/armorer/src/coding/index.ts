@@ -72,7 +72,7 @@ export interface CodingTools {
  *
  * @example
  * ```typescript
- * import { createCodingTools } from 'armorer/coding';
+ * import { createCodingTools } from 'armorer';
  * import { createToolbox } from 'armorer';
  *
  * const { readFile, grep, glob } = createCodingTools({ root: process.cwd() });

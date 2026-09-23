@@ -1,4 +1,4 @@
-import type { RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { GenerateFunction } from '../types.ts';
 
@@ -22,21 +22,21 @@ export type FalloverProvider = {
 export type FalloverOptions = {
   providers: FalloverProvider[];
   /** Maximum retries per provider before moving to the next. Defaults to 1. */
-  retriesPerProvider?: number;
+  retriesPerProvider?: number | undefined;
   /** Base delay in ms between retries, doubles per attempt. Defaults to 1000. */
-  retryDelay?: number;
+  retryDelay?: number | undefined;
   /** Duration in ms a provider stays on cooldown after auth/billing failures. Defaults to 300_000 (5 min). */
-  cooldownDuration?: number;
+  cooldownDuration?: number | undefined;
   /** Injectable clock for tests. Defaults to Date.now. */
-  now?: () => number;
+  now?: (() => number) | undefined;
   /** Injectable retry sleep for tests. Defaults to a setTimeout-backed sleep. */
-  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  sleep?: ((milliseconds: number, signal?: AbortSignal) => Promise<void>) | undefined;
   /** Called when the system falls over from one provider to the next. */
-  onFallover?: (event: FalloverEvent) => void;
+  onFallover?: ((event: FalloverEvent) => void) | undefined;
   /** Called when a previously failed provider succeeds again. */
-  onRecovery?: (provider: string) => void;
+  onRecovery?: ((provider: string) => void) | undefined;
   /** Override the default error classification logic. */
-  classifyError?: (error: unknown) => ErrorClassification;
+  classifyError?: ((error: unknown) => ErrorClassification) | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
    * exactly once at construction — omitted, `now`'s and `sleep`'s own
@@ -45,7 +45,7 @@ export type FalloverOptions = {
    * instance with `createManualRuntimeServices()`. An explicitly supplied
    * `now`/`sleep` still wins over this seam.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 };
 
 /**
@@ -65,8 +65,8 @@ export type FalloverEvent = {
 export type ProviderHealth = {
   name: string;
   available: boolean;
-  lastError?: { code: number; message: string; timestamp: number };
-  cooldownUntil?: number;
+  lastError?: { code: number; message: string; timestamp: number } | undefined;
+  cooldownUntil?: number | undefined;
   consecutiveFailures: number;
   totalCalls: number;
   totalFailures: number;

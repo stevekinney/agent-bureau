@@ -7,8 +7,8 @@
  * byte-stable and comparable with a deep-equality assertion — no sleeps, no
  * timers, no network, no wall-clock read.
  */
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import { type BackendDescriptor, createModelCatalog, type ModelCatalog } from './model-catalog.ts';
 import type { UserModelConfiguration } from './policy.ts';

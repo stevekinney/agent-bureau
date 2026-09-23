@@ -1,11 +1,8 @@
-import {
-  createToolbox,
-  internalToolboxOptionsRegistry,
-  type SerializedToolbox,
-  type Toolbox,
-  type ToolboxContext,
-} from './create-toolbox';
+import { createToolbox } from './create-toolbox';
 import type { Tool } from './is-tool';
+import type { SerializedToolbox, ToolboxContext } from './toolbox-contracts';
+import type { Toolbox } from './toolbox-interface';
+import { internalToolboxOptionsRegistry } from './toolbox-internal-registry';
 
 type ToolboxLike<TTools extends readonly Tool[] = readonly Tool[]> = {
   toJSON: () => SerializedToolbox;
@@ -73,20 +70,8 @@ export function combineToolboxes<const TBoxes extends readonly [ToolboxLike, ...
   }
 
   const [firstToolbox] = toolboxes;
-  // Reads the first toolbox's approval-related options out of a `WeakMap`
-  // keyed by its `toJSON` function reference, never a public accessor —
-  // see `internalToolboxOptionsRegistry`'s own doc comment in
-  // `create-toolbox.ts` for why: exposing `approvalSecret` on the public
-  // `Toolbox` interface, or even as a non-enumerable symbol-keyed property
-  // on the object, would let any caller holding a toolbox reference read
-  // it back off (two separate AB-362 review findings) — a `WeakMap` is the
-  // one mechanism nothing can enumerate its way into without already
-  // holding a reference to the map itself. Keying by `toJSON` (not the
-  // toolbox object) is what survives Bureau wrapping the toolbox in a
-  // transparent `Proxy` before this ever runs. A toolbox this package
-  // didn't construct (a duck-typed `ToolboxLike` from a test double, say)
-  // simply has no registry entry for its `toJSON`, so this falls back to
-  // `{}` exactly like the removed optional-method call it replaced.
+  // Read resolved private options keyed by the stable `toJSON` method. See
+  // `toolbox-internal-registry.ts` for the ownership and security rationale.
   const firstToolboxOptions = internalToolboxOptionsRegistry.get(firstToolbox.toJSON) ?? {};
 
   const configurations = toolboxes.flatMap((toolbox) => toolbox.toJSON());

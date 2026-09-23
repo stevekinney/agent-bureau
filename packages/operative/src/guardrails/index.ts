@@ -2,6 +2,18 @@
 // the retrieval surfaces (memory recall, ingested documents, skill
 // resources). Re-exported here so existing `operative` consumers keep the
 // same import path.
+export {
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  createInputLengthDetector,
+  createPromptInjectionDetector,
+  createTopicBoundaryDetector,
+  withMinimumTripwireConfidence,
+} from 'armorer';
+export type {
+  InputLengthDetectorOptions,
+  PromptInjectionDetectorOptions,
+  TopicBoundaryDetectorOptions,
+} from 'armorer';
 export { createGuardrails } from './create-guardrails';
 export { createInputGuardrail } from './input-guardrail';
 export { createOutputGuardrail } from './output-guardrail';
@@ -11,33 +23,21 @@ export type {
   DetectorContext,
   GuardrailHooks,
   GuardrailProvenance,
-  GuardrailsOptions,
   GuardrailTriggeredEvent,
+  GuardrailsOptions,
   InputDetector,
   InputGuardrailOptions,
   OutputGuardrailOptions,
   OutputGuardrailTriggeredEvent,
   OutputValidator,
-  SessionTaintedEvent,
   SessionTaintOptions,
   SessionTaintTracker,
+  SessionTaintedEvent,
   ValidationResult,
   ValidatorContext,
 } from './types';
-export type { CodeSafetyValidatorOptions } from './validators/code-safety';
 export { createCodeSafetyValidator } from './validators/code-safety';
-export type { GroundingValidatorOptions } from './validators/grounding';
+export type { CodeSafetyValidatorOptions } from './validators/code-safety';
 export { createGroundingValidator } from './validators/grounding';
+export type { GroundingValidatorOptions } from './validators/grounding';
 export { createOutputPIIValidator } from './validators/output-pii';
-export type {
-  InputLengthDetectorOptions,
-  PromptInjectionDetectorOptions,
-  TopicBoundaryDetectorOptions,
-} from 'armorer';
-export {
-  createInputLengthDetector,
-  createPromptInjectionDetector,
-  createTopicBoundaryDetector,
-  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
-  withMinimumTripwireConfidence,
-} from 'armorer';

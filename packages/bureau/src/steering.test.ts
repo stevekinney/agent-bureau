@@ -9,8 +9,8 @@
  * require but `submitSteeringCommand` itself never reaches (see
  * `ImplementedSteeringCommand`'s doc comment in `steering.ts`).
  */
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import {
   createSteeringCommandLedger,
@@ -47,6 +47,22 @@ function resumeCommand(
 }
 
 const NOW = '2026-09-02T00:00:01.000Z';
+
+function configurationCommand(
+  target: 'route' | 'model' | 'provider' | 'effort',
+  override: string,
+  overrides: Partial<ImplementedSteeringCommand> = {},
+): ImplementedSteeringCommand {
+  return {
+    id: 'cmd-1',
+    idOrigin: 'caller',
+    sessionId: 'session-1',
+    principal: 'alice',
+    requestedValue: { target, override } as ImplementedSteeringCommand['requestedValue'],
+    requestedAt: '2026-09-02T00:00:00.000Z',
+    ...overrides,
+  };
+}
 
 describe('createSteeringGate', () => {
   it('starts unpaused, at configVersion 0, with an applied floor of 0', () => {
@@ -1711,5 +1727,84 @@ describe('createSteeringGate', () => {
       gate.promoteForNewRun('run-1', NOW);
       expect(gate.forRun('run-1').getDesiredState().agentName).toBe('reviewer');
     });
+  });
+});
+
+describe('configuration-target supersession (AB-200)', () => {
+  const context = { liveRunIds: ['run-1'], now: NOW };
+
+  it('supersedes EVERY pending command for a target, not just the most recent', () => {
+    // The defect this pins: the idempotency short-circuit admits a
+    // duplicate at the current configVersion without tracking it as an
+    // owner, so a later different-value command superseded only the
+    // tracked one. The orphaned duplicate stayed `accepted`, and
+    // `recordApplied`'s `configVersion <= observed` test then marked it
+    // `applied` for a value no boundary ever applied. Same class as the
+    // pause defect PR #430 fixed with a set of owners.
+    const gate = createSteeringGate('session-1');
+
+    const first = gate.admit(configurationCommand('model', 'X', { id: 'a' }), context);
+    const duplicate = gate.admit(configurationCommand('model', 'X', { id: 'b' }), context);
+    if (first.outcome !== 'accepted' || duplicate.outcome !== 'accepted') {
+      throw new Error('expected both accepted');
+    }
+    // Idempotent at the value: the duplicate gets no second bump.
+    expect(duplicate.command.configVersion).toBe(first.command.configVersion);
+
+    const replacement = gate.admit(configurationCommand('model', 'Y', { id: 'c' }), context);
+    if (replacement.outcome !== 'accepted') throw new Error('expected accepted');
+
+    // An exact retry replays each command's CURRENT state. Both owners of
+    // the superseded value must report `superseded`, the duplicate
+    // included — that is the orphan this guards.
+    for (const id of ['a', 'b']) {
+      const replay = gate.admit(configurationCommand('model', 'X', { id }), context);
+      expect(replay).toEqual({
+        outcome: 'replayed',
+        command: expect.objectContaining({
+          state: 'superseded',
+          failure: { failedAt: NOW, reason: 'superseded-by', supersededBy: 'c' },
+        }),
+      });
+    }
+
+    expect(gate.getDesiredState().model).toBe('Y');
+  });
+
+  it('does not mark a superseded duplicate applied when a later version is observed', () => {
+    const gate = createSteeringGate('session-1');
+    gate.admit(configurationCommand('model', 'X', { id: 'a' }), context);
+    gate.admit(configurationCommand('model', 'X', { id: 'b' }), context);
+    const replacement = gate.admit(configurationCommand('model', 'Y', { id: 'c' }), context);
+    if (replacement.outcome !== 'accepted') throw new Error('expected accepted');
+
+    // A boundary observes the replacement's version. Neither 'X' command
+    // may come out `applied`: 'X' was never what a boundary applied.
+    gate.recordApplied('run-1', replacement.command.configVersion, NOW);
+
+    for (const id of ['a', 'b']) {
+      const replay = gate.admit(configurationCommand('model', 'X', { id }), context);
+      if (replay.outcome !== 'replayed') throw new Error('expected replayed');
+      expect(replay.command.state).toBe('superseded');
+    }
+    expect(gate.getDesiredState().model).toBe('Y');
+  });
+
+  it('keeps separate targets independent: steering model does not supersede pending effort', () => {
+    const gate = createSteeringGate('session-1');
+    const effort = gate.admit(configurationCommand('effort', 'low', { id: 'e' }), context);
+    const model = gate.admit(configurationCommand('model', 'X', { id: 'm' }), context);
+    if (effort.outcome !== 'accepted' || model.outcome !== 'accepted') {
+      throw new Error('expected both accepted');
+    }
+
+    const desired = gate.getDesiredState();
+    expect(desired.effort).toBe('low');
+    expect(desired.model).toBe('X');
+
+    // The effort command is untouched by the model change.
+    const replayEffort = gate.admit(configurationCommand('effort', 'low', { id: 'e' }), context);
+    if (replayEffort.outcome !== 'replayed') throw new Error('expected replayed');
+    expect(replayEffort.command.state).toBe('accepted');
   });
 });

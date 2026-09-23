@@ -3,7 +3,7 @@
  * AB-245, AB-288): the ordered union of every candidate's attached
  * descriptors, deduplicated by `(provider, endpoint, model)`.
  */
-import { createTestToolbox } from 'armorer/test';
+import { createTestToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
@@ -135,8 +135,8 @@ describe('createFallbackGenerate — backend-descriptor propagation', () => {
 
     const attached = readBackendDescriptors(generate);
     expect(attached).toHaveLength(2);
-    expect([...attached].sort((x, y) => (x.provider < y.provider ? -1 : 1))).toEqual(
-      [anthropic, openai].sort((x, y) => (x.provider < y.provider ? -1 : 1)),
+    expect([...attached].toSorted((x, y) => (x.provider < y.provider ? -1 : 1))).toEqual(
+      [anthropic, openai].toSorted((x, y) => (x.provider < y.provider ? -1 : 1)),
     );
   });
 

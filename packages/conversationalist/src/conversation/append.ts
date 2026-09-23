@@ -3,16 +3,17 @@ import {
   isConversationEnvironmentParameter,
   resolveConversationEnvironment,
 } from '../environment';
-import { createIntegrityError } from '../errors';
+import { createIntegrityError, createInvalidInputError } from '../errors';
 import type {
   ConversationHistory as Conversation,
   JSONValue,
   Message,
   MessageInput,
 } from '../types';
-import type { AppendableMessageInput } from '../utilities';
-import { buildMessageFromInput, repositionMessage, toReadonly } from '../utilities';
+import type { AppendableMessageInput } from '../utilities/message';
+import { buildMessageFromInput, repositionMessage } from '../utilities/message';
 import { getOrderedMessages, toIdRecord } from '../utilities/message-store';
+import { toReadonly } from '../utilities/type-helpers';
 import {
   assertToolReference,
   buildToolUseIndex,
@@ -39,12 +40,19 @@ function partitionAppendArgs(
   const last = filtered[filtered.length - 1];
   if (isConversationEnvironmentParameter(last)) {
     return {
-      inputs: filtered.slice(0, -1) as AppendableMessageInput[],
+      inputs: filtered.slice(0, -1).map(requireMessageInput),
       environment: last,
     };
   }
 
-  return { inputs: filtered as AppendableMessageInput[] };
+  return { inputs: filtered.map(requireMessageInput) };
+}
+
+function requireMessageInput(
+  value: AppendableMessageInput | Partial<ConversationEnvironment>,
+): AppendableMessageInput {
+  if ('role' in value) return value;
+  throw createInvalidInputError('Expected a message input before the trailing environment');
 }
 
 /**

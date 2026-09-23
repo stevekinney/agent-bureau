@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { SoulItem } from './types';
 
@@ -30,10 +30,19 @@ function createSeedItem(content: string, runtime: RuntimeServices, topic?: strin
     content,
     source: 'seed',
     pinned: true,
-    topic,
+    ...(topic !== undefined ? { topic } : {}),
     updatedAt: runtime.clock.nowISO(),
     reinforcementCount: 0,
   };
+}
+
+function appendItems(
+  items: SoulItem[],
+  values: string[],
+  topic: string,
+  runtime: RuntimeServices,
+): void {
+  for (const value of values) items.push(createSeedItem(value, runtime, topic));
 }
 
 /**
@@ -58,17 +67,9 @@ export function createSoulSeed(options?: CreateSoulSeedOptions): SoulItem[] {
     items.push(createSeedItem(`Your name is ${options.name}.`, runtime, 'identity'));
   }
 
-  for (const trait of options.traits ?? []) {
-    items.push(createSeedItem(trait, runtime, 'trait'));
-  }
-
-  for (const value of options.values ?? []) {
-    items.push(createSeedItem(value, runtime, 'value'));
-  }
-
-  for (const style of options.style ?? []) {
-    items.push(createSeedItem(style, runtime, 'style'));
-  }
+  appendItems(items, options.traits ?? [], 'trait', runtime);
+  appendItems(items, options.values ?? [], 'value', runtime);
+  appendItems(items, options.style ?? [], 'style', runtime);
 
   if (options.additional) {
     items.push(createSeedItem(options.additional, runtime));

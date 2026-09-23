@@ -1,5 +1,5 @@
-export type { StoreEventMap } from './events';
 export { RunRegisteredEvent, RunRemovedEvent, StoreActionEvent } from './events';
+export type { StoreEventMap } from './events';
 export { createStore } from './store';
 export type {
   Action,

@@ -1,4 +1,4 @@
-export { bind, pipe, PipelineError } from '../compose';
+export { PipelineError, bind, pipe } from '../compose';
 export type {
   AnyTool,
   ComposedTool,
@@ -15,16 +15,10 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from '../tool-materialization';
-export type {
-  StructuredToolResultTruncation,
-  StructuredToolResultTruncationOptions,
-  ToolResultTruncationOptions,
-  TruncationOptions,
-} from '../truncation/index';
 export {
-  containsBase64Data,
   DEFAULT_ERROR_MAX_CHARACTERS,
   DEFAULT_MAX_CHARACTERS,
+  containsBase64Data,
   isHighSurrogate,
   isLowSurrogate,
   safeSlice,
@@ -32,6 +26,12 @@ export {
   truncateText,
   truncateToolResultContent,
   truncateToolResultContentStructured,
+} from '../truncation/index';
+export type {
+  StructuredToolResultTruncation,
+  StructuredToolResultTruncationOptions,
+  ToolResultTruncationOptions,
+  TruncationOptions,
 } from '../truncation/index';
 export { parallel } from './parallel';
 export { postprocess } from './postprocess';

@@ -33,6 +33,51 @@ export interface VectorSearchResult {
   score: number;
 }
 
+function scoreCandidates(
+  ids: Set<string>,
+  indexById: Map<string, number>,
+  candidates: HybridSearchCandidate[],
+  vectorScores: Map<string, number>,
+  textScores: Map<number, number>,
+  vectorWeight: number,
+  textWeight: number,
+  threshold: number,
+): HybridSearchResult[] {
+  const results: HybridSearchResult[] = [];
+  for (const id of ids) {
+    const index = indexById.get(id);
+    if (index === undefined) continue;
+    const candidate = candidates[index]!;
+    const vectorScore = vectorScores.get(id) ?? 0;
+    const textScore = textScores.get(index) ?? 0;
+    const combinedScore = vectorWeight * vectorScore + textWeight * textScore;
+    if (combinedScore < threshold) continue;
+    results.push({ ...candidate, combinedScore, vectorScore, textScore });
+  }
+  return results;
+}
+
+function buildSearchIndexes(
+  vectorResults: VectorSearchResult[],
+  textScores: Map<number, number>,
+  candidates: HybridSearchCandidate[],
+): {
+  vectorScores: Map<string, number>;
+  textScoresByIndex: Map<number, number>;
+  candidateIds: Set<string>;
+  candidateIndexById: Map<string, number>;
+} {
+  const vectorScores = new Map(vectorResults.map((result) => [result.id, result.score]));
+  const textScoresByIndex = new Map(textScores);
+  const candidateIds = new Set(vectorResults.map((result) => result.id));
+  for (const [index] of textScores) {
+    const candidate = candidates[index];
+    if (candidate) candidateIds.add(candidate.id);
+  }
+  const candidateIndexById = new Map(candidates.map((candidate, index) => [candidate.id, index]));
+  return { vectorScores, textScoresByIndex, candidateIds, candidateIndexById };
+}
+
 /**
  * Merges vector search results and BM25 text search results into a single ranked list.
  *
@@ -54,61 +99,22 @@ export function mergeHybridResults(
   const limit = options?.limit ?? 10;
   const threshold = options?.threshold ?? 0;
 
-  // Build a lookup from candidate id to vector score
-  const vectorScoreById = new Map<string, number>();
-  for (const vectorResult of vectorResults) {
-    vectorScoreById.set(vectorResult.id, vectorResult.score);
-  }
+  const { vectorScores, textScoresByIndex, candidateIds, candidateIndexById } = buildSearchIndexes(
+    vectorResults,
+    textScores,
+    candidates,
+  );
 
-  // Build a lookup from candidate index to text score
-  const textScoreByIndex = new Map<number, number>();
-  for (const [index, score] of textScores) {
-    textScoreByIndex.set(index, score);
-  }
-
-  // Collect all candidate IDs that appear in either result set
-  const candidateIds = new Set<string>();
-  for (const vectorResult of vectorResults) {
-    candidateIds.add(vectorResult.id);
-  }
-  for (const [index] of textScores) {
-    const candidate = candidates[index];
-    if (candidate) {
-      candidateIds.add(candidate.id);
-    }
-  }
-
-  // Build candidate index by id for text score lookup
-  const candidateIndexById = new Map<string, number>();
-  for (let i = 0; i < candidates.length; i++) {
-    candidateIndexById.set(candidates[i]!.id, i);
-  }
-
-  const results: HybridSearchResult[] = [];
-
-  for (const id of candidateIds) {
-    const candidateIndex = candidateIndexById.get(id);
-    if (candidateIndex === undefined) continue;
-
-    const candidate = candidates[candidateIndex]!;
-    const vectorScore = vectorScoreById.get(id) ?? 0;
-    const textSearchScore = textScoreByIndex.get(candidateIndex) ?? 0;
-    const combinedScore = vectorWeight * vectorScore + textWeight * textSearchScore;
-
-    if (combinedScore < threshold) continue;
-
-    results.push({
-      id: candidate.id,
-      content: candidate.content,
-      combinedScore,
-      vectorScore,
-      textScore: textSearchScore,
-      metadata: candidate.metadata,
-      createdAt: candidate.createdAt,
-    });
-  }
-
-  results.sort((a, b) => b.combinedScore - a.combinedScore);
-
-  return results.slice(0, limit);
+  return scoreCandidates(
+    candidateIds,
+    candidateIndexById,
+    candidates,
+    vectorScores,
+    textScoresByIndex,
+    vectorWeight,
+    textWeight,
+    threshold,
+  )
+    .toSorted((a, b) => b.combinedScore - a.combinedScore)
+    .slice(0, limit);
 }

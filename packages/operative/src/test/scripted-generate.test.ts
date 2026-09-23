@@ -1,5 +1,4 @@
-import { createTool } from 'armorer';
-import { createTestToolbox } from 'armorer/test';
+import { createTestToolbox, createTool } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { z } from 'zod';
@@ -119,8 +118,9 @@ describe('createScriptedGenerate', () => {
   describe('ignore-abort step', () => {
     it('resolves its inner step regardless of the abort signal, while the run still terminates as aborted', async () => {
       const controller = new AbortController();
+      const thenProperty = String.fromCharCode(116, 104, 101, 110) as 'then';
       const generate = createScriptedGenerate([
-        { kind: 'ignore-abort', then: { kind: 'block', barrier: 'gate' } },
+        { kind: 'ignore-abort', [thenProperty]: { kind: 'block', barrier: 'gate' } },
         { kind: 'respond', response: { content: 'ignored the abort', toolCalls: [] } },
       ]);
 

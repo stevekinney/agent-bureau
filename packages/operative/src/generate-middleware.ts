@@ -26,7 +26,7 @@ export function composeGenerate(
  */
 export function createFallbackGenerate(options: {
   providers: GenerateFunction[];
-  shouldFallback?: (error: unknown) => boolean;
+  shouldFallback?: ((error: unknown) => boolean) | undefined;
 }): GenerateFunction {
   const { providers, shouldFallback = () => true } = options;
 

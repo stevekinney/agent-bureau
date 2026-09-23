@@ -1,28 +1,18 @@
+import type { RunState } from '@lostgradient/operative';
+import { describe, expect, it } from 'bun:test';
+import { serializeRunDetail, serializeRunState } from './serialization';
 import {
-  AbortAgentRunError,
-  type ActiveRun,
-  type CombinedOperativeEventMap,
-} from '@lostgradient/operative';
-import { LIVENESS_POLICY_VERSION } from '@lostgradient/operative/liveness';
-import type { RunState } from '@lostgradient/operative/store';
-import { afterEach, describe, expect, it, spyOn } from 'bun:test';
-import { CompletableEventTarget } from 'lifecycle';
-
-import {
-  resolveDiagnosticSink,
-  serializeActionDetail,
-  serializeRunDetail,
-  serializeRunState,
-  serializeUnknownError,
-} from './serialization';
-import type { BureauDiagnostic } from './types';
+  makeNonJsonToolCall,
+  makeStep,
+  stubActiveRunWithSnapshot,
+} from './serialization-test-helpers';
 
 describe('serializeRunState', () => {
   it('maps RunState to a JSON-safe RunSummary', () => {
     const runState: RunState = {
       id: 'run-1',
       status: 'completed',
-      steps: [{ step: 1 } as never, { step: 2 } as never],
+      steps: [makeStep(1), makeStep(2)],
       usage: { prompt: 100, completion: 50, total: 150 },
       finishReason: 'stop-condition',
       error: undefined,
@@ -31,7 +21,7 @@ describe('serializeRunState', () => {
         { sequence: 0, runId: 'run-1', type: 'run.started', detail: {}, timestamp: 1 },
         { sequence: 1, runId: 'run-1', type: 'run.completed', detail: {}, timestamp: 2 },
       ],
-      activeRun: {} as ActiveRun,
+      activeRun: stubActiveRunWithSnapshot(),
     };
 
     const summary = serializeRunState(runState, '');
@@ -55,7 +45,7 @@ describe('serializeRunState', () => {
       error: new Error('Something broke'),
       snapshots: [],
       actions: [],
-      activeRun: {} as ActiveRun,
+      activeRun: stubActiveRunWithSnapshot(),
     };
 
     const summary = serializeRunState(runState, '');
@@ -72,7 +62,7 @@ describe('serializeRunState', () => {
       error: undefined,
       snapshots: [],
       actions: [],
-      activeRun: {} as ActiveRun,
+      activeRun: stubActiveRunWithSnapshot(),
     };
 
     const summary = serializeRunState(runState, '');
@@ -91,355 +81,13 @@ describe('serializeRunState', () => {
       error: 'Connection timeout',
       snapshots: [],
       actions: [],
-      activeRun: {} as ActiveRun,
+      activeRun: stubActiveRunWithSnapshot(),
     };
 
     const summary = serializeRunState(runState, '');
     expect(summary.error).toBe('Connection timeout');
   });
 });
-
-describe('serializeActionDetail', () => {
-  it('strips conversation from step.completed details', () => {
-    const detail = {
-      step: 1,
-      conversation: { snapshot: () => ({}) },
-      content: 'hello',
-      toolCalls: [],
-      results: [],
-      final: false,
-    };
-
-    const result = serializeActionDetail('step.completed', detail) as Record<string, unknown>;
-    expect(result).not.toHaveProperty('conversation');
-    expect(result['content']).toBe('hello');
-    expect(result['step']).toBe(1);
-  });
-
-  it('keeps step.completed details JSON-safe after stripping conversation', () => {
-    const detail = {
-      step: 1,
-      conversation: { snapshot: () => ({}) },
-      completedAt: new Date('2026-03-31T21:15:48.000Z'),
-      values: new Set(['gateway', 'live']),
-      stats: new Map([['attempts', 2n]]),
-      final: false,
-    };
-
-    const result = serializeActionDetail('step.completed', detail) as Record<string, unknown>;
-    expect(result).not.toHaveProperty('conversation');
-    expect(result['completedAt']).toBe('2026-03-31T21:15:48.000Z');
-    expect(result['values']).toEqual(['gateway', 'live']);
-    expect(result['stats']).toEqual([['attempts', '2']]);
-    expect(() => JSON.stringify(result)).not.toThrow();
-  });
-
-  it('strips conversation from run.aborted details', () => {
-    const detail = {
-      step: 2,
-      conversation: { snapshot: () => ({}) },
-      reason: 'cancelled',
-      error: new AbortAgentRunError('cancelled'),
-    };
-
-    const result = serializeActionDetail('run.aborted', detail) as Record<string, unknown>;
-    expect(result).not.toHaveProperty('conversation');
-    expect(result['step']).toBe(2);
-    expect(result['reason']).toBe('cancelled');
-    expect(JSON.parse(result['error'] as string)).toMatchObject({
-      name: 'AbortAgentRunError',
-      message: 'cancelled',
-      kind: 'abort',
-      code: 'ABORTED',
-    });
-  });
-
-  it('strips conversation from run.completed details', () => {
-    const detail = {
-      conversation: { snapshot: () => ({}) },
-      steps: [],
-      content: 'done',
-      usage: { prompt: 1, completion: 2, total: 3 },
-      finishReason: 'stop-condition',
-    };
-
-    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
-    expect(result).not.toHaveProperty('conversation');
-    expect(result['content']).toBe('done');
-    expect(result['finishReason']).toBe('stop-condition');
-  });
-
-  it('strips nested conversation from each step inside run.completed details', () => {
-    const detail = {
-      conversation: { snapshot: () => ({}) },
-      steps: [
-        {
-          step: 1,
-          conversation: { snapshot: () => ({}) },
-          content: 'a',
-          toolCalls: [],
-          results: [],
-          final: false,
-        },
-        {
-          step: 2,
-          conversation: { snapshot: () => ({}) },
-          content: 'b',
-          toolCalls: [],
-          results: [],
-          final: true,
-        },
-      ],
-      content: 'done',
-      usage: { prompt: 10, completion: 20, total: 30 },
-      finishReason: 'stop-condition',
-    };
-
-    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
-    expect(result).not.toHaveProperty('conversation');
-
-    const steps = result['steps'] as Record<string, unknown>[];
-    expect(steps).toHaveLength(2);
-    for (const step of steps) {
-      expect(step).not.toHaveProperty('conversation');
-    }
-    expect(steps[0]!['content']).toBe('a');
-    expect(steps[1]!['content']).toBe('b');
-  });
-
-  it('projects nested run.completed result without conversation graphs', () => {
-    const detail = {
-      conversation: { snapshot: () => ({}) },
-      result: {
-        conversation: { snapshot: () => ({}) },
-        steps: [
-          {
-            step: 1,
-            conversation: { snapshot: () => ({}) },
-            content: 'nested',
-            toolCalls: [],
-            results: [],
-            final: true,
-          },
-        ],
-        content: 'done',
-        usage: { prompt: 1, completion: 2, total: 3 },
-        finishReason: 'stop-condition',
-      },
-      steps: [],
-      content: 'done',
-      usage: { prompt: 1, completion: 2, total: 3 },
-      finishReason: 'stop-condition',
-    };
-
-    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
-    const nestedResult = result['result'] as Record<string, unknown>;
-    const nestedSteps = nestedResult['steps'] as Record<string, unknown>[];
-
-    expect(nestedResult).not.toHaveProperty('conversation');
-    expect(nestedSteps[0]).not.toHaveProperty('conversation');
-    expect(nestedResult['content']).toBe('done');
-  });
-
-  it('keeps run.completed details JSON-safe after stripping conversations', () => {
-    const detail = {
-      conversation: { snapshot: () => ({}) },
-      finishedAt: new Date('2026-03-31T21:15:48.000Z'),
-      usage: { prompt: 1, completion: 2, total: 3 },
-      totalCost: 42n,
-      steps: [
-        {
-          step: 1,
-          conversation: { snapshot: () => ({}) },
-          content: 'done',
-          toolCalls: [
-            {
-              name: 'inspect',
-              metadata: new Map([['labels', new Set(['gateway'])]]),
-            },
-          ],
-          results: [
-            {
-              value: new Set(['ok']),
-            },
-          ],
-          final: true,
-        },
-      ],
-    };
-
-    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
-    expect(result).not.toHaveProperty('conversation');
-    expect(result['finishedAt']).toBe('2026-03-31T21:15:48.000Z');
-    expect(result['totalCost']).toBe('42');
-
-    const steps = result['steps'] as Record<string, unknown>[];
-    expect(steps[0]).not.toHaveProperty('conversation');
-    expect(steps[0]?.['toolCalls']).toEqual([
-      {
-        name: 'inspect',
-        metadata: [['labels', ['gateway']]],
-      },
-    ]);
-    expect(steps[0]?.['results']).toEqual([{ value: ['ok'] }]);
-    expect(() => JSON.stringify(result)).not.toThrow();
-  });
-
-  it('strips conversation from run.completed details even when steps is not an array (e.g. an abrupt run.completed with no steps field)', () => {
-    const detail = {
-      conversation: { snapshot: () => ({}) },
-      content: 'done',
-      finishReason: 'error',
-    };
-
-    const result = serializeActionDetail('run.completed', detail) as Record<string, unknown>;
-    expect(result).not.toHaveProperty('conversation');
-    expect(result['content']).toBe('done');
-    expect(result['finishReason']).toBe('error');
-  });
-
-  it('passes through other event types unchanged', () => {
-    const detail = { some: 'data' };
-    const result = serializeActionDetail('run.started', detail);
-    expect(result).toEqual(detail);
-  });
-
-  it('serializes nested ordinary errors in other event details', () => {
-    expect(
-      serializeActionDetail('custom.event', {
-        nested: { error: new Error('nested failure') },
-      }),
-    ).toEqual({ nested: { error: 'nested failure' } });
-  });
-
-  it('passes through primitives unchanged', () => {
-    expect(serializeActionDetail('run.error', 'oops')).toBe('oops');
-    expect(serializeActionDetail('run.error', null)).toBeNull();
-    expect(serializeActionDetail('run.error', 42)).toBe(42);
-  });
-
-  it('serializes Error instances in run.error details to their message', () => {
-    const detail = { step: 3, error: new Error('Connection refused') };
-    const result = serializeActionDetail('run.error', detail) as Record<string, unknown>;
-    expect(result['step']).toBe(3);
-    expect(result['error']).toBe('Connection refused');
-  });
-
-  it('preserves string errors in run.error details', () => {
-    const detail = { step: 1, error: 'something went wrong' };
-    const result = serializeActionDetail('run.error', detail) as Record<string, unknown>;
-    expect(result['step']).toBe(1);
-    expect(result['error']).toBe('something went wrong');
-  });
-
-  it('serializes non-string non-Error errors in run.error details', () => {
-    const detail = { step: 2, error: { code: 'TIMEOUT', retryable: true } };
-    const result = serializeActionDetail('run.error', detail) as Record<string, unknown>;
-    expect(result['step']).toBe(2);
-    expect(result['error']).toBe('{"code":"TIMEOUT","retryable":true}');
-  });
-
-  it('produces valid JSON for run.error with Error instances', () => {
-    const detail = { step: 5, error: new Error('Boom') };
-    const serialized = serializeActionDetail('run.error', detail);
-    const json = JSON.stringify(serialized);
-    const parsed = JSON.parse(json);
-    expect(parsed.error).toBe('Boom');
-    expect(parsed.step).toBe(5);
-  });
-
-  it('serializes Error instances in generate.error details', () => {
-    const detail = { step: 1, error: new Error('Rate limited'), durationMilliseconds: 150 };
-    const result = serializeActionDetail('generate.error', detail) as Record<string, unknown>;
-    expect(result['error']).toBe('Rate limited');
-    expect(result['durationMilliseconds']).toBe(150);
-  });
-
-  it('serializes Error instances in generate.retry details', () => {
-    const detail = { step: 2, attempt: 3, error: new Error('Timeout') };
-    const result = serializeActionDetail('generate.retry', detail) as Record<string, unknown>;
-    expect(result['error']).toBe('Timeout');
-    expect(result['attempt']).toBe(3);
-  });
-
-  it('preserves dates, maps, and sets in serialized detail payloads', () => {
-    const detail = {
-      createdAt: new Date('2026-03-31T21:15:48.000Z'),
-      labels: new Set(['gateway', 'live']),
-      metadata: new Map<unknown, unknown>([
-        ['attempt', 2],
-        ['nested', new Map([['ok', true]])],
-      ]),
-    };
-
-    const result = serializeActionDetail('run.started', detail) as Record<string, unknown>;
-    expect(result['createdAt']).toBe('2026-03-31T21:15:48.000Z');
-    expect(result['labels']).toEqual(['gateway', 'live']);
-    expect(result['metadata']).toEqual([
-      ['attempt', 2],
-      ['nested', [['ok', true]]],
-    ]);
-  });
-
-  it('preserves shared object values that are not circular', () => {
-    const sharedUsage = { prompt: 10, completion: 5, total: 15 };
-    const detail = {
-      first: sharedUsage,
-      second: sharedUsage,
-    };
-
-    const result = serializeActionDetail('run.started', detail) as Record<string, unknown>;
-    expect(result['first']).toEqual({ prompt: 10, completion: 5, total: 15 });
-    expect(result['second']).toEqual({ prompt: 10, completion: 5, total: 15 });
-  });
-});
-
-function buildStubLivenessSnapshot() {
-  return {
-    id: 'run-5',
-    kind: 'agent-run' as const,
-    startedAt: new Date(0).toISOString(),
-    revision: 0,
-    status: 'running' as const,
-    lastTransitionAt: new Date(0).toISOString(),
-    projection: 'redacted' as const,
-    ownership: 'independent' as const,
-    detached: false,
-    durability: 'process-local' as const,
-    cancellable: true,
-    attempt: 0,
-    reachability: 'unknown' as const,
-    progress: 'unknown' as const,
-    assessment: 'healthy' as const,
-    observedAt: 0,
-    missedPulseCount: 0,
-    policyVersion: LIVENESS_POLICY_VERSION,
-    evidence: [],
-  };
-}
-
-function stubActiveRunWithSnapshot(): ActiveRun {
-  const emitter = new CompletableEventTarget<CombinedOperativeEventMap>();
-  return {
-    result: new Promise<never>(() => {}),
-    abort: () => {},
-    addEventListener: emitter.addEventListener.bind(emitter),
-    removeEventListener: emitter.removeEventListener.bind(emitter),
-    on: emitter.on.bind(emitter),
-    once: emitter.once.bind(emitter),
-    subscribe: emitter.subscribe.bind(emitter),
-    events: emitter.events.bind(emitter) as ActiveRun['events'],
-    toObservable: emitter.toObservable.bind(emitter),
-    complete: emitter.complete.bind(emitter),
-    closed: () => new Promise(() => {}),
-    snapshot: buildStubLivenessSnapshot,
-    subscribeSnapshot: (observer) => {
-      observer(buildStubLivenessSnapshot());
-      return { unsubscribe: () => {}, closed: false };
-    },
-    [Symbol.dispose]: () => {},
-  };
-}
 
 describe('serializeRunDetail', () => {
   it('keeps non-plain tool result values JSON-safe without dropping their contents', () => {
@@ -448,31 +96,26 @@ describe('serializeRunDetail', () => {
       status: 'completed',
       steps: [
         {
+          ...makeStep(1),
           step: 1,
           content: 'done',
           final: true,
           usage: { prompt: 1, completion: 1, total: 2 },
-          toolCalls: [
-            {
-              id: 'tool-call-1',
-              name: 'inspect',
-              arguments: {
-                createdAt: new Date('2026-03-31T21:15:48.000Z'),
-              },
-            },
-          ],
+          toolCalls: [makeNonJsonToolCall()],
           results: [
             {
+              callId: 'tool-call-1',
+              toolCallId: 'tool-call-1',
+              outcome: 'success',
+              content: null,
               toolName: 'inspect',
               result: {
                 tags: new Set(['one', 'two']),
                 values: new Map([['count', 2]]),
               },
-              error: undefined,
-              errorMessage: undefined,
             },
           ],
-        } as never,
+        },
       ],
       usage: { prompt: 1, completion: 1, total: 2 },
       finishReason: 'stop-condition',
@@ -490,122 +133,5 @@ describe('serializeRunDetail', () => {
       tags: ['one', 'two'],
       values: [['count', 2]],
     });
-  });
-});
-
-describe('serializeUnknownError', () => {
-  it('serializes circular objects without throwing', () => {
-    const error: Record<string, unknown> = {};
-    error['self'] = error;
-
-    expect(serializeUnknownError(error)).toBe('{"self":"[Circular]"}');
-  });
-
-  it('serializes bigint-containing objects without throwing', () => {
-    expect(serializeUnknownError({ value: 42n })).toBe('{"value":"42"}');
-  });
-
-  it('serializes repeated non-circular references without dropping later values', () => {
-    const shared = { attempts: 2, ok: true };
-
-    expect(serializeUnknownError({ first: shared, second: shared })).toBe(
-      '{"first":{"attempts":2,"ok":true},"second":{"attempts":2,"ok":true}}',
-    );
-  });
-
-  it('returns "null" for a null error', () => {
-    expect(serializeUnknownError(null)).toBe('null');
-  });
-
-  it('returns "null" for an undefined error', () => {
-    expect(serializeUnknownError(undefined)).toBe('null');
-  });
-
-  it('serializes symbols instead of returning undefined', () => {
-    expect(serializeUnknownError(Symbol('boom'))).toBe('Symbol(boom)');
-  });
-
-  it('falls back to String when the host JSON serializer throws', () => {
-    const stringify = spyOn(JSON, 'stringify').mockImplementationOnce(() => {
-      throw new Error('serializer unavailable');
-    });
-    try {
-      expect(serializeUnknownError(Symbol('boom'))).toBe('Symbol(boom)');
-      expect(stringify).toHaveBeenCalledTimes(1);
-    } finally {
-      stringify.mockRestore();
-    }
-  });
-
-  it('serializes an object with a toJSON method by calling it instead of walking its own properties', () => {
-    const value = {
-      internal: 'should never be visible',
-      toJSON(): unknown {
-        return { summary: 'redacted view' };
-      },
-    };
-
-    expect(serializeUnknownError(value)).toBe('{"summary":"redacted view"}');
-  });
-
-  it('preserves typed AgentRunError details', () => {
-    const error = new AbortAgentRunError('cancelled', new Error('socket closed'));
-
-    expect(JSON.parse(serializeUnknownError(error))).toMatchObject({
-      name: 'AbortAgentRunError',
-      message: 'cancelled',
-      kind: 'abort',
-      code: 'ABORTED',
-      cause: {
-        name: 'Error',
-        message: 'socket closed',
-      },
-    });
-  });
-});
-
-describe('resolveDiagnosticSink', () => {
-  afterEach(() => {
-    // Every test here spies on console.error/warn — restore between tests so
-    // a spy from one test never leaks into the next.
-    (console.error as unknown as { mockRestore?: () => void }).mockRestore?.();
-    (console.warn as unknown as { mockRestore?: () => void }).mockRestore?.();
-  });
-
-  it('with no sink supplied, writes to console.error/console.warn — unchanged default behavior', () => {
-    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
-    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
-    const diagnose = resolveDiagnosticSink(undefined);
-
-    diagnose({ level: 'error', scope: 'recovery', message: 'boom', cause: new Error('cause') });
-    diagnose({ level: 'warn', scope: 'recovery', message: 'careful' });
-
-    expect(errorSpy).toHaveBeenCalledWith('boom', expect.any(Error));
-    expect(warnSpy).toHaveBeenCalledWith('careful');
-  });
-
-  it('with a sink supplied, routes diagnostics to it instead of the console', () => {
-    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
-    const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
-    const received: BureauDiagnostic[] = [];
-    const diagnose = resolveDiagnosticSink((diagnostic) => received.push(diagnostic));
-
-    diagnose({ level: 'error', scope: 'webhook', message: 'delivery failed' });
-
-    expect(received).toEqual([{ level: 'error', scope: 'webhook', message: 'delivery failed' }]);
-    expect(errorSpy).not.toHaveBeenCalled();
-    expect(warnSpy).not.toHaveBeenCalled();
-  });
-
-  it('falls back to the console for a diagnostic whose sink throws, without crashing', () => {
-    const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
-    const diagnose = resolveDiagnosticSink(() => {
-      throw new Error('a misbehaving sink');
-    });
-
-    expect(() =>
-      diagnose({ level: 'error', scope: 'dispose', message: 'teardown failed' }),
-    ).not.toThrow();
-    expect(errorSpy).toHaveBeenCalledWith('teardown failed');
   });
 });

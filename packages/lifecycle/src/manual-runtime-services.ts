@@ -131,6 +131,32 @@ interface TimerEntry {
   fired: boolean;
 }
 
+function findNextDueTimer(
+  entries: Map<number, TimerEntry>,
+  targetMilliseconds: number,
+): TimerEntry | undefined {
+  let next: TimerEntry | undefined;
+  for (const entry of entries.values()) {
+    if (entry.cleared || entry.fired || entry.dueAt > targetMilliseconds) continue;
+    if (
+      !next ||
+      entry.dueAt < next.dueAt ||
+      (entry.dueAt === next.dueAt && entry.handle < next.handle)
+    ) {
+      next = entry;
+    }
+  }
+  return next;
+}
+
+function rearmOrFinishTimer(entry: TimerEntry, dueAt: number): void {
+  if (entry.periodMilliseconds === undefined) {
+    entry.fired = true;
+    return;
+  }
+  entry.dueAt = dueAt + Math.max(0, entry.periodMilliseconds);
+}
+
 interface TrackedDeferred {
   readonly label: string;
   outcome: 'resolved' | 'rejected' | undefined;
@@ -187,7 +213,7 @@ export function createManualRuntimeServices(
       handle,
       dueAt: monotonicMilliseconds + Math.max(0, milliseconds ?? 0),
       callback,
-      periodMilliseconds,
+      ...(periodMilliseconds === undefined ? {} : { periodMilliseconds }),
       cleared: false,
       fired: false,
     });
@@ -266,9 +292,11 @@ export function createManualRuntimeServices(
         void promise.then(
           () => {
             entry.outcome = 'resolved';
+            return undefined;
           },
           () => {
             entry.outcome = 'rejected';
+            return undefined;
           },
         );
       },
@@ -277,28 +305,11 @@ export function createManualRuntimeServices(
     advance: async (milliseconds) => {
       const targetMilliseconds = monotonicMilliseconds + Math.max(0, milliseconds);
       for (;;) {
-        let next: TimerEntry | undefined;
-        for (const entry of timerEntries.values()) {
-          if (entry.cleared || entry.fired) continue;
-          if (entry.dueAt > targetMilliseconds) continue;
-          if (
-            !next ||
-            entry.dueAt < next.dueAt ||
-            (entry.dueAt === next.dueAt && entry.handle < next.handle)
-          ) {
-            next = entry;
-          }
-        }
+        const next = findNextDueTimer(timerEntries, targetMilliseconds);
         if (!next) break;
 
         monotonicMilliseconds = next.dueAt;
-        if (next.periodMilliseconds !== undefined) {
-          // An interval re-arms at its own period inside the advanced
-          // window rather than firing once.
-          next.dueAt = monotonicMilliseconds + Math.max(0, next.periodMilliseconds);
-        } else {
-          next.fired = true;
-        }
+        rearmOrFinishTimer(next, monotonicMilliseconds);
 
         next.callback();
         // Awaits the microtask queue between each callback, so a timer
@@ -314,7 +325,7 @@ export function createManualRuntimeServices(
     pendingTimers: () =>
       [...timerEntries.values()]
         .filter((entry) => !entry.cleared && !entry.fired)
-        .sort((a, b) => a.dueAt - b.dueAt)
+        .toSorted((a, b) => a.dueAt - b.dueAt)
         .map((entry) => ({ handle: entry.handle, dueAt: entry.dueAt })),
     outstandingDeferred: () =>
       [...tracked.values()]

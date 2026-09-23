@@ -17,7 +17,6 @@ import {
   wallClockTimeout,
 } from './predicates';
 
-export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './predicates';
 export {
   contentMatches,
   every,
@@ -33,6 +32,7 @@ export {
   toolOutcome,
   wallClockTimeout,
 } from './predicates';
+export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './predicates';
 
 /**
  * Creates a stop condition that halts the loop when the accumulated

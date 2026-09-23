@@ -1,0 +1,54 @@
+{
+  "name": "@lostgradient/tool-protocol",
+  "description": "Shared JSON-safe tool protocol types and materialization utilities",
+  "type": "module",
+  "exports": {
+    ".": {
+      "bun": "./dist/index.js",
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "lint": "oxlint --deny-warnings --type-aware --tsconfig ./tsconfig.json",
+    "lint:fix": "oxlint --deny-warnings --fix --type-aware --tsconfig ./tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "tsdown",
+    "clean": "rm -rf dist coverage"
+  },
+  "dependencies": {
+    "@lostgradient/lifecycle": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "oxlint": "^1.83.0",
+    "tsdown": "^0.22.14",
+    "typescript": "6.0.3"
+  },
+  "version": "0.0.0",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "engines": {
+    "bun": ">=1.4.0",
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false
+}

@@ -1,3 +1,5 @@
+import type { EventMap, TypedEventTarget } from './typed-event-target';
+
 export interface EventIteratorOptions {
   signal?: AbortSignal;
   bufferSize?: number;
@@ -13,26 +15,35 @@ export interface EventIteratorOptions {
  *
  * Uses a pull-based queue: events are buffered until the consumer calls next().
  */
-export function eventIterator<E extends Event>(
+export function eventIterator<M extends EventMap, K extends keyof M & string>(
+  target: TypedEventTarget<M>,
+  type: K,
+  options?: EventIteratorOptions,
+): AsyncIterableIterator<M[K]>;
+export function eventIterator(
   target: EventTarget,
   type: string,
   options?: EventIteratorOptions,
-): AsyncIterableIterator<E> {
+): AsyncIterableIterator<Event>;
+export function eventIterator(
+  target: EventTarget,
+  type: string,
+  options?: EventIteratorOptions,
+): AsyncIterableIterator<Event> {
   const bufferSize = options?.bufferSize ?? 256;
   const signal = options?.signal;
 
-  const queue: E[] = [];
-  let resolve: ((value: IteratorResult<E>) => void) | null = null;
+  const queue: Event[] = [];
+  let resolve: ((value: IteratorResult<Event>) => void) | null = null;
   let done = false;
 
   function onEvent(event: Event): void {
-    const typed = event as E;
     if (resolve) {
       const pending = resolve;
       resolve = null;
-      pending({ value: typed, done: false });
+      pending({ value: event, done: false });
     } else if (queue.length < bufferSize) {
-      queue.push(typed);
+      queue.push(event);
     }
   }
 
@@ -55,22 +66,22 @@ export function eventIterator<E extends Event>(
     signal?.addEventListener('abort', cleanup, { once: true });
   }
 
-  const iterator: AsyncIterableIterator<E> = {
-    next(): Promise<IteratorResult<E>> {
+  const iterator: AsyncIterableIterator<Event> = {
+    next(): Promise<IteratorResult<Event>> {
       if (queue.length > 0) {
         return Promise.resolve({ value: queue.shift()!, done: false });
       }
       if (done) {
-        return Promise.resolve({ value: undefined as unknown as E, done: true });
+        return Promise.resolve({ value: undefined, done: true });
       }
-      return new Promise<IteratorResult<E>>((_resolve) => {
+      return new Promise<IteratorResult<Event>>((_resolve) => {
         resolve = _resolve;
       });
     },
 
-    return(): Promise<IteratorResult<E>> {
+    return(): Promise<IteratorResult<Event>> {
       cleanup();
-      return Promise.resolve({ value: undefined as unknown as E, done: true });
+      return Promise.resolve({ value: undefined, done: true });
     },
 
     [Symbol.asyncIterator]() {

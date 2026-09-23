@@ -40,8 +40,8 @@ export function withStreaming(fn: StreamingGenerateFunction): GenerateFunction {
       const response = await fn({ ...context, streaming: handle });
 
       conversation.finalizeStreamingMessage(messageId, {
-        tokenUsage: response.usage,
-        metadata: response.metadata,
+        ...(response.usage === undefined ? {} : { tokenUsage: response.usage }),
+        ...(response.metadata === undefined ? {} : { metadata: response.metadata }),
       });
 
       return { ...response, messageAppended: true };

@@ -1,45 +1,14 @@
-export type {
-  AgentRun,
-  CreateAgentRunOptions,
-  DiagnosticAgentRun,
-  OutputMethod,
-  RunEvent,
-  SuccessfulRunResult,
-  UnwrappedValue,
-} from './agent-run';
-export {
-  CompletedRunIterationError,
-  createAgentRun,
-  createDiagnosticAgentRun,
-  isSuccessfulRunResult,
-} from './agent-run';
-export type { AgentSession, RunRef } from './agent-session';
+export * from './agent-run';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
-export type {
-  AdaptiveBackoffOptions,
-  BackpressureSignal,
-  BackpressureStrategy,
-  SlidingWindowOptions,
-  TokenBucketOptions,
-} from './backpressure';
-export { createAdaptiveBackoff, createSlidingWindow, createTokenBucket } from './backpressure';
-export type {
-  CacheEntry,
-  CacheHitEvent,
-  CacheKeyFunction,
-  CacheMetrics,
-  CacheMetricsOptions,
-  CacheMissEvent,
-  CacheOptions,
-} from './cache/index';
+export type { AgentSession, RunRef } from './agent-session';
+export * from './backpressure';
+export * from './cache/index';
 export {
-  clearCache,
-  conversationHashKey,
-  invalidateCache,
-  lastMessageKey,
-  withCache,
-  withCacheMetrics,
-} from './cache/index';
+  attenuateDelegatedAuthority,
+  createChildRunRegistry,
+  dispatchChildRun,
+  listChildRuns,
+} from './child-run';
 export type {
   ChildEventEmitter,
   ChildRunDescriptor,
@@ -51,81 +20,40 @@ export type {
   DispatchChildRunOptions,
   MutableChildRunRegistry,
 } from './child-run';
-export {
-  attenuateDelegatedAuthority,
-  createChildRunRegistry,
-  dispatchChildRun,
-  listChildRuns,
-} from './child-run';
-export type { RepeatingToolCallsOptions, TokenBudgetOptions } from './conditions/index';
-export { stopWhen } from './conditions/index';
-export type {
-  AssemblyOptions,
-  AssemblyResult,
-  BudgetReport,
-  CompactionOptions,
-  CompactionStrategy,
-  ContextAssembler,
-  ContextEngineOptions,
-  TokenBudgetOptions as ContextTokenBudgetOptions,
-  MergeSubagentResultOptions,
-  PrepareSubagentContextOptions,
-  TokenBudget,
-} from './context/index';
-export {
-  createContextAssembler,
-  createHybridStrategy,
-  createSelectivePruningStrategy,
-  createSlidingWindowStrategy,
-  createTokenBudget,
-  mergeSubagentResult,
-  prepareSubagentContext,
-} from './context/index';
-export type {
-  CostBudgetExceededEvent,
-  CostBudgetMonitor,
-  CostBudgetOptions,
-  CostBudgetThresholdEvent,
-} from './cost-budget-monitor';
-export { createCostBudgetMonitor } from './cost-budget-monitor';
-export type { CostEstimate, CostEstimationOptions, ModelPricing } from './cost-estimation';
-export {
-  defaultPricingTable,
-  estimateCacheHitRate,
-  estimateCost,
-  getModelPricing,
-} from './cost-estimation';
-export type {
-  CreateAgentOptions,
-  CreateAgentOptionsBase,
-  CreateAgentToolConfiguration,
-  StandaloneAgent,
-} from './create-agent';
-export { createAgent } from './create-agent';
-export type { CreateContextCompactorOptions } from './create-context-compactor';
+export * from './conditions/index';
+export * from './context/index';
+
+export * from './cost-budget-monitor';
+export * from './cost-estimation';
+export * from './create-agent';
 export { createContextCompactor } from './create-context-compactor';
-export type { EarlyStoppingHandlerOptions } from './create-early-stopping-handler';
+export type { CreateContextCompactorOptions } from './create-context-compactor';
 export { createEarlyStoppingHandler } from './create-early-stopping-handler';
+export type { EarlyStoppingHandlerOptions } from './create-early-stopping-handler';
+export { HANDOFF_MARKER, createHandoffTool, extractHandoffTarget } from './create-handoff-tool';
 export type { CreateHandoffToolOptions, HandoffTarget } from './create-handoff-tool';
-export { createHandoffTool, extractHandoffTarget, HANDOFF_MARKER } from './create-handoff-tool';
-export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createIdentityHook } from './create-identity-hook';
-export type { AgentModule, CreateLazyAgentOptions, LazyAgentLoader } from './create-lazy-agent';
+export type { CreateIdentityHookOptions } from './create-identity-hook';
 export { createDeferredAgentRun, createLazyAgent } from './create-lazy-agent';
-export type { CreateLazyGenerateOptions, LazyGenerateLoader } from './create-lazy-generate';
+export type { AgentModule, CreateLazyAgentOptions, LazyAgentLoader } from './create-lazy-agent';
 export { createLazyGenerate } from './create-lazy-generate';
-export type { CreateMcpElicitationResponderOptions } from './create-mcp-elicitation-responder';
+export type { CreateLazyGenerateOptions, LazyGenerateLoader } from './create-lazy-generate';
 export { createMcpElicitationResponder } from './create-mcp-elicitation-responder';
-export type { CreateMemoryBridgeOptions, MemoryLike } from './create-memory-bridge';
+export type { CreateMcpElicitationResponderOptions } from './create-mcp-elicitation-responder';
 export { createMemoryBridge } from './create-memory-bridge';
-export type {
-  CreatePolicyEnforcementHookOptions,
-  ToolLike,
-  ToolPolicy,
-} from './create-policy-enforcement-hook';
-export { createPolicyEnforcementHook } from './create-policy-enforcement-hook';
-export type { ActiveRun, DurableRunRouting } from './create-run';
+export type { CreateMemoryBridgeOptions, MemoryLike } from './create-memory-bridge';
+export * from './create-policy-enforcement-hook';
 export { createActiveRun } from './create-run';
+export type { ActiveRun, DurableRunRouting } from './create-run';
+export {
+  EntryDeletedEvent,
+  EntrySetEvent,
+  ScratchpadClearedEvent,
+  createScratchpad,
+  createScratchpadReadTool,
+  createScratchpadWriteTool,
+  createTypedScratchpad,
+} from './create-scratchpad';
 export type {
   CreateScratchpadOptions,
   Scratchpad,
@@ -133,21 +61,25 @@ export type {
   ScratchpadEvents,
   TypedScratchpad,
 } from './create-scratchpad';
+export * from './create-subagent-tool';
 export {
-  createScratchpad,
-  createScratchpadReadTool,
-  createScratchpadWriteTool,
-  createTypedScratchpad,
-  EntryDeletedEvent,
-  EntrySetEvent,
-  ScratchpadClearedEvent,
-} from './create-scratchpad';
-export type {
-  CreateSubagentToolOptions,
-  SubagentSummarizer,
-  SubagentSummaryContext,
-} from './create-subagent-tool';
-export { createSubagentTool, defaultSubagentSummarizer } from './create-subagent-tool';
+  AbortAgentRunError,
+  AgentContractError,
+  AgentRunError,
+  AsyncDefinitionLoadError,
+  BudgetExceededError,
+  ElicitationDeniedError,
+  GuardrailTripwireError,
+  MaximumStepsExceededError,
+  NonJsonOutputError,
+  OutputSchemaConversionError,
+  OutputValidationError,
+  SelectionRevalidationError,
+  SubagentRunError,
+  agentRunErrorToJSON,
+  classifyError,
+  serializeAgentRunError,
+} from './errors';
 export type {
   AgentRunErrorCode,
   AgentRunErrorKind,
@@ -158,38 +90,11 @@ export type {
   SerializedAgentRunError,
 } from './errors';
 export {
-  AbortAgentRunError,
-  AgentContractError,
-  AgentRunError,
-  agentRunErrorToJSON,
-  AsyncDefinitionLoadError,
-  BudgetExceededError,
-  classifyError,
-  ElicitationDeniedError,
-  GuardrailTripwireError,
-  MaximumStepsExceededError,
-  NonJsonOutputError,
-  OutputSchemaConversionError,
-  OutputValidationError,
-  SelectionRevalidationError,
-  serializeAgentRunError,
-  SubagentRunError,
-} from './errors';
-export type {
-  CombinedOperativeEventMap,
-  CombinedOperativeEvents,
-  CombinedOperativeEventType,
-  ForwardedEvents,
-  OperativeEventEmitter,
-  OperativeEventMap,
-  OperativeEvents,
-  OperativeEventType,
-} from './events';
-export {
   BackpressureAppliedEvent,
   BackpressureReleasedEvent,
   BudgetExceededEvent,
   BudgetThresholdEvent,
+  ContextBudgetWarningEvent,
   ContextCompactedEvent,
   ElicitationRequestedEvent,
   ElicitationResolvedEvent,
@@ -218,36 +123,40 @@ export {
   ToolsExecutingEvent,
   UsageAccumulatedEvent,
 } from './events';
-export { ContextBudgetWarningEvent } from './events';
 export type {
-  AgentGenerationProfile,
-  AgentPreferences,
-  GenerationMode,
-} from './generation-profile';
-export { readGenerationProfile } from './generation-profile';
-export type {
-  AgentInput,
-  AgentRunContext,
-  DefinitionResolvingAgent,
-  ResolveRunOptions,
-  RunnableAgent,
-} from './runnable-agent';
-export { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-export type {
-  CreateSelectionGateOptions,
-  SelectionGate,
-  SelectionGateSource,
-} from './selection-gate';
-export { createSelectionGate } from './selection-gate';
-// AB-92/AB-252 — the RuntimeServices contract and its real-globals default
-// implementation live in `lifecycle` (a private foundation package) and are
-// re-exported here so a consumer never has to depend on `lifecycle`
-// directly; inlined into this package's shipped artifact at build time,
-// the existing treatment `ObservableLike`/`Subscription` already receive.
-// The manual (deterministic) implementation is exported from
-// `@lostgradient/operative/test` instead — see `./test/index.ts`.
+  CombinedOperativeEventMap,
+  CombinedOperativeEventType,
+  CombinedOperativeEvents,
+  ForwardedEvents,
+  OperativeEventEmitter,
+  OperativeEventMap,
+  OperativeEventType,
+  OperativeEvents,
+} from './events';
+export * from './generation-profile';
+export * from './runnable-agent';
+export * from './selection-gate';
+// RuntimeServices is part of this package's public execution contract.
+// Its implementation and types have one source owner: @lostgradient/lifecycle.
+// Deterministic callers can use createManualRuntimeServices from that workspace.
+export { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+// COR-1268 — `HookRegistry` is the ONLY way to configure hooks on a run, so
+// it has to be reachable from this package. Before the legacy `RunOptions`
+// hook arrays were removed a consumer could configure hooks without ever
+// naming the registry; now it cannot, and re-exporting here spares every
+// caller a direct dependency on @lostgradient/lifecycle for the one type the
+// operative run contract requires. Source owner is still lifecycle.
+export { HookRegistry, mergeHookRegistries } from '@lostgradient/lifecycle';
 export type {
   DeferredDrainReport,
+  HookErrorHandler,
+  HookPlanDescription,
+  HookPlanEntryDescription,
+  HookPlanObservation,
+  HookPlanObserver,
+  HookRegistrationOptions,
+  HookRegistryOptions,
+  HookReplayPolicy,
   RuntimeClock,
   RuntimeDeferred,
   RuntimeIdentifiers,
@@ -256,10 +165,8 @@ export type {
   RuntimeServices,
   RuntimeTimeoutHandle,
   RuntimeTimers,
-} from 'lifecycle';
-export { createDefaultRuntimeServices } from 'lifecycle';
+} from '@lostgradient/lifecycle';
 // C3 — curated tool.* bubble events
-export type { ToolEventStamp } from './events';
 export {
   ToolErrorBubbleEvent,
   ToolPolicyDeniedBubbleEvent,
@@ -267,8 +174,29 @@ export {
   ToolSettledBubbleEvent,
   ToolStartedBubbleEvent,
 } from './events';
+export type {
+  GenerationBackendRecord,
+  GenerationDivergence,
+  GenerationSelectionRecord,
+  ToolEventStamp,
+} from './events';
+// COR-581 — effective-context epochs
+export { createContextEpochSealer, digestText, epochSourcesUnchanged } from './context-epoch';
+export type {
+  ContextEpochConsumer,
+  ContextEpochSealInput,
+  ContextEpochSealer,
+  ContextSourceAvailability,
+  ContextSourceDisposition,
+  ContextSourceRecord,
+  ContextSourceRedaction,
+  ContextSourceTrust,
+  CreateContextEpochSealerOptions,
+  EffectiveContextEpoch,
+  SkillActivationBinding,
+  SkillActivationContext,
+} from './context-epoch';
 // C3 — session verb events
-export type { SessionRecoverFailure } from './events';
 export {
   SessionCancelEvent,
   SessionForkEvent,
@@ -280,6 +208,7 @@ export {
   SessionSleepEvent,
   SessionUpdateEvent,
 } from './events';
+export type { SessionRecoverFailure } from './events';
 // F1/F2/F3 — durable multi-agent transition events
 export { ChildWorkflowStartedEvent, HandoffOccurredEvent, HumanWaitParkedEvent } from './events';
 // AB-90 child ab90-01 / AB-221 — steering events (AB-67's decision record)
@@ -291,16 +220,27 @@ export {
   SteeringSupersededEvent,
 } from './events';
 // AB-50 — child dispatch lifecycle correlation (terminal events)
-export type { ChildWorkflowCorrelation } from './events';
 export {
   ChildWorkflowAbortedEvent,
   ChildWorkflowCompletedEvent,
   ChildWorkflowFailedEvent,
 } from './events';
+export type { ChildWorkflowCorrelation } from './events';
 // AB-90 child ab90-02 / AB-222 — child reattachment and progress events
-export type { ChildWorkflowProgressPayload, ChildWorkflowReattachedPayload } from './events';
 export { ChildWorkflowProgressEvent, ChildWorkflowReattachedEvent } from './events';
+// Hook plan (COR-766). No `HookPlanReplayedEvent` — see the block comment
+// above these classes in `events.ts`.
+export {
+  HookPlanFailedEvent,
+  HookPlanInvokedEvent,
+  HookPlanRegisteredEvent,
+  HookPlanRemovedEvent,
+} from './events';
+export type { ChildWorkflowProgressPayload, ChildWorkflowReattachedPayload } from './events';
+export { observeHookPlan } from './hook-plan-events';
 // D6 — scheduling events
+export * from './create-request-human-input-tool';
+export { createScheduleSelfTool } from './create-schedule-self-tool';
 export type {
   CreateScheduleSelfToolOptions,
   ScheduleSelfFn,
@@ -308,302 +248,59 @@ export type {
   ScheduleSelfResult,
   ScheduleSelfTool,
 } from './create-schedule-self-tool';
-export { createScheduleSelfTool } from './create-schedule-self-tool';
-export type {
-  CreateScheduleWakeupToolOptions,
-  ScheduleWakeupContext,
-  ScheduleWakeupInput,
-  ScheduleWakeupResult,
-  ScheduleWakeupTool,
-} from './create-schedule-wakeup-tool';
-export { createScheduleWakeupTool } from './create-schedule-wakeup-tool';
-// F3 — HITL human-input gate
-export type {
-  CreateRequestHumanInputToolOptions,
-  RequestHumanInputContext,
-  RequestHumanInputInput,
-  RequestHumanInputResult,
-  RequestHumanInputTool,
-} from './create-request-human-input-tool';
-export { createRequestHumanInputTool } from './create-request-human-input-tool';
+export * from './create-schedule-wakeup-tool';
 // F3/D6 — thrown by scheduleWakeup/requestHumanInput when invoked outside a
 // durable run (AB-41's decision record, implemented by AB-43).
 export { DurableCapabilityUnavailableError } from './durable/durable-capability-unavailable-error';
-export type {
-  AgentScheduleHandle,
-  AgentScheduleOptions,
-  AgentScheduleOverlapPolicy,
-  AgentScheduler,
-  CreateAgentScheduleOptions,
-  ScheduledAgentRunInput,
-  SchedulingEngine,
-} from './durable/schedule-agent';
+export * from './durable/schedule-agent';
 export {
-  createAgentSchedule,
-  createAgentScheduler,
-  InvalidScheduleError,
-  isScheduledAgentRunInput,
-} from './durable/schedule-agent';
-export { AgentScheduledEvent, WakeupScheduledEvent } from './events';
-export {
+  AgentScheduledEvent,
+  ScheduleAttemptedEvent,
   ScheduleCancelledEvent,
   ScheduleCompletedEvent,
   ScheduleFailedEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
+  ScheduleSkippedEvent,
+  WakeupScheduledEvent,
 } from './events';
 // AB-10 — workflow versioning for in-flight durable runs
+export * from './durable';
 export { WorkflowVersionMismatchEvent } from './events';
 export { composeGenerate, createFallbackGenerate } from './generate-middleware';
-export type {
-  CodeSafetyValidatorOptions,
-  DetectionResult,
-  DetectorContext,
-  GroundingValidatorOptions,
-  GuardrailHooks,
-  GuardrailProvenance,
-  GuardrailsOptions,
-  GuardrailTriggeredEvent,
-  InputDetector,
-  InputGuardrailOptions,
-  InputLengthDetectorOptions,
-  OutputGuardrailOptions,
-  OutputGuardrailTriggeredEvent,
-  OutputValidator,
-  PromptInjectionDetectorOptions,
-  SessionTaintedEvent,
-  SessionTaintOptions,
-  SessionTaintTracker,
-  TopicBoundaryDetectorOptions,
-  ValidationResult,
-  ValidatorContext,
-} from './guardrails/index';
-export {
-  createCodeSafetyValidator,
-  createGroundingValidator,
-  createGuardrails,
-  createInputGuardrail,
-  createInputLengthDetector,
-  createOutputGuardrail,
-  createOutputPIIValidator,
-  createPromptInjectionDetector,
-  createSessionTaintTracker,
-  createTopicBoundaryDetector,
-  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
-  withMinimumTripwireConfidence,
-} from './guardrails/index';
-export type { OperativeHookMap } from './hooks';
-export type {
-  AfterCompactionHookContext,
-  AfterContextAssemblyHookContext,
-  BeforeCompactionHookContext,
-  // Phase F — durable multi-agent hook context types (C3 completeness rule)
-  ChildWorkflowStartedHookContext,
-  ContextAssemblyHookContext,
-  HandoffOccurredHookContext,
-  HumanWaitParkedHookContext,
-  // Session verb hook context types (C3 completeness rule)
-  SessionCancelHookContext,
-  SessionForkHookContext,
-  SessionQueryHookContext,
-  SessionRecoverHookContext,
-  SessionSignalHookContext,
-  SessionSleepHookContext,
-  SessionUpdateHookContext,
-  // Curated tool.* bubble event hook context types (C3)
-  ToolErrorHookContext,
-  ToolPolicyDeniedHookContext,
-  ToolProgressHookContext,
-  ToolSettledHookContext,
-  ToolStartedHookContext,
-} from './hooks';
-export type {
-  AfterGenerateContext,
-  BeforeGenerateContext,
-  ErrorContext,
-  ErrorRecoveryAction,
-  LLMInputContext,
-  LLMOutputContext,
-  RunAbortContext,
-  RunCompleteContext,
-  RunErrorContext,
-  RunStartContext,
-} from './hooks/index';
-export { composeHooks, everyNSteps, onlyOnStep, runOnce, withTimeout } from './hooks/index';
-export type { IdentityInheritanceLayer, MemoryInheritanceSide } from './inheritance';
-export {
-  combineHooks,
-  combineIdentity,
-  combineMemory,
-  combineProvider,
-  combineTools,
-} from './inheritance';
+export * from './guardrails';
+export * from './hooks';
+export * from './hooks/index';
+export * from './inheritance';
+export * from './liveness';
 export type { EventDispatcher } from './loop';
-export type {
-  JitterOptions,
-  OverflowMutatorOptions,
-  RetryMutator,
-  TemperatureEscalationOptions,
-} from './retry/index';
+export * from './providers';
+export * from './retry';
+export * from './run-envelope';
+/*
+ * `operative.runs.events`, declared with Weft's `defineOperation` so a client
+ * subscribing to a run speaks the same dialect and obeys the same access
+ * policy as one subscribing to a workflow. A host registers this into its
+ * catalog and passes `{ runFeeds }` as the operation's engine value.
+ */
 export {
-  addJitter,
-  composeMutators,
-  createOverflowMutator,
-  createSchemaErrorMutator,
-  createTemperatureEscalationMutator,
-  createToolRemovalMutator,
-  RETRY_TEMPERATURE_KEY,
-} from './retry/index';
-export type {
-  AssistantChunkFrame,
-  AssistantFinalFrame,
-  BuildRunReportInput,
-  NotificationFrame,
-  NotificationLevel,
-  RunFinishedFrame,
-  RunFrame,
-  RunReport,
-  RunReportStatus,
-  RunStartedFrame,
-  StepFrame,
-  SummarizeOptions,
-  ToolFrameStatus,
-  ToolPostFrame,
-  ToolPreFrame,
-} from './run-envelope';
-export {
-  buildRunReport,
-  createAssistantChunkFrame,
-  createAssistantFinalFrame,
-  createNotificationFrame,
-  createRunFinishedFrame,
-  createRunStartedFrame,
-  createStepFrame,
-  createToolPostFrame,
-  createToolPreFrame,
-  mapFinishReasonToStatus,
-  notificationLevelSchema,
-  parseRunFrame,
-  RUN_ENVELOPE_SCHEMA_VERSION,
-  runFrameSchema,
-  runReportSchema,
-  runReportStatusSchema,
-  stringifyError,
-  summarizeToolInput,
-  toolStatusSchema,
-  UnsupportedRunResultLegacyFieldError,
-  UnsupportedRunResultVersionError,
-} from './run-envelope';
+  createAgentRunEventRegistry,
+  runEventEnvelopeSchema,
+  runEventsSubscriptionOperation,
+  type AgentRunEventRegistry,
+  type RunEventsOperationEngine,
+  type RunEventsSubscriptionInput,
+} from './run-events-operation';
 export { DEFAULT_MAXIMUM_STEPS } from './run-step';
-export type {
-  CreateChunkedTaskOptions,
-  CreateDurableHeartbeatOptions,
-  CreateHeartbeatOptions,
-  CreateSchedulerOptions,
-  DurableHeartbeat,
-  DurableHeartbeatTickInput,
-  DurableHeartbeatTickResult,
-  Heartbeat,
-  Scheduler,
-} from './scheduler/index';
-export type {
-  PriorityQueue,
-  SchedulerEventMap,
-  SchedulerEventType,
-  SchedulerPriority,
-  SchedulerRunOptions,
-  SchedulerState,
-  SchedulerTask,
-  SchedulerTaskSummary,
-} from './scheduler/index';
-export type {
-  ConcurrencyPolicy,
-  FlowControlDecision,
-  FlowControlKeyFunction,
-  FlowController,
-  FlowControlPolicy,
-  FlowControlRejectionReason,
-  FlowControlTrigger,
-  RateLimitPolicy,
-  SingletonPolicy,
-} from './scheduler/index';
-export {
-  createChunkedTask,
-  createDurableHeartbeat,
-  createFlowController,
-  createHeartbeat,
-  createPriorityQueue,
-  createScheduler,
-  isHigherPriority,
-  PRIORITY_WEIGHT,
-  SchedulerIdleEvent,
-  SchedulerStartedEvent,
-  SchedulerStoppedEvent,
-  TaskCompletedEvent as SchedulerTaskCompletedEvent,
-  TaskFailedEvent as SchedulerTaskFailedEvent,
-  sleep,
-  TaskCancelledEvent,
-  TaskDispatchedEvent,
-  TaskPreemptedEvent,
-  TaskQueuedEvent,
-} from './scheduler/index';
-export type {
-  MonitorOptions,
-  ResumeSessionOptions,
-  ResumeSessionResult,
-  SessionCleanupOptions,
-  SessionHandle,
-  SessionHandleContext,
-  SessionListOptions,
-  SessionOutboxClaim,
-  SessionOutboxClaimAttempt,
-  SessionOutboxEntry,
-  SessionRunOptions,
-  SessionStore,
-  SessionSummary,
-} from './session/index';
-export {
-  createSessionHandle,
-  createSessionStore,
-  deriveRunId,
-  ForkThroughRunError,
-  NoDurableEngineError,
-  NoRunningRunError,
-  resumeSession,
-  SessionConflictError,
-  StaleSessionIncarnationError,
-} from './session/index';
+export * from './scheduler/index';
+
+export * from './session/index';
 export { MissingRunOptionsError } from './session/session-handle-types';
+export * from './store';
 export { withStreaming } from './streaming';
-export type { BackpressureBuffer, BackpressureBufferOptions } from './streaming/index';
-export type {
-  BlockType,
-  EnhancedStreamingOptions,
-  LiveStreamEvent,
-  StreamBlock,
-  StreamCommand,
-  StreamEvent,
-  StreamEventMap,
-  StreamState,
-  StreamStateMachine,
-} from './streaming/index';
-export {
-  createBackpressureBuffer,
-  createStreamStateMachine,
-  StreamCustomEvent,
-  withEnhancedStreaming,
-} from './streaming/index';
-export type {
-  ResponseFormat,
-  ResponseSchemaValidationResult,
-  ToolChoice,
-} from './structured-output/index';
-export {
-  resolveResponseFormat,
-  toOutputJsonSchema,
-  validateOutput,
-  validateOutputValue,
-} from './structured-output/index';
+export * from './streaming/index';
+export * from './structured-output/index';
+export * from './test';
 export type {
   AfterGenerateHook,
   AfterToolExecutionHook,
@@ -650,12 +347,40 @@ export type {
   StreamingGenerateFunction,
   StreamingHandle,
   TokenUsage,
-  Toolbox,
   ToolCall,
   ToolCallInput,
   ToolExecutionHookContext,
   ToolExecutionResult,
   ToolExecutionResultContext,
+  Toolbox,
   ValidateResponseHook,
   ValidateToolResultHook,
 } from './types';
+
+export * from './providers/test';
+
+export { instrumentRun, type RunInstrumentationOptions } from './instrumentation';
+export {
+  instrumentGenerate,
+  type GenerateInstrumentationOptions,
+  type InstrumentableGenerateOptions,
+} from './providers/instrumentation';
+
+/*
+ * An agent run's events, projected onto a replay-plus-live feed.
+ *
+ * Built on Weft's `createReplayLiveFeed`, which this package already depends
+ * on, so a subscriber watching a run gets the same cursors and resume
+ * semantics as one watching a workflow. See `run-event-feed.ts` for why the
+ * projection names every field rather than serializing events generically.
+ */
+export {
+  PUBLISHED_RUN_EVENT_KINDS,
+  createAgentRunEventFeed,
+  projectRunEvent,
+  publishedRunEventKinds,
+  type AgentRunEventEnvelope,
+  type AgentRunEventFeed,
+  type AgentRunEventFeedOptions,
+  type PublishedRunEventKind,
+} from './run-event-feed';

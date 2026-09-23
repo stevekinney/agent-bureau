@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 import { importToolSchema } from '../../adapters/imported-schema';
-import { createTool } from '../../create-tool';
+import { createTool, type CreateToolOptions } from '../../create-tool';
 import type { Tool, ToolMetadata } from '../../is-tool';
 
 /** Parameter locations this generator understands. `cookie` parameters are ignored. */
@@ -106,7 +106,7 @@ const READ_ONLY_METHODS = new Set<OpenAPIHttpMethod>(['get', 'head', 'options', 
  *
  * @example
  * ```typescript
- * import { createToolboxFromOpenAPI } from 'armorer/openapi';
+ * import { createToolboxFromOpenAPI } from 'armorer';
  * import { createToolbox } from 'armorer';
  *
  * const tools = createToolboxFromOpenAPI(spec, {
@@ -251,7 +251,7 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
   const description =
     operation.description ?? operation.summary ?? `${method.toUpperCase()} ${path}`;
 
-  const createOptions: Parameters<typeof createTool>[0] = {
+  const createOptions = {
     name,
     description,
     input: z.object(inputShape),
@@ -296,9 +296,9 @@ function createOperationTool(options: CreateOperationToolOptions): Tool {
 
       return result;
     },
-  };
+  } satisfies CreateToolOptions<Record<string, unknown>, OpenAPIToolResult>;
 
-  return createTool(createOptions) as Tool;
+  return createTool(createOptions);
 }
 
 function mergeParameters(

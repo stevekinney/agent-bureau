@@ -24,9 +24,9 @@ export function createMemoryStoreTool(memory: Memory) {
     async execute(params) {
       const entry = await memory.remember(params.content, {
         source: 'tool',
-        tags: params.tags,
-        importance: params.importance,
-        evergreen: params.evergreen,
+        ...(params.tags !== undefined ? { tags: params.tags } : {}),
+        ...(params.importance !== undefined ? { importance: params.importance } : {}),
+        ...(params.evergreen !== undefined ? { evergreen: params.evergreen } : {}),
       });
 
       return {

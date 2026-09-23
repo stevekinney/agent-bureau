@@ -11,6 +11,87 @@ export interface BM25Options {
   queryTerms?: string[];
 }
 
+function appendJapaneseTokens(word: string, tokens: string[]): void {
+  const parts =
+    word.match(/[a-z0-9_]+|[\u30a0-\u30ffー]+|[\u4e00-\u9fff]+|[\u3040-\u309f]{2,}/g) ?? [];
+  for (const part of parts) {
+    if (/^[\u4e00-\u9fff]+$/.test(part)) expandCJKUnigrams(part, tokens);
+    else tokens.push(part);
+  }
+}
+
+function appendMixedCjkTokens(word: string, tokens: string[]): void {
+  let cjkRun = '';
+  let latinRun = '';
+  const flush = (): void => {
+    if (latinRun) {
+      tokens.push(latinRun);
+      latinRun = '';
+    }
+    if (cjkRun) {
+      expandCJKUnigrams(cjkRun, tokens);
+      cjkRun = '';
+    }
+  };
+  for (const character of Array.from(word)) {
+    if (/[\u4e00-\u9fff]/.test(character)) {
+      if (latinRun) {
+        tokens.push(latinRun);
+        latinRun = '';
+      }
+      cjkRun += character;
+    } else if (/[a-z0-9_]/.test(character)) {
+      if (cjkRun) {
+        expandCJKUnigrams(cjkRun, tokens);
+        cjkRun = '';
+      }
+      latinRun += character;
+    } else flush();
+  }
+  flush();
+}
+
+function termFrequencies(tokens: string[]): Map<string, number> {
+  const frequencies = new Map<string, number>();
+  for (const token of tokens) frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
+  return frequencies;
+}
+
+function documentFrequencies(terms: string[], sets: Set<string>[]): Map<string, number> {
+  const frequencies = new Map<string, number>();
+  for (const term of terms) {
+    if (frequencies.has(term)) continue;
+    frequencies.set(
+      term,
+      sets.reduce((count, set) => count + (set.has(term) ? 1 : 0), 0),
+    );
+  }
+  return frequencies;
+}
+
+function scoreDocument(
+  frequencies: Map<string, number>,
+  length: number,
+  queryTerms: string[],
+  documentFrequency: Map<string, number>,
+  documentCount: number,
+  averageLength: number,
+  k1: number,
+  b: number,
+): number {
+  let score = 0;
+  for (const term of queryTerms) {
+    const termFrequency = frequencies.get(term) ?? 0;
+    if (termFrequency === 0) continue;
+    const df = documentFrequency.get(term) ?? 0;
+    const idf = Math.log((documentCount - df + 0.5) / (df + 0.5) + 1);
+    const numerator = termFrequency * (k1 + 1);
+    const denominator = termFrequency + k1 * (1 - b + b * (length / averageLength));
+    score += idf * (numerator / denominator);
+  }
+  return score;
+}
+
 /**
  * Tokenizes text into lowercase terms with punctuation removed.
  *
@@ -31,54 +112,9 @@ export function tokenize(text: string): string[] {
   const tokens: string[] = [];
 
   for (const word of words) {
-    if (/[\u3040-\u30ff]/.test(word)) {
-      // Japanese: extract script-specific chunks.
-      const parts =
-        word.match(/[a-z0-9_]+|[\u30a0-\u30ffー]+|[\u4e00-\u9fff]+|[\u3040-\u309f]{2,}/g) ?? [];
-      for (const part of parts) {
-        if (/^[\u4e00-\u9fff]+$/.test(part)) {
-          expandCJKUnigrams(part, tokens);
-        } else {
-          tokens.push(part);
-        }
-      }
-    } else if (/[\u4e00-\u9fff]/.test(word)) {
-      // Chinese or mixed CJK with Latin: preserve Latin chunks and expand
-      // contiguous CJK runs into character unigrams + bigrams.
-      let cjkRun = '';
-      let latinRun = '';
-      const flushLatin = () => {
-        if (latinRun) {
-          tokens.push(latinRun);
-          latinRun = '';
-        }
-      };
-      const flushCJK = () => {
-        if (cjkRun) {
-          expandCJKUnigrams(cjkRun, tokens);
-          cjkRun = '';
-        }
-      };
-      for (const ch of Array.from(word)) {
-        if (/[\u4e00-\u9fff]/.test(ch)) {
-          // Part of a CJK run.
-          flushLatin();
-          cjkRun += ch;
-        } else if (/[a-z0-9_]/.test(ch)) {
-          // Part of a Latin/number run.
-          flushCJK();
-          latinRun += ch;
-        } else {
-          // Delimiter or other script: end any current runs.
-          flushLatin();
-          flushCJK();
-        }
-      }
-      flushLatin();
-      flushCJK();
-    } else {
-      tokens.push(word);
-    }
+    if (/[\u3040-\u30ff]/.test(word)) appendJapaneseTokens(word, tokens);
+    else if (/[\u4e00-\u9fff]/.test(word)) appendMixedCjkTokens(word, tokens);
+    else tokens.push(word);
   }
 
   return tokens;
@@ -131,51 +167,29 @@ export function computeBM25Scores(
   const averageDocumentLength = totalLength / numberOfDocuments;
 
   // Precompute per-document term frequencies and term sets for efficient DF/TF lookups
-  const documentTermFrequencies: Map<string, number>[] = [];
-  const documentTermSets: Set<string>[] = [];
-  for (const tokens of tokenizedDocuments) {
-    const frequencies = new Map<string, number>();
-    for (const token of tokens) {
-      frequencies.set(token, (frequencies.get(token) ?? 0) + 1);
-    }
-    documentTermFrequencies.push(frequencies);
-    documentTermSets.push(new Set(frequencies.keys()));
-  }
-
-  // Build document frequency for each query term using precomputed term sets
-  const documentFrequency = new Map<string, number>();
-  for (const term of queryTerms) {
-    if (documentFrequency.has(term)) continue;
-    let count = 0;
-    for (const termSet of documentTermSets) {
-      if (termSet.has(term)) count++;
-    }
-    documentFrequency.set(term, count);
-  }
+  const documentTermFrequencies = tokenizedDocuments.map(termFrequencies);
+  const documentTermSets = documentTermFrequencies.map(
+    (frequencies) => new Set(frequencies.keys()),
+  );
+  const documentFrequency = documentFrequencies(queryTerms, documentTermSets);
 
   // Score each document using precomputed term frequencies
   for (let documentIndex = 0; documentIndex < numberOfDocuments; documentIndex++) {
-    const termFrequencies = documentTermFrequencies[documentIndex]!;
+    const frequencies = documentTermFrequencies[documentIndex]!;
     const documentLength = tokenizedDocuments[documentIndex]!.length;
-    let score = 0;
-
-    for (const term of queryTerms) {
-      const df = documentFrequency.get(term) ?? 0;
-      const termFrequency = termFrequencies.get(term) ?? 0;
-
-      if (termFrequency === 0) continue;
-
-      // IDF with smoothing
-      const idf = Math.log((numberOfDocuments - df + 0.5) / (df + 0.5) + 1);
-
-      // BM25 term score
-      const numerator = termFrequency * (k1 + 1);
-      const denominator =
-        termFrequency + k1 * (1 - b + b * (documentLength / averageDocumentLength));
-      score += idf * (numerator / denominator);
-    }
-
-    scores.set(documentIndex, score);
+    scores.set(
+      documentIndex,
+      scoreDocument(
+        frequencies,
+        documentLength,
+        queryTerms,
+        documentFrequency,
+        numberOfDocuments,
+        averageDocumentLength,
+        k1,
+        b,
+      ),
+    );
   }
 
   return scores;

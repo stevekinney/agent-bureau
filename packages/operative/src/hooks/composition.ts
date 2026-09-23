@@ -1,5 +1,5 @@
-import type { RuntimeServices, RuntimeTimeoutHandle } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeServices, RuntimeTimeoutHandle } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 /**
  * AB-92/AB-252: this pre-existing declared-but-unwired timer seam is now an
@@ -25,7 +25,7 @@ const defaultRuntimeTimers = createDefaultRuntimeServices().timers;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function onlyOnStep<H extends (...args: any[]) => any>(step: number, hook: H): H {
   return ((...args: unknown[]) => {
-    const context = args[0] as { step?: number } | undefined;
+    const context = args[0] as { step?: number | undefined } | undefined;
     if (context && typeof context === 'object' && 'step' in context && context.step === step) {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-return
       return hook(...args);
@@ -74,7 +74,7 @@ export function everyNSteps<H extends (...args: any[]) => any>(n: number, hook: 
   }
 
   return ((...args: unknown[]) => {
-    const context = args[0] as { step?: number } | undefined;
+    const context = args[0] as { step?: number | undefined } | undefined;
     if (context && typeof context === 'object' && 'step' in context) {
       const step = context.step;
       if (typeof step === 'number' && Number.isFinite(step) && step % n === 0) {
@@ -97,8 +97,8 @@ export function withTimeout<H extends (...args: any[]) => any>(
   hook: H,
   onTimeout: 'ignore' | 'error' = 'ignore',
   options: {
-    clearTimeoutFunction?: ClearScheduledTimeout;
-    setTimeoutFunction?: ScheduleTimeout;
+    clearTimeoutFunction?: ClearScheduledTimeout | undefined;
+    setTimeoutFunction?: ScheduleTimeout | undefined;
   } = {},
 ): H {
   return ((...args: unknown[]) => {
@@ -119,10 +119,12 @@ export function withTimeout<H extends (...args: any[]) => any>(
         (result: unknown) => {
           clearTimeoutFunction(timer);
           resolve(result);
+          return undefined;
         },
         (error: unknown) => {
           clearTimeoutFunction(timer);
           reject(error instanceof Error ? error : new Error(String(error)));
+          return undefined;
         },
       );
     });

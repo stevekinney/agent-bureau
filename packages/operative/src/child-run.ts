@@ -46,8 +46,8 @@
  * Deliberately not `bureau.*`-namespaced — see the function's own docstring.
  */
 
-import type { RuntimeServices, Subscription } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeServices, Subscription } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { RunEvent } from './agent-run';
 import {
@@ -126,7 +126,7 @@ export interface ChildRunDescriptor {
    * genuinely can carry `result === undefined`; only `'completed'` and
    * `'aborted'` are guaranteed to carry one.
    */
-  readonly result?: RunResult;
+  readonly result?: RunResult | undefined;
   /**
    * This child's own most recently observed `LivenessAssessment` (AB-88's
    * `LivenessSnapshot.assessment`), populated once `attachLiveness` has
@@ -139,7 +139,7 @@ export interface ChildRunDescriptor {
    * `assessment` the same as a `'terminal'` one: excluded from the
    * worst-child fold, never a stale value standing in for real evidence.
    */
-  readonly assessment?: LivenessAssessment;
+  readonly assessment?: LivenessAssessment | undefined;
 }
 
 /**
@@ -192,9 +192,9 @@ interface RegisteredChild {
   descriptor: ChildRunDescriptor;
   abort: (reason?: string) => void;
   /** Set by `attachLiveness`; released once the child settles or is re-attached. */
-  livenessSubscription?: Subscription;
+  livenessSubscription?: Subscription | undefined;
   /** Set by `attachClosed` (AB-211); see that method's doc comment. */
-  closed?: () => Promise<CleanupAcknowledgement>;
+  closed?: (() => Promise<CleanupAcknowledgement>) | undefined;
 }
 
 /** Internal registration surface `dispatchChildRun` uses; not part of the public read contract. */
@@ -409,7 +409,8 @@ export function createChildRunRegistry(): MutableChildRunRegistry {
     // uncaught throw here would otherwise surface as this registry
     // breaking that child's own liveness propagation to its OTHER
     // subscribers, not just this one's bug.
-    for (const listener of [...livenessListeners]) {
+    const listenerSnapshot = [...livenessListeners];
+    for (const listener of listenerSnapshot) {
       try {
         listener();
       } catch {
@@ -577,18 +578,18 @@ export interface DispatchChildRunOptions {
   /** The parent run's identifier, stamped on every emitted event and on `parentRunId`. */
   parentRunId: string;
   /** The parent's agent name, stamped on every emitted event. Defaults to `''` when omitted. */
-  parentAgentName?: string;
+  parentAgentName?: string | undefined;
   /**
    * Composed with a private per-child `AbortController`: aborting `signal`
    * (a parent abort) and calling the returned handle's own `abort()` (a
    * child-targeted abort) both stop the child; neither reaches a sibling
    * dispatched from the same parent.
    */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
   traceContext?: unknown;
-  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  withTraceContext?: (<T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>) | undefined;
   /** When supplied, the four `multiagent.child-workflow.*` events are dispatched onto it. */
-  emitter?: ChildEventEmitter;
+  emitter?: ChildEventEmitter | undefined;
   /**
    * True when this child runs as a durable Weft child workflow; false for
    * an in-process one. `dispatchChildRun` dispatches through
@@ -598,11 +599,11 @@ export interface DispatchChildRunOptions {
    * `RunnableAgent` is responsible for passing `durable: true` here to
    * match.
    */
-  durable?: boolean;
+  durable?: boolean | undefined;
   /** Overrides the generated `childRunId`. Exists for deterministic tests. */
-  childRunId?: string;
+  childRunId?: string | undefined;
   /** When supplied, this dispatch registers into it — see `createChildRunRegistry`. */
-  registry?: MutableChildRunRegistry;
+  registry?: MutableChildRunRegistry | undefined;
   /**
    * AB-64/AB-250 — the child's delegated-authority grant, ALREADY attenuated
    * (never widened) from whatever grant governs the dispatching parent —
@@ -616,7 +617,7 @@ export interface DispatchChildRunOptions {
    * no additional narrowing beyond whatever its own `RunOptions.selection`
    * gate already enforces.
    */
-  delegatedAuthority?: DelegatedAuthority;
+  delegatedAuthority?: DelegatedAuthority | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
    * exactly once at dispatch — omitted, this dispatch mints `childRunId`
@@ -625,7 +626,7 @@ export interface DispatchChildRunOptions {
    * instance with `createManualRuntimeServices()` for a fully
    * time-controlled, deterministic child id.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 /**
@@ -728,7 +729,7 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
   // child-targeted `abort()` on such an agent would abort only this
   // private controller and leave the child itself running, its `result()`
   // pending forever.
-  const liveAgentRun: { current?: ReturnType<typeof agent.run> } = {};
+  const liveAgentRun: { current?: ReturnType<typeof agent.run> | undefined } = {};
 
   const abort = (reason?: string): void => {
     childController.abort(reason);
@@ -774,6 +775,12 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
       ...(options.delegatedAuthority === undefined
         ? {}
         : { delegatedAuthority: options.delegatedAuthority }),
+      // COR-1269 — the same four fields the `multiagent.child-workflow.*`
+      // events already carry, handed to the child so ITS hook observations are
+      // attributable to this parent-child pair. Data, not a hook surface: this
+      // function composes no registry and references none, which is what makes
+      // "no parent hook reaches a child" structural rather than a convention.
+      childCorrelation: correlation,
     });
   } catch (error) {
     options.registry?.settle(childRunId, 'failed');

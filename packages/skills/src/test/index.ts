@@ -1,6 +1,6 @@
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft';
 
-import type { SkillCatalogEntry, SkillContent, SkillProvider } from '../types';
+import type { SkillContent, SkillWriter } from '../types';
 
 /**
  * Creates an in-memory text-value store for tests, backed by Weft's
@@ -13,14 +13,18 @@ export function createMockKeyValueStore() {
 }
 
 /**
- * Creates a mock skill provider that tracks all calls for assertion.
- * Useful for testing hooks and tools that depend on a SkillProvider.
+ * Creates an in-memory skill writer that tracks every call for assertion.
+ *
+ * Writes only, matching {@link SkillWriter}: a test that needs to read skills back discovers them,
+ * the same way production does. `written` exposes what landed, so a test can assert the effect of a
+ * write without a read method existing for production to reach for.
  */
-export function createMockSkillProvider(
-  initialSkills: SkillContent[] = [],
-): SkillProvider & { calls: Array<{ method: string; args: unknown[] }> } {
+export function createMockSkillProvider(initialSkills: SkillContent[] = []): SkillWriter & {
+  calls: Array<{ method: string; args: unknown[] }>;
+  written: ReadonlyMap<string, SkillContent>;
+} {
   const skills = new Map<string, SkillContent>();
-  const resources = new Map<string, string>();
+  const resources = new Map<string, Uint8Array>();
   const enabled = new Map<string, boolean>();
   const calls: Array<{ method: string; args: unknown[] }> = [];
 
@@ -30,19 +34,7 @@ export function createMockSkillProvider(
 
   return {
     calls,
-
-    async listSkills(): Promise<SkillCatalogEntry[]> {
-      calls.push({ method: 'listSkills', args: [] });
-      return [...skills.values()].map((skill) => ({
-        name: skill.metadata.name,
-        description: skill.metadata.description,
-      }));
-    },
-
-    async loadSkill(name: string): Promise<SkillContent | undefined> {
-      calls.push({ method: 'loadSkill', args: [name] });
-      return skills.get(name);
-    },
+    written: skills,
 
     async saveSkill(name: string, content: SkillContent): Promise<void> {
       calls.push({ method: 'saveSkill', args: [name, content] });
@@ -61,27 +53,9 @@ export function createMockSkillProvider(
       enabled.delete(name);
     },
 
-    async listResources(name: string): Promise<string[]> {
-      calls.push({ method: 'listResources', args: [name] });
-      const prefix = `${name}:`;
-      return [...resources.keys()]
-        .filter((key) => key.startsWith(prefix))
-        .map((key) => key.slice(prefix.length));
-    },
-
-    async loadResource(name: string, path: string): Promise<string | undefined> {
-      calls.push({ method: 'loadResource', args: [name, path] });
-      return resources.get(`${name}:${path}`);
-    },
-
-    async saveResource(name: string, path: string, content: string): Promise<void> {
+    async saveResource(name: string, path: string, content: Uint8Array): Promise<void> {
       calls.push({ method: 'saveResource', args: [name, path, content] });
       resources.set(`${name}:${path}`, content);
-    },
-
-    async isEnabled(name: string): Promise<boolean> {
-      calls.push({ method: 'isEnabled', args: [name] });
-      return enabled.get(name) ?? true;
     },
 
     async setEnabled(name: string, value: boolean): Promise<void> {

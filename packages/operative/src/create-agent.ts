@@ -1,8 +1,8 @@
+import type { HookRegistry, RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices, mergeHookRegistries } from '@lostgradient/lifecycle';
 import type { AnyToolbox, HeadlessPermissionPolicyConfiguration, Tool } from 'armorer';
 import { createHeadlessPermissionPolicyHooks, createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { AgentRun } from './agent-run';
@@ -10,6 +10,7 @@ import { createAgentRun } from './agent-run';
 import { noToolCalls } from './conditions/predicates';
 import { createActiveRun } from './create-run';
 import type { AgentGenerationProfile, AgentPreferences } from './generation-profile';
+import type { OperativeHookMap } from './hooks';
 import { readBackendDescriptors } from './providers/backend-descriptor-attachment';
 import type { ProviderName } from './providers/types';
 import type { AgentRunContext, DefinitionResolvingAgent } from './runnable-agent';
@@ -53,13 +54,13 @@ export interface CreateAgentOptionsBase {
    * `createAgent` result already satisfies `RunnableAgent<O, H>`
    * structurally without one, defaulting to `'(agent)'`.
    */
-  name?: string;
+  name?: string | undefined;
 
   /**
    * System instructions injected as a system message on step 0.
    * Prepended to every run started by this agent.
    */
-  instructions?: string;
+  instructions?: string | undefined;
 
   /**
    * Stop conditions checked after each step.
@@ -74,19 +75,19 @@ export interface CreateAgentOptionsBase {
    * `stopWhen.toolCalled(...)` for agents that MUST end on a tool call, e.g.
    * `createHandoffTool`) to override it.
    */
-  stopWhen?: StopCondition | StopCondition[];
+  stopWhen?: (StopCondition | StopCondition[]) | undefined;
 
   /** Hard cap on the number of steps before the loop exits. */
-  maximumSteps?: number;
+  maximumSteps?: number | undefined;
 
   /** Options forwarded to toolbox.execute() within the loop. */
-  executeOptions?: OperativeExecuteOptions;
+  executeOptions?: OperativeExecuteOptions | undefined;
 
   /** Retry configuration for transient generate failures. */
-  retry?: RetryOptions;
+  retry?: RetryOptions | undefined;
 
   /** Context window management (compaction). */
-  contextManagement?: ContextManagementOptions;
+  contextManagement?: ContextManagementOptions | undefined;
 
   /**
    * Zod schema for the validated terminal `output` value (AB-18) — the
@@ -101,7 +102,7 @@ export interface CreateAgentOptionsBase {
    * generated asset a run produces belongs in `RunResult.parts` as a
    * managed-asset reference part, never inlined as base64 here.
    */
-  output?: ZodType<unknown>;
+  output?: ZodType | undefined;
 
   /**
    * The Agent-requirements-and-preferences layer of AB-64's precedence
@@ -109,7 +110,7 @@ export interface CreateAgentOptionsBase {
    * `generationProfile.preferences` verbatim; consumed by AB-66's
    * not-yet-built selector, never by this function.
    */
-  generationPreferences?: AgentPreferences;
+  generationPreferences?: AgentPreferences | undefined;
 
   /**
    * Candidates a future selector (AB-66) may choose among. Supplying this
@@ -119,7 +120,8 @@ export interface CreateAgentOptionsBase {
    * a `createAgent` agent has no Bureau, no policy configuration, and no
    * catalog, so it can never select (AB-64's verification walk).
    */
-  allowedCandidates?: readonly { readonly provider: ProviderName; readonly model: string }[];
+  allowedCandidates?:
+    readonly { readonly provider: ProviderName; readonly model: string }[] | undefined;
 
   /**
    * The AB-92/AB-252 injectable runtime-service seam: wall time, monotonic
@@ -130,9 +132,26 @@ export interface CreateAgentOptionsBase {
    * share one clock; two agents never share one. Unconfigured (the
    * default), a run reads the real globals; a test composes its own
    * deterministic instance with `createManualRuntimeServices()` from
-   * `@lostgradient/operative/test`.
+   * `@lostgradient/operative`.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
+  /**
+   * This agent's own hook tier (COR-1265, COR-567).
+   *
+   * Construction-time only, matching every other field here: an agent
+   * definition is reused across runs, so a registry swapped in afterwards
+   * would retroactively change runs already in flight. The value surfaces
+   * as the readonly `hooks` on the resulting agent, and `buildRunOptions`
+   * composes it into each run's effective plan through
+   * `mergeHookRegistries` rather than handing this instance to the run —
+   * so mutating this registry later cannot reach a run already dispatched.
+   *
+   * Under Bureau, this tier composes UNDER Bureau's invariants: Bureau's
+   * registrations hold final narrowing power for every dispatch shape, and
+   * an agent hook can add behavior but never widen inherited authority or
+   * suppress a Bureau registration.
+   */
+  hooks?: HookRegistry<OperativeHookMap> | undefined;
 }
 
 /**
@@ -340,6 +359,17 @@ export interface StandaloneAgent<
   readonly generationProfile: AgentGenerationProfile;
 
   /**
+   * This agent's own hook tier, exactly as `options.hooks` supplied it
+   * (COR-1265). `readonly` because it is construction-time only — see
+   * `CreateAgentOptionsBase.hooks`.
+   *
+   * This is the SOURCE registry, not any run's effective plan: a run's plan
+   * is a merged snapshot built at dispatch, so registering on this registry
+   * after a run started does not change that run.
+   */
+  readonly hooks?: HookRegistry<OperativeHookMap> | undefined;
+
+  /**
    * Start a new in-memory run.
    *
    * - `run('some text')` starts a fresh conversation: `instructions` (if
@@ -506,6 +536,12 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     // below, at agent construction, and that SAME instance handed to every
     // run this agent starts.
     runtime: providedRuntime,
+    // COR-1265 — destructured out rather than left in `...rest` so the raw
+    // agent registry never reaches `RunOptions.hooks` directly. What a run
+    // gets is the MERGED snapshot `buildRunOptions` composes below; handing
+    // this instance over instead would let a later `agent.hooks.on(...)`
+    // reach a run already in flight.
+    hooks: agentHooks,
     // Review findings (AB-241): `principal` is inherently per-call
     // attribution (AB-21's `AgentRunContext.principal`), never a
     // construction-time concept — `CreateAgentOptionsBase` declares no such
@@ -640,6 +676,22 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       // construction-time value must never be able to override the run's
       // actual caller-supplied principal.
       ...rest,
+      // COR-1265 — the agent tier becomes this run's effective hook plan,
+      // as a fresh merged snapshot rather than the agent's own registry.
+      // `mergeHookRegistries` copies every entry into a new registry that
+      // holds no reference back, so a registration added to `agentHooks`
+      // after this run was dispatched cannot reach it.
+      //
+      // Only the agent tier participates here. Bureau's tier is composed at
+      // Bureau's own dispatch sites, and there is no direct tier on this
+      // path: `AgentRunContext` declares no `hooks` field, so a caller of
+      // `agent.run()` has no per-call hook surface. Left `undefined` when
+      // the agent declares no hooks, so an agent without them keeps the
+      // absent `RunOptions.hooks` it has today rather than an empty
+      // registry allocated per run.
+      ...(agentHooks === undefined
+        ? {}
+        : { hooks: mergeHookRegistries(undefined, agentHooks, undefined) }),
       // AB-21: `AgentRunContext` fields translate onto their `RunOptions`
       // equivalents — `agentName` stamps curated `tool.*` events (falling
       // back to this agent's own `name`), `signal` drives per-run abort,
@@ -664,6 +716,13 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       // AB-241 — `AgentRunContext.principal` forwards into `RunOptions.principal`
       // the same way `signal`/`traceContext` do above.
       ...(context?.principal !== undefined ? { principal: context.principal } : {}),
+      // COR-1269 — `AgentRunContext.childCorrelation` forwards the same way, so
+      // a child run's hook-plan observations name the parent-child pair that
+      // dispatched it. Correlation only: it reaches the observer attachment in
+      // `startRunLifecycle` and nothing else reads it.
+      ...(context?.childCorrelation !== undefined
+        ? { childCorrelation: context.childCorrelation }
+        : {}),
     };
   }
 
@@ -671,6 +730,10 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
     name: resolvedName,
     hasOutput: output !== undefined,
     generationProfile,
+    // COR-1265 — omitted entirely rather than set to `undefined` when the
+    // agent declares no hooks, so `'hooks' in agent` distinguishes "no tier"
+    // from "a tier that happens to be empty".
+    ...(agentHooks === undefined ? {} : { hooks: agentHooks }),
     run(
       input: string | { conversation: ConversationHistory },
       context?: AgentRunContext,

@@ -1,8 +1,9 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 import type { AnyToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
+import type { ContextEpochSealer } from './context-epoch';
 import type { AgentRunErrorKind } from './errors';
 import {
   GenerateCompletedEvent,
@@ -19,22 +20,15 @@ import { explicitAbortReason } from './run-step-utilities';
 import type { SelectionGate } from './selection-gate';
 import type { ToolChoice } from './structured-output/types';
 import type {
-  AfterToolExecutionHook,
-  BeforeToolExecutionHook,
   ContextManagementOptions,
   GenerateContext,
   OnElicitation,
-  OnStepHook,
-  PrepareStepHook,
   RetryOptions,
   RunOptions,
-  SelectToolsHook,
   SteeringGate,
   StepResult,
   StopCondition,
   TokenUsage,
-  ValidateResponseHook,
-  ValidateToolResultHook,
 } from './types';
 
 export { awaitResumeOrAbort, normalizeToArray, runHookSilently } from './run-step-utilities';
@@ -73,7 +67,7 @@ export interface StepDeps {
   readonly onElicitation: OnElicitation | undefined;
   readonly hooks: RunOptions['hooks'];
   readonly contextManagement: ContextManagementOptions | undefined;
-  readonly output: ZodType<unknown> | undefined;
+  readonly output: ZodType | undefined;
   readonly responseFormat: GenerateContext['responseFormat'];
   /** Per-request output token cap passed through to every GenerateContext. */
   readonly maximumTokens: number | undefined;
@@ -111,14 +105,14 @@ export interface StepDeps {
    * and behavior is unchanged.
    */
   readonly selection: SelectionGate | undefined;
+  /**
+   * COR-581's effective-context epoch sealer, threaded from
+   * `RunOptions.contextEpoch`. `undefined` when the run composes none —
+   * the seal below is skipped entirely and `generate.started` carries no
+   * `contextEpochId`, exactly as before.
+   */
+  readonly contextEpoch: ContextEpochSealer | undefined;
   readonly stopConditions: StopCondition[];
-  readonly prepareStepHooks: PrepareStepHook[];
-  readonly beforeToolExecutionHooks: BeforeToolExecutionHook[];
-  readonly afterToolExecutionHooks: AfterToolExecutionHook[];
-  readonly onStepHooks: OnStepHook[];
-  readonly selectToolsHooks: SelectToolsHook[];
-  readonly validateResponseHooks: ValidateResponseHook[];
-  readonly validateToolResultHooks: ValidateToolResultHook[];
   /** Maximum number of retries the onError hook can request per step. */
   readonly maxErrorRetries: number;
   /**
@@ -137,7 +131,7 @@ export interface StepDeps {
    * doesn't need the acknowledgement (e.g. a bare `executeLoop` caller that
    * never calls `closed()`) — hooks still run exactly the same either way.
    */
-  readonly hookTracker?: (promise: Promise<unknown>) => void;
+  readonly hookTracker?: ((promise: Promise<unknown>) => void) | undefined;
   /**
    * AB-239 — invoked by `runStep` itself ONCE, at step start, with that
    * step's resolved toolbox (`deps.toolbox`, or a `selectTools`
@@ -152,7 +146,7 @@ export interface StepDeps {
    * `startDurableRunResult`'s headless scheduler runs) — see
    * `ToolboxEventForwarder`.
    */
-  readonly onStepToolbox?: (toolbox: AnyToolbox) => void;
+  readonly onStepToolbox?: ((toolbox: AnyToolbox) => void) | undefined;
 }
 
 /**
@@ -198,12 +192,12 @@ export type StepOutcome =
       // A step only ever stops the run by a stop condition firing; `maximum-steps`
       // is decided by the driver's loop bound, not a step.
       finishReason: 'stop-condition';
-      schemaValidation?: { success: boolean; error?: unknown };
+      schemaValidation?: { success: boolean; error?: unknown } | undefined;
       /** The validated structured output — set only on a successful `schemaValidation`. */
       output?: unknown;
     }
-  | { kind: 'abort'; reason?: string }
-  | { kind: 'error'; error: unknown; errorKind?: AgentRunErrorKind };
+  | { kind: 'abort'; reason?: string | undefined }
+  | { kind: 'error'; error: unknown; errorKind?: AgentRunErrorKind | undefined };
 
 /**
  * Executes exactly one iteration of the agent loop against a live
@@ -350,33 +344,6 @@ export async function runStep(
   if (stepSkipped) return { kind: 'continue' };
 
   // Validate response guardrail
-  if (deps.validateResponseHooks.length > 0) {
-    try {
-      for (const hook of deps.validateResponseHooks) {
-        const originalResponse = { ...response };
-        const validated = await hook(response, {
-          conversation,
-          step,
-          signal: stepSignal,
-          abortStep,
-          elicit,
-        });
-        if (validated) {
-          emitter?.dispatch(new ResponseValidatedEvent(step, originalResponse, validated));
-          response = validated;
-        }
-      }
-    } catch (error) {
-      // The provider call already completed (and may have been metered)
-      // before this hook ran — e.g. the default output-guardrail tripwire
-      // throws GuardrailTripwireError here. Accumulate the response's usage
-      // before returning the error result so a tripwire-halted run still
-      // reports the cost of the generate call that triggered it.
-      accumulateUsage(runState, emitter, step, response.usage);
-      emitter?.dispatch(new RunErrorEvent(step, error, 'output'));
-      return { kind: 'error', error, errorKind: 'output' };
-    }
-  }
   if (hooks?.has('validateResponse')) {
     try {
       const originalResponse = { ...response };

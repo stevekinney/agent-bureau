@@ -82,28 +82,20 @@ export function buildMessageFromInput(
   createdAt: string,
   environment: MessageBuildEnvironment,
 ): Message {
-  const prebuiltId = 'id' in input && typeof input.id === 'string' ? input.id : undefined;
-  const prebuiltCreatedAt =
-    'createdAt' in input && typeof input.createdAt === 'string' ? input.createdAt : undefined;
-  const goalCompleted =
-    'goalCompleted' in input && typeof input.goalCompleted === 'boolean'
-      ? input.goalCompleted
-      : undefined;
-
   // `MessageInput.content` is a mutable array; `Message.content` is a
   // ReadonlyArray. Copy rather than reuse the reference so the result always
   // satisfies the mutable shape `normalizeContent`/`createMessage` expect,
   // regardless of which shape `input` was.
   const content = typeof input.content === 'string' ? input.content : [...input.content];
-  const normalizedContent = normalizeContent(content) as string | MultiModalContent[];
+  const normalizedContent = normalizeContent(content);
 
   const baseMessage = {
-    id: prebuiltId ?? environment.randomId(),
+    id: readInputString(input, 'id') ?? environment.randomId(),
     role: input.role,
     content: normalizedContent,
     position,
-    createdAt: prebuiltCreatedAt ?? createdAt,
-    metadata: { ...(input.metadata ?? {}) },
+    createdAt: readInputString(input, 'createdAt') ?? createdAt,
+    metadata: { ...input.metadata },
     hidden: input.hidden ?? false,
     toolCall: input.toolCall,
     toolResult: input.toolResult,
@@ -115,11 +107,19 @@ export function buildMessageFromInput(
     return createMessage({
       ...baseMessage,
       role: 'assistant',
-      goalCompleted,
+      goalCompleted: 'goalCompleted' in input ? input.goalCompleted : undefined,
     });
   }
 
   return createMessage(baseMessage);
+}
+
+function readInputString(
+  input: AppendableMessageInput,
+  key: 'id' | 'createdAt',
+): string | undefined {
+  if (key === 'id') return 'id' in input && typeof input.id === 'string' ? input.id : undefined;
+  return 'createdAt' in input && typeof input.createdAt === 'string' ? input.createdAt : undefined;
 }
 
 /**

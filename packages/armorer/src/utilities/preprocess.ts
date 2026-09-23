@@ -1,18 +1,13 @@
 import { z } from 'zod';
 
-import type {
-  AnyTool,
-  ComposedTool,
-  InferToolInput,
-  InferToolMetadata,
-  InferToolOutput,
-} from '../compose-types';
-import { createTool, type CreateToolOptions } from '../create-tool';
-import type { DefaultToolEvents, ToolContext } from '../is-tool';
+import type { ComposedTool } from '../compose-types';
+import { createTool } from '../create-tool';
+import type { DefaultToolEvents, Tool, ToolContext, ToolEventsMap, ToolMetadata } from '../is-tool';
+import type { ToolCallReturn } from '../types';
 
 type PreprocessMapper<TInput, TTransformedInput> = (
   input: TInput,
-  context: ToolContext<DefaultToolEvents>,
+  context: ToolContext,
 ) => TTransformedInput | Promise<TTransformedInput>;
 
 /**
@@ -30,6 +25,7 @@ type PreprocessMapper<TInput, TTransformedInput> = (
  * // Preprocess to convert string numbers to actual numbers
  * const addNumbersWithPreprocessing = preprocess(
  *   addNumbers,
+ *   z.object({ a: z.string(), b: z.string() }),
  *   async (input: { a: string; b: string }) => ({
  *     a: Number(input.a),
  *     b: Number(input.b),
@@ -40,25 +36,26 @@ type PreprocessMapper<TInput, TTransformedInput> = (
  * const result = await addNumbersWithPreprocessing({ a: '5', b: '3' });
  * ```
  */
-export function preprocess<TTool extends AnyTool, TNewInput extends object>(
-  tool: TTool,
-  mapper: PreprocessMapper<TNewInput, InferToolInput<TTool>>,
-): ComposedTool<TNewInput, InferToolOutput<TTool>, InferToolMetadata<TTool>> {
+export function preprocess<
+  TSchema extends z.ZodType,
+  TEvents extends ToolEventsMap,
+  TOutput,
+  TMetadata extends ToolMetadata | undefined,
+  TNewInput,
+>(
+  tool: Tool<TSchema, TEvents, TOutput, TMetadata>,
+  schema: z.ZodType<TNewInput>,
+  mapper: PreprocessMapper<TNewInput, z.infer<TSchema>>,
+): ComposedTool<TNewInput, ToolCallReturn<TOutput>, TMetadata> {
   const name = `preprocess(${tool.name})`;
   const description = `Preprocessed tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
 
-  // Create a schema that matches the new input type
-  // We use a loose object schema (Zod v4's z.object({}).loose(), formerly .passthrough())
-  // since we can't infer the exact schema from the mapper
-  // The mapper is responsible for transforming to the tool's expected input
-  const schema = z.object({}).loose() as z.ZodType<TNewInput>;
-
   const runPreprocess = async (
-    params: unknown,
-    context: ToolContext<DefaultToolEvents>,
-  ): Promise<InferToolOutput<TTool>> => {
-    const transformed = await mapper(params as TNewInput, context);
+    params: TNewInput,
+    context: ToolContext,
+  ): Promise<ToolCallReturn<TOutput>> => {
+    const transformed = await mapper(params, context);
     const executeOptions =
       context.signal || context.timeout !== undefined || context.stream !== undefined
         ? {
@@ -67,45 +64,24 @@ export function preprocess<TTool extends AnyTool, TNewInput extends object>(
             ...(context.stream !== undefined ? { stream: context.stream } : {}),
           }
         : undefined;
-    const result = await tool.execute(transformed, executeOptions);
-    return result as InferToolOutput<TTool>;
+    return tool.execute(transformed, executeOptions);
   };
 
-  const toolOptions: Omit<
-    CreateToolOptions<
-      TNewInput,
-      InferToolOutput<TTool>,
-      DefaultToolEvents,
-      readonly string[],
-      InferToolMetadata<TTool>,
-      ToolContext<DefaultToolEvents>,
-      InferToolOutput<TTool>
-    >,
-    'metadata'
-  > & {
-    metadata?: InferToolMetadata<TTool>;
-  } = {
+  return createTool<
+    z.ZodType<TNewInput>,
+    TOutput,
+    DefaultToolEvents,
+    readonly string[],
+    TMetadata,
+    ToolCallReturn<TOutput>
+  >({
     name,
     description,
     input: schema,
-    async execute(params, context) {
+    async execute(params: TNewInput, context: ToolContext) {
       return runPreprocess(params, context);
     },
     ...(tags ? { tags } : {}),
-    // `tool: TTool` (generic, constrained to `AnyTool`) makes `tool.metadata`
-    // resolve to `AnyTool`'s fixed `ToolMetadata | undefined`, not the
-    // caller's concrete `InferToolMetadata<TTool>` — TypeScript can't prove
-    // the two are the same type inside a generic function even though they
-    // structurally are. Narrowest correct cast at the one property read.
-    ...(tool.metadata !== undefined ? { metadata: tool.metadata as InferToolMetadata<TTool> } : {}),
-  };
-  return createTool<
-    TNewInput,
-    InferToolOutput<TTool>,
-    DefaultToolEvents,
-    readonly string[],
-    InferToolMetadata<TTool>,
-    ToolContext<DefaultToolEvents>,
-    InferToolOutput<TTool>
-  >(toolOptions) as ComposedTool<TNewInput, InferToolOutput<TTool>, InferToolMetadata<TTool>>;
+    metadata: tool.metadata,
+  });
 }

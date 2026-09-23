@@ -1,18 +1,5 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "exactOptionalPropertyTypes": true,
-    "declaration": true,
-    "declarationMap": true,
-    "declarationDir": "dist",
-    "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
-    "rootDir": ".",
-    "paths": {
-      "@/*": ["./src/*"]
-    },
-    "typeRoots": ["node_modules/@types"],
-    "types": ["bun"]
-  },
+  "extends": "./typescript/library.json",
   "include": ["src", "scripts"],
   "exclude": ["node_modules", "coverage", "**/dist/**", "**/build/**"]
 }

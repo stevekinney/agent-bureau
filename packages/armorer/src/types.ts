@@ -2,6 +2,11 @@ import type {
   JSONValue as SharedJSONValue,
   ToolAction as SharedToolAction,
   ToolActionInput as SharedToolActionInput,
+  ToolApprovalAction as SharedToolApprovalAction,
+  ToolApprovalOperation as SharedToolApprovalOperation,
+  ToolApprovalResolution as SharedToolApprovalResolution,
+  ToolApprovalRisk as SharedToolApprovalRisk,
+  ToolApprovalSandbox as SharedToolApprovalSandbox,
   ToolCall as SharedToolCall,
   ToolCallInput as SharedToolCallInput,
   ToolError as SharedToolError,
@@ -9,7 +14,7 @@ import type {
   ToolErrorInput as SharedToolErrorInput,
   ToolResult as SharedToolResult,
   ToolResultInput as SharedToolResultInput,
-} from 'interoperability';
+} from '@lostgradient/tool-protocol';
 
 import type { ApprovalBindingPayload } from './approval-binding';
 
@@ -20,6 +25,11 @@ export type ToolErrorCategory = SharedToolErrorCategory;
 export type ToolErrorInput = SharedToolErrorInput;
 export type ToolAction = SharedToolAction;
 export type ToolActionInput = SharedToolActionInput;
+export type ToolApprovalAction = SharedToolApprovalAction;
+export type ToolApprovalOperation = SharedToolApprovalOperation;
+export type ToolApprovalResolution = SharedToolApprovalResolution;
+export type ToolApprovalRisk = SharedToolApprovalRisk;
+export type ToolApprovalSandbox = SharedToolApprovalSandbox;
 export type ToolCall = SharedToolCall;
 export type ToolCallInput = SharedToolCallInput;
 export type ToolResult = SharedToolResult;
@@ -51,6 +61,23 @@ export interface ToolExecutionResult extends ToolResult {
   /** @deprecated Use error.category instead. */
   errorCategory?: ToolErrorCategory;
 }
+
+/** The value returned by the public parsed-parameter execution path. */
+export type ToolExecutionValue<TReturn> =
+  | { kind: 'callback'; value: TReturn }
+  | { kind: 'collected-stream'; value: unknown[] }
+  | { kind: 'live-stream'; value: AsyncIterable<unknown> }
+  | { kind: 'authorization-only'; value: undefined };
+
+/** Parsed execution can return the callback value, a collected stream, a live stream, or no value. */
+export type ToolCallReturn<TReturn> = TReturn | unknown[] | AsyncIterable<unknown> | undefined;
+
+/** Internal typed handoff from the execution pipeline to the factory surface. */
+export const toolExecutionValue = Symbol('armorer.toolExecutionValue');
+
+export type TypedToolExecutionResult<TReturn> = ToolExecutionResult & {
+  [toolExecutionValue]?: ToolExecutionValue<TReturn>;
+};
 
 export type ToolResultLike = ToolResultInput | ToolExecutionResult;
 

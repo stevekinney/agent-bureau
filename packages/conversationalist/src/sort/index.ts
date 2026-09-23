@@ -1,1 +1,1 @@
-export { sortMessagesByPosition, sortObjectKeys } from '../utilities/deterministic';
+export { sortMessagesByPosition, sortObjectKeys } from '../utilities/deterministic.ts';

@@ -1,11 +1,12 @@
 import {
   type AnyWorkflowDefinition,
+  MemoryStorage,
+  textValueStore,
   WorkflowHandle,
   WorkflowStartedEvent,
   type WorkflowStatus,
+  yieldToPortableEventLoop,
 } from '@lostgradient/weft';
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 
 import { createCheckpointStore } from '../durable/checkpoint-store';
 import { createRunEngine, type RunEngine } from '../durable/create-run-engine';
@@ -134,7 +135,7 @@ export interface DurableMultiAgentHarness {
    * Drain one portable event-loop turn.
    *
    * Re-exported from Weft so tests can advance the inline-launch queue
-   * without importing from `@lostgradient/weft/testing` directly.
+   * without importing from an internal Weft testing module directly.
    */
   yield(): Promise<void>;
 
@@ -159,13 +160,13 @@ export interface CreateDurableMultiAgentHarnessOptions {
    * The injected workflow MUST use the name `'agentRun'` — that is what the
    * engine dispatches on `engine.start('agentRun', ...)`.
    */
-  runWorkflow?: AnyWorkflowDefinition;
+  runWorkflow?: AnyWorkflowDefinition | undefined;
 
   /**
    * Arm Weft's durable-timer polling loop. Defaults to `false` (most
    * multi-agent tests use `ctx.waitForSignal`, not timers).
    */
-  startScheduler?: boolean;
+  startScheduler?: boolean | undefined;
 }
 
 /**
@@ -189,7 +190,7 @@ export interface CreateDurableMultiAgentHarnessOptions {
  * @example
  * ```ts
  * import { workflow } from '@lostgradient/weft';
- * import { createDurableMultiAgentHarness } from '@lostgradient/operative/test';
+ * import { createDurableMultiAgentHarness } from '@lostgradient/operative';
  *
  * // A minimal HITL probe: parks until a 'human-response' signal arrives.
  * const hitlWorkflow = workflow({ name: 'agentRun' })

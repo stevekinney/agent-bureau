@@ -15,7 +15,7 @@
  * architecture.md for the 3-reviewer consensus on this decision.
  */
 
-import type { Subscription } from 'lifecycle';
+import type { Subscription } from '@lostgradient/lifecycle';
 
 import type { ChildRunDescriptor, ChildRunRegistry } from './child-run';
 import type { ActiveRun } from './create-run';
@@ -214,7 +214,7 @@ export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
  */
 export type SuccessfulRunResult<O = never, H extends boolean = false> = RunResultBase & {
   finishReason: 'stop-condition';
-  schemaValidation?: { success: true; error?: unknown };
+  schemaValidation?: { success: true; error?: unknown } | undefined;
 } & ([H] extends [true] ? { output: O } : Record<never, never>);
 
 /**
@@ -282,9 +282,9 @@ export interface CreateAgentRunOptions {
    *   This is the safest choice: it surfaces the mis-use, rather than hanging.
    * - `'empty'` — returns immediately without yielding any events.
    */
-  onCompletedIteration?: 'error' | 'empty';
+  onCompletedIteration?: ('error' | 'empty') | undefined;
   /** Whether this handle has a configured schema-backed output accessor. */
-  hasOutput?: boolean;
+  hasOutput?: boolean | undefined;
   /**
    * Backs `children()`/`abortChild()` (AB-50). Opt-in: omit it and both
    * methods are safe no-ops (`children()` returns `[]`, `abortChild()` does
@@ -293,7 +293,7 @@ export interface CreateAgentRunOptions {
    * run's children discoverable — see `child-run.ts`'s module docs for why
    * this can't be wired automatically.
    */
-  childRegistry?: ChildRunRegistry;
+  childRegistry?: ChildRunRegistry | undefined;
 }
 
 /**
@@ -350,9 +350,11 @@ export function createAgentRun<O = never, H extends boolean = false>(
   void cachedResult.then(
     () => {
       runSettled = true;
+      return undefined;
     },
     () => {
       runSettled = true;
+      return undefined;
     },
   );
 
@@ -428,8 +430,8 @@ export function createAgentRun<O = never, H extends boolean = false>(
       childRegistry?.abortChild(childId, reason);
     },
 
-    closed(options?: ClosedOptions): Promise<CleanupAcknowledgement> {
-      return activeRun.closed(options);
+    closed(closedOptions?: ClosedOptions): Promise<CleanupAcknowledgement> {
+      return activeRun.closed(closedOptions);
     },
 
     snapshot(): AgentRunLivenessSnapshot {
@@ -438,9 +440,9 @@ export function createAgentRun<O = never, H extends boolean = false>(
 
     subscribeSnapshot(
       observer: (snapshot: AgentRunLivenessSnapshot) => void,
-      options?: { signal?: AbortSignal },
+      subscriptionOptions?: { signal?: AbortSignal },
     ): Subscription {
-      return activeRun.subscribeSnapshot(observer, options);
+      return activeRun.subscribeSnapshot(observer, subscriptionOptions);
     },
 
     [Symbol.dispose](): void {
@@ -535,6 +537,7 @@ export function createAgentRun<O = never, H extends boolean = false>(
             resolve({ value: undefined, done: true });
           }
         }
+        return undefined;
       });
 
       return {
@@ -591,12 +594,9 @@ export function createDiagnosticAgentRun(
   activeRun: ActiveRun,
   options: Pick<CreateAgentRunOptions, 'childRegistry'> = {},
 ): DiagnosticAgentRun {
-  const run = createAgentRun<unknown, false>(
-    activeRun,
-    options,
-  ) as unknown as DiagnosticAgentRun & {
-    unwrap?: () => Promise<string>;
-    output?: () => Promise<unknown>;
+  const run = createAgentRun<unknown>(activeRun, options) as unknown as DiagnosticAgentRun & {
+    unwrap?: (() => Promise<string>) | undefined;
+    output?: (() => Promise<unknown>) | undefined;
   };
   delete run.unwrap;
   delete run.output;
@@ -649,10 +649,11 @@ export function createDiagnosticAgentRun(
       };
       signal.addEventListener('abort', onAbort, { once: true });
       void settlement.then((acknowledgement) => {
-        if (callSettled) return;
+        if (callSettled) return undefined;
         callSettled = true;
         signal.removeEventListener('abort', onAbort);
         resolve(acknowledgement);
+        return undefined;
       });
     });
   };

@@ -1,6 +1,6 @@
+import { CompletableEventTarget } from '@lostgradient/lifecycle';
 import type { ToolElicitationRequest } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { CompletableEventTarget } from 'lifecycle';
 
 import { createMcpElicitationResponder } from './create-mcp-elicitation-responder';
 import type { CombinedOperativeEventMap } from './events';
@@ -156,7 +156,7 @@ describe('createMcpElicitationResponder', () => {
         schema: { type: 'object' },
       });
 
-      expect(result).toEqual({ action: 'accept', content: undefined });
+      expect(result).toEqual({ action: 'accept' });
     },
   );
 

@@ -59,15 +59,15 @@ export interface SchedulerTask {
   /** Factory that creates RunOptions when the task is dispatched. */
   readonly createRun: () => SchedulerRunOptions | Promise<SchedulerRunOptions>;
   /** Called when the task completes successfully. */
-  readonly onComplete?: (result: RunResult) => void | Promise<void>;
+  readonly onComplete?: ((result: RunResult) => void | Promise<void>) | undefined;
   /** Called when the task is preempted before completion. */
-  readonly onPreempted?: (reason: string) => void | Promise<void>;
+  readonly onPreempted?: ((reason: string) => void | Promise<void>) | undefined;
   /** Whether this task should be re-queued after preemption. Default: true for background/ambient, false for immediate/scheduled. */
-  readonly requeue?: boolean;
+  readonly requeue?: boolean | undefined;
   /** Maximum number of times this task can be requeued. Default: 3. */
-  readonly maxRequeues?: number;
+  readonly maxRequeues?: number | undefined;
   /** Optional metadata for logging and diagnostics. */
-  readonly metadata?: Record<string, unknown>;
+  readonly metadata?: Record<string, unknown> | undefined;
 }
 
 /**
@@ -92,5 +92,5 @@ export interface SchedulerState {
 export interface SchedulerTaskSummary {
   readonly id: string;
   readonly priority: SchedulerPriority;
-  readonly metadata?: Record<string, unknown>;
+  readonly metadata?: Record<string, unknown> | undefined;
 }

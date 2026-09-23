@@ -1,3 +1,4 @@
+import { createAnthropicSdkClient } from '../anthropic-sdk.ts';
 import { ProviderError } from '../errors.ts';
 import type { BatchSurfaceRequirement } from '../shared/batch-support.ts';
 import { assertBatchSurface } from '../shared/batch-support.ts';
@@ -33,9 +34,9 @@ export interface AnthropicBatchClientOptions {
    * {@link AnthropicBatchClient} with no cast — see
    * `providers/batch-client-assignability.test-d.ts`.
    */
-  client?: AnthropicBatchClient;
+  client?: AnthropicBatchClient | undefined;
   /** Falls back to the SDK's own `ANTHROPIC_API_KEY` lookup when omitted. */
-  apiKey?: string;
+  apiKey?: string | undefined;
   /**
    * Overrides the Anthropic SDK's default base URL. Accepts any string —
    * including a credential-injecting proxy origin — with no shape validation,
@@ -44,7 +45,7 @@ export interface AnthropicBatchClientOptions {
    * `getProviderCapabilities('anthropic')` keeps reporting `batchInference:
    * true` regardless of this value.
    */
-  baseURL?: string;
+  baseURL?: string | undefined;
 }
 
 /**
@@ -102,25 +103,22 @@ export function createAnthropicBatchClient(
   function getClient(): Promise<AnthropicBatchClient> {
     if (options.client) return Promise.resolve(options.client);
     if (!clientPromise) {
-      clientPromise = import('@anthropic-ai/sdk').then((module) => {
-        const Anthropic = module.default ?? module.Anthropic;
-        const clientOptions: { apiKey?: string; baseURL?: string } = {};
+      clientPromise = Promise.resolve().then(() => {
+        const clientOptions: { apiKey?: string | undefined; baseURL?: string | undefined } = {};
         if (options.apiKey) clientOptions.apiKey = options.apiKey;
         if (options.baseURL) clientOptions.baseURL = options.baseURL;
         // No cast: a real `Anthropic` satisfies `AnthropicBatchClient` as
         // declared, the same guarantee a consumer passing their own client
         // relies on. `batch-client-assignability.test-d.ts` locks it in.
-        const client = new Anthropic(clientOptions);
+        const client = createAnthropicSdkClient<AnthropicBatchClient>(
+          clientOptions,
+          isAnthropicBatchClient,
+        );
         assertBatchSurface(client, ANTHROPIC_BATCH_REQUIREMENT);
         return client;
       });
     }
     return clientPromise;
-  }
-
-  function wrap(error: unknown): ProviderError {
-    if (error instanceof ProviderError) return error;
-    return new ProviderError({ provider: 'anthropic', cause: error });
   }
 
   return {
@@ -129,7 +127,7 @@ export function createAnthropicBatchClient(
         const client = await getClient();
         return await client.messages.batches.create(request);
       } catch (error) {
-        throw wrap(error);
+        throw wrapAnthropicBatchError(error);
       }
     },
 
@@ -138,7 +136,7 @@ export function createAnthropicBatchClient(
         const client = await getClient();
         return await client.messages.batches.retrieve(batchId);
       } catch (error) {
-        throw wrap(error);
+        throw wrapAnthropicBatchError(error);
       }
     },
 
@@ -147,7 +145,7 @@ export function createAnthropicBatchClient(
         const client = await getClient();
         yield* client.messages.batches.list(query);
       } catch (error) {
-        throw wrap(error);
+        throw wrapAnthropicBatchError(error);
       }
     },
 
@@ -156,7 +154,7 @@ export function createAnthropicBatchClient(
         const client = await getClient();
         return await client.messages.batches.cancel(batchId);
       } catch (error) {
-        throw wrap(error);
+        throw wrapAnthropicBatchError(error);
       }
     },
 
@@ -165,8 +163,22 @@ export function createAnthropicBatchClient(
         const client = await getClient();
         yield* await client.messages.batches.results(batchId);
       } catch (error) {
-        throw wrap(error);
+        throw wrapAnthropicBatchError(error);
       }
     },
   };
+}
+
+function isAnthropicBatchClient(value: unknown): value is AnthropicBatchClient {
+  try {
+    assertBatchSurface(value, ANTHROPIC_BATCH_REQUIREMENT);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function wrapAnthropicBatchError(error: unknown): ProviderError {
+  if (error instanceof ProviderError) return error;
+  return new ProviderError({ provider: 'anthropic', cause: error });
 }

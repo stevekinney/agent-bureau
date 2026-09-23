@@ -1,87 +1,104 @@
 import {
+  CompletableEventTarget,
+  createDefaultRuntimeServices,
+  mergeHookRegistries,
+  type RuntimeServices,
+  type RuntimeTimeoutHandle,
+  type TypedEventTarget,
+} from '@lostgradient/lifecycle';
+import {
   type ActiveRun,
-  AgentContractError,
   type AgentInput,
   type AgentRun,
-  type AgentRunContext,
   type AgentSession,
-  type ClosedOptions,
   type CombinedOperativeEventMap,
   createActiveRun,
-  createAgentRun,
-  createAgentSession,
-  createDeferredAgentRun,
+  createAgentRunEventRegistry,
+  createAgentScheduler,
   createFlowController,
+  createModelCatalog,
+  createRecoveredRunEventSurface,
   createRunFinishedFrame,
   createRunStartedFrame,
-  type DefinitionResolvingAgent,
+  createStore,
+  type DurableEventEnvelope,
+  type DurableEventGap,
+  type DurableEventOwner,
+  type DurableEventPage,
+  type DurableRunDeps,
+  type Effort,
   type FlowController,
+  hasDefinitionResolver,
   HumanWaitParkedEvent,
+  InvalidScheduleError,
+  isAgentRunWorkflowInput,
+  isScheduledAgentRunInput,
   type JSONValue,
+  type LivenessSnapshot,
+  type OnStepHook,
   OPERATIVE_RESOLVE_RUN_OPTIONS,
   readGenerationProfile,
+  reattachDurableActiveRun,
+  type RecoveredRunHandle,
   type RequestHumanInputResult,
-  type RunnableAgent,
-  type RunOptions,
+  // COR-625: operative's OBJECT-form cleanup acknowledgement, aliased on
+  // import because `./types` exports an unrelated string-union type under
+  // the same name (armorer's shutdown-owner outcome vocabulary). The two are
+  // genuinely different values and must not shadow each other here.
+  type CleanupAcknowledgement as RunCleanupAcknowledgement,
   type RunReport,
+  ScheduleAttemptedEvent,
   ScheduleCancelledEvent,
   ScheduleCompletedEvent,
+  type ScheduledAgentRunInput,
   ScheduleFailedEvent,
   SchedulePausedEvent,
+  SCHEDULER_RUN_ID_PREFIX,
   ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  ScheduleSkippedEvent,
   SessionCreatedEvent,
   SessionDeletedEvent,
+  type SessionInputAdmissionOutcome,
+  type SessionInputAdmissionRequest,
   type SessionListOptions,
   SessionOutboxAppendedEvent,
   type SessionOutboxEntry,
   SessionSavedEvent,
   type SessionStore,
   type SessionSummary,
+  SteeringAcceptedEvent,
   SteeringAppliedEvent,
+  type SteeringRequestedValue,
+  type StepRecord,
+  type Store,
+  StoreActionEvent,
+  RunRegisteredEvent as StoreRunRegisteredEvent,
+  RunRemovedEvent as StoreRunRemovedEvent,
   type StreamEventMap,
+  type Subscription,
   TaskCancelledEvent,
   TaskDispatchedEvent,
   TaskPreemptedEvent,
 } from '@lostgradient/operative';
 import {
-  createAgentScheduler,
-  createRecoveredRunEventSurface,
-  type DurableEventEnvelope,
-  type DurableEventGap,
-  type DurableEventOwner,
-  type DurableEventPage,
-  type DurableRunDeps,
-  InvalidScheduleError,
-  isAgentRunWorkflowInput,
-  isScheduledAgentRunInput,
-  reattachDurableActiveRun,
-  type RecoveredRunHandle,
-  type ScheduledAgentRunInput,
-  SCHEDULER_RUN_ID_PREFIX,
-  type SessionInputAdmissionOutcome,
-  type SessionInputAdmissionRequest,
-  type StepRecord,
-} from '@lostgradient/operative/durable';
-import type { LivenessSnapshot, Subscription } from '@lostgradient/operative/liveness';
-import { createModelCatalog } from '@lostgradient/operative/providers';
-import {
-  createStore,
-  RunRegisteredEvent as StoreRunRegisteredEvent,
-  RunRemovedEvent as StoreRunRemovedEvent,
-  type Store,
-  StoreActionEvent,
-} from '@lostgradient/operative/store';
+  SkillActivatedEvent,
+  SkillDeactivatedEvent,
+  SkillFailedEvent,
+  SkillLoadedEvent,
+  SkillRejectedEvent,
+} from '@lostgradient/skills';
 import {
   decode,
+  KEYS,
   type ListFilter,
   type ListOptions,
+  Mailbox,
   type RecoveredWorkflowInfo,
   type ScheduleSpec,
   type WorkflowState,
 } from '@lostgradient/weft';
-import { KEYS } from '@lostgradient/weft/storage';
 import {
   type GrantListFilter,
   type ReusableApprovalGrant,
@@ -89,27 +106,29 @@ import {
   type SignedPendingToolApproval,
   type ToolRequestContext,
 } from 'armorer';
+import { Conversation, createConversationHistory, isConversationHistory } from 'conversationalist';
 import {
-  Conversation,
-  type ConversationHistory,
-  createConversationHistory,
-  isConversationHistory,
-} from 'conversationalist';
+  isPlainAuthorityRecord,
+  isSessionAuthorityAuthorized,
+  isSessionRunTerminal,
+  resolvePersistedRunOwningPrincipal,
+} from './session-authority';
 import {
-  CompletableEventTarget,
-  createDefaultRuntimeServices,
-  type RuntimeServices,
-  type RuntimeTimeoutHandle,
-  type TypedEventTarget,
-} from 'lifecycle';
+  normalizeRunRequestContext,
+  recoveredRequestContextFromMetadata,
+} from './session-request-context';
 
 import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
 import {
   type AuditTrail,
   auditTrailSessionOwnerId,
+  type CheckpointRetentionOption,
   computeInitialAuditSequence,
   createAuditTrail,
 } from './audit-trail';
+import { createCatalogDispatcher } from './bureau-catalog-dispatch';
+import { createBureauEventFeed } from './bureau-event-feed.ts';
+import { createSessionPersistence } from './bureau-session-persistence';
 import {
   createDurableEventHistory,
   createDurableEventProducer,
@@ -149,12 +168,14 @@ import {
   buildTerminalReportFromCompletedEvent,
   createRunFrameForwarder,
 } from './run-envelope';
+import { attachRunEventFeed, disposeRunEventFeed } from './run-event-feed-attachment.ts';
 import type { BureauToolbox, CatalogAgentRunOptionsResolution } from './runtime-composition';
 import {
   createRuntimeComposition,
   createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
   isRunFailureFinishReason,
+  registerTrailingOnStep,
   wireDurableOptInTools,
 } from './runtime-composition';
 import {
@@ -166,15 +187,26 @@ import {
   serializeRunState,
   serializeUnknownError,
 } from './serialization';
+import {
+  admitSessionInput,
+  createSessionInputMailbox,
+  type PersistedSessionInput,
+} from './session-input-durability';
 import { generateSessionOutboxDrainOwnerSuffix } from './session-outbox-drain-owner-suffix';
 import {
   type BureauSteeringGate,
   createSteeringCommandLedger,
   createSteeringGate,
   type ImplementedSteeringCommand,
+  isConfigurationTarget,
   type SteeringCommandAdmissionOutcome,
   type SteeringCommandRequest,
 } from './steering';
+import {
+  createSteeringMailbox,
+  persistSteeringCommand,
+  recoverSteeringCommands,
+} from './steering-durability';
 import type {
   AbortingRun,
   Bureau,
@@ -203,6 +235,10 @@ import type {
   SubmitSchedulerTaskResponse,
   ToolSummary,
 } from './types';
+import {
+  DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT,
+  DEFAULT_SESSION_INPUT_BACKLOG_LIMIT,
+} from './types';
 import { createWebhookNotifier, type WebhookNotifier } from './webhook-notifier';
 import { streamEventToFrame } from './websocket-frames';
 
@@ -210,95 +246,6 @@ const BUREAU_AGENT_NAME = 'bureau';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
-
-function normalizeRunRequestContext(
-  requestContext: ToolRequestContext | undefined,
-  runId: string,
-  sessionId: string,
-  agentName: string,
-  principal: string | undefined,
-): ToolRequestContext {
-  const context = requestContext ?? {
-    authority: {
-      principalId: principal ?? `run:${runId}`,
-      tenantId: 'bureau',
-      ownerId: agentName,
-      capabilities: ['tools:execute'],
-      authorizationRevision: 'bureau:1',
-    },
-  };
-  const authority = Object.freeze({
-    ...context.authority,
-    capabilities: Object.freeze([...context.authority.capabilities]),
-  });
-  return Object.freeze({
-    ...context,
-    authority,
-    audience: context.audience ?? 'operator',
-    agentId: agentName,
-    runId,
-    // Reusable approval grant `session` scope (AB-364) matches on this —
-    // always the run's OWNING session, never caller-suppliable via
-    // `requestContext`, so a request can never forge its way into a
-    // different session's grants.
-    sessionId,
-  });
-}
-
-export function recoveredRequestContextFromMetadata(
-  metadata: Record<string, JSONValue>,
-  runId: string,
-  sessionId: string,
-  agentName: string,
-  now: () => number,
-): ToolRequestContext | undefined {
-  const authorities = metadata['lastRequestAuthorities'];
-  const candidate =
-    authorities && typeof authorities === 'object' && !Array.isArray(authorities)
-      ? (authorities as Record<string, JSONValue>)[runId]
-      : metadata['lastRequestAuthority'];
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-    return undefined;
-  }
-  const value = candidate as Record<string, JSONValue>;
-  const capabilities = value['capabilities'];
-  if (
-    typeof value['principalId'] !== 'string' ||
-    typeof value['tenantId'] !== 'string' ||
-    typeof value['ownerId'] !== 'string' ||
-    typeof value['authorizationRevision'] !== 'string' ||
-    !Array.isArray(capabilities) ||
-    !capabilities.every((capability) => typeof capability === 'string')
-  ) {
-    return undefined;
-  }
-  const deadline = value['deadline'];
-  const persistedAgentId = value['agentId'];
-  if (persistedAgentId !== undefined && typeof persistedAgentId !== 'string') return undefined;
-  if (deadline !== undefined && (typeof deadline !== 'number' || !Number.isFinite(deadline))) {
-    return undefined;
-  }
-  if (typeof deadline === 'number' && deadline <= now()) return undefined;
-  return normalizeRunRequestContext(
-    {
-      authority: {
-        principalId: value['principalId'],
-        tenantId: value['tenantId'],
-        ownerId: value['ownerId'],
-        capabilities: capabilities,
-        authorizationRevision: value['authorizationRevision'],
-      },
-      ...(value['audience'] !== undefined
-        ? { audience: value['audience'] as ToolRequestContext['audience'] }
-        : {}),
-      ...(typeof deadline === 'number' ? { deadline } : {}),
-    },
-    runId,
-    sessionId,
-    persistedAgentId ?? agentName,
-    undefined,
-  );
-}
 
 /**
  * Returns whether a persisted session can still resume under transport-issued
@@ -330,183 +277,6 @@ export function hasRecoverableTransportAuthority(metadata: Record<string, JSONVa
   );
 }
 
-/**
- * Resolves what a session's metadata records about its most recent run's
- * authority, per AB-42's coordinator ruling (2026-09-02): reads
- * `metadata['lastRequestAuthorities'][lastRunId]?.principalId`, falling back
- * to the legacy `metadata['lastRequestAuthority'].principalId` exactly as
- * {@link recoveredRequestContextFromMetadata} already does.
- *
- * `{ recorded: false }` means the session has recorded no authority at
- * all — an "open" session, per the ruling. `{ recorded: true, principalId }`
- * means an authority WAS recorded; `principalId` is `undefined` only when
- * that recorded authority is itself malformed (missing or non-string
- * `principalId`), which must fail closed (deny every principal), never be
- * read as "open" — a corrupted or partially-written persistence record must
- * not silently grant access. This is why a per-run entry present-but-malformed
- * does NOT fall back to the legacy field the way a genuinely absent per-run
- * entry does: once a per-run entry exists, it is authoritative for that run,
- * so silently falling through past a corrupted record would suppress exactly
- * the failure this distinction exists to catch — conflating "absent" with
- * "malformed" is the class of bug this whole function guards against.
- *
- * The same reasoning extends to a non-empty-but-uncorrelated
- * `lastRequestAuthorities` map (see below): it is checked BEFORE the legacy
- * fallback, not after, because that exact shape is what two concurrent runs
- * on one session produce, and the legacy field may belong to the OTHER,
- * unrelated run — see the concurrent-run correlation note below.
- *
- * A completed/aborted/errored run's `lastRequestAuthorities[lastRunId]` entry
- * is pruned on terminal transition (see the cleanup near `remainingAuthorities`
- * below), while the legacy singular `lastRequestAuthority` is retained — so a
- * per-run lookup that is GENUINELY ABSENT (no map, no `lastRunId`, or the key
- * missing from the map) falls back to the legacy field.
- */
-function isPlainAuthorityRecord(value: JSONValue | undefined): value is Record<string, JSONValue> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function lookupSessionAuthority(
-  metadata: Record<string, JSONValue>,
-  // AB-67/AB-199 review finding (PR #430 — Codex P2, "Authorize against the
-  // targeted live run"): defaults to `metadata['lastRunId']` — the prior,
-  // single-run behavior every existing caller (`submitSessionInput`) keeps
-  // unchanged — but a caller that already knows which run a command
-  // actually targets (`submitSteeringCommand`, once it resolves an
-  // explicit `runId` or the session's sole live run) passes it explicitly.
-  // Without this, a run B that completes first prunes only its OWN
-  // `lastRequestAuthorities[B]` entry (see the terminal-transition cleanup
-  // below) while leaving `lastRunId: B` and A's now-uncorrelated entry
-  // behind; the uncorrelated-map branch below then fails EVERY principal
-  // closed before a command explicitly naming still-live run A ever gets a
-  // chance to authorize against A's own (perfectly valid) entry.
-  targetRunId?: string,
-):
-  | { readonly recorded: false }
-  | { readonly recorded: true; readonly principalId: string | undefined } {
-  const lastRunId = targetRunId ?? metadata['lastRunId'];
-  const authorities = metadata['lastRequestAuthorities'];
-  // A PRESENT-but-malformed `lastRequestAuthorities` value (not absent — a
-  // string or array where a map belongs) is itself evidence something was
-  // recorded and corrupted. It must fail closed regardless of `lastRunId` or
-  // a legacy fallback, never be read as "nothing recorded" (open) — the same
-  // fail-closed principle as a malformed per-run/legacy entry below.
-  if (authorities !== undefined && !isPlainAuthorityRecord(authorities)) {
-    return { recorded: true, principalId: undefined };
-  }
-  const perRunEntry =
-    typeof lastRunId === 'string' && lastRunId && authorities !== undefined
-      ? authorities[lastRunId]
-      : undefined;
-  const legacy = metadata['lastRequestAuthority'];
-  let candidate: JSONValue | undefined;
-  if (perRunEntry !== undefined) {
-    candidate = perRunEntry;
-  } else if (authorities !== undefined && Object.keys(authorities).length > 0) {
-    // A valid, non-empty `lastRequestAuthorities` map exists but doesn't
-    // correlate to this run (`lastRunId` missing/corrupt, or the map's
-    // entries are keyed to other runs). Checked BEFORE the legacy fallback,
-    // not after: this exact shape is what two concurrent runs on one session
-    // produce — run B's dispatch overwrites the singular legacy field with
-    // B's authority while A is still running, so trusting legacy here would
-    // authorize B's principal against A's (still-uncorrelated) run. A
-    // non-empty-but-uncorrelated map is recorded-but-uncorrelated evidence,
-    // not "nothing recorded" — fail closed rather than consult a legacy
-    // field that may belong to an unrelated concurrent run.
-    return { recorded: true, principalId: undefined };
-  } else if (legacy !== undefined) {
-    candidate = legacy;
-  } else {
-    return { recorded: false };
-  }
-  if (!isPlainAuthorityRecord(candidate)) {
-    return { recorded: true, principalId: undefined };
-  }
-  const principalId = candidate['principalId'];
-  return { recorded: true, principalId: typeof principalId === 'string' ? principalId : undefined };
-}
-
-/**
- * The `principalId` recorded for a session's most recent run, per
- * {@link lookupSessionAuthority}'s rule. Returns `undefined` both when the
- * session has recorded no authority at all AND when a recorded authority is
- * malformed — this function alone cannot distinguish the two, so it is
- * informational only. {@link isSessionAuthorityAuthorized} is the
- * security-relevant surface: it fails closed (denies) for malformed
- * authority, never treating it as open the way "genuinely no authority
- * recorded" is treated.
- *
- * Shared by every new Bureau session verb that needs to read a session's
- * recorded authority (AB-194's `submitSessionInput`, AB-199's
- * `submitSteeringCommand`) — neither issue owns or invents this mechanism,
- * both simply read the pre-existing metadata keys `create-bureau.ts` already
- * writes on every run dispatch.
- */
-export function recordedSessionAuthorityPrincipalId(
-  metadata: Record<string, JSONValue>,
-): string | undefined {
-  const lookup = lookupSessionAuthority(metadata);
-  return lookup.recorded ? lookup.principalId : undefined;
-}
-
-/**
- * Whether `principal` is authorized to act on a session recording the given
- * metadata, per {@link lookupSessionAuthority}'s rule. A session with no
- * recorded authority at all is treated as open — every principal is
- * authorized — matching what every existing session verb enforces today
- * (nothing stronger), per AB-42's coordinator ruling (2026-09-02). A session
- * with a RECORDED-BUT-MALFORMED authority fails closed: no principal is
- * authorized, since a corrupted record cannot be verified to match anyone.
- */
-export function isSessionAuthorityAuthorized(
-  metadata: Record<string, JSONValue>,
-  principal: string,
-  // See {@link lookupSessionAuthority}'s doc comment on its own `targetRunId`
-  // parameter — forwarded verbatim.
-  targetRunId?: string,
-): boolean {
-  const lookup = lookupSessionAuthority(metadata, targetRunId);
-  if (!lookup.recorded) return true;
-  return lookup.principalId === principal;
-}
-
-/**
- * The owning principal persisted for `runId` in a session's
- * `lastRunOwningPrincipals` map (AB-359), or `undefined` when nothing was
- * recorded, the map itself is malformed, or the recorded entry for this
- * `runId` isn't a string. Every one of those cases decodes to `undefined`
- * on purpose: an older record written before this field existed has no
- * `lastRunOwningPrincipals` key at all, and must decode with ownership
- * absent rather than throw or be treated as corrupt — exactly the same
- * schema-version-tolerant contract {@link UnsupportedDurableEventSchemaVersionError}
- * enforces for a durable event record's own payload wrapper. `undefined`
- * here is consumed by `reattachRecoveredRun`, which then leaves
- * `runAttribution` for this run unset — reproducing AB-313's existing
- * fail-closed behavior for "no principal recorded" after a restart, the
- * same as it already does live.
- */
-export function resolvePersistedRunOwningPrincipal(
-  metadata: Record<string, JSONValue>,
-  runId: string,
-): string | undefined {
-  const owners = metadata['lastRunOwningPrincipals'];
-  if (!isPlainAuthorityRecord(owners)) return undefined;
-  const principal = owners[runId];
-  return typeof principal === 'string' ? principal : undefined;
-}
-
-/**
- * Whether a session's most recent run is in a terminal (non-`'running'`)
- * state, reading the same `metadata['lastRunStatus']` field
- * {@link requireSessionRunId} and {@link hasRecoverableTransportAuthority}
- * already read. Shared by every new Bureau session verb that needs a
- * terminal-session check (AB-194's `submitSessionInput`, AB-199's
- * `submitSteeringCommand`).
- */
-export function isSessionRunTerminal(metadata: Record<string, JSONValue>): boolean {
-  return metadata['lastRunStatus'] !== 'running';
-}
-
 export function isTerminalApprovalBindingError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const code = (error as Record<string, unknown>)['code'];
@@ -532,6 +302,11 @@ export function omitKeysWithPrefix(
     if (!key.startsWith(prefix)) remaining[key] = value;
   }
   return remaining;
+}
+
+/** Narrows JSON's readonly array union before spreading object metadata. */
+function isJsonObject(value: JSONValue | undefined): value is Record<string, JSONValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function stringValues(values: readonly JSONValue[]): string[] {
@@ -755,54 +530,6 @@ export function wireFlowControlSchedulerEvents(
   });
 }
 
-function messagesAreEqual(
-  left: ConversationHistory['messages'][string],
-  right: ConversationHistory['messages'][string],
-): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function appendConversationMessages(
-  current: ConversationHistory,
-  candidate: ConversationHistory,
-  base: ConversationHistory,
-): ConversationHistory {
-  const baseIds = new Set(base.ids);
-  const candidateIds = new Set(candidate.ids);
-  const currentIds = new Set(current.ids);
-  const currentPreservedIds = current.ids.filter((id) => candidateIds.has(id) || !baseIds.has(id));
-  const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
-  const ids = [...currentPreservedIds, ...candidateOnlyIds];
-  const messages: Record<string, ConversationHistory['messages'][string]> = {};
-
-  for (const id of ids) {
-    const candidateMessage = candidate.messages[id];
-    const baseMessage = base.messages[id];
-    const message =
-      candidateMessage &&
-      (!baseMessage || !messagesAreEqual(candidateMessage, baseMessage) || !current.messages[id])
-        ? candidateMessage
-        : (current.messages[id] ?? candidateMessage);
-    if (message) messages[id] = message;
-  }
-
-  for (const [position, id] of ids.entries()) {
-    const message = messages[id];
-    if (message) messages[id] = { ...message, position };
-  }
-
-  return {
-    ...current,
-    metadata: {
-      ...current.metadata,
-      ...candidate.metadata,
-    },
-    ids,
-    messages,
-    updatedAt: candidate.updatedAt,
-  };
-}
-
 /**
  * Discriminates *why* a `BureauError` with code `NOT_CONFIGURED` was thrown.
  * `NOT_CONFIGURED` alone is not enough for a consumer to decide an HTTP status:
@@ -822,7 +549,7 @@ class BureauError extends Error {
     | 'BAD_REQUEST'
     | 'RATE_LIMITED'
     | 'UNSUPPORTED_CAPABILITY';
-  readonly subject?: BureauErrorNotConfiguredSubject;
+  readonly subject: BureauErrorNotConfiguredSubject | undefined;
 
   // `subject` is required for NOT_CONFIGURED and disallowed for every other
   // code — a compile-time guarantee that a future NOT_CONFIGURED throw site
@@ -1367,6 +1094,72 @@ function validateAuditRetentionOption(value: { olderThan: number } | 'forever' |
   }
 }
 
+/**
+ * COR-625 — `BureauOptions.checkpointRetention`'s `{ keepLast }` form feeds
+ * weft's `Engine.pruneCheckpoints` (COR-11), whose own contract requires a
+ * non-negative integer. Bureau narrows that further to a POSITIVE integer:
+ * `keepLast: 0` would discard a terminal run's entire checkpoint history,
+ * including the newest entry a postmortem needs, which is a destructive
+ * default no operator means to configure — an operator who genuinely wants
+ * nothing retained is asking to delete the run, not to retain zero of it.
+ * `timeoutMilliseconds` bounds the step's own wait and its abort signal, so
+ * `NaN` or a negative value would arm a timer that fires immediately (or
+ * never), turning every step into a spurious `'timed-out'`. Validated here at
+ * construction time, the same boundary `validateAuditRetentionOption` above
+ * uses for the other destructive-if-malformed retention option.
+ */
+function validateCheckpointRetentionOption(value: CheckpointRetentionOption | undefined): void {
+  if (value === undefined || value === 'keep-all') return;
+  if (!Number.isInteger(value.keepLast) || value.keepLast <= 0) {
+    toBadRequest('"options.checkpointRetention.keepLast" must be a positive integer');
+  }
+  const timeout = value.timeoutMilliseconds;
+  if (timeout !== undefined && (!Number.isFinite(timeout) || timeout < 0)) {
+    toBadRequest(
+      '"options.checkpointRetention.timeoutMilliseconds" must be a finite, non-negative number',
+    );
+  }
+}
+
+/**
+ * The trailing `onStep` hook that records a step's pending tool approvals —
+ * registered as `bureau:pending-approval-persist`.
+ *
+ * A named factory rather than the inline closure it was, because COR-567
+ * classifies this registration `effectful` and COR-1267 requires each
+ * `effectful` registration to be provable idempotent by a test that invokes it
+ * twice. A closure written inline inside `createBureau` is reachable only by
+ * dispatching a whole interactive run and then contriving a second execution of
+ * the same step; the handler itself is the unit under test, so it has a name.
+ *
+ * Idempotent by key, not by append: the review id is
+ * `approval:${runId}:${callId}`, derived from the step's own tool call, so a
+ * crashed step re-running from its boundary produces the SAME id, and both
+ * writes it performs — the in-memory override map and the session-metadata
+ * persist — are keyed writes.
+ */
+export function createPendingApprovalPersistHook(
+  runId: string,
+  sessionId: string,
+  overrides: Map<string, Extract<PendingReview, { kind: 'tool-approval' }>['approval']>,
+  persist: (
+    sessionId: string,
+    reviewId: string,
+    approval: Extract<PendingReview, { kind: 'tool-approval' }>['approval'],
+  ) => Promise<void>,
+): OnStepHook {
+  return async (stepResult) => {
+    for (const stepResultItem of stepResult.results) {
+      if (stepResultItem.outcome !== 'action_required' || !stepResultItem.pendingApproval) {
+        continue;
+      }
+      const reviewId = `approval:${runId}:${stepResultItem.pendingApproval.callId}`;
+      overrides.set(reviewId, stepResultItem.pendingApproval);
+      await persist(sessionId, reviewId, stepResultItem.pendingApproval);
+    }
+  };
+}
+
 export async function createBureau<const D extends AgentDefinitions = AgentDefinitions>(
   options: BureauOptions<D>,
 ): Promise<Bureau<D>> {
@@ -1384,7 +1177,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     options.sessionInput?.principalBacklogLimit,
     'principalBacklogLimit',
   );
+  // COR-435: the values `ab-42-bureau-b` above anticipated. Resolved once,
+  // here, so every session's mailbox is constructed against the identical
+  // pair this bureau validated at construction time.
+  const sessionInputSessionBacklogLimit =
+    options.sessionInput?.sessionBacklogLimit ?? DEFAULT_SESSION_INPUT_BACKLOG_LIMIT;
+  const sessionInputPrincipalBacklogLimit =
+    options.sessionInput?.principalBacklogLimit ?? DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT;
   validateAuditRetentionOption(options.auditRetention);
+  validateCheckpointRetentionOption(options.checkpointRetention);
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   // AB-260 — resolve the injectable runtime-service seam exactly once,
@@ -1410,6 +1211,37 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // timestamps (AB-370's regression test did exactly that before this fix).
   const store: Store = options.store ?? createStore({ runtime: runtimeServices });
   const emitter = new CompletableEventTarget<BureauEventMap>();
+  const bureauId = options.id ?? runtimeServices.identifiers.next('bureau');
+  // A bureau owns its own events: every dispatch onto `emitter` is also
+  // recorded here, with cursors, so a reconnecting client resumes instead of
+  // missing whatever happened while it was away. `toObservable()` is the
+  // emitter's all-types interception point, so this needs no per-type list
+  // and cannot drift from `BureauEventMap`. Events the feed has no
+  // projection for are dropped by `publish`, which is what keeps the
+  // supervisor's task and synthesis events off it.
+  const eventFeed = createBureauEventFeed({ bureauId, now: runtimeServices.clock.now });
+  const eventFeedSubscription = emitter.toObservable().subscribe((event: Event) => {
+    // Guarded for the reason `emitLiveFrame` is (AB-96): `dispatchEvent`
+    // walks its all-events listeners unguarded, so a throw here would
+    // propagate out of whichever `emitter.dispatch` call was in flight —
+    // several of which run synchronously inside run setup, where an
+    // exception leaves a run launched but untracked. Recording an event must
+    // never be able to break the thing it is recording.
+    try {
+      eventFeed.publish(event);
+    } catch (error) {
+      diagnose({
+        level: 'error',
+        scope: 'event-feed',
+        message: `[bureau] event feed threw recording a "${event.type}" event:`,
+        cause: error,
+      });
+    }
+  });
+  // ...and its operatives' events: one feed per run, created before the run
+  // is registered and reaped when it is removed. See
+  // `run-event-feed-attachment.ts`.
+  const runEventFeeds = createAgentRunEventRegistry();
   // Snapshot `agents` synchronously, before the first `await` below — the
   // "fixed at createBureau() call time" catalog contract otherwise has a
   // real mutation window: a caller that mutates the SAME `agents` object it
@@ -1445,6 +1277,45 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   runtime.scheduleFireEvents.addEventListener(ScheduleFailedEvent.type, (event) => {
     emitter.dispatch(new ScheduleFailedEvent(event.scheduleId, event.runId));
   });
+  // COR-660 — the per-tick observation pair, forwarded the same way and for
+  // the same reason: a scheduled tick is headless, so the bureau emitter is
+  // the only surface it has. Fresh instances again, for the WHATWG
+  // already-being-dispatched reason above.
+  // COR-767 — skill lifecycle, forwarded the same way and for the same reason
+  // as the schedule families: the `@lostgradient/skills` tools dispatch onto the
+  // composition's target, and this bureau's emitter is the surface consumers
+  // actually subscribe to. Fresh instances again, for the WHATWG
+  // already-being-dispatched constraint documented above.
+  runtime.skillEvents.addEventListener(SkillLoadedEvent.type, (event) => {
+    emitter.dispatch(new SkillLoadedEvent(event.skillName, event.correlation));
+  });
+  runtime.skillEvents.addEventListener(SkillActivatedEvent.type, (event) => {
+    emitter.dispatch(new SkillActivatedEvent(event.skillName, event.correlation));
+  });
+  runtime.skillEvents.addEventListener(SkillDeactivatedEvent.type, (event) => {
+    emitter.dispatch(new SkillDeactivatedEvent(event.skillName, event.correlation));
+  });
+  runtime.skillEvents.addEventListener(SkillRejectedEvent.type, (event) => {
+    emitter.dispatch(
+      new SkillRejectedEvent(event.skillName, event.reason, event.correlation, event.rule),
+    );
+  });
+  runtime.skillEvents.addEventListener(SkillFailedEvent.type, (event) => {
+    emitter.dispatch(new SkillFailedEvent(event.skillName, event.correlation));
+  });
+  runtime.scheduleFireEvents.addEventListener(ScheduleAttemptedEvent.type, (event) => {
+    emitter.dispatch(new ScheduleAttemptedEvent(event.scheduleId, event.occurrence));
+  });
+  runtime.scheduleFireEvents.addEventListener(ScheduleSkippedEvent.type, (event) => {
+    emitter.dispatch(
+      new ScheduleSkippedEvent(
+        event.scheduleId,
+        event.policy,
+        event.occurrence,
+        event.blockingRunId,
+      ),
+    );
+  });
   // AB-389 — `SessionStore.events` (`@lostgradient/operative`) now carries
   // only the best-effort `SessionOutboxAppendedEvent` drain trigger, never
   // `SessionCreatedEvent`/`SessionSavedEvent`/`SessionDeletedEvent`
@@ -1478,7 +1349,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
   // AB-246 — the model-catalog refresh service. Independent of `runtime`.
   // When the caller doesn't supply one, the default `descriptorSource`
-  // re-derives `@lostgradient/operative/providers`'s static seed — this is
+  // re-derives `@lostgradient/operative`'s static seed — this is
   // the seam a future live provider probe attaches to (out of scope here).
   //
   // Constructed BEFORE `agentCatalog` below: `selectorAvailable: true`
@@ -1511,34 +1382,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   runtime.setCatalogAgentRunOptionsResolver(async (name, input, context) => {
     const agent = agentCatalog.find(name);
     if (!agent) return { status: 'missing-agent' };
-    const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
-      DefinitionResolvingAgent;
-    const resolver = definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS];
     // AB-240 review finding: distinct from `'missing-agent'` — the name IS
     // still in the catalog, it just no longer (or never did) exposes AB-21's
     // resolver, e.g. the catalog was reconfigured between restarts to swap
     // this name to a different `RunnableAgent`. Conflating the two produced
     // a misleading "is no longer in the catalog" reason for an agent that
     // genuinely is still there.
-    if (typeof resolver !== 'function') return { status: 'not-durable-capable' };
+    if (!hasDefinitionResolver(agent)) return { status: 'not-durable-capable' };
     try {
-      // Invoked through `definitionResolvingAgent`, matching `runAgent`'s own
-      // forwarding below (not a bare extracted `resolver(...)` call) — see its
-      // comment for why a method-shaped resolver needs its receiver preserved.
-      const resolvedOptions = await definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(
-        input,
-        context,
-      );
+      // Invoke through the agent so a method-shaped resolver retains its receiver.
+      const resolvedOptions = await agent[OPERATIVE_RESOLVE_RUN_OPTIONS](input, context);
       const resolution: CatalogAgentRunOptionsResolution = {
         status: 'resolved',
         options: resolvedOptions,
-        // Type-level-only correction (mirrors `agent-catalog.ts`'s own
-        // `buildCatalogGenerationProfile` cast): `readGenerationProfile`
-        // only reads `agent.generationProfile`, which doesn't depend on
-        // `RunnableAgent`'s O/H type parameters, but its parameter type
-        // defaults to `RunnableAgent<never, false>`, not structurally
-        // assignable from `AnyRunnableAgent`'s `RunnableAgent<any, true>` half.
-        definitionRevision: readGenerationProfile(agent as RunnableAgent).revision,
+        definitionRevision: readGenerationProfile(agent).revision,
       };
       return resolution;
     } catch (error) {
@@ -1659,6 +1516,139 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // `deleteSession` below) so a reused session id never inherits a deleted
   // session's pause state / command history / applied floor.
   const steeringGates = new Map<string, BureauSteeringGate>();
+  /**
+   * AB-200 — one steering mailbox per session, for a durably-configured
+   * bureau. Cached because a `Mailbox` holds its own storage-scoped state
+   * and constructing a second one for the same `(namespace, resourceId)`
+   * would defeat the FIFO ordering that is the point of using one.
+   */
+  const steeringMailboxes = new Map<string, Mailbox>();
+  /**
+   * Sessions whose durable steering log has already been drained into a
+   * gate in this process. Recovery is once per session per boot: the
+   * mailbox is consumed by draining, so a second pass would find nothing
+   * and a concurrent second pass could interleave two replays of the same
+   * command into one gate.
+   */
+  const steeringRecoveries = new Map<string, Promise<void>>();
+
+  /** `undefined` for a non-durable bureau — nothing to persist against. */
+  function getSteeringMailbox(sessionId: string): Mailbox | undefined {
+    const storage = runtime.durableStorage;
+    if (!runtime.durable || storage === undefined) return undefined;
+    let mailbox = steeringMailboxes.get(sessionId);
+    if (!mailbox) {
+      mailbox = createSteeringMailbox(storage, sessionId);
+      steeringMailboxes.set(sessionId, mailbox);
+    }
+    return mailbox;
+  }
+
+  /**
+   * COR-435 — one session-input mailbox per session, for a
+   * durably-configured bureau. See `session-input-durability.ts`'s module
+   * doc: the cross-session identity index lives in `runtime.kv` directly,
+   * not in a second `Mailbox`. Cached for the same reason
+   * `steeringMailboxes` is: constructing a second `Mailbox` for the same
+   * `(namespace, resourceId)` would defeat the FIFO ordering that is the
+   * point of using one.
+   */
+  const sessionInputMailboxes = new Map<string, Mailbox>();
+
+  /** `undefined` for a non-durable bureau — nothing to persist against. */
+  function getSessionInputMailbox(sessionId: string): Mailbox | undefined {
+    const storage = runtime.durableStorage;
+    if (!runtime.durable || storage === undefined) return undefined;
+    let mailbox = sessionInputMailboxes.get(sessionId);
+    if (!mailbox) {
+      mailbox = createSessionInputMailbox(storage, sessionId, sessionInputSessionBacklogLimit);
+      sessionInputMailboxes.set(sessionId, mailbox);
+    }
+    return mailbox;
+  }
+
+  /**
+   * Resolves this session's gate, replaying its durable steering log into
+   * a freshly-created one first.
+   *
+   * Recovery is lazy rather than a boot sweep, and deliberately: a bureau
+   * may hold thousands of sessions whose steering logs are empty, and
+   * draining every one at startup would pay for all of them to recover the
+   * few that need it. The first steering operation on a session after a
+   * restart is exactly when its log matters.
+   */
+  async function ensureSteeringGate(
+    sessionId: string,
+    liveRunIds: readonly string[],
+  ): Promise<BureauSteeringGate> {
+    let gate = steeringGates.get(sessionId);
+    if (gate === undefined) {
+      gate = createSteeringGate(sessionId, steeringCommandLedger, runtimeServices.clock);
+      steeringGates.set(sessionId, gate);
+    }
+
+    const mailbox = getSteeringMailbox(sessionId);
+    if (mailbox === undefined) return gate;
+
+    // Every caller awaits the SAME recovery promise, including one that
+    // found the gate already in the map. Publishing the gate and then
+    // awaiting recovery without this would let a concurrent
+    // `submitSteeringCommand` observe the gate mid-replay and admit its
+    // own command ahead of commands that were durably admitted earlier —
+    // the recovered ones would then supersede the newer one, inverting
+    // the order the mailbox exists to preserve.
+    let recovery = steeringRecoveries.get(sessionId);
+    if (recovery === undefined) {
+      recovery = replaySteeringLog(gate, mailbox, liveRunIds).catch((error: unknown) => {
+        // A failed recovery must not be cached as done: a transient
+        // storage fault would otherwise leave this session permanently
+        // unrecoverable for the life of the process. Clearing lets the
+        // next caller retry, and rethrowing fails this one closed rather
+        // than admitting into a gate whose durable history is unknown.
+        steeringRecoveries.delete(sessionId);
+        throw error;
+      });
+      steeringRecoveries.set(sessionId, recovery);
+    }
+    await recovery;
+    return gate;
+  }
+
+  /** Drains one session's durable steering log into its gate, in order. */
+  async function replaySteeringLog(
+    gate: BureauSteeringGate,
+    mailbox: Mailbox,
+    liveRunIds: readonly string[],
+  ): Promise<void> {
+    const now = runtimeServices.clock.nowISO();
+    // The replay is handed to `recoverSteeringCommands` as a callback so
+    // each command reaches the gate BEFORE its mailbox acknowledgement.
+    // Collecting the batch first and admitting afterwards would leave a
+    // window where a crash loses a command from both sides: durably
+    // acknowledged, never applied.
+    await recoverSteeringCommands(mailbox, (recovered) => {
+      // Replayed through the gate's ordinary admission, not a private
+      // back door, so a recovered command is subject to every invariant
+      // a live one is. A pause bound to a run this process no longer has
+      // is correctly rejected `run-terminal` — the run genuinely ended.
+      gate.admit(
+        {
+          id: recovered.id,
+          idOrigin: 'caller',
+          sessionId: recovered.sessionId,
+          principal: recovered.principal,
+          requestedValue: recovered.requestedValue,
+          requestedAt: recovered.requestedAt,
+          ...(recovered.expectedRevision !== undefined
+            ? { expectedRevision: recovered.expectedRevision }
+            : {}),
+          ...(recovered.deadline !== undefined ? { deadline: recovered.deadline } : {}),
+          ...(recovered.runId !== undefined ? { runId: recovered.runId } : {}),
+        },
+        { liveRunIds, now },
+      );
+    });
+  }
   // AB-67/AB-199 — the bureau-wide `(principal, id)` idempotency ledger
   // every session's gate shares (see `steering.ts`'s `createSteeringGate`
   // `ledger` parameter doc comment): a same-`(principal, id)` retry against
@@ -1703,6 +1693,31 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // AB-96 — terminal RunReports, cached at the moment each run's lifecycle
   // event fires so `getRunReport` never needs to re-derive them.
   const runReports = new Map<string, RunReport>();
+  // COR-625: one memoized terminal-cleanup step per run id. Every trigger
+  // MUST route through `runTerminalCheckpointCleanup` rather than calling the
+  // step directly — the exactly-once guarantee is the memo, not the triggers.
+  // Entries are released only by `deleteRun`, which a caller can reach only
+  // for an already-terminal run, so a released entry cannot be re-created by
+  // any of today's three triggers. A future API that can re-fire a terminal
+  // transition for one run id would break that and must be routed here too. This is what
+  // makes the step exactly-once across its three independent triggers — the
+  // live run's terminal listeners, a recovered run's terminal listeners, and
+  // `cancelDurableRun` on a run this process holds no `ActiveRun` for. Its
+  // entries are released alongside that run's report (`releaseRunReport`), so
+  // a long-lived bureau does not retain one promise per run forever.
+  const terminalCheckpointCleanups = new Map<string, Promise<RunCleanupAcknowledgement>>();
+  // COR-625: registered on a durable run's `closed()` only when a retention
+  // policy is actually configured. Registering it unconditionally would
+  // disqualify every durable run's `not-required` fast path (a run with a
+  // step registered genuinely has cleanup left to do — see
+  // `active-run-create.ts`'s `disqualifiesFastPath`) and so would change
+  // `closed()`'s answer for every bureau that never asked for retention. The
+  // terminal listeners still call the step unconditionally, so the
+  // `run.cleanup-settled` audit record exists either way.
+  const durableTerminalCleanup =
+    options.checkpointRetention && options.checkpointRetention !== 'keep-all'
+      ? runTerminalCheckpointCleanup
+      : undefined;
   // AB-205/AB-37 — ids `abortRun` has already requested cancellation for
   // (`ActiveRun.abort()` called) but whose teardown has not yet genuinely
   // settled. Guards `abortRun` itself against re-calling `abort()` (and
@@ -1844,6 +1859,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         const removedRun = store.getRun(removedRunId);
         const removedSessionId = removedRun ? getRunSessionIdentifier(removedRun) : '';
         runSequenceCounters.delete(removedRunId);
+        // Reaped with the rest of this run's per-run state: the feed holds a
+        // bounded log per run, so a long-lived gateway that never released
+        // them would leak one per run forever. Disposal aborts the feed's
+        // lifetime signal, so a client still reading it ends cleanly rather
+        // than parking on a generator that can never yield again.
+        disposeRunEventFeed(removedRunId, runEventFeeds);
         runRequestContexts.delete(removedRunId);
         recoveredRunIds.delete(removedRunId);
         runToolboxesByRunId.delete(removedRunId);
@@ -1938,7 +1959,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       ? []
       : wireFlowControlSchedulerEvents(runtime.scheduler, flowController);
 
-  function requireSessionStore() {
+  function requireSessionStore(): SessionStore {
     if (!runtime.sessionStore) {
       throw new BureauError(
         'No SessionStore configured (set options.persistence with a StorageConfiguration or PersistenceOptions)',
@@ -1946,176 +1967,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         'persistence',
       );
     }
-
     return runtime.sessionStore;
   }
 
-  async function loadConversation(sessionId: string) {
-    const sessionStore = runtime.sessionStore;
-    if (!sessionStore) {
-      return {
-        session: undefined,
-        conversation: new Conversation(createConversationHistory({ id: sessionId })),
-      };
-    }
-
-    const session = await sessionStore.load(sessionId);
-    if (!session) {
-      return {
-        session: undefined,
-        conversation: new Conversation(createConversationHistory({ id: sessionId })),
-      };
-    }
-
-    return {
-      session,
-      conversation: new Conversation(session.conversationHistory),
-    };
-  }
-
-  async function saveSession(
-    sessionId: string,
-    conversation: Conversation,
-    metadata: Record<string, JSONValue>,
-    agentName?: string,
-    baseConversationHistory: ConversationHistory = conversation.current,
-  ): Promise<void> {
-    const sessionStore = runtime.sessionStore;
-    if (!sessionStore) {
-      return;
-    }
-
-    // AB-67/AB-199 review finding (PR #430 — Codex P1, "Prevent released
-    // runs from recreating deleted sessions"): a run this bureau explicitly
-    // orphaned via `deleteSession` must never resurrect the session record
-    // it belonged to, however this call arrived (terminal completion,
-    // abort, live or recovered driver) — see `orphanedRunIds`'s own doc
-    // comment. Consumed (removed) here so the set never grows unboundedly
-    // and a session id reused later is unaffected.
-    const candidateRunId = metadata['lastRunId'];
-    if (typeof candidateRunId === 'string' && orphanedRunIds.delete(candidateRunId)) {
-      return;
-    }
-
-    await sessionStore.update(sessionId, (existingSession: AgentSession | undefined) => {
-      const nextSession =
-        existingSession ??
-        createAgentSession({
-          id: sessionId,
-          // Stamp the dispatched agent on a brand-new session (falls back to the
-          // house default when no agent was named).
-          agentName: agentName ?? BUREAU_AGENT_NAME,
-          conversationHistory: conversation.current,
-        });
-
-      // Promote a session still on the default house agent to the named agent on
-      // its first named dispatch, so session APIs/persistence reflect which agent
-      // actually owns it (PRRT_kwDORvupsc6MbUsN — previously the session was always
-      // stamped 'bureau' regardless of request.agentName). Don't overwrite a session
-      // already owned by a specific agent.
-      const resolvedAgentName =
-        agentName !== undefined && nextSession.agentName === BUREAU_AGENT_NAME
-          ? agentName
-          : nextSession.agentName;
-
-      const mergedMetadata: Record<string, JSONValue> = {
-        ...nextSession.metadata,
-        ...metadata,
-        ...(metadata['lastRequestAuthorities'] !== undefined
-          ? {
-              lastRequestAuthorities: {
-                ...(typeof nextSession.metadata['lastRequestAuthorities'] === 'object' &&
-                nextSession.metadata['lastRequestAuthorities'] !== null &&
-                !Array.isArray(nextSession.metadata['lastRequestAuthorities'])
-                  ? nextSession.metadata['lastRequestAuthorities']
-                  : {}),
-                ...(metadata['lastRequestAuthorities'] as Record<string, JSONValue>),
-              },
-            }
-          : {}),
-        // AB-359 — same per-run union-merge as `lastRequestAuthorities`
-        // immediately above (never overwrite an unrelated concurrent run's
-        // entry). This map is never pruned HERE, on this write path, or on
-        // a run's terminal transition, or on any count: it is the run's
-        // OWNERSHIP record for durable `eventHistory` authorization
-        // (AB-313), which must stay resolvable for as long as the run's
-        // durable history is still pageable. The ONLY pruning is AB-363's
-        // `pruneStaleRunOwnership`, run from `runDurableMaintenance`, which
-        // drops an entry once its run's entire durable history has fallen
-        // below the fleet feed's retention floor — a history that can no
-        // longer be paged needs no owner.
-        ...(metadata['lastRunOwningPrincipals'] !== undefined
-          ? {
-              lastRunOwningPrincipals: {
-                ...(isPlainAuthorityRecord(nextSession.metadata['lastRunOwningPrincipals'])
-                  ? nextSession.metadata['lastRunOwningPrincipals']
-                  : {}),
-                ...(metadata['lastRunOwningPrincipals'] as Record<string, JSONValue>),
-              },
-            }
-          : {}),
-      };
-      const terminalRunId = mergedMetadata['lastRunId'];
-      const terminalStatus = mergedMetadata['lastRunStatus'];
-      if (
-        typeof terminalRunId === 'string' &&
-        (terminalStatus === 'completed' ||
-          terminalStatus === 'aborted' ||
-          terminalStatus === 'error')
-      ) {
-        // Approval reviews can outlive the run's terminal transition. Keep the
-        // authority alongside the signed approval until that review resolves;
-        // otherwise recovery cannot reconstruct the exact execution context.
-        const terminalRun = store.getRun(terminalRunId);
-        const hasPendingApproval = terminalRun?.steps.some((step) =>
-          step.results.some(
-            (result) =>
-              result.outcome === 'action_required' && result.pendingApproval !== undefined,
-          ),
-        );
-        const authorities = mergedMetadata['lastRequestAuthorities'];
-        if (
-          !hasPendingApproval &&
-          typeof authorities === 'object' &&
-          authorities !== null &&
-          !Array.isArray(authorities)
-        ) {
-          const { [terminalRunId]: _removed, ...remainingAuthorities } = authorities as Record<
-            string,
-            JSONValue
-          >;
-          mergedMetadata['lastRequestAuthorities'] = remainingAuthorities;
-        }
-        // Completed action-required runs remain reviewable until their
-        // approval is explicitly resolved. Removing the signed descriptor at
-        // the terminal transition would make a restart lose the only binding
-        // that can resume that review.
-        if (!hasPendingApproval) {
-          const approvals = mergedMetadata['pendingApprovalOverrides'];
-          if (typeof approvals === 'object' && approvals !== null && !Array.isArray(approvals)) {
-            const remainingApprovals = omitKeysWithPrefix(
-              approvals as Record<string, JSONValue>,
-              `approval:${terminalRunId}:`,
-            );
-            mergedMetadata['pendingApprovalOverrides'] = remainingApprovals;
-          }
-        }
-      }
-
-      return {
-        ...nextSession,
-        agentName: resolvedAgentName,
-        conversationHistory: existingSession
-          ? appendConversationMessages(
-              existingSession.conversationHistory,
-              conversation.current,
-              baseConversationHistory,
-            )
-          : conversation.current,
-        metadata: mergedMetadata,
-      };
-    });
-  }
+  const sessionPersistence = createSessionPersistence({
+    sessionStore: runtime.sessionStore,
+    orphanedRunIds,
+    store,
+    retryDelayMilliseconds: sessionPersistenceRetryDelayMilliseconds,
+    sleep: sessionPersistenceSleep,
+    diagnose,
+    serializeError: serializeUnknownError,
+  });
+  const { loadConversation, saveSession, persistSessionUpdate } = sessionPersistence;
 
   // ── AB-391: review-transition audit records ride the session outbox ──
   //
@@ -2177,9 +2041,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           ? omitStringValue(session!.metadata['approvalResolutionStartedIds'], reviewId)
           : [],
         pendingApprovalOverrides: {
-          ...(typeof session!.metadata['pendingApprovalOverrides'] === 'object' &&
-          session!.metadata['pendingApprovalOverrides'] !== null &&
-          !Array.isArray(session!.metadata['pendingApprovalOverrides'])
+          ...(isJsonObject(session!.metadata['pendingApprovalOverrides'])
             ? session!.metadata['pendingApprovalOverrides']
             : {}),
           [reviewId]: serializedApproval,
@@ -2271,23 +2133,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     await runtime.sessionStore.update(sessionId, (session) => {
       if (!session) return session;
       const currentPending = session.metadata['pendingApprovalOverrides'];
-      let pendingApprovalOverrides = currentPending;
+      let persistedApprovalOverrides = currentPending;
       if (
         typeof currentPending === 'object' &&
         currentPending !== null &&
         !Array.isArray(currentPending)
       ) {
         const { [reviewId]: _removed, ...remaining } = currentPending as Record<string, JSONValue>;
-        pendingApprovalOverrides = remaining;
+        persistedApprovalOverrides = remaining;
       }
 
       let hasRemainingApprovalForRun = false;
       if (
-        typeof pendingApprovalOverrides === 'object' &&
-        pendingApprovalOverrides !== null &&
-        !Array.isArray(pendingApprovalOverrides)
+        typeof persistedApprovalOverrides === 'object' &&
+        persistedApprovalOverrides !== null &&
+        !Array.isArray(persistedApprovalOverrides)
       ) {
-        for (const id of Object.keys(pendingApprovalOverrides)) {
+        for (const id of Object.keys(persistedApprovalOverrides)) {
           if (id.startsWith(`approval:${runId}:`)) {
             hasRemainingApprovalForRun = true;
             break;
@@ -2312,7 +2174,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         ...session,
         metadata: {
           ...session.metadata,
-          ...(pendingApprovalOverrides !== currentPending ? { pendingApprovalOverrides } : {}),
+          ...(persistedApprovalOverrides !== currentPending
+            ? { pendingApprovalOverrides: persistedApprovalOverrides }
+            : {}),
           ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
             ? { lastRequestAuthorities }
             : {}),
@@ -2447,13 +2311,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       (session) => {
         if (!session) return session;
         const currentResolved = session.metadata['resolvedReviewIds'];
-        const resolvedReviewIds: string[] = [];
+        const persistedResolvedReviewIds: string[] = [];
         if (Array.isArray(currentResolved)) {
           for (const id of currentResolved) {
-            if (typeof id === 'string') resolvedReviewIds.push(id);
+            if (typeof id === 'string') persistedResolvedReviewIds.push(id);
           }
         }
-        if (resolvedReviewIds.includes(reviewId)) {
+        if (persistedResolvedReviewIds.includes(reviewId)) {
           // AB-391 (Codex P1 review finding, PR #601, "Distinguish
           // concurrent resolvers from commit retries"): `resolvedReviewIds`
           // alone cannot tell this call's own ambiguous-commit retry apart
@@ -2496,7 +2360,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           return undefined;
         }
         const currentPending = session.metadata['pendingApprovalOverrides'];
-        let pendingApprovalOverrides = currentPending;
+        let persistedApprovalOverrides = currentPending;
         if (
           removePendingApproval &&
           typeof currentPending === 'object' &&
@@ -2507,7 +2371,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             string,
             JSONValue
           >;
-          pendingApprovalOverrides = remaining;
+          persistedApprovalOverrides = remaining;
         }
         const run = store.getRun(runId);
         let hasRemainingReviews = false;
@@ -2544,15 +2408,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             // `reviewId` here — the `alreadyLanded`/`conflictingDecision`
             // early returns above handle that case before this object is
             // ever built.
-            resolvedReviewIds: [...resolvedReviewIds, reviewId],
+            resolvedReviewIds: [...persistedResolvedReviewIds, reviewId],
             // AB-391: this call's own decision identity, persisted so a
             // LATER attempt that finds `reviewId` already resolved can
             // compare against it — see the `resolvedReviewIds.includes`
             // branch above.
             resolvedReviewDecisions: {
-              ...(typeof session.metadata['resolvedReviewDecisions'] === 'object' &&
-              session.metadata['resolvedReviewDecisions'] !== null &&
-              !Array.isArray(session.metadata['resolvedReviewDecisions'])
+              ...(isJsonObject(session.metadata['resolvedReviewDecisions'])
                 ? session.metadata['resolvedReviewDecisions']
                 : {}),
               [reviewId]: {
@@ -2561,7 +2423,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                 ...(reason !== undefined ? { reason } : {}),
               },
             },
-            ...(removePendingApproval ? { pendingApprovalOverrides } : {}),
+            ...(removePendingApproval
+              ? { pendingApprovalOverrides: persistedApprovalOverrides }
+              : {}),
             ...(lastRequestAuthorities !== session.metadata['lastRequestAuthorities']
               ? { lastRequestAuthorities }
               : {}),
@@ -2875,39 +2739,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
   }
 
-  function persistSessionUpdate(
-    saveSessionUpdate: () => Promise<void>,
-    context: { runId: string; sessionId: string; status: 'completed' | 'error' | 'aborted' },
-  ): void {
-    void (async () => {
-      let lastError: unknown;
-
-      for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
-        try {
-          await saveSessionUpdate();
-          return;
-        } catch (error) {
-          lastError = error;
-
-          if (attempt < SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS) {
-            try {
-              await sessionPersistenceSleep(sessionPersistenceRetryDelayMilliseconds);
-            } catch (sleepError) {
-              lastError = sleepError;
-              break;
-            }
-          }
-        }
-      }
-
-      diagnose({
-        level: 'error',
-        scope: 'session-persistence',
-        message: `[bureau] Failed to persist ${context.status} session state for run ${context.runId} in session ${context.sessionId}: ${serializeUnknownError(lastError)}`,
-      });
-    })();
-  }
-
   function disposeRegisteredStreamListeners(listeners: Array<() => void>): void {
     while (listeners.length > 0) {
       const disposeListener = listeners.pop();
@@ -2969,370 +2800,6 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * catalog runs their own deletion surface, which is its own design
    * problem outside AB-241's attribution-forwarding scope.
    */
-  function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
-    catalogRuns.add(handle);
-    // `detachBestEffortPromise`, not a bare `void ... .finally(...)`: AB-15's
-    // contract says a well-behaved `RunnableAgent.result()` never rejects
-    // (it settles through `RunResult.error` instead), but "JavaScript
-    // callers" is itself one of this issue's acceptance-criteria categories
-    // — a foreign, non-conforming agent's `result()` genuinely can reject,
-    // and a dropped rejection under `void` would be an unhandled rejection
-    // that is this bureau's fault, not the caller's.
-    detachBestEffortPromise(
-      handle.result().finally(() => {
-        catalogRuns.delete(handle);
-      }),
-    );
-    return handle;
-  }
-
-  function runAgent(
-    name: string,
-    input: AgentInput,
-    runOptions?: BureauRunOptions,
-  ): AgentRun<unknown, boolean> {
-    if (shutdownPromise) {
-      throw new BureauError('Cannot run an agent: bureau is disposed', 'CONFLICT');
-    }
-    const agent = agentCatalog.find(name);
-    if (!agent) {
-      throw new BureauError(`Unknown agent "${name}"`, 'NOT_FOUND');
-    }
-    validateAgentRunInput(input);
-
-    // AB-241 review finding: captured HERE, in one property access, BEFORE
-    // `validateBureauRunOptions` — not re-read a second time either inside
-    // that validation or later (at the `persistCatalogRunRecoveryRecord`
-    // call and the direct-branch `createActiveRun` call, both AFTER an
-    // `await`). `runOptions` is the caller's own object, not a copy: a
-    // getter/proxy `principal` whose result changes between reads could
-    // otherwise pass a validated string on one read while a DIFFERENT
-    // (possibly non-string) value reaches the context/attribution/recovery
-    // record on another read. Capturing once and validating that same
-    // captured value pins every downstream consumer to what was actually
-    // checked.
-    const capturedRunOptionsPrincipal = runOptions?.principal;
-    validateBureauRunOptions(runOptions, capturedRunOptionsPrincipal);
-    const principal = capturedRunOptionsPrincipal;
-
-    const context: AgentRunContext = { agentName: name };
-    if (runOptions?.signal) context.signal = runOptions.signal;
-    if (runOptions?.traceContext !== undefined) context.traceContext = runOptions.traceContext;
-    if (runOptions?.withTraceContext) context.withTraceContext = runOptions.withTraceContext;
-    // AB-241 — forwarded to both dispatch branches: the direct branch hands
-    // it straight to the agent's own `run()`/`RunOptions.principal`; the
-    // durable branch (below) additionally records it the way `createRun`
-    // does, so `eventHistory`'s principal gate sees the same attribution
-    // either way.
-    if (principal !== undefined) context.principal = principal;
-
-    const definitionResolvingAgent = agent as RunnableAgent<unknown, boolean> &
-      DefinitionResolvingAgent;
-    const resolver = definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS];
-
-    if (runtime.durable && typeof resolver === 'function') {
-      const durable = runtime.durable;
-      const runId = runtimeServices.identifiers.next('agent-run');
-      // AB-241 — recorded BEFORE any async work, mirroring
-      // `createRunFromRequest`'s own `runAttribution.set` (it writes before
-      // `store.register` so it's in place before any observer can see this
-      // run). Review finding: cleaned up ONLY when this minted `runId` is
-      // abandoned before it ever actually dispatches — the `AgentContractError`
-      // fallback and the non-`AgentContractError` resolver-failure catch
-      // below, both because an attribution entry keyed to a run that never
-      // existed would otherwise be a permanent phantom. A run that DOES
-      // dispatch and settle keeps its attribution indefinitely (see
-      // `trackCatalogRun`'s own doc comment) — it is not cleaned up here.
-      if (principal !== undefined) {
-        runAttribution.set(runId, { agentName: name, principal });
-      }
-      // Captured so the wrapper below can forward an abort straight to the
-      // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
-      // does not close: `resolveDurableAgent` unconditionally starts the
-      // durable engine dispatch (it has no way to observe the outer handle's
-      // already-terminal state — `createDeferredAgentRun` checks that only
-      // AFTER awaiting this resolver, and only to decide whether to call the
-      // synthetic agent's `run()`, not whether to have started it). A caller
-      // that calls `.abort()` on the returned handle before this resolver's
-      // `await resolver(...)` settles would otherwise leave the already-started
-      // durable workflow running, unobserved, forever.
-      let dispatchedActiveRun: ActiveRun | undefined;
-      // Review round 2 (Codex): the previous fix only forwarded abort() to
-      // `dispatchedActiveRun` when it ALREADY existed at the moment abort()
-      // ran — it did nothing when abort() was called (or the handle
-      // disposed) while `resolver(input, context)` was still pending, since
-      // `dispatchedActiveRun` is undefined for that entire window and
-      // nothing re-checks after it's finally assigned. Remember the request
-      // instead, and act on it the instant the ActiveRun exists, whichever
-      // order the two events happen in.
-      let cancellationRequested: { reason: string | undefined; dispose: boolean } | undefined;
-      // AB-291 (AC4): the durable `ActiveRun`'s own `closed()` acknowledgement
-      // for a cancellation FORWARDED here (below, once `dispatchedActiveRun`
-      // exists) — set the instant that forward runs. `guardedRun.closed()`
-      // (below `deferredRun`) must await this, not `deferredRun.closed()`
-      // alone: `createDeferredAgentRun`'s own abort handling settles its
-      // synthetic `result()` — and therefore its `closed()` — IMMEDIATELY
-      // when `abort()` arrives before its resolver has settled (the shared
-      // async work is deliberately left running in the background,
-      // uncancelled, matching `createLazyAgent`'s module-load precedent).
-      // Left alone, `guardedRun.closed()` would report `completed` before
-      // the durable engine dispatch this forward targets has even started,
-      // let alone been cleaned up.
-      // Typed off `ActiveRun['closed']`'s own return, not this file's
-      // locally-imported `CleanupAcknowledgement` (bureau's distinct
-      // `BureauShutdownReport` string-status vocabulary, shadowing
-      // operative's `{ status, reason?, error? }` object shape that
-      // `ActiveRun.closed()` actually returns).
-      let cancellationForward: ReturnType<ActiveRun['closed']> | undefined;
-      // Resolves once `resolveDurableAgent` itself has settled (success,
-      // fallback, or throw) — i.e. once `cancellationForward` above has its
-      // final value (set or not). `guardedRun.closed()` gates on this before
-      // reading `cancellationForward`, so it never reads it too early.
-      let dispatchSettled: (() => void) | undefined;
-      const dispatchSettledPromise = new Promise<void>((resolve) => {
-        dispatchSettled = resolve;
-      });
-      // `createDeferredAgentRun` resolves a `RunnableAgent` then calls its
-      // `run()` — built for `createLazyAgent`'s "resolve a module" case, but
-      // agnostic to WHY resolution is async. Wrapping the durable-engine
-      // handle (already fully built by the time this resolver settles) in a
-      // one-shot synthetic agent reuses its buffering/abort-forwarding
-      // machinery instead of reimplementing it.
-      const resolveDurableAgent = async (): Promise<RunnableAgent<unknown, boolean>> => {
-        let resolvedOptions: RunOptions;
-        try {
-          // Invoked through `definitionResolvingAgent`, not as a bare
-          // extracted `resolver(...)` call — a resolver implemented as a
-          // method reading instance state via `this` (a custom
-          // `DefinitionResolvingAgent`, not necessarily `createAgent`'s own
-          // arrow-function implementation) would otherwise lose its receiver
-          // under strict-mode ESM. Matches `createLazyAgent`'s own resolver
-          // forwarding for the same reason.
-          resolvedOptions = await definitionResolvingAgent[OPERATIVE_RESOLVE_RUN_OPTIONS]!(
-            input,
-            context,
-          );
-          // AB-260: a catalog agent's own resolver builds its RunOptions
-          // independently of `runtime.createRunRuntime` (AB-240's dispatch
-          // path), so without this it would fall back to operative's OWN
-          // default RuntimeServices rather than this bureau's composed
-          // instance — breaking "two bureaus in one process never share a
-          // clock" for catalog-dispatched runs. Never overrides a resolver
-          // that deliberately set its own `runtime`.
-          resolvedOptions = { runtime: runtimeServices, ...resolvedOptions };
-        } catch (error) {
-          // Review round 2 (Codex): `typeof resolver === 'function'` above
-          // is true for EVERY `createLazyAgent`-wrapped agent unconditionally
-          // — the wrapper always exposes this symbol as a proxy that only
-          // discovers, once actually invoked, whether the module it loads
-          // supports durable resolution at all. A lazy-wrapped agent whose
-          // real underlying agent does NOT support it would otherwise always
-          // be routed into this durable branch and fail here, even though
-          // the exact same agent registered eagerly correctly falls back to
-          // direct dispatch (see the "falls back to direct execution" test
-          // above). `AgentContractError` is the established convention this
-          // codebase already throws for "this capability is not supported"
-          // (both here and inside `createLazyAgent`'s own resolver) — catch
-          // exactly that class and fall back to the ORIGINAL catalog agent's
-          // own `run()`, matching what direct registration would have done.
-          // Anything else is a genuine resolver failure and must propagate.
-          if (error instanceof AgentContractError) {
-            // AB-241: this fallback abandons `runId` entirely — the agent's
-            // own `run()` mints (or is given) a DIFFERENT run identity, so
-            // an attribution entry recorded above under `runId` would
-            // otherwise be a permanent phantom, keyed to a run that never
-            // existed.
-            runAttribution.delete(runId);
-            return agent;
-          }
-          throw error;
-        }
-        // AB-240: persist a recovery record BEFORE starting the durable
-        // engine, so a crash immediately after `engine.start` still leaves
-        // enough, on the next boot, to reattach this run against the catalog
-        // agent's OWN run options rather than the Bureau's default runtime
-        // composition — a catalog dispatch has no bureau session to write
-        // `lastRunId`/`lastRunStatus` onto (see `resolveRunServices`'s
-        // catalog branch in runtime-composition.ts). A write failure here
-        // propagates uncaught, same as every other resolver failure in this
-        // function — better to fail this run's start than dispatch a durable
-        // run with no way to reattach it later.
-        await runtime.persistCatalogRunRecoveryRecord(runId, {
-          agentName: name,
-          // Type-level-only correction (mirrors `agent-catalog.ts`'s own
-          // `buildCatalogGenerationProfile` cast): `readGenerationProfile`
-          // only reads `agent.generationProfile`, which doesn't depend on
-          // `RunnableAgent`'s O/H type parameters, but its parameter type
-          // defaults to `RunnableAgent<never, false>`, not structurally
-          // assignable from `AnyRunnableAgent`'s `RunnableAgent<any, true>` half.
-          definitionRevision: readGenerationProfile(agent as RunnableAgent).revision,
-          input,
-          // AB-241 review finding: without this, a durable catalog run that
-          // crosses a process restart lost its attribution entirely — the
-          // resumed resolver's rebuilt `AgentRunContext` carried no
-          // `principal`, and `runAttribution` (in-memory only) started
-          // empty on the new process.
-          ...(principal !== undefined ? { principal } : {}),
-        });
-        const activeRun = createActiveRun(
-          resolvedOptions,
-          {
-            engine: durable.engine,
-            checkpointStore: durable.checkpointStore,
-            runId,
-            sessionId: runOptions?.sessionId ?? runId,
-          },
-          // AB-241 — thread the caller-supplied principal into
-          // `LivenessSnapshot.owner`, matching `createRunFromRequest`'s own
-          // `request.principal !== undefined ? { owner: request.principal } : undefined`.
-          principal !== undefined ? { owner: principal } : undefined,
-        );
-        dispatchedActiveRun = activeRun;
-        if (cancellationRequested) {
-          if (cancellationRequested.dispose) {
-            activeRun[Symbol.dispose]();
-          } else {
-            activeRun.abort(cancellationRequested.reason);
-          }
-          // AB-291 (AC4): the real durable run's own acknowledgement for
-          // THIS forwarded cancellation — `guardedRun.closed()` awaits it
-          // below instead of the deferred wrapper's synthetic settlement.
-          cancellationForward = activeRun.closed();
-        }
-        const agentRun = createAgentRun<unknown, boolean>(activeRun, {
-          hasOutput: resolvedOptions.output !== undefined,
-        });
-        return { name, hasOutput: resolvedOptions.output !== undefined, run: () => agentRun };
-      };
-      // AB-291 (AC4): wraps `resolveDurableAgent` purely to signal
-      // `dispatchSettledPromise` once it settles — by then
-      // `cancellationForward` above has its final value (set if a
-      // cancellation was forwarded, left `undefined` otherwise). Never
-      // swallows or alters `resolveDurableAgent`'s own result/rejection.
-      const trackDispatchSettlement = async (): Promise<RunnableAgent<unknown, boolean>> => {
-        try {
-          return await resolveDurableAgent();
-        } catch (error) {
-          // AB-241: `resolveDurableAgent`'s `AgentContractError` fallback
-          // (above) already deletes `runAttribution` for the abandoned
-          // `runId` on ITS OWN success path (a `return`, not a throw). Any
-          // other rejection here — `persistCatalogRunRecoveryRecord`
-          // failing, `createActiveRun` throwing synchronously on an
-          // unrepresentable `output` schema, a genuine resolver failure —
-          // means this run never dispatched either, so the same cleanup
-          // applies, mirroring `createRunFromRequest`'s own
-          // `runAttribution.delete(runId)` for a run that "never reached
-          // `store.register`" (see that catch block, below).
-          runAttribution.delete(runId);
-          throw error;
-        } finally {
-          dispatchSettled?.();
-        }
-      };
-      const deferredRun = createDeferredAgentRun(trackDispatchSettlement, input, context, name);
-      // AB-291 (AC4): computed once — `dispatchSettledPromise` resolves only
-      // after `resolveDurableAgent` has settled, by which point
-      // `cancellationForward` (set inside it, above) has its final value.
-      // Reading `cancellationForward` lazily inside the `.then` (not
-      // captured now) is required: this expression is built before that
-      // assignment can possibly have happened yet.
-      const closedSettlement: ReturnType<ActiveRun['closed']> = dispatchSettledPromise.then(
-        () => cancellationForward ?? deferredRun.closed(),
-      );
-      // AB-291 (AC4 review finding): `closedSettlement`'s own genuine
-      // acknowledgement, captured once it settles — read by `closed()`
-      // below BEFORE `options.signal.aborted`, so a caller passing an
-      // already-aborted signal AFTER the shared settlement has genuinely
-      // resolved still gets the identical cached acknowledgement, per
-      // `createClosedAcknowledgement`'s own post-settlement idempotency
-      // guarantee ("a repeated call after the underlying cleanup has
-      // genuinely settled returns the identical cached acknowledgement
-      // object by reference"), rather than manufacturing a fresh
-      // `unresolved`/`timed-out` result for a signal that arrived too late
-      // to mean anything.
-      let cachedAcknowledgement: Awaited<ReturnType<ActiveRun['closed']>> | undefined;
-      void closedSettlement.then((acknowledgement) => {
-        cachedAcknowledgement = acknowledgement;
-      });
-      const guardedRun: AgentRun<unknown, boolean> = {
-        ...deferredRun,
-        abort(reason?: string): void {
-          deferredRun.abort(reason);
-          if (dispatchedActiveRun) {
-            // No-op if `activeRun.abort()` already ran via the normal
-            // `underlying.abort()` forwarding path — `AbortController.abort()`
-            // (what `ActiveRun.abort()` calls under the hood) is idempotent.
-            dispatchedActiveRun.abort(reason);
-          } else if (!cancellationRequested) {
-            cancellationRequested = { reason, dispose: false };
-          }
-        },
-        [Symbol.dispose](): void {
-          deferredRun[Symbol.dispose]();
-          if (dispatchedActiveRun) {
-            dispatchedActiveRun[Symbol.dispose]();
-          } else if (!cancellationRequested) {
-            cancellationRequested = { reason: undefined, dispose: true };
-          }
-        },
-        // AB-291 (AC4): overrides `deferredRun.closed()` (otherwise inherited
-        // via the `...deferredRun` spread above) — see `closedSettlement`'s
-        // and `cancellationForward`'s doc comments for why the inherited one
-        // can report `completed` before a forwarded cancellation's own
-        // durable cleanup has even started. `options.signal` bounds THIS
-        // caller's own wait only, matching every other `closed()`
-        // implementation's per-call signal contract (never writes into the
-        // shared `closedSettlement` cache).
-        closed(options?: ClosedOptions): ReturnType<ActiveRun['closed']> {
-          const signal = options?.signal;
-          if (!signal) return closedSettlement;
-          // Post-settlement idempotency guarantee: once the shared
-          // acknowledgement has genuinely settled, every call — regardless
-          // of a per-call signal's state — returns that identical cached
-          // object, never a fresh `unresolved`/`timed-out` manufactured
-          // from a signal that arrived after the fact.
-          if (cachedAcknowledgement) return Promise.resolve(cachedAcknowledgement);
-          if (signal.aborted) {
-            return Promise.resolve({ status: 'unresolved', reason: 'timed-out' });
-          }
-          return new Promise((resolve) => {
-            let settled = false;
-            const onAbort = (): void => {
-              if (settled) return;
-              settled = true;
-              resolve({ status: 'unresolved', reason: 'timed-out' });
-            };
-            signal.addEventListener('abort', onAbort, { once: true });
-            void closedSettlement.then((acknowledgement) => {
-              if (settled) return;
-              settled = true;
-              signal.removeEventListener('abort', onAbort);
-              resolve(acknowledgement);
-            });
-          });
-        },
-      };
-      return trackCatalogRun(guardedRun);
-    }
-
-    // Review round 2 (Codex): a hand-written catalog RunnableAgent is a
-    // valid entry, and one whose run() throws synchronously during per-run
-    // setup must still settle through the returned handle, not escape as a
-    // synchronous throw from bureau.run() itself — AB-22's synchronous-throw
-    // allowlist is unknown name / disposed / malformed input-options only.
-    // `createDeferredAgentRun` already contains exactly this "resolveAgent's
-    // run() throws synchronously" handling (built for createLazyAgent's own
-    // resolved-module case, agnostic to why); reusing it here for an
-    // already-resolved agent avoids duplicating that state machine. The one
-    // externally observable cost is that `agent.run()` itself is invoked one
-    // microtask later than before — compatible with the contract, which
-    // promises a synchronous RETURN of the handle, not synchronous START of
-    // the agent's own work.
-    return trackCatalogRun(
-      createDeferredAgentRun(() => Promise.resolve(agent), input, context, name),
-    );
-  }
-
   async function createRunFromRequest(request: CreateRunRequest): Promise<RunSummary> {
     validateCreateRunRequest(request);
 
@@ -3458,16 +2925,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           lastMaximumSteps: request.maximumSteps ?? null,
           // Reset the active-skill snapshot at the start of every run so a reused
           // session never seeds a fresh run with the PREVIOUS run's active skills.
-          // The snapshot is otherwise written only by createSkillStateSnapshotHook
+          // The snapshot is otherwise written only by createSkillRecordSnapshotHook
           // after the run's first onStep boundary; if the durable process crashes
           // before that first snapshot, recovery would read this session's stale
-          // lastActiveSkills and pre-seed the new run's SkillSession with skills a
-          // live fresh run would not have — making load_skill_resource/list_skills
-          // treat stale skills as active. null clears it: buildRunDepsFromSession
-          // runs lastActiveSkills through isActiveSkillEntryArray, which rejects
-          // null → initialActiveSkills undefined → the recovered run starts empty,
-          // exactly as a fresh run would (PRRT_kwDORvupsc6Mddv3).
-          lastActiveSkills: null,
+          // records and pre-seed the new run with skills a live fresh run would not
+          // have. null clears it: buildRunDepsFromSession runs the value through
+          // isSkillActivationRecordArray, which rejects null → the recovered run
+          // starts empty, exactly as a fresh run would (PRRT_kwDORvupsc6Mddv3).
+          //
+          // All three keys, not just the records. The run id and step are what
+          // loadCommittedScheduledActiveSkills matches on, and a stale pair left
+          // behind would let it accept a committed step snapshot belonging to a
+          // previous run on this session.
+          activeSkillRecords: null,
+          activeSkillRecordsRunId: null,
+          activeSkillRecordsStep: null,
           // Durable recovery needs the authority that was safe to persist at
           // dispatch time. Credentials, tracing, and other request-local data
           // intentionally never cross the session boundary.
@@ -3587,17 +3059,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // `promoteForNewRun()` promotes any agent-identity bump a prior run
       // deferred (AB-199's coordinator amendments, 2026-09-02 addendum); a
       // no-op when nothing was pending.
-      let steeringGate: BureauSteeringGate | undefined;
-      if (!runtime.durable) {
-        steeringGate = steeringGates.get(sessionId);
-        if (!steeringGate) {
-          steeringGate = createSteeringGate(
-            sessionId,
-            steeringCommandLedger,
-            runtimeServices.clock,
-          );
-          steeringGates.set(sessionId, steeringGate);
-        }
+      // AB-200: durable runs get a steering gate too. They were excluded
+      // while `submitSteeringCommand` refused every durable command —
+      // attaching a gate nothing could ever write to was pointless. Now
+      // that durable steering persists and recovers, excluding them would
+      // be the actual bug: a command admitted and durably recovered would
+      // never reach the run it was meant to steer.
+      let steeringGate = steeringGates.get(sessionId);
+      if (!steeringGate) {
+        steeringGate = createSteeringGate(sessionId, steeringCommandLedger, runtimeServices.clock);
+        steeringGates.set(sessionId, steeringGate);
+      }
+      // A durable run starting after a restart must see the recovered
+      // desired state at its own step 0, not merely at the next steering
+      // call, so the log is drained before the run begins.
+      const steeringMailboxForRun = getSteeringMailbox(sessionId);
+      if (steeringMailboxForRun !== undefined) {
+        await ensureSteeringGate(sessionId, [runId]);
       }
       steeringGate?.promoteForNewRun(runId, runtimeServices.clock.nowISO());
       // AB-67/AB-199 — a per-run VIEW of the shared session gate (see
@@ -3616,30 +3094,27 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // AB-260: the bureau's single composed RuntimeServices instance,
           // snapshotted into every run it starts.
           runtime: runtimeServices,
-          prepareStep: runRuntime.prepareStep,
           ...(runSteeringGate ? { steering: runSteeringGate } : {}),
-          onStep: [
-            ...runRuntime.onStep,
-            async (stepResult) => {
-              for (const stepResultItem of stepResult.results) {
-                if (
-                  stepResultItem.outcome !== 'action_required' ||
-                  !stepResultItem.pendingApproval
-                ) {
-                  continue;
-                }
-                const reviewId = `approval:${runId}:${stepResultItem.pendingApproval.callId}`;
-                pendingApprovalOverrides.set(reviewId, stepResultItem.pendingApproval);
-                await persistPendingApprovalOverrideWithRetry(
-                  sessionId,
-                  reviewId,
-                  stepResultItem.pendingApproval,
-                );
-              }
-            },
-          ],
-          executeOptions: { requestContext },
-          validateResponse: runRuntime.validateResponse,
+          // COR-1269 — stamped onto this run's hook-plan observations.
+          sessionId,
+          // COR-1265 criterion 8 — merged AFTER the trailing registration, so
+          // the Bureau tier is complete before it becomes the merge's first
+          // argument. A single-tier merge still copies every entry into a fresh
+          // registry, which is what makes the plan a snapshot: a registration
+          // added to `runRuntime.hooks` afterwards cannot reach this run.
+          hooks: mergeHookRegistries(
+            registerTrailingOnStep(
+              runRuntime.hooks,
+              'bureau:pending-approval-persist',
+              createPendingApprovalPersistHook(
+                runId,
+                sessionId,
+                pendingApprovalOverrides,
+                persistPendingApprovalOverrideWithRetry,
+              ),
+            ),
+          ),
+          executeOptions: requestContext === undefined ? {} : { requestContext },
           // Thread agentName and runId so curated tool.* bubble events are stamped
           // with {agentName, runId, step} metadata (C3) and durable launch input
           // carries the owning agent for audit/recovery attribution (F2). Fall back
@@ -3657,6 +3132,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           ? {
               engine: runtime.durable.engine,
               checkpointStore: runtime.durable.checkpointStore,
+              // COR-625: this run's terminal checkpoint-retention step,
+              // folded into its `closed()`. Memoized per run id, so the
+              // listeners below firing it independently costs nothing.
+              ...(durableTerminalCleanup ? { terminalCleanup: durableTerminalCleanup } : {}),
               runId,
               // Carry the owning session in the durable input so boot recovery can
               // correlate a recovered handle back to its session without a side
@@ -3688,6 +3167,24 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         { streamEventTarget, clock: runtimeServices.clock.now },
       );
       disposeStreamListeners.push(disposeRunFrameForwarder);
+      // Registered here, for the same reason the frame forwarder is: before
+      // `store.register`, which is what drives `run.registered` onto this
+      // bureau's own feed. A client that reacts to `run.registered` by
+      // subscribing to `operative.runs.events` would otherwise race an entry
+      // that does not exist yet.
+      disposeStreamListeners.push(
+        attachRunEventFeed(runId, activeRun, runEventFeeds, {
+          now: runtimeServices.clock.now,
+          onError: (error, kind) => {
+            diagnose({
+              level: 'error',
+              scope: 'event-feed',
+              message: `[bureau] run event feed threw recording a "${kind}" event for run ${runId}:`,
+              cause: error,
+            });
+          },
+        }),
+      );
       emitLiveFrame({
         type: 'run-envelope',
         runId,
@@ -3732,6 +3229,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         activeRuns.delete(activeRun);
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
+        // COR-625: a terminal transition owes this run one checkpoint-
+        // retention step whether or not anyone ever calls `closed()`.
+        // Memoized per run id, so this and `closed()`'s own fold resolve the
+        // SAME step. Fire-and-forget: the step records its own
+        // acknowledgement durably and never rejects.
+        void runTerminalCheckpointCleanup(runId);
         // AB-67's ratified Abort row: a session's pause/resume never carries
         // into a future run. Any command still `accepted` and bound to this
         // run transitions to `failed`/`'run-terminal'` the moment the run
@@ -3780,6 +3283,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         activeRuns.delete(activeRun);
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
+        // COR-625: a terminal transition owes this run one checkpoint-
+        // retention step whether or not anyone ever calls `closed()`.
+        // Memoized per run id, so this and `closed()`'s own fold resolve the
+        // SAME step. Fire-and-forget: the step records its own
+        // acknowledgement durably and never rejects.
+        void runTerminalCheckpointCleanup(runId);
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
         // See the identical call in the `run.completed` listener above.
@@ -3840,6 +3349,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         activeRuns.delete(activeRun);
         runToolboxes.delete(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
+        // COR-625: a terminal transition owes this run one checkpoint-
+        // retention step whether or not anyone ever calls `closed()`.
+        // Memoized per run id, so this and `closed()`'s own fold resolve the
+        // SAME step. Fire-and-forget: the step records its own
+        // acknowledgement durably and never rejects.
+        void runTerminalCheckpointCleanup(runId);
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
       });
@@ -4020,7 +3535,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
 
     const recoveredRun = reattachDurableActiveRun(
-      { engine: runtime.durable!.engine, checkpointStore: runtime.durable!.checkpointStore },
+      {
+        engine: runtime.durable!.engine,
+        checkpointStore: runtime.durable!.checkpointStore,
+        // COR-625: same terminal checkpoint-retention step as the live path.
+        // A run recovered after a restart still owes its cleanup.
+        ...(durableTerminalCleanup ? { terminalCleanup: durableTerminalCleanup } : {}),
+      },
       {
         runId,
         handle,
@@ -4079,6 +3600,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // AB-260: same origin-derived clock threading as the live-run forwarder.
       { clock: runtimeServices.clock.now },
     );
+    // A recovered run gets a feed too, and it starts without `run.started`:
+    // that event fired in the process that died, so this feed's first
+    // envelope is whatever step the run resumes into. That is the honest
+    // record — this bureau did not start this run — and a client tells the
+    // two apart by the run's session status rather than by guessing from
+    // the feed's first envelope.
+    //
+    // Detached alongside the frame forwarder, on whichever terminal event
+    // settles this run. Both are registered BEFORE those `once` handlers,
+    // and an EventTarget fires listeners in registration order, so the
+    // terminal event still reaches the feed before the feed stops listening
+    // for it. The feed itself stays registered and readable until the run is
+    // removed.
+    const disposeRecoveredRunEventFeed = attachRunEventFeed(runId, recoveredRun, runEventFeeds, {
+      now: runtimeServices.clock.now,
+      onError: (error, kind) => {
+        diagnose({
+          level: 'error',
+          scope: 'event-feed',
+          message: `[bureau] run event feed threw recording a "${kind}" event for run ${runId}:`,
+          cause: error,
+        });
+      },
+    });
 
     // Persist terminal session status from the recovered run's OWN terminal
     // events — the same fields the live-run listeners write. The conversation
@@ -4089,9 +3634,30 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // unavailable) or one interrupted by teardown fires NO terminal event — the
     // adapter stays write-free for those and the resolver/teardown owns the
     // session status; so these listeners only run for a genuinely settled run.
+    // COR-625: a reattached run whose `result` REJECTS — a recovered
+    // workflow whose stored result fails its schema-version check
+    // (`UnsupportedRunResultVersionError`, rethrown by
+    // `driveReattachedRun`) is the reachable case — dispatches no terminal
+    // event at all, so neither listener below ever fires and `closed()`'s
+    // own fold is skipped too (`createClosedAcknowledgement` classifies a
+    // rejected `result` as `failed` without consulting `resolveOutcome`).
+    // Without this the run would reach a dead end with NO
+    // `run.cleanup-settled` record, which is exactly the "cleanup failure
+    // that is invisible" this feature exists to prevent. The step re-reads
+    // the engine itself, so a run left non-terminal by the failure is
+    // recorded as unresolved rather than being pruned.
+    detachBestEffortPromise(recoveredRun.result.catch(() => runTerminalCheckpointCleanup(runId)));
+
     recoveredRun.once('run.completed', (event) => {
       activeRuns.delete(recoveredRun);
       disposeRecoveredRunFrameForwarder();
+      disposeRecoveredRunEventFeed();
+      // COR-625: a terminal transition owes this run one checkpoint-
+      // retention step whether or not anyone ever calls `closed()`.
+      // Memoized per run id, so this and `closed()`'s own fold resolve the
+      // SAME step. Fire-and-forget: the step records its own
+      // acknowledgement durably and never rejects.
+      void runTerminalCheckpointCleanup(runId);
       const completedConversation = event.conversation;
       const finishReason = event.finishReason;
       const lastRunStatus = isRunFailureFinishReason(finishReason) ? 'error' : 'completed';
@@ -4122,6 +3688,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     recoveredRun.once('run.aborted', (event) => {
       activeRuns.delete(recoveredRun);
       disposeRecoveredRunFrameForwarder();
+      disposeRecoveredRunEventFeed();
+      // COR-625: a terminal transition owes this run one checkpoint-
+      // retention step whether or not anyone ever calls `closed()`.
+      // Memoized per run id, so this and `closed()`'s own fold resolve the
+      // SAME step. Fire-and-forget: the step records its own
+      // acknowledgement durably and never rejects.
+      void runTerminalCheckpointCleanup(runId);
       const abortedConversation = event.conversation;
 
       const report = buildTerminalReportFromAbortedEvent(runId, {
@@ -4173,7 +3746,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     store.recordAction(runId, 'workflow.reattached', {
       sessionId,
       versionMismatch: versionMismatch !== undefined,
-      ...(versionMismatch ?? {}),
+      ...versionMismatch,
     });
   }
 
@@ -4766,10 +4339,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                   // instance, snapshotted into every run it starts — including
                   // a mocked/custom-engine reattach.
                   runtime: runtimeServices,
-                  prepareStep: runRuntime.prepareStep,
-                  onStep: runRuntime.onStep,
-                  validateResponse: runRuntime.validateResponse,
-                  executeOptions: { requestContext },
+                  sessionId: ownedSessionId,
+                  // COR-1265 — the Bureau tier, snapshotted.
+                  hooks: mergeHookRegistries(runRuntime.hooks),
+                  executeOptions: requestContext === undefined ? {} : { requestContext },
                   agentName: recoveredAgentName,
                   runId: handle.id,
                 },
@@ -4834,6 +4407,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
                 });
               }
             });
+            return undefined;
           },
         );
       }
@@ -4932,10 +4506,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           // AB-260: the bureau's single composed RuntimeServices instance,
           // snapshotted into every scheduler task run it starts.
           runtime: runtimeServices,
-          onStep: runRuntime.onStep,
-          prepareStep: runRuntime.prepareStep,
+          sessionId: taskId,
+          // COR-1265 — the Bureau tier, snapshotted.
+          hooks: mergeHookRegistries(runRuntime.hooks),
           stopWhen: options.stopWhen,
-          validateResponse: runRuntime.validateResponse,
         };
       },
     };
@@ -4977,14 +4551,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   function subscribeRunSnapshot(
     runId: string,
     observer: (snapshot: LivenessSnapshot) => void,
-    options?: { signal?: AbortSignal },
+    requestOptions?: { signal?: AbortSignal },
   ): Subscription {
     const runState = store.getRun(runId);
     if (!runState) {
       throw new BureauError('Run not found', 'NOT_FOUND');
     }
 
-    return runState.activeRun.subscribeSnapshot(observer, options);
+    return runState.activeRun.subscribeSnapshot(observer, requestOptions);
   }
 
   function getRunReport(id: string): RunReport | undefined {
@@ -5050,6 +4624,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       detachBestEffortPromise(
         runState.activeRun.closed().then(() => {
           abortingRunIds.delete(id);
+          return undefined;
         }),
       );
       // AB-46: `abortRun` carries no principal, so every still-pending review
@@ -5200,6 +4775,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // AB-96 — drop the cached terminal RunReport too, or a long-lived bureau
     // that creates/deletes many runs would retain one forever per run id.
     runReports.delete(id);
+    // COR-625: released on the same boundary as the report it belongs to.
+    // The step has already recorded its acknowledgement durably by the time
+    // a report is released, so nothing observable is lost — only the
+    // in-memory memo, whose exactly-once duty is over once every trigger for
+    // this run id has passed.
+    terminalCheckpointCleanups.delete(id);
   }
 
   /**
@@ -5235,6 +4816,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         status: 'canceled',
         principal: 'system:run-abort',
       });
+      // COR-625: the third trigger. A run cancelled here may have no live
+      // `ActiveRun` in this process at all — no terminal listener will ever
+      // fire for it — so the cancellation path owes the step directly.
+      // `'requested'` is the only outcome that proves a committed
+      // cancellation; the others describe a run this call never genuinely
+      // terminated, and pruning on those would be the exact
+      // prune-before-terminal-transition this issue names as its rollback
+      // trigger. Where a live run DOES exist, its own terminal listener
+      // reaches the same memoized step, which is what keeps
+      // cancel-then-terminal at exactly one step rather than two.
+      await runTerminalCheckpointCleanup(runId);
     }
     return outcome;
   }
@@ -5243,9 +4835,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * List durable runs from the engine, optionally filtered. Thin passthrough to
    * `engine.list`; `undefined` when no durable engine is composed.
    */
-  async function listDurableRuns(filter?: ListFilter, options?: ListOptions) {
+  async function listDurableRuns(filter?: ListFilter, requestOptions?: ListOptions) {
     if (!runtime.durable) return undefined;
-    return runtime.durable.engine.list(filter, options);
+    return runtime.durable.engine.list(filter, requestOptions);
   }
 
   /**
@@ -5996,6 +5588,188 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   /**
+   * COR-625 — the terminal-run cleanup step: one application of
+   * `options.checkpointRetention` to a durable run's weft checkpoint history,
+   * run exactly once per run id and reported as a {@link RunCleanupAcknowledgement}.
+   *
+   * Memoized on `runId` in {@link terminalCheckpointCleanups}, which is what
+   * makes "exactly one step, never two" true across the THREE independent
+   * triggers that can observe the same run reaching a terminal state: the
+   * live run's own terminal listeners, a recovered run's terminal listeners,
+   * and `cancelDurableRun` cancelling a run this process holds no
+   * `ActiveRun` for at all. Every trigger calls this; the first one to arrive
+   * performs the step and the rest await its promise.
+   *
+   * The step re-reads the durable record before pruning anything. A bureau
+   * terminal listener fires on operative's own event emitter, which is NOT
+   * proof that the engine's final checkpoint write has committed, and weft's
+   * prune rejects on a compare-and-swap race with a concurrent write
+   * (`packages/weft/src/core/engine/checkpoint-prune.ts`). Pruning on the
+   * event alone would therefore both risk this issue's own rollback trigger
+   * — a run whose checkpoints are pruned BEFORE its terminal transition —
+   * and manufacture spurious `persistence-failed` results out of a race that
+   * is really just "too early". Gating on the same post-transition re-read
+   * `resolveCancelDurableRun` already performs removes both.
+   *
+   * Never rejects: it is folded into `closed()`, which never rejects, and a
+   * throw here would be attributed to the RUN's teardown rather than to this
+   * step.
+   */
+  async function runTerminalCheckpointCleanup(runId: string): Promise<RunCleanupAcknowledgement> {
+    const existing = terminalCheckpointCleanups.get(runId);
+    if (existing) return existing;
+    const step = performTerminalCheckpointCleanup(runId);
+    terminalCheckpointCleanups.set(runId, step);
+    return step;
+  }
+
+  /** The un-memoized body of {@link runTerminalCheckpointCleanup}. */
+  async function performTerminalCheckpointCleanup(
+    runId: string,
+  ): Promise<RunCleanupAcknowledgement> {
+    // The outer fence behind this step's "never rejects" contract. Every
+    // caller depends on it: the terminal listeners fire this as
+    // `void runTerminalCheckpointCleanup(...)`, where a rejection becomes an
+    // unhandled rejection, and `cancelDurableRun` AWAITS it while its own
+    // public doc comment promises it never rejects. `classifyTerminalCheckpointCleanup`
+    // classifies the outcomes it can see, but it also awaits a
+    // caller-supplied `shutdownTimeoutSleep`, so it cannot promise this on
+    // its own — the same reason `shutdown()` wraps its identical
+    // `shutdownTimeoutSleep` race in `settleNeverRejecting`.
+    let acknowledgement: RunCleanupAcknowledgement;
+    try {
+      acknowledgement = await classifyTerminalCheckpointCleanup(runId);
+    } catch (error) {
+      diagnose({
+        level: 'error',
+        scope: 'audit-trail',
+        message: `[bureau] terminal checkpoint cleanup for run "${runId}" settled via an unexpected rejection: ${serializeUnknownError(error)}`,
+      });
+      acknowledgement = { status: 'failed', error };
+    }
+    // The acknowledgement is recorded whatever it is — including the
+    // `not-required` of the default `'keep-all'` policy. "A cleanup failure
+    // that is invisible" is this issue's other named rollback trigger, and
+    // an operator can only answer "did cleanup finish?" from a record that
+    // exists for every run, not only for the ones that pruned something.
+    await auditTrailInstance
+      ?.record({
+        runId,
+        type: 'run.cleanup-settled',
+        detail: { acknowledgement },
+      })
+      .catch((error: unknown) => {
+        // `record()` is documented best-effort and does not reject without a
+        // `dedupeKey`; a rejection nonetheless must not turn a successful
+        // prune into a failed cleanup, so it is diagnosed rather than
+        // folded into the acknowledgement.
+        diagnose({
+          level: 'warn',
+          scope: 'audit-trail',
+          message: `[bureau] run.cleanup-settled audit record failed for run "${runId}"`,
+          cause: error,
+        });
+      });
+    return acknowledgement;
+  }
+
+  /**
+   * Resolves the step's acknowledgement without recording it. Split from
+   * {@link performTerminalCheckpointCleanup} so the audit write happens on
+   * exactly one path, including the early returns.
+   */
+  async function classifyTerminalCheckpointCleanup(
+    runId: string,
+  ): Promise<RunCleanupAcknowledgement> {
+    const durable = runtime.durable;
+    // Nothing durable to retain: a process-local run has no checkpoint
+    // history, which is this issue's own documented out-of-scope case.
+    if (!durable) return { status: 'not-required' };
+    const retention = options.checkpointRetention;
+    if (!retention || retention === 'keep-all') return { status: 'not-required' };
+
+    let state: WorkflowState | null;
+    try {
+      state = await durable.engine.get(runId);
+    } catch (error) {
+      return { status: 'unresolved', reason: 'persistence-failed', error };
+    }
+    if (!state || DURABLE_FORCIBLY_TERMINABLE_STATUSES.has(state.status)) {
+      // Either the engine has no such run, or it is not terminal yet. Both
+      // mean this step cannot truthfully claim to have pruned a terminal
+      // run's history — see this function's own doc comment.
+      return {
+        status: 'unresolved',
+        reason: 'persistence-failed',
+        error: new Error(
+          `runTerminalCheckpointCleanup("${runId}"): refusing to prune checkpoints for a run ` +
+            `the engine reports as ${state ? `"${state.status}"` : 'missing'} — not terminal.`,
+        ),
+      };
+    }
+
+    const timeoutMilliseconds = retention.timeoutMilliseconds;
+    if (timeoutMilliseconds === undefined) {
+      try {
+        await durable.engine.pruneCheckpoints(runId, { keepLast: retention.keepLast });
+        return { status: 'completed' };
+      } catch (error) {
+        return { status: 'unresolved', reason: 'persistence-failed', error };
+      }
+    }
+
+    // The bound ABORTS the prune rather than merely abandoning the wait:
+    // weft throws the abort reason before issuing any delete, so a step that
+    // times out while still scanning leaves no unowned deletes running
+    // behind a cached `'timed-out'` acknowledgement. Weft stops rechecking
+    // the signal once its first delete chunk commits (see
+    // `checkpoint-prune.ts`'s own doc comment), so a prune large enough to
+    // span more than one chunk can still finish its remaining chunks after
+    // the abort — an abandoned wait would leave EVERY delete unowned, which
+    // is the case this actually closes. Sleeps on `shutdownTimeoutSleep`, which
+    // is `RuntimeServices.timers`-backed (never a real timer), so a manual
+    // runtime drives this exactly as it drives `shutdown()`'s own wait.
+    const pruneAbort = new AbortController();
+    const sleepAbort = new AbortController();
+    try {
+      const outcome = await Promise.race([
+        durable.engine
+          .pruneCheckpoints(runId, { keepLast: retention.keepLast, signal: pruneAbort.signal })
+          .then(
+            (): RunCleanupAcknowledgement => ({ status: 'completed' }),
+            (error: unknown): RunCleanupAcknowledgement =>
+              pruneAbort.signal.aborted
+                ? { status: 'unresolved', reason: 'timed-out' }
+                : { status: 'unresolved', reason: 'persistence-failed', error },
+          ),
+        shutdownTimeoutSleep(timeoutMilliseconds, sleepAbort.signal).then(
+          (): RunCleanupAcknowledgement => {
+            pruneAbort.abort();
+            return { status: 'unresolved', reason: 'timed-out' };
+          },
+          // `shutdownTimeoutSleep` is a public, caller-injectable seam
+          // (`BureauOptions.shutdownTimeoutSleep`), so it CAN reject even
+          // though the default never does. A rejection means the bound
+          // could not be applied at all: the prune is still stopped —
+          // leaving it running behind an answer nobody owns is precisely
+          // what this bound exists to prevent — and the failure is
+          // classified as the unresolved wait it is, carrying the error
+          // rather than being silently reported as a clean timeout.
+          (error: unknown): RunCleanupAcknowledgement => {
+            pruneAbort.abort();
+            return { status: 'unresolved', reason: 'timed-out', error };
+          },
+        ),
+      ]);
+      return outcome;
+    } finally {
+      // Release whichever side of the race lost, so neither a pending timer
+      // nor a caller-supplied sleep outlives this step.
+      sleepAbort.abort();
+    }
+  }
+
+  /**
    * AB-388 (Codex review, PR #597, "Run audit retention for KV-backed
    * non-durable bureaus" / "Isolate the manual audit-retention sub-pass"):
    * `auditTrailInstance` is built whenever `runtime.kv` exists — a
@@ -6581,8 +6355,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }, AUTOMATIC_RUN_OWNERSHIP_PRUNE_INTERVAL_MS);
   }
 
-  async function listSessions(options?: SessionListOptions) {
-    return requireSessionStore().list(options);
+  async function listSessions(requestOptions?: SessionListOptions) {
+    return requireSessionStore().list(requestOptions);
   }
 
   async function getSession(id: string) {
@@ -6800,6 +6574,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       steeringGateForAbort?.settleForDeletion(runtimeServices.clock.nowISO());
       steeringGateForAbort?.purgeFromLedger();
       steeringGates.delete(id);
+      // AB-200: the durable side needs the same treatment the gate and
+      // ledger just got, and for the identical reason — a reused session
+      // id must not inherit a deleted session's command history. The
+      // mailbox is keyed by `sessionId` as its Weft `resourceId`, so a
+      // cached instance left behind here would hand a new session the old
+      // one's undrained commands on its first `ensureSteeringGate` call.
+      // Dropping the recovery promise alongside it keeps the two in step;
+      // a future session under this id recovers from the durable log
+      // rather than from a resolved promise about a session that is gone.
+      steeringMailboxes.get(id)?.dispose();
+      steeringMailboxes.delete(id);
+      steeringRecoveries.delete(id);
 
       await Promise.allSettled(runTerminals);
 
@@ -6925,6 +6711,19 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    * `unsupported-capability`. No `SessionInputRecord` is created and no `id`
    * is consumed by this method today.
    */
+  /**
+   * COR-435 — generalizes the `inFlightSessionDeletions` coalescing pattern
+   * (see that map's own doc comment, below `deleteSession`) to
+   * `(principal, 'session-input', id)`: two concurrent admission attempts
+   * for the identical retry identity share ONE in-flight promise rather
+   * than racing two independent mailbox admissions. Keyed by a joined
+   * string (not a nested Map) for the same reason a plain `Map<string, ...>`
+   * suffices for session deletions — the three components are individually
+   * unbounded strings, so a delimiter that cannot appear in any of them is
+   * used to prevent `("a\x00b", "c")` and `("a", "b\x00c")` from colliding.
+   */
+  const inFlightSessionInputAdmissions = new Map<string, Promise<SessionInputAdmissionOutcome>>();
+
   async function submitSessionInput(
     sessionId: string,
     request: SessionInputAdmissionRequest,
@@ -6934,14 +6733,58 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // ephemeral bureau (no persistence/storage) is a supported configuration,
     // and every sessionId is necessarily unknown in it — the correct outcome
     // per this method's own contract is `not-found`, not a throw.
-    const session = runtime.sessionStore ? await runtime.sessionStore.load(sessionId) : undefined;
-    if (!session || !isSessionAuthorityAuthorized(session.metadata, request.principal)) {
+    const sessionStoreForInput = runtime.sessionStore;
+    const session = sessionStoreForInput ? await sessionStoreForInput.load(sessionId) : undefined;
+    // `session` truthy implies `sessionStoreForInput` was truthy above, but
+    // TypeScript cannot carry that narrowing across the ternary into later
+    // code — this makes it explicit rather than asserting it away.
+    if (
+      !session ||
+      !sessionStoreForInput ||
+      !isSessionAuthorityAuthorized(session.metadata, request.principal)
+    ) {
       return { outcome: 'not-found' };
     }
     if (isSessionRunTerminal(session.metadata)) {
       return { outcome: 'session-terminal', sessionId };
     }
-    return { outcome: 'unsupported-capability', reason: 'durable-mailbox-unavailable' };
+
+    const sessionMailbox = getSessionInputMailbox(sessionId);
+    const storage = runtime.durableStorage;
+    const kv = runtime.kv;
+    if (sessionMailbox === undefined || storage === undefined || kv === undefined) {
+      return { outcome: 'unsupported-capability', reason: 'durable-mailbox-unavailable' };
+    }
+
+    const id = request.id ?? runtimeServices.identifiers.next('session-input');
+    const reservationKey = `${request.principal}\u0000session-input\u0000${id}`;
+    const existing = inFlightSessionInputAdmissions.get(reservationKey);
+    if (existing) return existing;
+
+    const payload: PersistedSessionInput = {
+      payload: request.payload,
+      ...(request.expiresAt !== undefined ? { expiresAt: request.expiresAt } : {}),
+      ...(request.supersedes !== undefined ? { supersedes: request.supersedes } : {}),
+    };
+
+    const admission = admitSessionInput({
+      storage,
+      kv,
+      sessionStore: sessionStoreForInput,
+      sessionMailbox,
+      sessionId,
+      id,
+      principal: request.principal,
+      deliveryMode: request.deliveryMode,
+      payload,
+      principalBacklogLimit: sessionInputPrincipalBacklogLimit,
+      sessionBacklogLimitForCrossSessionRead: sessionInputSessionBacklogLimit,
+      nowMs: runtimeServices.clock.now(),
+    }).finally(() => {
+      inFlightSessionInputAdmissions.delete(reservationKey);
+    });
+    inFlightSessionInputAdmissions.set(reservationKey, admission);
+    return admission;
   }
 
   /**
@@ -7005,18 +6848,181 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (isSessionRunTerminal(session.metadata) && liveRunIds.length === 0) {
       return { outcome: 'session-terminal', sessionId };
     }
-    if (request.requestedValue.target !== 'pause' && request.requestedValue.target !== 'resume') {
+    // AB-200/AB-68: `agent-identity` joins `pause`/`resume` on the admitted
+    // path. The gate has always accepted it (see `ImplementedSteeringCommand`),
+    // and what was missing was this verb's own catalog validation — the one
+    // piece `ImplementedSteeringCommand`'s doc comment names as still owed.
+    // `route`/`model`/`provider`/`effort` remain unreachable: the gate is
+    // type-narrowed against them on purpose, and widening it is the
+    // separate state-machine slice that owns per-target desired-state
+    // writes and per-run `configVersion` accounting.
+    const steeringTarget = request.requestedValue.target;
+    // A `policyRef` names a pre-approved policy only the AB-66 selector can
+    // resolve into a concrete agent name. Until that resolution path exists
+    // here, a `policyRef`-carrying command is unsupported rather than
+    // guessed at — validating an unresolved reference against the agents
+    // map would reject every legitimate policy name.
+    if (steeringTarget === 'agent-identity' && request.requestedValue.policyRef !== undefined) {
       return { outcome: 'unsupported-capability', reason: 'selector-unavailable' };
     }
-    if (runtime.durable) {
+    // A durably-configured bureau with no resolved storage backend cannot
+    // persist a command, and admitting one into the in-memory gate would
+    // silently lose it on restart — exactly what the durable contract
+    // exists to prevent. That combination is not reachable through normal
+    // composition (durable execution resolves ON only when a persistent
+    // backend is configured), so this stays a guard rather than a path.
+    if (runtime.durable && runtime.durableStorage === undefined) {
       return { outcome: 'unsupported-capability', reason: 'durable-steering-unavailable' };
     }
-
-    let gate = steeringGates.get(sessionId);
-    if (!gate) {
-      gate = createSteeringGate(sessionId, steeringCommandLedger, runtimeServices.clock);
-      steeringGates.set(sessionId, gate);
+    // `SteeringRequestedValue`'s own contract: an agent-identity `override`
+    // "must be a key of Bureau<D>'s agents map". Validated against the
+    // construction-time snapshot every other agent lookup in this module
+    // uses, so a name this Bureau cannot run is refused at admission rather
+    // than surfacing as an unresolvable agent at the next run's step 0.
+    //
+    // `policy-denied` rather than a new failure reason: this deployment's
+    // own catalog is what refuses the change, which is what that reason
+    // already means. Widening the exported `SteeringCommandFailure` union
+    // is a contract change owned by the steering-types issue, not this one.
+    if (
+      steeringTarget === 'agent-identity' &&
+      agentsSnapshot[request.requestedValue.override] === undefined
+    ) {
+      return {
+        outcome: 'rejected',
+        failure: { failedAt: runtimeServices.clock.nowISO(), reason: 'policy-denied' },
+      };
     }
+
+    // AB-200 — validate a configuration override against the live model
+    // catalog, coordinate by coordinate.
+    //
+    // NOT through `planSelection`, and the reason is a real constraint
+    // rather than a preference. `composePolicy`'s exact-override path
+    // (`providers/policy.ts`'s `matchesOverride`) requires provider AND
+    // model together — "a partially specified override cannot resolve to
+    // one candidate, so it matches nothing" — and rejects any override
+    // naming a `route`, because `route` is not a field `BackendDescriptor`
+    // carries. A steering command addresses exactly one coordinate, so it
+    // can never satisfy that path: routing every one of them through
+    // `planSelection` would reject every legitimate single-coordinate
+    // command as `no-candidate`. That is the catalog gap AB-65 names.
+    //
+    // What a steering override actually needs to answer is narrower: "is
+    // this coordinate one the deployment knows about?" The accumulated
+    // desired configuration is recomputed into a full plan at the runStep
+    // selection boundary anyway (AB-250's revalidation), which is where
+    // whole-backend coherence is decided. Admission's job is only to stop
+    // a value the catalog has never heard of.
+    //
+    // The one cast: every target the gate cannot admit has already
+    // returned above (the four configuration targets are admitted, and
+    // `agent-identity` with a `policyRef` returned at the policyRef check),
+    // so this value genuinely is one of the gate's accepted variants.
+    // TypeScript cannot carry that narrowing across the intervening
+    // statements because the checks are separate early returns rather than
+    // one discriminating switch.
+    let resolvedRequestedValue =
+      request.requestedValue as ImplementedSteeringCommand['requestedValue'];
+    if (isConfigurationTarget(steeringTarget)) {
+      // Narrowing `steeringTarget` does not narrow `request.requestedValue`:
+      // they are separate bindings, so the predicate above tells TypeScript
+      // nothing about the value's own discriminant. Bind the narrowed view
+      // once here rather than casting at each field access.
+      const configurationRequest = request.requestedValue as Extract<
+        SteeringRequestedValue,
+        { target: 'route' | 'model' | 'provider' | 'effort' }
+      >;
+
+      // COR-1227 — resolve a `policyRef` to a concrete coordinate.
+      //
+      // A policyRef names a key of `BureauModelPolicyOptions.users`, whose
+      // own doc comment fixes that meaning: "Named policy profiles are keys
+      // of `users`". Resolution reads that profile's coordinate for this
+      // target and admits the concrete value, so the stored command records
+      // what was actually chosen rather than an unresolved reference a
+      // later reader would have to re-resolve against possibly-changed
+      // configuration.
+      //
+      // Not through `planSelection`, for the reason the override path below
+      // documents: `composePolicy`'s exact-override test needs provider and
+      // model together and rejects routes outright, so a single-coordinate
+      // request can never satisfy it.
+      // `Effort` is a union of string literals, so `string` already
+      // covers every coordinate this can hold.
+      let override: string | undefined = configurationRequest.override;
+      if (configurationRequest.policyRef !== undefined) {
+        const profile = options.modelPolicy?.users?.[configurationRequest.policyRef];
+        if (profile === undefined) {
+          // Unknown policy name. Distinct from the case below, and the
+          // caller is entitled to tell them apart: one is a typo or a
+          // decommissioned profile, the other is a profile that simply
+          // says nothing about this coordinate.
+          return {
+            outcome: 'rejected',
+            failure: { failedAt: runtimeServices.clock.nowISO(), reason: 'policy-denied' },
+          };
+        }
+        override =
+          steeringTarget === 'model'
+            ? profile.exactOverride?.model
+            : steeringTarget === 'provider'
+              ? profile.exactOverride?.provider
+              : steeringTarget === 'route'
+                ? profile.exactOverride?.route
+                : // `effort` has a dedicated profile field beside the
+                  // override, and it is the more natural place for a policy
+                  // to express one — `exactOverride.effort` still wins when
+                  // both are set, matching the override's name.
+                  (profile.exactOverride?.effort ?? profile.defaultEffort);
+        if (override === undefined) {
+          // The profile exists but specifies nothing for this coordinate.
+          // Admitting anything here would be inventing a value the policy
+          // never stated.
+          return {
+            outcome: 'rejected',
+            failure: { failedAt: runtimeServices.clock.nowISO(), reason: 'policy-denied' },
+          };
+        }
+        // The resolved value is admitted, not the reference. It still falls
+        // through to the identical catalog check the `override` path uses
+        // below, so a policy cannot admit a coordinate an override could
+        // not — that is the authority guarantee, and it needs no second
+        // mechanism.
+        resolvedRequestedValue = (
+          steeringTarget === 'effort'
+            ? { target: 'effort', override: override as Effort }
+            : { target: steeringTarget, override }
+        ) satisfies ImplementedSteeringCommand['requestedValue'];
+      }
+      const { descriptors } = modelCatalog.catalog();
+      const known =
+        steeringTarget === 'model'
+          ? descriptors.some((descriptor) => descriptor.model === override)
+          : steeringTarget === 'provider'
+            ? descriptors.some((descriptor) => descriptor.provider === override)
+            : steeringTarget === 'effort'
+              ? descriptors.some((descriptor) =>
+                  descriptor.effort.portable.includes(override as Effort),
+                )
+              : // `route`: a routing entry is configured on the generate
+                // function (`RoutingOptions.routes`), not in the model
+                // catalog, and Bureau does not hold that table. There is
+                // nothing here to validate against, so admission accepts
+                // the name and the routing layer rejects an unknown route
+                // at generate time. Recorded rather than faked: a
+                // membership test against a catalog that structurally
+                // cannot contain routes would reject every valid route.
+                true;
+      if (!known) {
+        return {
+          outcome: 'rejected',
+          failure: { failedAt: runtimeServices.clock.nowISO(), reason: 'policy-denied' },
+        };
+      }
+    }
+
+    const gate = await ensureSteeringGate(sessionId, liveRunIds);
 
     const now = runtimeServices.clock.nowISO();
     const id = request.id ?? runtimeServices.identifiers.next('steering-command');
@@ -7025,10 +7031,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       idOrigin: request.id !== undefined ? 'caller' : 'generated',
       sessionId,
       principal: request.principal,
-      // Narrowed by the `target !== 'pause' && target !== 'resume'` early
-      // return above — TypeScript tracks this back through `request.requestedValue`
-      // without a cast because `request` is never reassigned.
-      requestedValue: request.requestedValue,
+      // For pause/resume/agent-identity this is `request.requestedValue`
+      // unchanged, narrowed by the target early returns above. For the four
+      // configuration targets it is the selector-resolved coordinate, so a
+      // `policyRef` is admitted as the concrete value the plan chose.
+      requestedValue: resolvedRequestedValue,
       requestedAt: now,
       ...(request.expectedRevision !== undefined
         ? { expectedRevision: request.expectedRevision }
@@ -7037,7 +7044,44 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       ...(request.runId !== undefined ? { runId: request.runId } : {}),
     };
 
-    return gate.admit(command, { liveRunIds, now });
+    // AB-200 durable steering: persist BEFORE admitting into desired
+    // state. A crash between the two then loses nothing — recovery finds
+    // the command still unconsumed and replays it. The reverse order
+    // would put a command into desired state that no restart could
+    // recover, which is precisely the failure the durable contract exists
+    // to rule out.
+    const steeringMailbox = getSteeringMailbox(sessionId);
+    if (steeringMailbox !== undefined) {
+      const persistence = await persistSteeringCommand(steeringMailbox, command);
+      if (!persistence.persisted && persistence.reason !== 'idempotency-identity-mismatch') {
+        // Backlog exhaustion: nothing was written, so nothing may enter
+        // desired state either.
+        return { outcome: 'unsupported-capability', reason: persistence.reason };
+      }
+      // A mailbox idempotency conflict deliberately falls through to the
+      // gate rather than returning here. The gate's ledger is the
+      // authority on conflict *shape* — only it holds the original
+      // command's snapshot, which `SteeringCommandConflict` requires — and
+      // after a restart that ledger is rebuilt by the recovery replay
+      // above, so it can still describe the original. The mailbox
+      // conflict and the gate conflict are the same fact seen twice; the
+      // gate reports it in the contract's own terms.
+    }
+
+    const outcome = gate.admit(command, { liveRunIds, now });
+    // AB-68: give `steering.accepted` its first production dispatch site.
+    // Only the `accepted` transition is dispatched here, and deliberately:
+    // `SteeringRejectedEvent`/`SteeringSupersededEvent`/`SteeringFailedEvent`
+    // are documented as `accepted → X` transitions, so a PRE-admission
+    // rejection (an unknown agent name, an ambiguous run) never reached
+    // `accepted` and must not be reported as having left it. Those three
+    // belong to the gate's own post-admission transitions.
+    if (outcome.outcome === 'accepted') {
+      emitter.dispatch(
+        new SteeringAcceptedEvent(sessionId, outcome.command.id, outcome.command.configVersion),
+      );
+    }
+    return outcome;
   }
 
   function listPendingReviews(): PendingReview[] {
@@ -7662,9 +7706,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // (the default) is the ONLY path with no preceding session-store commit
     // to couple to (`resolveReview`'s `keepPending` re-gate branch), where
     // the direct write below remains correct exactly as it always was.
-    options?: { auditAlreadyAppended?: boolean },
+    requestOptions?: { auditAlreadyAppended?: boolean },
   ): Promise<void> {
-    if (!options?.auditAlreadyAppended) {
+    if (!requestOptions?.auditAlreadyAppended) {
       await auditTrailInstance?.record(
         buildReviewDecisionAuditRecord(review, decision, principal, reason),
       );
@@ -8101,7 +8145,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // already cached at this point, every subsequent shutdown()/dispose()
         // call would return the same rejection forever instead of ever
         // completing cleanup (review round 2, Codex).
-        for (const catalogRun of [...catalogRuns]) {
+        const currentCatalogRuns = [...catalogRuns];
+        for (const catalogRun of currentCatalogRuns) {
           try {
             catalogRun.abort('Bureau disposed');
           } catch (error) {
@@ -8119,7 +8164,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         for (const activeRun of activeRuns) {
           runTerminals.push(whenActiveRunTerminal(activeRun));
         }
-        for (const catalogRun of [...catalogRuns]) {
+        const currentCatalogRuns = [...catalogRuns];
+        for (const catalogRun of currentCatalogRuns) {
           runTerminals.push(Promise.allSettled([catalogRun.result()]));
         }
       }
@@ -8209,7 +8255,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // just above: both must settle before the shared signal aborts and
       // before backend teardown below.
       if (manualDurableMaintenancePasses.size > 0) {
-        await Promise.allSettled([...manualDurableMaintenancePasses]);
+        await Promise.allSettled(manualDurableMaintenancePasses);
       }
       // Bureau-owned background work is stopped/awaited identically under
       // BOTH policies (2026-09-02 coordinator ruling) — abort the shared
@@ -8292,6 +8338,17 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
           emitter.dispatch(new BureauDisposedEvent());
           storeSubscription.unsubscribe();
+          // After `BureauDisposedEvent` is dispatched, so the feed records
+          // its own last event before it stops recording. Unsubscribing
+          // first, then disposing, ends every watcher: disposal aborts the
+          // feed's lifetime signal, which each subscription is bound to.
+          eventFeedSubscription.unsubscribe();
+          // Any run feed still registered goes with it — `run.removed` reaps
+          // the runs a host deleted, and this covers the rest.
+          for (const feedRunId of runEventFeeds.runIds()) {
+            disposeRunEventFeed(feedRunId, runEventFeeds);
+          }
+          eventFeed.dispose();
           for (const disposeListener of schedulerCleanup) {
             disposeListener();
           }
@@ -8349,10 +8406,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
           }
         } finally {
           try {
-            runtime.disposeStorage?.();
+            // AB-200: every steering mailbox holds process-local state
+            // over the shared backend, so they are released before the
+            // backend itself is. Disposing a mailbox does not delete its
+            // durable log — the commands stay recoverable by the next
+            // process, which is the whole point of persisting them.
+            for (const mailbox of steeringMailboxes.values()) mailbox.dispose();
+            steeringMailboxes.clear();
+            steeringRecoveries.clear();
           } finally {
-            if (ownsStore) {
-              store.dispose();
+            try {
+              runtime.disposeStorage?.();
+            } finally {
+              if (ownsStore) {
+                store.dispose();
+              }
             }
           }
         }
@@ -8529,14 +8597,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   async function resolveEventHistory(
     history: DurableEventHistory,
     owner: DurableEventOwner,
-    options?: DurableEventHistoryPageOptions,
+    requestOptions?: DurableEventHistoryPageOptions,
   ): Promise<
     | DurableEventPage
     | DurableEventGap
     | EventHistoryNotFoundOutcome
     | EventHistoryDeletedAggregateOutcome
   > {
-    const principal = options?.principal;
+    const principal = requestOptions?.principal;
 
     if (owner.kind === 'run' && principal !== undefined) {
       // AB-313 — fail CLOSED whenever this run's ownership cannot be
@@ -8636,7 +8704,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // first — so this is always defined whenever `history` is.
     await durableEventProducerInstance?.waitForActiveWrites(owner);
 
-    const page = await history.page(owner, options);
+    const page = await history.page(owner, requestOptions);
     if ('outcome' in page) {
       // AB-372 (Codex review finding, PR #580, "Reauthorize the session
       // before returning a post-wait gap"): the pre-page check above ran
@@ -8690,7 +8758,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // truncated `hasMore: true` page, or a fresh, still-empty owner where
     // both are true but a fast internal/trusted answer is fine) still pays
     // for the independent scan.
-    const pageProvesCompleteHistory = options?.since === undefined && !page.hasMore;
+    const pageProvesCompleteHistory = requestOptions?.since === undefined && !page.hasMore;
     const hasDeletionMarker =
       pageHasDeletionMarker ||
       (!pageProvesCompleteHistory && (await history.latestDeletionMarker(owner)) !== undefined);
@@ -8734,7 +8802,23 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return page;
   }
 
+  const { runAgent } = createCatalogDispatcher({
+    agentCatalog,
+    runtime,
+    runtimeServices,
+    getShutdownPromise: () => shutdownPromise,
+    catalogRuns,
+    runAttribution,
+    detachBestEffortPromise,
+    createBureauError: (message, code) => new BureauError(message, code),
+    validateAgentRunInput,
+    validateBureauRunOptions,
+  });
+
   const bureau: Bureau<D> = {
+    id: bureauId,
+    eventFeed,
+    runEventFeeds,
     store,
     memory: runtime.memory,
     scheduler: runtime.scheduler,

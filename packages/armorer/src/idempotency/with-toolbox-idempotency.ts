@@ -1,16 +1,16 @@
-import { sha256HexSync } from 'interoperability';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { sha256HexSync } from '@lostgradient/cryptography';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { JsonValue } from '../core/serialization/json';
 import { stableStringifyJson } from '../core/serialization/json';
-import type { AnyToolbox } from '../create-toolbox';
 import type { ToolRequestContext } from '../execution-context';
 import {
   approvalConsumeSymbol,
   approvalResumeSymbol,
   policyAuthorizationOnlySymbol,
 } from '../internal/approval-resume';
-import type { ToolCallInput, ToolExecutionResult } from '../types';
+import type { AnyToolbox } from '../toolbox-interface';
+import type { ToolApprovalAction, ToolCallInput, ToolExecutionResult } from '../types';
 import { normalizeConcurrency } from '../utilities/concurrency';
 import { claimCacheStarted, getCacheEntry } from './cache-operations';
 import { fullInputKey, namespacedKey } from './key-generators';
@@ -242,11 +242,38 @@ export function withToolboxIdempotency(
     };
   }
 
+  function createIdempotencyApprovalAction(
+    fields: { id: string },
+    cacheKey: string,
+    toolName: string,
+    purpose: 'authorization-required' | 'unknown-outcome',
+    message: string,
+  ): ToolApprovalAction {
+    const keyPayload = {
+      cacheKey,
+      callId: fields.id,
+      policyRevision,
+      purpose,
+      toolName,
+    } satisfies JsonValue;
+    return {
+      type: 'approval',
+      message,
+      risk: 'high',
+      operation: {
+        kind: 'other',
+        argsPreview: { cacheKey, purpose },
+      },
+      policyVersion: policyRevision,
+      idempotencyKey: `approval:${sha256HexSync(stableStringifyJson(keyPayload))}`,
+    };
+  }
+
   function createUnknownOutcomeResult(
     fields: { id: string },
     cacheKey: string,
     toolName: string,
-    options: { attemptId?: string; inputDigest?: string; legacyStartedAt?: number } = {},
+    outcomeOptions: { attemptId?: string; inputDigest?: string; legacyStartedAt?: number } = {},
   ): ToolExecutionResult {
     return {
       callId: fields.id,
@@ -258,17 +285,19 @@ export function withToolboxIdempotency(
       idempotency: {
         key: cacheKey,
         outcome: 'unknown-outcome',
-        ...(options.attemptId ? { attemptId: options.attemptId } : {}),
-        ...(options.inputDigest ? { inputDigest: options.inputDigest } : {}),
-        ...(options.legacyStartedAt !== undefined
-          ? { legacyStartedAt: options.legacyStartedAt }
+        ...(outcomeOptions.attemptId ? { attemptId: outcomeOptions.attemptId } : {}),
+        ...(outcomeOptions.inputDigest ? { inputDigest: outcomeOptions.inputDigest } : {}),
+        ...(outcomeOptions.legacyStartedAt !== undefined
+          ? { legacyStartedAt: outcomeOptions.legacyStartedAt }
           : {}),
       },
-      action: {
-        type: 'approval',
-        message:
-          'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
-      },
+      action: createIdempotencyApprovalAction(
+        fields,
+        cacheKey,
+        toolName,
+        'unknown-outcome',
+        'This idempotency key has an unknown outcome. Re-approve before retrying the side effect.',
+      ),
     };
   }
 
@@ -413,10 +442,13 @@ export function withToolboxIdempotency(
       toolName,
       result: undefined,
       idempotency: { key: cacheKey, outcome: 'authorization-required' },
-      action: {
-        type: 'approval',
-        message: 'Re-authorize this cached result under the current policy revision.',
-      },
+      action: createIdempotencyApprovalAction(
+        fields,
+        cacheKey,
+        toolName,
+        'authorization-required',
+        'Re-authorize this cached result under the current policy revision.',
+      ),
     };
   }
 
@@ -534,9 +566,11 @@ export function withToolboxIdempotency(
         ? current.startedAt
         : undefined;
     return createUnknownOutcomeResult(fields, cacheKey, current?.toolName ?? fallbackToolName, {
-      attemptId: currentAttemptId,
-      inputDigest: current?.status === 'started' ? current.inputDigest : undefined,
-      legacyStartedAt,
+      ...(currentAttemptId !== undefined ? { attemptId: currentAttemptId } : {}),
+      ...(current?.status === 'started' && current.inputDigest !== undefined
+        ? { inputDigest: current.inputDigest }
+        : {}),
+      ...(legacyStartedAt !== undefined ? { legacyStartedAt } : {}),
     });
   }
 
@@ -656,7 +690,7 @@ export function withToolboxIdempotency(
           if (legacyReceiptVerification.outcome === 'interrupted') {
             return legacyReceiptVerification.result;
           }
-          validLegacyReceipt = legacyReceiptVerification.value === true;
+          validLegacyReceipt = legacyReceiptVerification.value;
         }
         if (!validLegacyReceipt) {
           return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
@@ -724,19 +758,19 @@ export function withToolboxIdempotency(
           if (receiptVerification.outcome === 'interrupted') {
             return receiptVerification.result;
           }
-          validReceipt = receiptVerification.value === true;
+          validReceipt = receiptVerification.value;
         }
         if (!validReceipt) {
           return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
             attemptId: cached.attemptId,
-            inputDigest: cached.inputDigest,
+            ...(cached.inputDigest !== undefined ? { inputDigest: cached.inputDigest } : {}),
           });
         }
         const startedAt = now();
         if (cached.leaseExpiresAt !== undefined && startedAt < cached.leaseExpiresAt) {
           return createUnknownOutcomeResult(fields, cacheKey, cached.toolName, {
             attemptId: cached.attemptId,
-            inputDigest: cached.inputDigest,
+            ...(cached.inputDigest !== undefined ? { inputDigest: cached.inputDigest } : {}),
           });
         }
         const cachedAttemptId = cached.attemptId;
@@ -791,9 +825,9 @@ export function withToolboxIdempotency(
       const entry = started.entry;
       if (entry.status === 'started') {
         return createUnknownOutcomeResult(fields, cacheKey, entry.toolName, {
-          attemptId: entry.attemptId,
-          inputDigest: entry.inputDigest,
-          legacyStartedAt: entry.attemptId === undefined ? entry.startedAt : undefined,
+          ...(entry.attemptId !== undefined ? { attemptId: entry.attemptId } : {}),
+          ...(entry.inputDigest !== undefined ? { inputDigest: entry.inputDigest } : {}),
+          ...(entry.attemptId === undefined ? { legacyStartedAt: entry.startedAt } : {}),
         });
       }
 
@@ -834,8 +868,8 @@ export function withToolboxIdempotency(
       );
     } catch {
       return createUnknownOutcomeResult(fields, cacheKey, fields.name, {
-        attemptId: execution.attemptId,
-        inputDigest: execution.inputDigest,
+        ...(execution.attemptId !== undefined ? { attemptId: execution.attemptId } : {}),
+        ...(execution.inputDigest !== undefined ? { inputDigest: execution.inputDigest } : {}),
       });
     }
     if (initialRenewalResult.outcome === 'interrupted') {
@@ -845,8 +879,8 @@ export function withToolboxIdempotency(
     let leaseOwned = initialRenewalResult.value;
     if (!leaseOwned) {
       return createUnknownOutcomeResult(fields, cacheKey, fields.name, {
-        attemptId: execution.attemptId,
-        inputDigest: execution.inputDigest,
+        ...(execution.attemptId !== undefined ? { attemptId: execution.attemptId } : {}),
+        ...(execution.inputDigest !== undefined ? { inputDigest: execution.inputDigest } : {}),
       });
     }
     let result: ToolExecutionResult;
@@ -866,7 +900,7 @@ export function withToolboxIdempotency(
               const renewalTime = now();
               if (renewalTime >= execution.absoluteDeadline!) {
                 stopRenewal();
-                return;
+                return undefined;
               }
               leaseOwned =
                 leaseOwned &&
@@ -876,6 +910,7 @@ export function withToolboxIdempotency(
                   Math.min(renewalTime + leaseDurationMs, execution.absoluteDeadline!),
                   renewalTime,
                 ));
+              return undefined;
             })
             .catch(() => {
               leaseOwned = false;
@@ -913,8 +948,8 @@ export function withToolboxIdempotency(
 
     if (!leaseOwned) {
       return createUnknownOutcomeResult(fields, cacheKey, result.toolName, {
-        attemptId: execution.attemptId,
-        inputDigest: execution.inputDigest,
+        ...(execution.attemptId !== undefined ? { attemptId: execution.attemptId } : {}),
+        ...(execution.inputDigest !== undefined ? { inputDigest: execution.inputDigest } : {}),
       });
     }
 
@@ -937,8 +972,8 @@ export function withToolboxIdempotency(
       const completed = completion.outcome === 'completed' && completion.value;
       if (!completed) {
         return createUnknownOutcomeResult(fields, cacheKey, result.toolName, {
-          attemptId: execution.attemptId,
-          inputDigest: execution.inputDigest,
+          ...(execution.attemptId !== undefined ? { attemptId: execution.attemptId } : {}),
+          ...(execution.inputDigest !== undefined ? { inputDigest: execution.inputDigest } : {}),
         });
       }
       result.idempotency = {
@@ -976,7 +1011,8 @@ export function withToolboxIdempotency(
             }
             const concurrency = normalizeConcurrency(controls?.concurrency);
             if (concurrency !== undefined && concurrency > 0 && concurrency < input.length) {
-              const results = new Array<ToolExecutionResult>(input.length);
+              const results: ToolExecutionResult[] = [];
+              results.length = input.length;
               let nextIndex = 0;
               await Promise.all(
                 Array.from({ length: concurrency }, async () => {
@@ -1000,11 +1036,11 @@ export function withToolboxIdempotency(
           return executeWithCache(input, originalExecute, executeOptions);
         };
       }
-      if (prop === 'resumeApproval') {
+      if (prop === 'resumeApproval' || prop === 'resolveApproval') {
         // Keep approval resumption bound to this proxy so the toolbox's
         // internal execute call is intercepted by the idempotency wrapper,
         // including when callers destructure the method as a callback.
-        return target.resumeApproval.bind(receiver);
+        return target[prop].bind(receiver);
       }
       return Reflect.get(target, prop, receiver as object) as unknown;
     },

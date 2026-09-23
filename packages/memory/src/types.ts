@@ -1,5 +1,5 @@
-import type { Embedder, EmbeddingVector } from 'interoperability';
-import type { RuntimeServices } from 'lifecycle';
+import type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 
 import type {
   MemoryRecord,
@@ -9,8 +9,9 @@ import type {
   MemoryVectorSearchResult,
 } from './memory-record-storage';
 
-export type { Embedder, EmbeddingVector };
 export type {
+  Embedder,
+  EmbeddingVector,
   MemoryRecord,
   MemoryRecordPutOnceResult,
   MemoryRecordScope,

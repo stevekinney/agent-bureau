@@ -119,7 +119,7 @@
  *   compare against.
  */
 
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { SteeringRequestedValue } from '../durable/types.ts';
 import type { BackendDescriptor, ModelCatalog } from './model-catalog.ts';
@@ -145,7 +145,7 @@ export type { SelectionExclusionCode };
  * classification is out of scope (ABP-11 ruling); `SelectionCandidate.rankingInputs`
  * is the named extension point for a future signal, not this type.
  */
-export type TaskClassification = string & { readonly __brand?: 'TaskClassification' };
+export type TaskClassification = string & { readonly __brand?: 'TaskClassification' | undefined };
 
 /**
  * `select`'s recorded input signature: the five values determinism is
@@ -157,17 +157,16 @@ export type TaskClassification = string & { readonly __brand?: 'TaskClassificati
  */
 export interface SelectionRequest {
   readonly agentName: string;
-  readonly taskClassification?: TaskClassification;
+  readonly taskClassification?: TaskClassification | undefined;
   /**
    * AB-67's shipped union, narrowed to the four targets a selector can act
    * on — `pause`/`resume`/`agent-identity` are not generation choices and
    * never reach a `SelectionRequest`. Absent means "use the Agent's own
    * default."
    */
-  readonly requestedValue?: Extract<
-    SteeringRequestedValue,
-    { target: 'model' | 'provider' | 'route' | 'effort' }
-  >;
+  readonly requestedValue?:
+    | Extract<SteeringRequestedValue, { target: 'model' | 'provider' | 'route' | 'effort' }>
+    | undefined;
   readonly catalogRevision: number;
   readonly policyRevision: number;
   readonly availabilitySnapshotRevision: number;
@@ -181,14 +180,14 @@ export interface SelectionRequest {
 export interface SelectionCandidate {
   readonly provider: ProviderName;
   readonly model: string;
-  readonly route?: string;
+  readonly route?: string | undefined;
   /** Inlined by value, deeply frozen, and structurally independent of the
    *  source catalog — the replay guarantee AB-64 requires. */
   readonly descriptorSnapshot: BackendDescriptor;
   readonly eligible: boolean;
-  readonly exclusionCode?: SelectionExclusionCode;
-  readonly exclusionReason?: string;
-  readonly rankingInputs?: Readonly<Record<string, number>>;
+  readonly exclusionCode?: SelectionExclusionCode | undefined;
+  readonly exclusionReason?: string | undefined;
+  readonly rankingInputs?: Readonly<Record<string, number>> | undefined;
 }
 
 export type SelectionOutcomeKind =
@@ -208,26 +207,28 @@ export interface SelectionOutcomeFailure {
    *  Absent for `'no-candidate'`/`'stale-catalog'` unless every excluded
    *  candidate shares the identical code, in which case it is still
    *  surfaced rather than discarded. */
-  readonly exclusionCode?: SelectionExclusionCode;
-  readonly rejectedOverride?: SteeringRequestedValue;
+  readonly exclusionCode?: SelectionExclusionCode | undefined;
+  readonly rejectedOverride?: SteeringRequestedValue | undefined;
 }
 
 interface SelectionPlanCommon {
   readonly planId: string;
   readonly request: SelectionRequest;
   readonly candidates: readonly SelectionCandidate[];
-  readonly selected?: {
-    readonly provider: ProviderName;
-    readonly model: string;
-    readonly route?: string;
-    readonly effort?: Effort;
-  };
+  readonly selected?:
+    | {
+        readonly provider: ProviderName;
+        readonly model: string;
+        readonly route?: string;
+        readonly effort?: Effort;
+      }
+    | undefined;
   /** Ordered, drawn from `UserModelConfiguration.fallbackOrder` intersected
    *  with the eligible set. Empty when no `fallbackOrder` is configured. */
   readonly fallbackPlan: readonly {
     readonly provider: ProviderName;
     readonly model: string;
-    readonly route?: string;
+    readonly route?: string | undefined;
   }[];
   readonly catalogRevision: number;
   readonly policyRevision: number;
@@ -236,7 +237,7 @@ interface SelectionPlanCommon {
   readonly selectorRevision: number;
   /** AB-67's `SteeringDesiredState.configVersion`, when steering produced
    *  this request. */
-  readonly configurationRevision?: number;
+  readonly configurationRevision?: number | undefined;
   readonly createdAt: string;
 }
 
@@ -247,7 +248,7 @@ interface SelectionPlanCommon {
  * record verbatim.
  */
 export type SelectionPlan =
-  | (SelectionPlanCommon & { readonly outcome: 'selected'; readonly failure?: never })
+  | (SelectionPlanCommon & { readonly outcome: 'selected'; readonly failure?: undefined })
   | (SelectionPlanCommon & {
       readonly outcome: Exclude<SelectionOutcomeKind, 'selected'>;
       readonly failure: SelectionOutcomeFailure;
@@ -262,7 +263,7 @@ export interface EffectiveGenerationResult {
   readonly planId: string;
   readonly provider: ProviderName;
   readonly model: string;
-  readonly effort?: Effort;
+  readonly effort?: Effort | undefined;
   readonly divergedFromPlan: boolean;
 }
 
@@ -276,7 +277,7 @@ export interface RevalidationInput {
   readonly priorSelected: {
     readonly provider: ProviderName;
     readonly model: string;
-    readonly route?: string;
+    readonly route?: string | undefined;
   };
   readonly priorCatalogRevision: number;
   readonly priorPolicyRevision: number;
@@ -288,26 +289,26 @@ export interface RevalidationInput {
  *  `SelectionRequest`. */
 export interface SelectOptions {
   readonly catalog: ModelCatalog;
-  readonly deployment?: DeploymentInvariants;
-  readonly bureau?: BureauInvariants;
-  readonly agent?: AgentPreferences;
-  readonly delegated?: DelegatedAuthority;
-  readonly user?: UserModelConfiguration;
+  readonly deployment?: DeploymentInvariants | undefined;
+  readonly bureau?: BureauInvariants | undefined;
+  readonly agent?: AgentPreferences | undefined;
+  readonly delegated?: DelegatedAuthority | undefined;
+  readonly user?: UserModelConfiguration | undefined;
   /** Defaults to `runtime.clock.nowISO()` (the real implementation when `runtime` is also omitted); inject in tests for byte-stable plans. */
-  readonly now?: () => string;
+  readonly now?: (() => string) | undefined;
   /** Defaults to `runtime.identifiers.next('selection-plan')` (the real implementation when `runtime` is also omitted); inject in tests for byte-stable plans. */
-  readonly newPlanId?: () => string;
+  readonly newPlanId?: (() => string) | undefined;
   /**
    * The AB-92/AB-252 `RuntimeServices` seam (AB-325) backing the default
    * `now`/`newPlanId` when those are not supplied. Defaults to the real
    * implementation; explicit `now`/`newPlanId` still take precedence over
    * `runtime` when both are supplied, for backward compatibility.
    */
-  readonly runtime?: RuntimeServices;
+  readonly runtime?: RuntimeServices | undefined;
   /** Defaults to `1`. */
-  readonly selectorRevision?: number;
-  readonly configurationRevision?: number;
-  readonly revalidate?: RevalidationInput;
+  readonly selectorRevision?: number | undefined;
+  readonly configurationRevision?: number | undefined;
+  readonly revalidate?: RevalidationInput | undefined;
 }
 
 // ── Deep freeze / structural copy, mirroring model-catalog.ts's own helper
@@ -343,9 +344,9 @@ function requestedEffort(request: SelectionRequest, options: SelectOptions): Eff
 
 interface EffortVerdict {
   readonly eligible: boolean;
-  readonly effort?: Effort;
-  readonly exclusionCode?: SelectionExclusionCode;
-  readonly exclusionReason?: string;
+  readonly effort?: Effort | undefined;
+  readonly exclusionCode?: SelectionExclusionCode | undefined;
+  readonly exclusionReason?: string | undefined;
 }
 
 const EFFORT_COMPATIBLE_NO_CHANGE = (effort: Effort): EffortVerdict => ({ eligible: true, effort });
@@ -498,10 +499,10 @@ function toRejectedOverride(request: SelectionRequest): SteeringRequestedValue |
 function toSelectionCandidate(
   policyCandidate: PolicyCandidate,
   overrides: {
-    readonly eligible?: boolean;
-    readonly exclusionCode?: SelectionExclusionCode;
-    readonly exclusionReason?: string;
-    readonly effort?: Effort;
+    readonly eligible?: boolean | undefined;
+    readonly exclusionCode?: SelectionExclusionCode | undefined;
+    readonly exclusionReason?: string | undefined;
+    readonly effort?: Effort | undefined;
   } = {},
 ): SelectionCandidate {
   const eligible = overrides.eligible ?? policyCandidate.eligible;
@@ -559,7 +560,7 @@ function buildFallbackPlan(
   const plan: {
     readonly provider: ProviderName;
     readonly model: string;
-    readonly route?: string;
+    readonly route?: string | undefined;
   }[] = [];
   for (const ref of fallbackOrder) {
     const candidate = byModel.get(ref);
@@ -757,7 +758,7 @@ export function select(request: SelectionRequest, options: SelectOptions): Selec
     });
   }
 
-  const sorted = [...eligibleCandidates].sort((a, b) => {
+  const sorted = [...eligibleCandidates].toSorted((a, b) => {
     const scoreA = rankingScore(
       a.rankingInputs ?? {},
       options.user?.costPreference,

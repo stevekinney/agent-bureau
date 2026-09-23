@@ -34,21 +34,20 @@
  * scheduler-task retrieval — AB-180) are named as unsupported through
  * `supports()` and a typed throw, never silently stubbed out.
  */
-import type {
-  AgentInput,
-  ChildRunHandle,
-  DispatchChildRunOptions,
-  MutableChildRunRegistry,
-} from '@lostgradient/operative';
-import { createChildRunRegistry, dispatchChildRun } from '@lostgradient/operative';
+import type { ManualRuntimeServices } from '@lostgradient/lifecycle';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import {
+  type AgentInput,
+  type ChildRunHandle,
+  createChildRunRegistry,
   createResourceScope,
+  dispatchChildRun,
+  type DispatchChildRunOptions,
+  type MutableChildRunRegistry,
   type ResourceScope,
   waitForCondition,
-} from '@lostgradient/operative/test';
+} from '@lostgradient/operative';
 import type { ScheduleSummary, WorkflowState } from '@lostgradient/weft';
-import type { ManualRuntimeServices } from 'lifecycle';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions, AgentNames, AgentRunForName } from '../agent-catalog';
 import { createBureau, detachBestEffortPromise } from '../create-bureau';
@@ -276,7 +275,7 @@ export interface BureauTestHarness<D extends AgentDefinitions = AgentDefinitions
  * `waitForCondition`'s own macrotask-yield loop — never a real timer, never
  * a fixed wall-clock sleep.
  */
-async function waitForBureauReady(bureau: Bureau<AgentDefinitions>): Promise<void> {
+async function waitForBureauReady(bureau: Bureau): Promise<void> {
   await waitForCondition(
     () => bureau.ready,
     'Bureau test harness: bureau.ready never became true after boot recovery',
@@ -331,7 +330,7 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
       storage: storage.configuration,
     });
 
-    await waitForBureauReady(bureau as unknown as Bureau<AgentDefinitions>);
+    await waitForBureauReady(bureau as unknown as Bureau);
   } catch (error) {
     await disposeQuietly(bureau);
     await disposeQuietly(storage);

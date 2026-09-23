@@ -1,11 +1,11 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
-import { sha256HexSync } from 'interoperability';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { sha256HexSync } from '@lostgradient/cryptography';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+import type { TextValueStore } from '@lostgradient/weft';
 import { z } from 'zod';
 
 import { parseSkillMarkdown } from '../parse-skill-markdown';
-import type { Proposal, SkillProvider } from '../types';
+import type { Proposal, SkillWriter } from '../types';
 
 // ── Key Namespace ───────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ export interface ListProposalsOptions {
 
 export interface AcceptProposalOptions {
   /** Skill provider for accepting skill proposals. */
-  skillProvider: SkillProvider;
+  skillProvider: SkillWriter;
   /** Identity provider for accepting soul/persona proposals. */
   identityProvider?: IdentityProviderLike;
 }
@@ -73,10 +73,86 @@ function parseProposal(raw: string): Proposal | undefined {
   try {
     const parsed = proposalSchema.safeParse(JSON.parse(raw));
     if (!parsed.success) return undefined;
-    return parsed.data;
+    const data = parsed.data;
+    return {
+      id: data.id,
+      type: data.type,
+      summary: data.summary,
+      content: data.content,
+      sourceEntryIds: data.sourceEntryIds,
+      createdAt: data.createdAt,
+      status: data.status,
+      ...(data.agentId !== undefined ? { agentId: data.agentId } : {}),
+      ...(data.rejectionReason !== undefined ? { rejectionReason: data.rejectionReason } : {}),
+    };
   } catch {
     return undefined;
   }
+}
+
+function matchesProposal(
+  proposal: Proposal,
+  options: ListProposalsOptions | undefined,
+  status: Proposal['status'],
+): boolean {
+  return (
+    proposal.status === status &&
+    (options?.type === undefined || proposal.type === options.type) &&
+    (options?.agentId === undefined || proposal.agentId === options.agentId)
+  );
+}
+
+async function acceptSkillProposal(proposal: Proposal, skillProvider: SkillWriter): Promise<void> {
+  const skillContent = parseSkillMarkdown(proposal.content);
+  await skillProvider.saveSkill(skillContent.metadata.name, skillContent);
+}
+
+async function acceptSoulProposal(
+  proposal: Proposal,
+  identityProvider: IdentityProviderLike | undefined,
+): Promise<void> {
+  if (!identityProvider) throw new Error('Identity provider required for soul proposals.');
+  const soulItemsResult = z.array(z.unknown()).safeParse(JSON.parse(proposal.content));
+  if (!soulItemsResult.success) throw new Error('Soul proposal content is not a valid JSON array.');
+  await identityProvider.savePendingSoulUpdate(soulItemsResult.data, proposal.agentId);
+}
+
+async function acceptPersonaProposal(
+  proposal: Proposal,
+  identityProvider: IdentityProviderLike | undefined,
+): Promise<void> {
+  if (!identityProvider) throw new Error('Identity provider required for persona proposals.');
+  if (!proposal.agentId) throw new Error('Persona proposals require an agentId.');
+  await identityProvider.savePersona(proposal.agentId, { text: proposal.content });
+}
+
+async function acceptProposalContent(
+  proposal: Proposal,
+  options: AcceptProposalOptions,
+): Promise<void> {
+  switch (proposal.type) {
+    case 'skill':
+      await acceptSkillProposal(proposal, options.skillProvider);
+      return;
+    case 'soul':
+      await acceptSoulProposal(proposal, options.identityProvider);
+      return;
+    case 'persona':
+      await acceptPersonaProposal(proposal, options.identityProvider);
+      return;
+  }
+}
+
+function shouldClearProposal(
+  proposal: Proposal,
+  options: { status?: 'accepted' | 'rejected'; olderThanMs?: number },
+  now: number,
+): boolean {
+  if (options.status ? proposal.status !== options.status : proposal.status === 'pending') {
+    return false;
+  }
+  if (options.olderThanMs === undefined) return true;
+  return now - new Date(proposal.createdAt).getTime() >= options.olderThanMs;
 }
 
 // ── CRUD Functions ──────────────────────────────────────────────────
@@ -115,9 +191,7 @@ export async function listProposals(
     const proposal = parseProposal(raw);
     if (!proposal) continue;
 
-    if (proposal.status !== status) continue;
-    if (options?.type && proposal.type !== options.type) continue;
-    if (options?.agentId && proposal.agentId !== options.agentId) continue;
+    if (!matchesProposal(proposal, options, status)) continue;
 
     proposals.push(proposal);
   }
@@ -129,7 +203,7 @@ export async function listProposals(
 
 /**
  * Accept a proposal. Behavior depends on type:
- * - 'skill': Parse content as SKILL.md, write to SkillProvider.
+ * - 'skill': Parse content as SKILL.md, write to SkillWriter.
  * - 'soul': Parse content as soul items JSON, write as pending soul update.
  * - 'persona': Update the persona text via identity provider.
  */
@@ -144,53 +218,7 @@ export async function acceptProposal(
   }
 
   try {
-    switch (proposal.type) {
-      case 'skill': {
-        const skillContent = parseSkillMarkdown(proposal.content);
-        await options.skillProvider.saveSkill(skillContent.metadata.name, skillContent);
-        break;
-      }
-
-      case 'soul': {
-        if (!options.identityProvider) {
-          return {
-            accepted: false,
-            error: 'Identity provider required for soul proposals.',
-          };
-        }
-        const soulItemsResult = z.array(z.unknown()).safeParse(JSON.parse(proposal.content));
-        if (!soulItemsResult.success) {
-          return {
-            accepted: false,
-            error: 'Soul proposal content is not a valid JSON array.',
-          };
-        }
-        await options.identityProvider.savePendingSoulUpdate(
-          soulItemsResult.data,
-          proposal.agentId,
-        );
-        break;
-      }
-
-      case 'persona': {
-        if (!options.identityProvider) {
-          return {
-            accepted: false,
-            error: 'Identity provider required for persona proposals.',
-          };
-        }
-        if (!proposal.agentId) {
-          return {
-            accepted: false,
-            error: 'Persona proposals require an agentId.',
-          };
-        }
-        await options.identityProvider.savePersona(proposal.agentId, {
-          text: proposal.content,
-        });
-        break;
-      }
-    }
+    await acceptProposalContent(proposal, options);
 
     const updated: Proposal = { ...proposal, status: 'accepted' };
     await saveProposal(storage, updated);
@@ -219,7 +247,7 @@ export async function rejectProposal(
   const updated: Proposal = {
     ...proposal,
     status: 'rejected',
-    rejectionReason: reason,
+    ...(reason !== undefined ? { rejectionReason: reason } : {}),
   };
   await saveProposal(storage, updated);
 
@@ -282,19 +310,7 @@ export async function clearProposals(
     const proposal = parseProposal(raw);
     if (!proposal) continue;
 
-    // When no status filter is given, only clear non-pending proposals.
-    // Without this guard, pending (unreviewed) proposals would be silently deleted.
-    const targetStatus = options?.status;
-    if (targetStatus) {
-      if (proposal.status !== targetStatus) continue;
-    } else if (proposal.status === 'pending') {
-      continue;
-    }
-
-    if (options?.olderThanMs) {
-      const age = runtime.clock.now() - new Date(proposal.createdAt).getTime();
-      if (age < options.olderThanMs) continue;
-    }
+    if (!shouldClearProposal(proposal, options ?? {}, runtime.clock.now())) continue;
 
     await storage.delete(key);
     removed++;

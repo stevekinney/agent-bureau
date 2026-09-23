@@ -42,8 +42,8 @@ export function createMemoryRecallTool(
     input: memoryRecallInput,
     async execute(params) {
       const results = await memory.recall(params.query, {
-        limit: params.limit,
-        namespace: params.namespace,
+        ...(params.limit !== undefined ? { limit: params.limit } : {}),
+        ...(params.namespace !== undefined ? { namespace: params.namespace } : {}),
       });
 
       if (results.length === 0) {

@@ -29,22 +29,22 @@ export interface CreateMemoryBridgeOptions {
   /** Scratchpad to populate and persist. */
   scratchpad: Scratchpad;
   /** Namespace for memory operations. Default: `'scratchpad'`. */
-  namespace?: string;
+  namespace?: string | undefined;
   /**
    * Which scratchpad keys to persist to long-term memory on the final step.
    * When omitted, all keys are persisted.
    */
-  persistKeys?: string[];
+  persistKeys?: string[] | undefined;
   /**
    * Query used to recall memories at run start. Can be a static string or a
    * function that extracts the query from the conversation. When omitted,
    * the last user message is used.
    */
-  recallQuery?: string | ((conversation: Conversation) => string);
+  recallQuery?: (string | ((conversation: Conversation) => string)) | undefined;
   /** Maximum number of memories to recall. Default: `5`. */
-  recallLimit?: number;
+  recallLimit?: number | undefined;
   /** Scratchpad key to write recalled memories under. Default: `'memories'`. */
-  scratchpadKey?: string;
+  scratchpadKey?: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ export interface CreateMemoryBridgeOptions {
 // ---------------------------------------------------------------------------
 
 function extractLastUserMessage(conversation: Conversation): string | undefined {
-  const lastUserMessage = [...conversation.getMessages()].reverse().find(
+  const lastUserMessage = [...conversation.getMessages()].toReversed().find(
     (
       message,
     ): message is typeof message & {

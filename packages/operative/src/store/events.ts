@@ -1,4 +1,4 @@
-import type { EventMap } from 'lifecycle';
+import type { EventMap } from '@lostgradient/lifecycle';
 
 import type { Action } from './types';
 

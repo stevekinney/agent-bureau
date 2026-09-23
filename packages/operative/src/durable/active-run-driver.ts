@@ -1,7 +1,7 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 import { isWeftErrorLike } from '@lostgradient/weft';
 import type { AnyToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
 
 import { AgentRunError, toAgentRunError } from '../errors';
 import type { OperativeEventEmitter } from '../events';
@@ -82,7 +82,14 @@ export async function driveDurableRun(
   // with that same error instead of hanging forever.
   let startError: unknown;
   try {
-    startError = await startRunLifecycle(options, conversation, emitter);
+    const started = await startRunLifecycle(options, conversation, emitter);
+    startError = started.error;
+    // COR-766: released when this run reaches a terminal state, so a registry
+    // that outlives the run does not accumulate an observer per run. A throw
+    // from `startRunLifecycle` itself never attached one.
+    emitter.addEventListener('run.completed', started.stopObservingHookPlan, { once: true });
+    emitter.addEventListener('run.error', started.stopObservingHookPlan, { once: true });
+    emitter.addEventListener('run.aborted', started.stopObservingHookPlan, { once: true });
   } catch (error) {
     rejectDurablyStarted(error);
     return makeErrorResult(

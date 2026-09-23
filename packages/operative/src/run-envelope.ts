@@ -1,11 +1,15 @@
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { ConversationHistory, JSONValue, TokenUsage } from 'conversationalist';
-import { conversationSchema, jsonValueSchema, tokenUsageSchema } from 'conversationalist/schemas';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { conversationSchema, jsonValueSchema, tokenUsageSchema } from 'conversationalist';
 import { z } from 'zod';
 
 import type { CostEstimate } from './cost-estimation';
 import { AgentRunError, serializeAgentRunError } from './errors';
 import type { FinishReason } from './types';
+
+function unreachable(value: never): never {
+  throw new Error(`Unsupported finish reason: ${String(value)}`);
+}
 
 /**
  * AB-96 — Serializable run envelope for out-of-process runners.
@@ -71,13 +75,13 @@ const DEFAULT_MAX_OBJECT_KEYS = 50;
 
 export interface SummarizeOptions {
   /** Strings longer than this are truncated with a `…(N more chars)` marker. Default 500. */
-  maxStringLength?: number;
+  maxStringLength?: number | undefined;
   /** Nesting depth beyond which a value collapses to `'[truncated]'`. Default 4. */
-  maxDepth?: number;
+  maxDepth?: number | undefined;
   /** Arrays longer than this are truncated with a trailing marker element. Default 20. */
-  maxArrayItems?: number;
+  maxArrayItems?: number | undefined;
   /** Objects with more keys than this are truncated with a trailing marker key. Default 50. */
-  maxObjectKeys?: number;
+  maxObjectKeys?: number | undefined;
 }
 
 /**
@@ -377,7 +381,7 @@ function now(clock?: () => number): number {
 }
 
 export function createRunStartedFrame(
-  input: { runId: string; sessionId?: string; agentName?: string },
+  input: { runId: string; sessionId?: string | undefined; agentName?: string | undefined },
   clock?: () => number,
 ): RunStartedFrame {
   return {
@@ -391,7 +395,12 @@ export function createRunStartedFrame(
 }
 
 export function createStepFrame(
-  input: { runId: string; step: number; phase: 'started' | 'completed'; usage?: TokenUsage },
+  input: {
+    runId: string;
+    step: number;
+    phase: 'started' | 'completed';
+    usage?: TokenUsage | undefined;
+  },
   clock?: () => number,
 ): StepFrame {
   return {
@@ -441,7 +450,7 @@ export function createToolPreFrame(
     toolCallId: string;
     toolName: string;
     params: unknown;
-    summarizeOptions?: SummarizeOptions;
+    summarizeOptions?: SummarizeOptions | undefined;
   },
   clock?: () => number,
 ): ToolPreFrame {
@@ -464,10 +473,10 @@ export function createToolPostFrame(
     toolCallId: string;
     toolName: string;
     status: ToolFrameStatus;
-    durationMs?: number;
+    durationMs?: number | undefined;
     result?: unknown;
     error?: unknown;
-    summarizeOptions?: SummarizeOptions;
+    summarizeOptions?: SummarizeOptions | undefined;
   },
   clock?: () => number,
 ): ToolPostFrame {
@@ -490,7 +499,13 @@ export function createToolPostFrame(
 }
 
 export function createNotificationFrame(
-  input: { runId: string; step?: number; level: NotificationLevel; code: string; message: string },
+  input: {
+    runId: string;
+    step?: number | undefined;
+    level: NotificationLevel;
+    code: string;
+    message: string;
+  },
   clock?: () => number,
 ): NotificationFrame {
   return {
@@ -526,6 +541,7 @@ export function createRunFinishedFrame(
 export function stringifyError(error: unknown): string {
   if (error instanceof AgentRunError) return serializeAgentRunError(error);
   if (error instanceof Error) return error.message;
+  if (isStructuredToolError(error)) return error.message;
   if (typeof error === 'string') return error;
   if (error === null || error === undefined) return 'null';
   try {
@@ -533,6 +549,30 @@ export function stringifyError(error: unknown): string {
   } catch {
     return '[unserializable error]';
   }
+}
+
+/**
+ * A tool-protocol `ToolError` — a plain object, not an `Error`, so the
+ * `instanceof` branch above cannot see it and the `JSON.stringify` fallback
+ * below turns a readable message into a serialized object. A frame's `error` is
+ * a human-facing string, so the message is what belongs there.
+ *
+ * Armorer has settled a `ToolError` on the approval path since COR-45, so these
+ * have been reaching here already; COR-1261 made ordinary tool failures settle
+ * one too, which is what surfaced it.
+ *
+ * Checked structurally rather than with armorer's own `isToolError`, which
+ * would add a dependency edge from operative onto armorer for one guard. The
+ * shape matches what that guard checks.
+ */
+function isStructuredToolError(value: unknown): value is { message: string } {
+  if (!value || typeof value !== 'object') return false;
+  return (
+    typeof Reflect.get(value, 'code') === 'string' &&
+    typeof Reflect.get(value, 'category') === 'string' &&
+    typeof Reflect.get(value, 'retryable') === 'boolean' &&
+    typeof Reflect.get(value, 'message') === 'string'
+  );
 }
 
 /** Coerces an arbitrary value to a JSON-safe value, or `undefined` if it can't round-trip. */
@@ -567,20 +607,22 @@ export function mapFinishReasonToStatus(finishReason: FinishReason): RunReportSt
     case 'error':
     case 'tripwire':
       return 'failed';
+    default:
+      return unreachable(finishReason);
   }
 }
 
 export interface BuildRunReportInput {
   runId: string;
   status: RunReportStatus;
-  finishReason?: FinishReason;
+  finishReason?: FinishReason | undefined;
   usage: TokenUsage;
-  costEstimate?: CostEstimate;
-  effectiveModel?: string;
-  effectiveEffort?: string;
+  costEstimate?: CostEstimate | undefined;
+  effectiveModel?: string | undefined;
+  effectiveEffort?: string | undefined;
   output?: unknown;
   error?: unknown;
-  transcript?: ConversationHistory;
+  transcript?: ConversationHistory | undefined;
 }
 
 /**

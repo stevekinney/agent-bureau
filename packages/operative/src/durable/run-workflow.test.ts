@@ -1,11 +1,16 @@
-import type { WorkflowServicesResolution, WorkflowServicesResolverInfo } from '@lostgradient/weft';
-import { Engine } from '@lostgradient/weft';
-import { MemoryStorage, type Storage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { HookRegistry } from '@lostgradient/lifecycle';
+import {
+  Engine,
+  MemoryStorage,
+  type Storage,
+  textValueStore,
+  type WorkflowServicesResolution,
+  type WorkflowServicesResolverInfo,
+  yieldToPortableEventLoop,
+} from '@lostgradient/weft';
 import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from '../conditions/predicates';
@@ -261,10 +266,10 @@ async function runToCompletion(
   engine: Awaited<ReturnType<typeof buildEngine>>['engine'],
   input: {
     runId: string;
-    sessionId?: string;
-    agentName?: string;
-    prompt?: string;
-    maximumSteps?: number;
+    sessionId?: string | undefined;
+    agentName?: string | undefined;
+    prompt?: string | undefined;
+    maximumSteps?: number | undefined;
   },
   services: DurableRunDeps,
 ) {
@@ -303,6 +308,10 @@ describe('durable agentRun workflow', () => {
       },
     });
     const toolbox = createToolbox([failingTool]);
+    const hooks = new HookRegistry<OperativeHookMap>();
+    hooks.on('validateToolResult', async () => {
+      throw new Error('tool validation failed');
+    });
     try {
       const result = await runToCompletion(
         engine,
@@ -317,9 +326,7 @@ describe('durable agentRun workflow', () => {
             toolbox,
             conversation: createConversationHistory(),
             stopWhen: noToolCalls(),
-            validateToolResult: async () => {
-              throw new Error('tool validation failed');
-            },
+            hooks,
           },
         },
       );
@@ -591,6 +598,17 @@ describe('durable agentRun workflow', () => {
       const toolbox = continuingToolbox();
       let generateCalled = false;
 
+      const prepareStepHooks = new HookRegistry<OperativeHookMap>();
+      prepareStepHooks.on('prepareStep', async () => {
+        throw new GuardrailTripwireError('Injection detected', {
+          guardrailName: 'prompt-injection',
+          category: 'prompt-injection',
+          phase: 'input',
+          confidence: 0.95,
+          detail: 'matched 3 patterns',
+        });
+      });
+
       const services: DurableRunDeps = {
         toolbox,
         options: {
@@ -601,15 +619,7 @@ describe('durable agentRun workflow', () => {
           toolbox,
           conversation: createConversationHistory(),
           stopWhen: noToolCalls(),
-          prepareStep: async () => {
-            throw new GuardrailTripwireError('Injection detected', {
-              guardrailName: 'prompt-injection',
-              category: 'prompt-injection',
-              phase: 'input',
-              confidence: 0.95,
-              detail: 'matched 3 patterns',
-            });
-          },
+          hooks: prepareStepHooks,
         },
       };
 
@@ -644,6 +654,18 @@ describe('durable agentRun workflow', () => {
       const toolbox = continuingToolbox();
       let generateCallCount = 0;
 
+      const validateResponseHooks = new HookRegistry<OperativeHookMap>();
+      validateResponseHooks.on('validateResponse', async (response) => {
+        if (response.content.includes('@')) {
+          throw new GuardrailTripwireError('PII detected', {
+            guardrailName: 'output-pii',
+            category: 'pii',
+            phase: 'output',
+            confidence: 0.9,
+          });
+        }
+      });
+
       const services: DurableRunDeps = {
         toolbox,
         options: {
@@ -654,16 +676,7 @@ describe('durable agentRun workflow', () => {
           toolbox,
           conversation: createConversationHistory(),
           stopWhen: noToolCalls(),
-          validateResponse: async (response) => {
-            if (response.content.includes('@')) {
-              throw new GuardrailTripwireError('PII detected', {
-                guardrailName: 'output-pii',
-                category: 'pii',
-                phase: 'output',
-                confidence: 0.9,
-              });
-            }
-          },
+          hooks: validateResponseHooks,
         },
       };
 
@@ -718,6 +731,18 @@ describe('durable agentRun workflow', () => {
       const toolbox = createToolbox([wakeupTool, nextTool]) as unknown as RegistryToolbox;
 
       let call = 0;
+      const wakeupValidateResponseHooks = new HookRegistry<OperativeHookMap>();
+      wakeupValidateResponseHooks.on('validateResponse', async (response) => {
+        if (response.content.includes('@')) {
+          throw new GuardrailTripwireError('PII detected', {
+            guardrailName: 'output-pii',
+            category: 'pii',
+            phase: 'output',
+            confidence: 0.9,
+          });
+        }
+      });
+
       const services: DurableRunDeps = {
         options: {
           generate: async () => {
@@ -733,16 +758,7 @@ describe('durable agentRun workflow', () => {
           toolbox,
           conversation: createConversationHistory(),
           stopWhen: noToolCalls(),
-          validateResponse: async (response) => {
-            if (response.content.includes('@')) {
-              throw new GuardrailTripwireError('PII detected', {
-                guardrailName: 'output-pii',
-                category: 'pii',
-                phase: 'output',
-                confidence: 0.9,
-              });
-            }
-          },
+          hooks: wakeupValidateResponseHooks,
         },
         toolbox,
       };
@@ -782,7 +798,12 @@ describe('durable agentRun workflow', () => {
     /** Start a run but do NOT await — used when the run hangs mid-step. */
     function startRun(
       engine: Awaited<ReturnType<typeof buildEngine>>['engine'],
-      input: { runId: string; sessionId?: string; agentName?: string; prompt?: string },
+      input: {
+        runId: string;
+        sessionId?: string | undefined;
+        agentName?: string | undefined;
+        prompt?: string | undefined;
+      },
       services: DurableRunDeps,
     ) {
       return engine.start(
@@ -854,6 +875,10 @@ describe('durable agentRun workflow', () => {
       }
     });
 
+    // COR-1267 criterion 3 — "completed-step replay invokes no hooks" — is
+    // this test. It is the memoized half of seam #11; the in-flight half is
+    // the test below it. Named here so the criterion's coverage is findable
+    // from the issue without a duplicate test asserting the same property.
     it('fires an effectful step-level hook exactly once across a crash/recover cycle (seam #11)', async () => {
       // Whole-step memoization (`ctx.memo` in run-workflow.ts) is what keeps a
       // hook's replay policy sound WITHOUT gating on it: `runStep` — and every
@@ -926,6 +951,108 @@ describe('durable agentRun workflow', () => {
       }
     });
 
+    it("re-invokes the IN-FLIGHT step's effectful hooks on recovery, in the same priority order (COR-1267)", async () => {
+      // The complement of the test above, and the other half of seam #11.
+      // That one proves a COMMITTED step's hooks do not re-fire, because
+      // `ctx.memo` short-circuits the whole step. This proves the case the
+      // decision actually turns on: the step that was in flight when the
+      // process died is NOT memoized, so on recovery it re-runs in full and
+      // every hook it invokes fires AGAIN.
+      //
+      // That is the at-least-once contract `HookReplayPolicy` documents, and
+      // why the mitigation for an `effectful` hook is idempotence rather than
+      // replay suppression: the step genuinely re-executed its generate and
+      // its tools, so suppressing the hook would drop a side effect for work
+      // that really did happen a second time.
+      const storage = new MemoryStorage();
+      const runId = 'cccccccc-0000-4000-8000-000000000007';
+
+      // Ids in invocation order, shared across both "processes" the way an
+      // external store would be.
+      const effects: string[] = [];
+      let sawInFlightEffect = 0;
+
+      function hooksRecordingOrder(hangOnStep: boolean): HookRegistry<OperativeHookMap> {
+        const hooks = new HookRegistry<OperativeHookMap>();
+        // Two effectful handlers on one hook point at different priorities,
+        // so recovery has an ORDER to get wrong, not just a count.
+        hooks.on(
+          'afterToolExecution',
+          async () => {
+            effects.push('high');
+            sawInFlightEffect += 1;
+          },
+          { id: 'effect:high', priority: 100, replay: 'effectful' },
+        );
+        hooks.on(
+          'afterToolExecution',
+          async () => {
+            effects.push('low');
+          },
+          { id: 'effect:low', priority: 1, replay: 'effectful' },
+        );
+        if (hangOnStep) {
+          // Hangs AFTER the tool hooks have run but BEFORE the step's memo
+          // commits, which is exactly the in-flight state a crash catches.
+          hooks.on('onStep', async () => {
+            if (effects.length >= 4) return new Promise<never>(() => {});
+            return undefined;
+          });
+        }
+        return hooks;
+      }
+
+      function services(hangOnStep: boolean): DurableRunDeps {
+        const toolbox = continuingToolbox();
+        return {
+          toolbox,
+          options: {
+            generate: async ({ step }: GenerateContext) =>
+              step < 2
+                ? { content: `step ${step}`, toolCalls: [{ name: 'next', arguments: {} }] }
+                : { content: 'done', toolCalls: [] },
+            toolbox,
+            conversation: createConversationHistory(),
+            stopWhen: noToolCalls(),
+            hooks: hooksRecordingOrder(hangOnStep),
+          },
+        };
+      }
+
+      const a = await buildEngine(storage, false);
+      const handle = await startRun(a.engine, { runId, prompt: 'Start' }, services(true));
+      void handle.result().catch(() => {});
+
+      // Step 0 commits; step 1 then runs its tool hooks and hangs in `onStep`.
+      await a.waitForCursorSave(runId, 1);
+      while (effects.length < 4) await yieldToPortableEventLoop();
+
+      // Step 0's two hooks, then step 1's two — priority order within each.
+      expect(effects).toEqual(['high', 'low', 'high', 'low']);
+      // Only step 0 is checkpointed. Step 1 is the in-flight, un-memoized one.
+      const beforeCrash = await a.checkpointStore.loadCheckpoint(runId);
+      expect(beforeCrash.steps).toHaveLength(1);
+      expect(sawInFlightEffect).toBe(2);
+      a.engine[Symbol.dispose]();
+
+      const b = await buildEngine(storage, false, async () => ({
+        status: 'available',
+        services: services(false),
+      }));
+      try {
+        const handles = await b.engine.recoverAll();
+        expect(handles.length).toBe(1);
+        await handles[0]!.result();
+
+        // Step 1 re-ran in full, so BOTH its effectful handlers fired a second
+        // time — and in the same priority order, high before low.
+        expect(effects).toEqual(['high', 'low', 'high', 'low', 'high', 'low']);
+        expect(sawInFlightEffect).toBe(3);
+      } finally {
+        b.engine[Symbol.dispose]();
+      }
+    });
+
     it('fails just the unrecoverable resumed run (resolver unavailable) without bricking the engine', async () => {
       const storage = new MemoryStorage();
       const runId = 'bbbbbbbb-0000-4000-8000-000000000002';
@@ -958,7 +1085,7 @@ describe('durable agentRun workflow', () => {
 
         // The single unresolvable run is now terminally `failed` (not left
         // `running`, which a later boot would re-attempt forever).
-        const state = (await b.engine.get(runId)) as { status?: string } | null;
+        const state = (await b.engine.get(runId)) as { status?: string | undefined } | null;
         expect(state?.status).toBe('failed');
       } finally {
         b.engine[Symbol.dispose]();

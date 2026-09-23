@@ -4,6 +4,8 @@
  * Uses a hand-crafted `TextValueStore` stub so tests are fully deterministic
  * without starting a live bureau or durable engine.
  */
+import { CompletableEventTarget, createManualRuntimeServices } from '@lostgradient/lifecycle';
+import type { Action } from '@lostgradient/operative';
 import {
   AgentScheduledEvent,
   ScheduleCancelledEvent,
@@ -11,11 +13,8 @@ import {
   ScheduleResumedEvent,
   SessionDeletedEvent,
 } from '@lostgradient/operative';
-import type { Action } from '@lostgradient/operative/store';
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { MemoryStorage, textValueStore, yieldToPortableEventLoop } from '@lostgradient/weft';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import { CompletableEventTarget, createManualRuntimeServices } from 'lifecycle';
 
 import { type AuditRecord, computeInitialAuditSequence, createAuditTrail } from './audit-trail';
 import { ActionEvent, type BureauEventMap } from './events';
@@ -451,7 +450,7 @@ describe('createAuditTrail', () => {
     const records = await trail.query();
     // Both records must be stored — no silent overwrite.
     expect(records).toHaveLength(2);
-    const runIds = records.map((r) => r.runId).sort();
+    const runIds = records.map((r) => r.runId).toSorted();
     expect(runIds).toEqual(['session-1:0', 'session-2:0']);
     trail.dispose();
   });
@@ -600,7 +599,7 @@ describe('createAuditTrail', () => {
       // the collision.
       const records = await trail.query({ runId: 'run-collide' });
       expect(records).toHaveLength(2);
-      expect(records.map((record) => record.type).sort()).toEqual([
+      expect(records.map((record) => record.type).toSorted()).toEqual([
         'review.tool-approval.approved',
         'tool.started',
       ]);
@@ -670,7 +669,7 @@ describe('createAuditTrail', () => {
       // a DIFFERENT key — never overwriting the collision.
       const records = await trail.query({ runId: 'run-ordinary-collide' });
       expect(records).toHaveLength(2);
-      expect(records.map((record) => record.type).sort()).toEqual([
+      expect(records.map((record) => record.type).toSorted()).toEqual([
         'review.tool-approval.approved',
         'tool.started',
       ]);
@@ -829,7 +828,7 @@ describe('createAuditTrail', () => {
 
     const records = await trail.query({ runId: 'run-collision-check' });
     expect(records).toHaveLength(2);
-    expect(records.map((r) => r.type).sort()).toEqual([
+    expect(records.map((r) => r.type).toSorted()).toEqual([
       'review.tool-approval.approved',
       'run.completed',
     ]);
@@ -1576,7 +1575,7 @@ describe('createAuditTrail', () => {
 
     it('query() sorts a sequence-less legacy record before every real sequence sharing its millisecond, using a transitive comparator (Codex P2 review finding, PR #594)', async () => {
       const kv = textValueStore(new MemoryStorage());
-      // Written out of final order; `query()`'s own `keys.sort()` (a
+      // Written out of final order; `query()`'s own `keys.toSorted()` (a
       // separate, lexicographic KEY sort used only for bounding the scan
       // — see its own doc comment) reorders the raw scan to
       // [seq 1, seq 2, legacy] first (digits sort before the letter 'l'),
@@ -1776,7 +1775,7 @@ describe('createAuditTrail', () => {
         remaining
           .map((r) => r.runId)
           .filter((runId) => !runId.startsWith('bureau:audit-retention'))
-          .sort(),
+          .toSorted(),
       ).toEqual(['run-at-cutoff', 'run-new']);
 
       const auditPrunedRecords = await trail.query({ type: 'audit.pruned' });

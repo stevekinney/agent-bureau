@@ -1,5 +1,14 @@
-import type { EventIteratorOptions } from 'lifecycle';
-
+export {
+  approvalStatusToDecision,
+  combineApprovalStatuses,
+  createApprovalPolicyHooks,
+  createHeadlessPermissionPolicyHooks,
+  evaluateApprovalStatus,
+  evaluateCapabilityApproval,
+  evaluateHeadlessPermission,
+  resolveApprovalMode,
+  resolveCapabilityTier,
+} from './approval-policy';
 export type {
   ApprovalMode,
   ApprovalPolicyConfiguration,
@@ -12,21 +21,18 @@ export type {
   PermissionGate,
   PermissionGateDecision,
 } from './approval-policy';
-export {
-  approvalStatusToDecision,
-  combineApprovalStatuses,
-  createApprovalPolicyHooks,
-  createHeadlessPermissionPolicyHooks,
-  evaluateApprovalStatus,
-  evaluateCapabilityApproval,
-  evaluateHeadlessPermission,
-  resolveApprovalMode,
-  resolveCapabilityTier,
-} from './approval-policy';
 export { combineToolboxes } from './combine-toolboxes';
-export type { ToolboxBudgetExceededToolError } from './core/errors';
-export type { ToolError, ToolErrorCategory } from './core/errors';
-export { isToolboxBudgetExceededToolError, TOOLBOX_BUDGET_EXCEEDED_MARKER } from './core/errors';
+export * from './core';
+export { TOOLBOX_BUDGET_EXCEEDED_MARKER, isToolboxBudgetExceededToolError } from './core/errors';
+export type { ToolError, ToolErrorCategory, ToolboxBudgetExceededToolError } from './core/errors';
+export {
+  EXTERNAL_PROJECTION_VERSION,
+  freezeEffectiveToolExecutionContext,
+  freezeToolRequestContext,
+  narrowToolAuthority,
+  privilegedExecutionSnapshot,
+  projectExecutionSnapshot,
+} from './execution-context';
 export type {
   EffectiveToolExecutionContext,
   ExternalExecutionProjection,
@@ -36,14 +42,7 @@ export type {
   ToolAuthority,
   ToolRequestContext,
 } from './execution-context';
-export {
-  EXTERNAL_PROJECTION_VERSION,
-  freezeEffectiveToolExecutionContext,
-  freezeToolRequestContext,
-  narrowToolAuthority,
-  privilegedExecutionSnapshot,
-  projectExecutionSnapshot,
-} from './execution-context';
+export { createExecutionLifecycle } from './execution-lifecycle';
 export type {
   BeginExecutionOptions,
   ExecutionAbortSource,
@@ -57,14 +56,10 @@ export type {
   ExecutionSnapshot,
   ExecutionState,
 } from './execution-lifecycle';
-export { createExecutionLifecycle } from './execution-lifecycle';
-// AB-92/AB-254 — the RuntimeServices contract and its real-globals default
-// implementation live in `lifecycle` (a private foundation package) and are
-// re-exported here so a consumer never has to depend on `lifecycle`
-// directly; inlined into this package's shipped artifact at build time,
-// the existing treatment `ObservableLike`/`Subscription` already receive.
-// The manual (deterministic) implementation is exported from
-// `armorer/test` instead — see `./test/index.ts`.
+// RuntimeServices is part of this package's public execution contract.
+// Its implementation and types have one source owner: @lostgradient/lifecycle.
+// Deterministic callers can use createManualRuntimeServices from that workspace.
+export { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 export type {
   DeferredDrainReport,
   RuntimeClock,
@@ -75,10 +70,20 @@ export type {
   RuntimeServices,
   RuntimeTimeoutHandle,
   RuntimeTimers,
-} from 'lifecycle';
-export { createDefaultRuntimeServices } from 'lifecycle';
+} from '@lostgradient/lifecycle';
 // `ToolDefinition` is part of the public `Tool` type's structure, so downstream
 // packages must be able to name it to emit their own declarations (TS2883).
+export {
+  APPROVAL_BINDING_VERSION,
+  ApprovalBindingError,
+  GRANT_VERSION,
+  GrantError,
+  createProcessLocalApprovalStateStore,
+  createProcessLocalGrantStateStore,
+  signGrant,
+  validateApprovalBinding,
+  verifyGrantSignature,
+} from './approval-binding';
 export type {
   ApprovalBindingContext,
   ApprovalBindingPayload,
@@ -86,17 +91,6 @@ export type {
   ApprovalStateStore,
   GrantStateStore,
   ReusableApprovalGrant,
-} from './approval-binding';
-export {
-  APPROVAL_BINDING_VERSION,
-  ApprovalBindingError,
-  createProcessLocalApprovalStateStore,
-  createProcessLocalGrantStateStore,
-  GRANT_VERSION,
-  GrantError,
-  signGrant,
-  validateApprovalBinding,
-  verifyGrantSignature,
 } from './approval-binding';
 export type {
   AnyToolDefinition,
@@ -109,46 +103,28 @@ export type {
 // whose own exported function infers a `Tool` return type (no explicit
 // annotation) needs to be able to name this type, not just reach it through
 // the `armorer/core` subpath.
+export type { LoopDetectionOptions, LoopDetectionResult } from './core/loop-detection';
 export type { SerializedToolDefinition } from './core/serialization';
-export type { CreateToolOptions, WithContext } from './create-tool';
-export { createTool, createToolCall, lazy, withContext } from './create-tool';
+export {
+  createTool,
+  createToolCall,
+  internalToolTestUtilities,
+  lazy,
+  withContext,
+} from './create-tool';
+// `NamedTool` is what `createTool` returns, so it belongs on the top-level surface for the same
+// reason as `SerializedToolDefinition` above: a downstream package whose exported function
+// infers a tool's type must be able to name it in its declarations. Operative's tool factories
+// did, and their declarations failed with TS2883 until it was exported (COR-1291).
 export type {
-  AnyToolbox,
-  GrantListFilter,
-  GrantUsedDetail,
-  ImportedToolboxOptions,
-  ImportedToolConfiguration,
-  LoopDetectionOptions,
-  LoopDetectionResult,
-  LoopDetectorInstance,
-  ReusableApprovalGrantInput,
-  SerializedToolbox,
-  SerializedToolboxJSONSchema,
-  Toolbox,
-  ToolboxCallInputForTools,
-  ToolboxContext,
-  ToolboxEntries,
-  ToolboxEntry,
-  ToolboxEvents,
-  ToolboxExecuteOptions,
-  ToolboxOptions,
-  ToolboxRuntimeContext,
-  ToolMiddleware,
-  ToolsFromEntries,
-  ToolStatusUpdate,
-} from './create-toolbox';
-export { createMiddleware, createToolbox, isToolbox } from './create-toolbox';
-export type {
-  CachedToolResult,
-  CreateToolResultCacheOptions,
-  DirectIdempotencyExecuteOptions,
-  IdempotencyOptions,
-  IdempotencyResolutionReceipt,
-  IdempotentTool,
-  LegacyIdempotencyResolutionReceipt,
-  ToolResultCache,
-  WithToolboxIdempotencyOptions,
-} from './idempotency';
+  AsyncToolMetadataInput,
+  CreateToolOptions,
+  NamedTool,
+  SyncToolMetadataInput,
+  ToolMetadataInput,
+  WithContext,
+} from './create-tool/options';
+export { createToolbox } from './create-toolbox';
 export {
   compositeKey,
   createToolResultCache,
@@ -158,24 +134,62 @@ export {
   withIdempotency,
   withToolboxIdempotency,
 } from './idempotency';
+export type {
+  CachedToolResult,
+  CreateToolResultCacheOptions,
+  DirectIdempotencyExecuteOptions,
+  IdempotencyOptions,
+  IdempotencyResolutionReceipt,
+  IdempotentTool,
+  LegacyIdempotencyResolutionReceipt,
+  StartedToolExecution,
+  ToolResultCache,
+  ToolResultCacheEntry,
+  WithToolboxIdempotencyOptions,
+} from './idempotency';
 export { jsonSchemaToZod } from './json-schema-to-zod';
+export type { ToolboxResolveApprovalOptions } from './toolbox-approval-api';
+export type { GrantListFilter, ReusableApprovalGrantInput } from './toolbox-approval-contracts';
+export { createMiddleware } from './toolbox-contracts';
+export type {
+  GrantUsedDetail,
+  ImportedToolboxOptions,
+  SerializedToolbox,
+  SerializedToolboxJSONSchema,
+  ToolMiddleware,
+  ToolStatusUpdate,
+  ToolboxContext,
+  ToolboxEntries,
+  ToolboxEntry,
+  ToolboxEvents,
+  ToolboxExecuteOptions,
+  ToolboxOptions,
+  ToolboxRuntimeContext,
+} from './toolbox-contracts';
+export { isToolbox } from './toolbox-instance';
+export type { AnyToolbox, LoopDetectorInstance, Toolbox } from './toolbox-interface';
+export type {
+  ImportedToolConfiguration,
+  ToolboxCallInputForTools,
+  ToolsFromEntries,
+} from './toolbox-type-inference';
 
 // Guardrail detector pipeline shared across operative (input guardrail) and
 // retrieval surfaces (memory recall, ingested documents, skill resources).
-export type { InputLengthDetectorOptions } from './guardrails/detectors/input-length';
 export { createInputLengthDetector } from './guardrails/detectors/input-length';
-export type { PromptInjectionDetectorOptions } from './guardrails/detectors/prompt-injection';
+export type { InputLengthDetectorOptions } from './guardrails/detectors/input-length';
 export {
-  createPromptInjectionDetector,
   DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  createPromptInjectionDetector,
   withMinimumTripwireConfidence,
 } from './guardrails/detectors/prompt-injection';
-export type { TopicBoundaryDetectorOptions } from './guardrails/detectors/topic-boundary';
+export type { PromptInjectionDetectorOptions } from './guardrails/detectors/prompt-injection';
 export { createTopicBoundaryDetector } from './guardrails/detectors/topic-boundary';
-export type { DetectorPipelineResult } from './guardrails/pipeline';
+export type { TopicBoundaryDetectorOptions } from './guardrails/detectors/topic-boundary';
 export { runDetectorPipeline } from './guardrails/pipeline';
-export type { ScanContentOptions, ScanContentResult } from './guardrails/scan';
+export type { DetectorPipelineResult } from './guardrails/pipeline';
 export { scanContent } from './guardrails/scan';
+export type { ScanContentOptions, ScanContentResult } from './guardrails/scan';
 export type {
   DetectionResult,
   DetectorContext,
@@ -185,64 +199,15 @@ export type {
 } from './guardrails/types';
 
 // Event classes and event maps
-export {
-  ToolboxBudgetExceededEvent,
-  ToolboxCallEvent,
-  ToolboxCancelledEvent,
-  ToolboxCompleteEvent,
-  ToolboxErrorEvent,
-  type ToolboxEventMap,
-  ToolboxExecuteErrorEvent,
-  ToolboxExecuteStartEvent,
-  ToolboxExecuteSuccessEvent,
-  ToolboxGrantUsedEvent,
-  ToolboxLogEvent,
-  ToolboxLoopBlockedEvent,
-  ToolboxLoopWarningEvent,
-  ToolboxNameResolvedEvent,
-  ToolboxNotFoundEvent,
-  ToolboxOutputChunkEvent,
-  ToolboxPolicyDeniedEvent,
-  ToolboxProgressEvent,
-  ToolboxQueryEvent,
-  ToolboxSearchEvent,
-  ToolboxSettledEvent,
-  ToolboxStatusUpdateEvent,
-  ToolboxStreamChunkEvent,
-  ToolboxStreamEndEvent,
-  ToolboxStreamErrorEvent,
-  ToolboxStreamStartEvent,
-  ToolboxToolFinishedEvent,
-  ToolboxToolStartedEvent,
-  ToolboxValidateErrorEvent,
-  ToolboxValidateSuccessEvent,
-  ToolCancelledEvent,
-  type ToolEventMap,
-  ToolExecuteErrorEvent,
-  ToolExecuteStartEvent,
-  ToolExecuteSuccessEvent,
-  ToolFinishedEvent,
-  ToolLogEvent,
-  ToolOutputChunkEvent,
-  ToolPolicyActionRequiredEvent,
-  ToolPolicyDeniedEvent,
-  ToolProgressEvent,
-  ToolSettledEvent,
-  ToolStartedEvent,
-  ToolStatusUpdateEvent,
-  ToolStreamChunkEvent,
-  ToolStreamEndEvent,
-  ToolStreamErrorEvent,
-  ToolStreamStartEvent,
-  ToolValidateErrorEvent,
-  ToolValidateSuccessEvent,
-} from './events';
+export type { ToolEventMap, ToolboxEventMap } from './event-types';
+export * from './tool-lifecycle-events';
+export * from './tool-stream-events';
+export * from './toolbox-discovery-events';
+export * from './toolbox-lifecycle-events';
+export * from './toolbox-policy-events';
+export * from './toolbox-stream-events';
 
-/** @deprecated Use the global `AddEventListenerOptions` type directly. */
-export type AddEventListenerOptionsLike = AddEventListenerOptions;
-/** @deprecated Use `EventIteratorOptions`, also exported from this module, directly. */
-export type AsyncIteratorOptions = EventIteratorOptions;
-
+export { isTool, resolveToolPolicyAllow } from './is-tool';
 export type {
   DefaultToolEvents,
   EventIteratorOptions,
@@ -280,7 +245,6 @@ export type {
   ToolValidationReport,
   ToolValidationWarning,
 } from './is-tool';
-export { isTool, resolveToolPolicyAllow } from './is-tool';
 export {
   materializeToolCall,
   materializeToolCalls,
@@ -291,10 +255,26 @@ export {
 } from './tool-materialization';
 
 // Embedding search API
-export type { Embedder, EmbeddingEntry, EmbeddingVector } from './core/registry/embeddings';
 export { awaitToolEmbeddings, registerToolEmbeddings } from './core/registry/embeddings';
+export type { Embedder, EmbeddingEntry, EmbeddingVector } from './core/registry/embeddings';
 
 // Types
+export * from './adapters/anthropic';
+export * from './adapters/gemini';
+export * from './adapters/open-ai/agents';
+export * from './adapters/openai';
+export * from './coding';
+export * from './inspect';
+export * from './instrumentation';
+export * from './integrations/mcp';
+export * from './integrations/mcp/oauth';
+export * from './integrations/openapi';
+export * from './middleware';
+export * from './query';
+export * from './resolution';
+export * from './test';
+export * from './tools';
+export * from './truncation';
 export type {
   JSONValue,
   MinimalToolConfiguration,
@@ -306,6 +286,7 @@ export type {
   ToolActionInput,
   ToolCall,
   ToolCallInput,
+  ToolCallReturn,
   ToolErrorInput,
   ToolExecutionIdempotency,
   ToolExecutionResult,
@@ -314,3 +295,4 @@ export type {
   ToolResultInput,
   ToolResultLike,
 } from './types';
+export * from './utilities';

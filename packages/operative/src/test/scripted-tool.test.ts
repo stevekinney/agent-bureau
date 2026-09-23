@@ -1,7 +1,7 @@
+import { createManualRuntimeServices, HookRegistry } from '@lostgradient/lifecycle';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createManualRuntimeServices, HookRegistry } from 'lifecycle';
 
 import { noToolCalls } from '../conditions/predicates';
 import { createActiveRun } from '../create-run';

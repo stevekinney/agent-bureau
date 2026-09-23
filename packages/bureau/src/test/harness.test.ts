@@ -1,10 +1,9 @@
+import type { ManualRuntimeServices } from '@lostgradient/lifecycle';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import type { GenerateFunction } from '@lostgradient/operative';
-import { createAgent, stopWhen } from '@lostgradient/operative';
-import { waitForCondition, waitForRunState } from '@lostgradient/operative/test';
+import { createAgent, stopWhen, waitForCondition, waitForRunState } from '@lostgradient/operative';
 import { createProcessLocalApprovalStateStore, createTool, createToolbox } from 'armorer';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
-import type { ManualRuntimeServices } from 'lifecycle';
-import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type { RunSummary } from '../types';

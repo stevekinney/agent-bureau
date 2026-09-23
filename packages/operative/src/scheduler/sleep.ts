@@ -1,5 +1,5 @@
-import type { RuntimeTimers } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeTimers } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 // Resolved once, lazily, at module scope — not per call. `createDefaultRuntimeServices()`
 // also sets up identifier and deferred-work tracking state that a bare `timers` seam never

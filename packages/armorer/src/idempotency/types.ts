@@ -1,4 +1,4 @@
-import type { RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 
 /**
  * A cached tool execution result stored in the result cache.

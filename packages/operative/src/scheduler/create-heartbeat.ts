@@ -1,5 +1,5 @@
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { RunResult } from '../types';
 import type { Scheduler } from './create-scheduler';
@@ -13,7 +13,7 @@ export interface CreateHeartbeatOptions {
   /** The scheduler to submit heartbeat tasks to. */
   scheduler: Scheduler;
   /** Interval between heartbeats in milliseconds. Default: 60000 (1 minute). */
-  interval?: number;
+  interval?: number | undefined;
   /**
    * Factory that creates the run options for each heartbeat tick.
    * `SchedulerRunOptions`, not `RunOptions` (AB-236) — this factory's
@@ -25,19 +25,19 @@ export interface CreateHeartbeatOptions {
    */
   createHeartbeatRun: () => SchedulerRunOptions | Promise<SchedulerRunOptions>;
   /** Priority for heartbeat tasks. Default: 'scheduled'. */
-  priority?: SchedulerPriority;
+  priority?: SchedulerPriority | undefined;
   /** Whether to run immediately on start, or wait for the first interval. Default: false. */
-  runImmediately?: boolean;
+  runImmediately?: boolean | undefined;
   /** AbortSignal to stop the heartbeat. */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
   /** Maximum consecutive heartbeat failures before stopping. Default: 5. */
-  maxConsecutiveFailures?: number;
+  maxConsecutiveFailures?: number | undefined;
   /** Injectable sleep primitive used by the heartbeat loop. Defaults to the scheduler sleep utility, driven by `runtime.timers`. */
-  sleepFunction?: (milliseconds: number) => Promise<void>;
+  sleepFunction?: ((milliseconds: number) => Promise<void>) | undefined;
   /** Callback when a heartbeat tick completes (including preempted ticks with null result). */
-  onTick?: (result: RunResult | null) => void | Promise<void>;
+  onTick?: ((result: RunResult | null) => void | Promise<void>) | undefined;
   /** Callback when the heartbeat stops due to max failures. */
-  onFailure?: (error: unknown) => void;
+  onFailure?: ((error: unknown) => void) | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
    * exactly once at construction — omitted, this heartbeat reads the real
@@ -46,7 +46,7 @@ export interface CreateHeartbeatOptions {
    * `sleepFunction`'s default and heartbeat task ids are fully
    * time-controlled. An explicitly supplied `sleepFunction` still wins.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 /**
@@ -205,7 +205,8 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
       if (!running || signal?.aborted) return;
     }
 
-    while (running && !signal?.aborted) {
+    for (;;) {
+      if (!running || signal?.aborted) break;
       await cancellableSleep(interval);
       if (!running || signal?.aborted) break;
       await tick();
@@ -228,7 +229,7 @@ export function createHeartbeat(options: CreateHeartbeatOptions): Heartbeat {
     // Await the in-flight tick(s) (and their tracked `onTick` promise) so stop()
     // is a real credential-lifetime boundary rather than a best-effort signal
     // (AB-208).
-    await Promise.allSettled([...inFlightTicks]);
+    await Promise.allSettled(inFlightTicks);
   }
 
   return {

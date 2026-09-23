@@ -13,15 +13,15 @@ export interface FlowControlTrigger {
   /** The agent this run dispatches to. Falls back to a house default upstream. */
   readonly agentName: string;
   /** The authenticated principal that created the run, when known (API only). */
-  readonly principal?: string;
+  readonly principal?: string | undefined;
   /** Where the run originated. */
   readonly source: 'api' | 'scheduler';
   /** The seed user message, available to key functions that need content-based dedupe. */
   readonly message: string;
   /** The session this run is attached to, when known. */
-  readonly sessionId?: string;
+  readonly sessionId?: string | undefined;
   /** Caller-supplied metadata carried through from the originating request. */
-  readonly metadata?: Record<string, unknown>;
+  readonly metadata?: Record<string, unknown> | undefined;
 }
 
 /** A function that derives a grouping key from a trigger. */
@@ -31,7 +31,7 @@ export interface ConcurrencyPolicy {
   /** Maximum number of runs that may be actively executing at once per key. */
   readonly limit: number;
   /** Groups runs for the cap. Defaults to `trigger.agentName` (per-agent concurrency). */
-  readonly key?: FlowControlKeyFunction;
+  readonly key?: FlowControlKeyFunction | undefined;
 }
 
 export interface RateLimitPolicy {
@@ -40,7 +40,7 @@ export interface RateLimitPolicy {
   /** The sliding window size, in milliseconds. */
   readonly windowMilliseconds: number;
   /** Groups runs for the limit. Defaults to `trigger.agentName`. */
-  readonly key?: FlowControlKeyFunction;
+  readonly key?: FlowControlKeyFunction | undefined;
 }
 
 export interface SingletonPolicy {
@@ -60,9 +60,9 @@ export interface SingletonPolicy {
  * model applied per agent or per an arbitrary key.
  */
 export interface FlowControlPolicy {
-  readonly concurrency?: ConcurrencyPolicy;
-  readonly rateLimit?: RateLimitPolicy;
-  readonly singleton?: SingletonPolicy;
+  readonly concurrency?: ConcurrencyPolicy | undefined;
+  readonly rateLimit?: RateLimitPolicy | undefined;
+  readonly singleton?: SingletonPolicy | undefined;
 }
 
 /** Why an admission was rejected. */

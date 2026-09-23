@@ -1,4 +1,4 @@
-import type { RuntimeServices, TypedEventTarget } from 'lifecycle';
+import type { RuntimeServices, TypedEventTarget } from '@lostgradient/lifecycle';
 
 import type { AgentRun } from '../agent-run';
 import type { OperativeEventMap } from '../events';

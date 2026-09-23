@@ -5,8 +5,8 @@ export interface GroundingValidatorOptions {
   /** Conversation text to ground claims against. Accepts a string or a getter
    *  function that returns the current conversation text on each validation call,
    *  which is necessary for live agent sessions where the conversation grows. */
-  conversationText?: string | (() => string);
-  groundingThreshold?: number;
+  conversationText?: (string | (() => string)) | undefined;
+  groundingThreshold?: number | undefined;
 }
 
 /**

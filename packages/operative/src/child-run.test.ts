@@ -15,10 +15,10 @@
  *     idempotent on an unknown or already-terminal id, never propagates to
  *     a sibling
  */
-import { createTestToolbox } from 'armorer/test';
+import { CompletableEventTarget } from '@lostgradient/lifecycle';
+import { createTestToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { CompletableEventTarget } from 'lifecycle';
 
 import { createAgentRun } from './agent-run';
 import {
@@ -593,7 +593,7 @@ describe('dispatchChildRun — concurrent children', () => {
 
     expect(handleAlpha.childRunId).not.toBe(handleBeta.childRunId);
     expect(startedEvents).toHaveLength(2);
-    expect(startedEvents.map((e) => e.childAgentName).sort()).toEqual(['alpha', 'beta']);
+    expect(startedEvents.map((e) => e.childAgentName).toSorted()).toEqual(['alpha', 'beta']);
 
     alpha.settle(makeResult({ content: 'alpha done' }));
     beta.settle(makeResult({ content: 'beta done' }));

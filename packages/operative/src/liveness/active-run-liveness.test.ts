@@ -1,5 +1,5 @@
+import { createManualRuntimeServices, type Subscription } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices, type Subscription } from 'lifecycle';
 
 import type { ChildRunDescriptor, ChildRunRegistry } from '../child-run';
 import { createActiveRunLiveness } from './active-run-liveness';
@@ -42,7 +42,8 @@ function createFakeChildRegistry(): ChildRunRegistry & {
       children = next;
     },
     notify() {
-      for (const listener of [...listeners]) listener();
+      const listenerSnapshot = [...listeners];
+      for (const listener of listenerSnapshot) listener();
     },
   };
 }
@@ -81,7 +82,8 @@ function createManualClock(): StallWatchdogClock & { advance(ms: number): void }
       let fired = true;
       while (fired) {
         fired = false;
-        for (const [handle, timer] of [...timers.entries()]) {
+        const timerSnapshot = [...timers.entries()];
+        for (const [handle, timer] of timerSnapshot) {
           if (timer.at <= time) {
             timers.delete(handle);
             timer.callback();
@@ -237,9 +239,14 @@ describe('createActiveRunLiveness', () => {
     liveness.recordToolProgressPulse({ toolCallId: 'call-1', toolName: 'search' });
 
     const evidence = liveness.snapshot().evidence;
-    expect(evidence.map((entry) => entry.source).sort()).toEqual(['provider-io', 'tool-progress']);
+    expect(evidence.map((entry) => entry.source).toSorted()).toEqual([
+      'provider-io',
+      'tool-progress',
+    ]);
     const toolEntry = evidence.find((entry) => entry.source === 'tool-progress');
-    expect((toolEntry?.detail as { toolCallId?: string } | undefined)?.toolCallId).toBe('call-1');
+    expect((toolEntry?.detail as { toolCallId?: string | undefined } | undefined)?.toolCallId).toBe(
+      'call-1',
+    );
 
     liveness.dispose();
   });

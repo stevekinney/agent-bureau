@@ -12,6 +12,7 @@
  * Layer A (live) is the operative/store; Layer B is this trail. Together they
  * form the glass-box audit surface for the gateway.
  */
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 import type {
   AgentScheduledEvent,
   ScheduleCancelledEvent,
@@ -19,8 +20,7 @@ import type {
   ScheduleResumedEvent,
   SessionDeletedEvent,
 } from '@lostgradient/operative';
-import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import type { ConditionalTextValueStore } from '@lostgradient/weft';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { EventTimestampResolver } from './event-timestamp';
@@ -154,6 +154,12 @@ export const AUDIT_EVENT_TYPES = [
   'run.error',
   'run.aborted',
   'run.tripwire',
+  // COR-625 — the terminal-run checkpoint-retention step's own
+  // acknowledgement, written out-of-band by `create-bureau.ts`'s
+  // `runTerminalCheckpointCleanup` once per durable run. Distinct from the
+  // `run.*` transitions above: those say how the run ENDED, this says
+  // whether the cleanup that followed it actually finished.
+  'run.cleanup-settled',
   // Step lifecycle
   'step.completed',
   // AB-228 — session lifecycle beyond creation (dispatched via a dedicated
@@ -189,6 +195,26 @@ export type AuditEventType = (typeof AUDIT_EVENT_TYPES)[number];
  * floor still protects.
  */
 export type AuditRetentionOption = 'forever' | { olderThan: number };
+
+/**
+ * COR-625: per-bureau checkpoint-retention policy applied by the
+ * terminal-run cleanup step. `'keep-all'` (the default) retains every
+ * checkpoint — today's behavior, unchanged until an operator opts in — and
+ * makes the step a no-op that still records `not-required`.
+ *
+ * `{ keepLast }` retains the newest `keepLast` checkpoint history entries of
+ * a terminal durable run through weft's public
+ * `Engine.pruneCheckpoints` (COR-11) and discards the rest.
+ *
+ * `timeoutMilliseconds` bounds one step. Weft exposes no engine-wide
+ * operation timeout to inherit, so a caller who needs `unresolved`/
+ * `'timed-out'` to be reachable sets it explicitly; omitted, the step is
+ * unbounded and a caller bounds its own wait through `closed({ signal })`.
+ * The bound ABORTS the prune rather than merely abandoning the wait, so a
+ * timed-out step never leaves unowned deletes running.
+ */
+export type CheckpointRetentionOption =
+  'keep-all' | { keepLast: number; timeoutMilliseconds?: number };
 
 /** The outcome of one {@link AuditTrail.prune} pass. */
 export interface AuditPruneResult {
@@ -313,7 +339,7 @@ export interface AuditTrail {
      * Defaults to `runtime.clock.now()`, matching every direct (non-replay)
      * caller.
      */
-    timestampMs?: number;
+    timestampMs?: number | undefined;
     /**
      * AB-391 (Codex review finding, PR #601, "Make attachment replay
      * deduplication atomic"): when provided, this write is dedupe-guarded
@@ -340,7 +366,7 @@ export interface AuditTrail {
      * written, reintroducing the exact durable-record loss this issue
      * exists to close (just at shutdown instead of a crash).
      */
-    dedupeKey?: string;
+    dedupeKey?: string | undefined;
   }): Promise<void>;
   /**
    * AB-388: delete every durable record whose `timestampMs` is strictly
@@ -407,7 +433,8 @@ export interface AuditTrail {
        * pass actually reaches the delete loop for), not per candidate
        * examined during listing.
        */
-      protectRunId?: (runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>;
+      protectRunId?:
+        ((runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>) | undefined;
     },
   ): Promise<AuditPruneResult | undefined>;
   /**
@@ -1016,9 +1043,9 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
         `[audit-trail] Exhausted retries resolving an audit-record key collision for ${target}.`,
       );
     }
-    const nextSequence = allocateSequence();
-    const nextKey = encodeKey(attemptRecord.timestampMs, nextSequence, attemptRecord.runId);
-    const nextRecord: AuditRecord = { ...attemptRecord, sequence: nextSequence };
+    const allocatedSequence = allocateSequence();
+    const nextKey = encodeKey(attemptRecord.timestampMs, allocatedSequence, attemptRecord.runId);
+    const nextRecord: AuditRecord = { ...attemptRecord, sequence: allocatedSequence };
     await attemptKeyFencedWrite(store, nextKey, nextRecord, markerKey, attemptsRemaining - 1);
   }
 
@@ -1111,8 +1138,8 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     writeOptions?: {
       strict?: boolean;
       bypassAbortCheck?: boolean;
-      timestampMs?: number;
-      dedupeKey?: string;
+      timestampMs?: number | undefined;
+      dedupeKey?: string | undefined;
     },
   ): Promise<void> {
     if (!kv) return Promise.resolve();
@@ -2226,8 +2253,8 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       type: string;
       detail: unknown;
       principal?: string;
-      timestampMs?: number;
-      dedupeKey?: string;
+      timestampMs?: number | undefined;
+      dedupeKey?: string | undefined;
     }): Promise<void> {
       await writeOutOfBandRecord(entry, {
         timestampMs: entry.timestampMs,
@@ -2238,7 +2265,8 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
     prune(
       cutoffMs: number,
       pruneOptions?: {
-        protectRunId?: (runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>;
+        protectRunId?:
+          ((runId: string, phase: 'listing' | 'delete') => boolean | Promise<boolean>) | undefined;
       },
     ): Promise<AuditPruneResult | undefined> {
       // AB-388 (Codex review, PR #597, "Serialize concurrent audit-pruning
@@ -2301,7 +2329,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       if (runId !== undefined) {
         const owned = activeWritesByRunId.get(runId);
         if (owned && owned.size > 0) {
-          await Promise.allSettled([...owned]);
+          await Promise.allSettled(owned);
         }
       }
 
@@ -2331,7 +2359,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // `manualSequence` scheme, so `<sequence>` segments of different
       // lengths do not always compare correctly as plain strings).
       const unsortedKeys = await kv.list(PREFIX);
-      const keys = unsortedKeys.sort();
+      const keys = unsortedKeys.toSorted();
 
       const records: AuditRecord[] = [];
       for (const key of keys) {
@@ -2428,7 +2456,7 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
       // cancellation hook, so there is nothing for the owner-issued `signal`
       // to bound here beyond refusing new writes (above); a write already
       // started runs to completion and `dispose()` waits for it.
-      await Promise.allSettled([...activeWrites]);
+      await Promise.allSettled(activeWrites);
       // AB-388 (Codex review, PR #597, "Await manual pruning before storage
       // teardown"): `activeWrites` only tracks individual `kv.set` calls —
       // a `prune()` pass's `kv.list()`/`kv.delete()` sequence and its

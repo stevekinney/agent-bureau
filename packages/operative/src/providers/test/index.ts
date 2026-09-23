@@ -27,14 +27,6 @@ export {
   openAITextResponse,
   openAIToolCallResponse,
 } from './fixtures.ts';
-export type {
-  MockAnthropicClient,
-  MockAnthropicStreamingClient,
-  MockGeminiModel,
-  MockGeminiStreamingModel,
-  MockOpenAIClient,
-  MockOpenAIStreamingClient,
-} from './mock-clients.ts';
 export {
   createMockAnthropicClient,
   createMockAnthropicStreamingClient,
@@ -42,4 +34,12 @@ export {
   createMockGeminiStreamingModel,
   createMockOpenAIClient,
   createMockOpenAIStreamingClient,
+} from './mock-clients.ts';
+export type {
+  MockAnthropicClient,
+  MockAnthropicStreamingClient,
+  MockGeminiModel,
+  MockGeminiStreamingModel,
+  MockOpenAIClient,
+  MockOpenAIStreamingClient,
 } from './mock-clients.ts';

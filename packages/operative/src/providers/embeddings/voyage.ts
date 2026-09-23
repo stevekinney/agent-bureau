@@ -1,4 +1,4 @@
-import type { Embedder, EmbeddingVector } from 'interoperability';
+import type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
 
 import { ProviderError } from '../errors.ts';
 
@@ -7,8 +7,8 @@ import { ProviderError } from '../errors.ts';
  */
 export interface VoyageEmbedderOptions {
   apiKey: string;
-  model?: string;
-  endpoint?: string;
+  model?: string | undefined;
+  endpoint?: string | undefined;
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
-import type { ImportedToolConfiguration } from '../../create-toolbox';
+import type { ImportedToolConfiguration } from '../../toolbox-type-inference';
 import { isAsyncIterable } from '../../type-guards';
 import type { ToolCallInput, ToolResultLike } from '../../types';
 import { importToolSchema } from '../imported-schema';
@@ -27,7 +27,7 @@ export type {
  *
  * @example
  * ```ts
- * import { toAnthropicTools } from 'armorer/adapters/anthropic';
+ * import { toAnthropicTools } from 'armorer';
  *
  * // Single tool
  * const tool = toAnthropicTools(myTool);

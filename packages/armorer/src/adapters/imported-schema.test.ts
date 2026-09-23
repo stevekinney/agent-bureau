@@ -81,7 +81,11 @@ describe('importToolSchema', () => {
 
     expect(parsed.success).toBe(true);
     if (parsed.success) {
-      expect((parsed.data as { state?: string }).state).toBe('draft');
+      expect(
+        parsed.data && typeof parsed.data === 'object'
+          ? Reflect.get(parsed.data, 'state')
+          : undefined,
+      ).toBe('draft');
     }
     expect(schema.safeParse({ tags: ['one'], metadata: { score: 'bad' } }).success).toBe(false);
   });

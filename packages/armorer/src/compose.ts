@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import type {
   AnyTool,
   ComposedTool,
@@ -6,8 +8,8 @@ import type {
   ToolWithInput,
 } from './compose-types';
 import { getSchemaShape } from './core/schema-utilities';
-import { createTool, type CreateToolOptions } from './create-tool';
-import type { DefaultToolEvents, ToolContext, ToolMetadata, ToolParametersSchema } from './is-tool';
+import { createTool } from './create-tool';
+import type { ToolContext, ToolParametersSchema } from './is-tool';
 
 /**
  * Error thrown when a pipeline step fails.
@@ -143,7 +145,7 @@ export function pipe<
  * const result = await pipeline({ id: 'user-123' });
  * ```
  */
-export function pipe(...tools: AnyTool[]): AnyTool {
+export function pipe(...tools: AnyTool[]): ComposedTool<unknown, unknown> {
   if (tools.length < 2) {
     throw new Error('pipe() requires at least 2 tools');
   }
@@ -151,29 +153,9 @@ export function pipe(...tools: AnyTool[]): AnyTool {
   const first = tools[0]!;
   const toolNames = tools.map((t) => t.identity.name);
 
-  // Helper to emit events: creates a plain Event and assigns detail properties.
-  const emit = (
-    dispatch: ToolContext<DefaultToolEvents>['dispatch'],
-    type: string,
-    detail: unknown,
-  ) => {
-    const event = new Event(type);
-    if (detail && typeof detail === 'object') {
-      Object.assign(event, detail);
-    }
-    return dispatch(event);
-  };
-
-  const runPipeline = async (input: unknown, context: ToolContext<DefaultToolEvents>) => {
+  const runPipeline = async (input: unknown, context: ToolContext) => {
     let result: unknown = input;
-    const executeOptions =
-      context.signal || context.timeout !== undefined || context.stream !== undefined
-        ? {
-            ...(context.signal ? { signal: context.signal } : {}),
-            ...(context.timeout !== undefined ? { timeout: context.timeout } : {}),
-            ...(context.stream !== undefined ? { stream: context.stream } : {}),
-          }
-        : undefined;
+    const executeOptions = buildExecuteOptions(context);
 
     for (let i = 0; i < tools.length; i++) {
       const tool = tools[i]!;
@@ -182,7 +164,7 @@ export function pipe(...tools: AnyTool[]): AnyTool {
       }
 
       // Emit step-start event
-      emit(context.dispatch, 'step-start', {
+      emitStep(context.dispatch, 'step-start', {
         stepIndex: i,
         stepName: tool.identity.name,
         input: result,
@@ -193,14 +175,14 @@ export function pipe(...tools: AnyTool[]): AnyTool {
         result = await tool.execute(result, executeOptions);
 
         // Emit step-complete event
-        emit(context.dispatch, 'step-complete', {
+        emitStep(context.dispatch, 'step-complete', {
           stepIndex: i,
           stepName: tool.identity.name,
           output: result,
         });
       } catch (error) {
         // Emit step-error event
-        emit(context.dispatch, 'step-error', {
+        emitStep(context.dispatch, 'step-error', {
           stepIndex: i,
           stepName: tool.identity.name,
           error,
@@ -218,15 +200,31 @@ export function pipe(...tools: AnyTool[]): AnyTool {
     return result;
   };
 
-  return createTool({
+  return createTool<z.ZodType>({
     name: `pipe(${toolNames.join(', ')})`,
     description: `Composed pipeline: ${toolNames.join(' → ')}`,
     input: first.input,
 
-    async execute(input: unknown, context: ToolContext<DefaultToolEvents>) {
+    async execute(input: unknown, context: ToolContext) {
       return runPipeline(input, context);
     },
   });
+}
+
+function buildExecuteOptions(context: ToolContext) {
+  if (!context.signal && context.timeout === undefined && context.stream === undefined)
+    return undefined;
+  return {
+    ...(context.signal ? { signal: context.signal } : {}),
+    ...(context.timeout !== undefined ? { timeout: context.timeout } : {}),
+    ...(context.stream !== undefined ? { stream: context.stream } : {}),
+  };
+}
+
+function emitStep(dispatch: ToolContext['dispatch'], type: string, detail: unknown) {
+  const event = new Event(type);
+  if (detail && typeof detail === 'object') Object.assign(event, detail);
+  return dispatch(event);
 }
 
 function toError(error: unknown): Error {
@@ -246,11 +244,6 @@ function toError(error: unknown): Error {
 type BindParams<TTool extends AnyTool> =
   InferToolInput<TTool> extends object ? Partial<InferToolInput<TTool>> : InferToolInput<TTool>;
 
-type BindInput<TTool extends AnyTool, TBound extends BindParams<TTool>> =
-  InferToolInput<TTool> extends object
-    ? Omit<InferToolInput<TTool>, keyof TBound>
-    : Record<string, never>;
-
 type BindOptions = {
   name?: string;
   description?: string;
@@ -267,24 +260,11 @@ export function bind<TTool extends AnyTool, TBound extends BindParams<TTool>>(
   const description = options.description ?? `Bound tool: ${tool.display.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
 
-  const toolOptions: Omit<
-    CreateToolOptions<
-      BindInput<TTool, TBound>,
-      InferToolOutput<TTool>,
-      DefaultToolEvents,
-      readonly string[],
-      ToolMetadata | undefined,
-      ToolContext<DefaultToolEvents>,
-      InferToolOutput<TTool>
-    >,
-    'metadata'
-  > & {
-    metadata?: ToolMetadata | undefined;
-  } = {
+  return createTool({
     name,
     description,
     input: input,
-    async execute(params, context) {
+    async execute(params: unknown, context: ToolContext) {
       const merged = mergeBoundParams(params, bound);
       const executeOptions =
         context.signal || context.timeout !== undefined || context.stream !== undefined
@@ -294,21 +274,11 @@ export function bind<TTool extends AnyTool, TBound extends BindParams<TTool>>(
               ...(context.stream !== undefined ? { stream: context.stream } : {}),
             }
           : undefined;
-      const result = await tool.execute(merged as InferToolInput<TTool>, executeOptions);
-      return result as InferToolOutput<TTool>;
+      return tool.execute(merged, executeOptions);
     },
     ...(tags ? { tags } : {}),
-    ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
-  };
-  return createTool<
-    BindInput<TTool, TBound>,
-    InferToolOutput<TTool>,
-    DefaultToolEvents,
-    readonly string[],
-    ToolMetadata | undefined,
-    ToolContext<DefaultToolEvents>,
-    InferToolOutput<TTool>
-  >(toolOptions);
+    metadata: tool.metadata,
+  });
 }
 
 function resolveBoundSchema(schema: ToolParametersSchema, bound: unknown): ToolParametersSchema {
@@ -323,21 +293,19 @@ function resolveBoundSchema(schema: ToolParametersSchema, bound: unknown): ToolP
   const boundKeys = Object.keys(bound);
   const unknownKeys = boundKeys.filter((key) => !shapeKeys.has(key));
   if (unknownKeys.length) {
-    throw new Error(`bind() cannot bind unknown keys: ${unknownKeys.sort().join(', ')}`);
+    throw new Error(`bind() cannot bind unknown keys: ${unknownKeys.toSorted().join(', ')}`);
   }
-  const mask = Object.fromEntries(boundKeys.map((key) => [key, true])) as Record<string, true>;
-  const objectSchema = schema as unknown as {
-    omit: (mask: Record<string, true>) => ToolParametersSchema;
-  };
-  if (typeof objectSchema.omit !== 'function') {
+  if (!(schema instanceof z.ZodObject)) {
     throw new TypeError('bind() expects a Zod object schema');
   }
-  return objectSchema.omit(mask);
+  const mask: Record<string, true> = {};
+  for (const key of boundKeys) mask[key] = true;
+  return schema.omit(mask);
 }
 
 function mergeBoundParams(params: unknown, bound: unknown): unknown {
   const input = isPlainObject(params) ? params : {};
-  return { ...input, ...(bound as Record<string, unknown>) };
+  return isPlainObject(bound) ? { ...input, ...bound } : input;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

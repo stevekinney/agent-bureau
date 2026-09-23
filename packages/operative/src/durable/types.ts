@@ -1,3 +1,4 @@
+import type { JSONValue, ToolCall } from '@lostgradient/tool-protocol';
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import type {
   ConversationSnapshot,
@@ -5,7 +6,6 @@ import type {
   ImageContent,
   TextContent,
 } from 'conversationalist';
-import type { JSONValue, ToolCall } from 'interoperability';
 
 import type { Effort } from '../providers/types';
 import type { EventDispatcher } from '../run-step';
@@ -56,7 +56,7 @@ export interface RunCursor {
    * for how this is compared against the currently-registered version on
    * recovery.
    */
-  workflowVersion?: string;
+  workflowVersion?: string | undefined;
 }
 
 /**
@@ -71,8 +71,8 @@ export interface StepRecord {
   content: string;
   toolCalls: readonly ToolCall[];
   results: readonly ToolExecutionResult[];
-  usage?: { prompt: number; completion: number; total: number };
-  metadata?: Record<string, JSONValue>;
+  usage?: { prompt: number; completion: number; total: number } | undefined;
+  metadata?: Record<string, JSONValue> | undefined;
   final: boolean;
 }
 
@@ -110,7 +110,7 @@ export interface PendingWakeup {
    */
   duration: number | string;
   /** Optional note to surface when the run resumes after sleeping. */
-  note?: string;
+  note?: string | undefined;
 }
 
 /**
@@ -127,7 +127,7 @@ export interface PendingHumanWait {
    */
   signalName: string;
   /** Optional prompt to surface to the human reviewer. */
-  prompt?: string;
+  prompt?: string | undefined;
 }
 
 /**
@@ -150,7 +150,7 @@ export interface DurableRunDeps {
    * in-memory loop (hooks/events parity); `undefined` for a headless durable run
    * with no observable surface.
    */
-  emitter?: EventDispatcher;
+  emitter?: EventDispatcher | undefined;
   /**
    * AB-239 — invoked twice per step (via `StepDeps.onStepToolbox`, which
    * `runStep` calls at step start and `run-workflow.ts` calls again at step
@@ -162,7 +162,7 @@ export interface DurableRunDeps {
    * one starting. `undefined` for a headless durable run with no `emitter`
    * (nothing to forward to) — see `createToolboxEventForwarder`.
    */
-  onStepToolbox?: (toolbox: AnyToolbox) => void;
+  onStepToolbox?: ((toolbox: AnyToolbox) => void) | undefined;
   /**
    * A pending self-wakeup registered during this run by the `scheduleWakeup`
    * tool. When present after the main step loop exits, the workflow performs
@@ -173,7 +173,7 @@ export interface DurableRunDeps {
    * previous request. The workflow reads this exactly once, after the loop, so
    * it is never checkpointed (tools can safely mutate it in-process).
    */
-  pendingWakeup?: PendingWakeup;
+  pendingWakeup?: PendingWakeup | undefined;
   /**
    * F3 — A pending human-input gate registered by the `requestHumanInput` tool.
    * When present after the main step loop exits, the workflow performs
@@ -184,7 +184,7 @@ export interface DurableRunDeps {
    * wakeup or human-wait) governs parking. Mutable by the `requestHumanInput`
    * tool inside `ctx.memo`.
    */
-  pendingHumanWait?: PendingHumanWait;
+  pendingHumanWait?: PendingHumanWait | undefined;
   /**
    * Optional plain metadata to persist with the committed step record after
    * `runStep` finishes. This runs immediately before `recordStep`, so the
@@ -218,14 +218,14 @@ export type SessionInputDeliveryMode = 'steer' | 'queue';
  *  misattributed if replayed as if the user had sent it. AB-42's coordinator amendments
  *  (2026-09-02) own this exclusion; AB-70 owns any future widening.
  *
- *  The text branch forbids `citations` structurally (`citations?: never`), not merely via
+ *  The text branch forbids `citations` structurally (`citations?: undefined`), not merely via
  *  `Omit<TextContent, 'citations'>`: because TypeScript is structurally typed, `Omit<>` alone
  *  only drops the property requirement — a caller holding a value already typed as `TextContent`
  *  (with `citations` set) is still assignable to `Omit<TextContent, 'citations'>`, since excess
- *  properties on a non-literal source go unchecked. `citations?: never` makes any non-`undefined`
+ *  properties on a non-literal source go unchecked. `citations?: undefined` makes any non-`undefined`
  *  `citations` a type error at every call site, literal or not. */
 export type UserAdmissibleContent =
-  | (Omit<TextContent, 'citations'> & { readonly citations?: never })
+  | (Omit<TextContent, 'citations'> & { readonly citations?: undefined })
   | ImageContent
   | DocumentContent;
 
@@ -256,9 +256,9 @@ export interface SessionInputRecord<TPayload extends SessionInputPayload = Sessi
   readonly admittedAt: string; // ISO
   /** The record's own eligibility deadline. Absent means no deadline. Distinct from
    *  post-terminal retention, which the document's line 569 rule governs separately. */
-  readonly expiresAt?: string; // ISO
+  readonly expiresAt?: string | undefined; // ISO
   /** Present only when admitted as an explicit successor to a still-pending input. Never inferred. */
-  readonly supersedes?: string;
+  readonly supersedes?: string | undefined;
 }
 
 /** Caller-facing admission request. `SessionInputRecord` is the persisted, server-computed shape
@@ -272,12 +272,12 @@ export interface SessionInputRecord<TPayload extends SessionInputPayload = Sessi
 export interface SessionInputAdmissionRequest<
   TPayload extends SessionInputPayload = SessionInputPayload,
 > {
-  readonly id?: string;
+  readonly id?: string | undefined;
   readonly principal: string;
   readonly deliveryMode: SessionInputDeliveryMode;
   readonly payload: TPayload;
-  readonly expiresAt?: string; // ISO
-  readonly supersedes?: string;
+  readonly expiresAt?: string | undefined; // ISO
+  readonly supersedes?: string | undefined;
 }
 
 // Illustrative: submitSessionInput(sessionId: string, request: SessionInputAdmissionRequest): Promise<SessionInputAdmissionOutcome>
@@ -373,7 +373,7 @@ export type SteeringTargetKind =
  * itself is the instruction. Every other target carries exactly one of
  * `policyRef` (a named, pre-approved policy the AB-66 selector resolves) or
  * `override` (an exact value), encoded as an exclusive pair — `policyRef?:
- * never` on the `override` arm and `override?: never` on the `policyRef`
+ * never` on the `override` arm and `override?: undefined` on the `policyRef`
  * arm — rather than two same-discriminant variants, so a literal supplying
  * both fields with non-`undefined` values, or neither field, is rejected by
  * the type checker at compile time (AB-67's 2026-09-02 coordinator
@@ -386,16 +386,36 @@ export type SteeringTargetKind =
 export type SteeringRequestedValue =
   | { readonly target: 'pause' }
   | { readonly target: 'resume' }
-  | { readonly target: 'agent-identity'; readonly policyRef: string; readonly override?: never }
-  | { readonly target: 'agent-identity'; readonly override: string; readonly policyRef?: never } // a catalog agent name; must be a key of Bureau<D>'s agents map
-  | { readonly target: 'route'; readonly policyRef: string; readonly override?: never }
-  | { readonly target: 'route'; readonly override: string; readonly policyRef?: never } // must name a configured RoutingOptions.routes entry
-  | { readonly target: 'model'; readonly policyRef: string; readonly override?: never }
-  | { readonly target: 'model'; readonly override: string; readonly policyRef?: never }
-  | { readonly target: 'provider'; readonly policyRef: string; readonly override?: never }
-  | { readonly target: 'provider'; readonly override: string; readonly policyRef?: never }
-  | { readonly target: 'effort'; readonly policyRef: string; readonly override?: never }
-  | { readonly target: 'effort'; readonly override: Effort; readonly policyRef?: never }; // packages/operative/src/providers/types.ts
+  | {
+      readonly target: 'agent-identity';
+      readonly policyRef: string;
+      readonly override?: undefined;
+    }
+  | {
+      readonly target: 'agent-identity';
+      readonly override: string;
+      readonly policyRef?: undefined;
+    } // a catalog agent name; must be a key of Bureau<D>'s agents map
+  | { readonly target: 'route'; readonly policyRef: string; readonly override?: undefined }
+  | { readonly target: 'route'; readonly override: string; readonly policyRef?: undefined } // must name a configured RoutingOptions.routes entry
+  | { readonly target: 'model'; readonly policyRef: string; readonly override?: undefined }
+  | { readonly target: 'model'; readonly override: string; readonly policyRef?: undefined }
+  | {
+      readonly target: 'provider';
+      readonly policyRef: string;
+      readonly override?: undefined;
+    }
+  | {
+      readonly target: 'provider';
+      readonly override: string;
+      readonly policyRef?: undefined;
+    }
+  | { readonly target: 'effort'; readonly policyRef: string; readonly override?: undefined }
+  | {
+      readonly target: 'effort';
+      readonly override: Effort;
+      readonly policyRef?: undefined;
+    }; // packages/operative/src/providers/types.ts
 
 /**
  * A versioned steering command: a caller's request to change one of
@@ -413,9 +433,9 @@ export interface SteeringCommand {
    *  `SteeringDesiredState` below). Absent means "apply regardless of
    *  current desired state"; present means "reject as a conflict if
    *  configVersion has moved past this value." */
-  readonly expectedRevision?: number;
+  readonly expectedRevision?: number | undefined;
   readonly requestedAt: string; // ISO
-  readonly deadline?: string; // ISO, same semantics as AB-42's SessionInputRecord.expiresAt
+  readonly deadline?: string | undefined; // ISO, same semantics as AB-42's SessionInputRecord.expiresAt
   /** `pause`/`resume` only (AB-67's 2026-09-02 coordinator amendments). When
    *  present, must name a non-terminal run owned by `sessionId`, or
    *  admission fails with `SteeringCommandFailure.reason: 'run-terminal'`.
@@ -426,7 +446,7 @@ export interface SteeringCommand {
    *  Configuration-targeting commands (`model`, `provider`, `route`,
    *  `effort`, `agent-identity`) remain session-scoped desired state and
    *  ignore `runId`. */
-  readonly runId?: string;
+  readonly runId?: string | undefined;
 }
 
 /**
@@ -437,7 +457,7 @@ export interface SteeringCommand {
  * for both a single reason and a subset of reasons (see
  * `events.ts`'s `SteeringFailureReason`).
  *
- * Declares `supersededBy?: never` rather than omitting the field entirely —
+ * Declares `supersededBy?: undefined` rather than omitting the field entirely —
  * the two catch DIFFERENT malformed shapes, and this one guards the more
  * consequential case. `?: never` rejects a KNOWN, definite `supersededBy:
  * string` reaching this type through a non-literal value (a builder
@@ -456,13 +476,13 @@ export interface SteeringCommand {
  * (`tsconfig.base.json`): a literal explicit `supersededBy: undefined`
  * still type-checks — behaviorally identical to omitting the field, so not
  * a real invariant violation — matching `SteeringRequestedValue`'s
- * identical `override?: never`/`policyRef?: never` caveat
+ * identical `override?: undefined`/`policyRef?: undefined` caveat
  * (`steering-types.check.ts`).
  */
 type SteeringCommandFailureOf<R extends string> = {
   readonly failedAt: string; // ISO
   readonly reason: R;
-  readonly supersededBy?: never;
+  readonly supersededBy?: undefined;
 };
 
 /**
@@ -474,7 +494,7 @@ type SteeringCommandFailureOf<R extends string> = {
  * when `reason` is `'superseded-by'` and absent otherwise" in prose; this
  * makes that exclusivity a type error instead of a runtime-only invariant).
  * The `'superseded-by'` member requires `supersededBy`; every other member
- * carries `supersededBy?: never` (see `SteeringCommandFailureOf`'s doc
+ * carries `supersededBy?: undefined` (see `SteeringCommandFailureOf`'s doc
  * comment for the tradeoff that shape makes), so a literal or non-literal
  * value that supplies a real `supersededBy` alongside a different reason,
  * or omits it alongside `'superseded-by'`, fails to type-check. See
@@ -524,11 +544,11 @@ export type SteeringCommandState =
  * checks optimistic concurrency against.
  */
 export interface SteeringDesiredState {
-  readonly agentName?: string;
-  readonly route?: string;
-  readonly model?: string;
-  readonly provider?: string;
-  readonly effort?: Effort;
+  readonly agentName?: string | undefined;
+  readonly route?: string | undefined;
+  readonly model?: string | undefined;
+  readonly provider?: string | undefined;
+  readonly effort?: Effort | undefined;
   readonly paused: boolean;
   readonly configVersion: number;
 }

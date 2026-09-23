@@ -1,5 +1,5 @@
-import type { MultiModalContent } from '../multi-modal';
-import type { ChatMessage, ConversationHistory as Conversation } from '../types';
+import { copyContent } from '../multi-modal';
+import type { ChatMessage, ConversationHistory as Conversation, MessageRole } from '../types';
 import { getOrderedMessages } from '../utilities/message-store';
 import { assertConversationSafe } from './validation';
 
@@ -10,7 +10,7 @@ import { assertConversationSafe } from './validation';
  */
 export function toChatMessages(conversation: Conversation): ChatMessage[] {
   assertConversationSafe(conversation);
-  const roleMap: Record<string, 'user' | 'assistant' | 'system'> = {
+  const roleMap: Record<MessageRole, ChatMessage['role']> = {
     user: 'user',
     assistant: 'assistant',
     system: 'system',
@@ -23,10 +23,9 @@ export function toChatMessages(conversation: Conversation): ChatMessage[] {
   const result: ChatMessage[] = [];
   for (const message of getOrderedMessages(conversation)) {
     if (message.hidden) continue;
-    const externalRole = roleMap[message.role] as 'user' | 'assistant' | 'system';
     result.push({
-      role: externalRole,
-      content: message.content as string | MultiModalContent[],
+      role: roleMap[message.role],
+      content: copyContent(message.content),
     });
   }
   return result;

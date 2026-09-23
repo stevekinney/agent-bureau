@@ -34,7 +34,7 @@ export interface StallWatchdogAssessment {
  * to a subscriber-based consumer.
  */
 export interface StallWatchdogOptions {
-  onAssessmentChange?: () => void;
+  onAssessmentChange?: (() => void) | undefined;
 }
 
 export interface StallWatchdog {

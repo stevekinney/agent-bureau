@@ -1,8 +1,8 @@
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft';
 import type { Toolbox } from 'armorer';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';

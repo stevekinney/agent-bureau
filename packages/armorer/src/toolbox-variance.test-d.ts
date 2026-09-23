@@ -26,7 +26,8 @@
 import { z } from 'zod';
 
 import { createTool } from './create-tool';
-import { type AnyToolbox, createToolbox, type Toolbox } from './create-toolbox';
+import { createToolbox } from './create-toolbox';
+import type { AnyToolbox, Toolbox } from './toolbox-interface';
 
 const weatherTool = createTool({
   name: 'get_weather',

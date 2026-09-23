@@ -15,13 +15,13 @@ export interface OverflowMutatorOptions {
    * Number of recent messages to retain verbatim after compaction.
    * Defaults to 4.
    */
-  retainRecentMessages?: number;
+  retainRecentMessages?: number | undefined;
   /**
    * Classifies an error as `'overflow'` or another category.
    * When omitted, a default classifier checks for common overflow
    * patterns in the error message.
    */
-  classifyError?: (error: unknown) => string;
+  classifyError?: ((error: unknown) => string) | undefined;
 }
 
 const OVERFLOW_PATTERNS = [
@@ -56,12 +56,12 @@ export function createOverflowMutator(options: OverflowMutatorOptions): RetryMut
 
   return async (context: GenerateContext, error: unknown, _attempt: number) => {
     const classification = classifyError(error);
-    if (classification !== 'overflow') return;
+    if (classification !== 'overflow') return undefined;
 
     const messages = context.conversation.getMessages();
     if (messages.length <= retainRecentMessages) {
       // Not enough messages to compact — nothing useful we can do
-      return;
+      return undefined;
     }
 
     const cutoff = messages.length - retainRecentMessages;

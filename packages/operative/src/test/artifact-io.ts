@@ -16,8 +16,8 @@
 // second one.
 // ---------------------------------------------------------------------------
 
-import type { DeferredDrainReport, RuntimeServices } from 'lifecycle';
-import { createManualRuntimeServices } from 'lifecycle';
+import type { DeferredDrainReport, RuntimeServices } from '@lostgradient/lifecycle';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { CleanupAcknowledgement } from '../types';
 import { createBarrierRegistry } from './barriers';
@@ -57,7 +57,7 @@ export interface ReproductionArtifact<TCleanupReport = ReproductionCleanupReport
   readonly effectiveModel: {
     readonly provider: string;
     readonly model: string;
-    readonly effort?: string;
+    readonly effort?: string | undefined;
   };
   readonly clockOrigin: string;
   readonly identifierSeed: string;
@@ -101,7 +101,7 @@ function canonicalize<TCleanupReport>(
   artifact: ReproductionArtifact<TCleanupReport>,
 ): ReproductionArtifact<TCleanupReport> {
   const sortedPackageVersions = Object.fromEntries(
-    Object.entries(artifact.packageVersions).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    Object.entries(artifact.packageVersions).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   );
 
   return {
@@ -210,16 +210,9 @@ function requirePresentKey(raw: Record<string, unknown>, field: string, path: st
 
 /**
  * Reads and structurally validates the `ReproductionArtifact` at `path`.
- * Hand-written guards rather than a schema library: `src/test/` ships in
- * `@lostgradient/operative`'s published `./test` subpath, and `zod` is only
- * a devDependency of this package — adding a runtime dependency here for
- * one file's validation is a bigger footprint change than this slice's
- * delivery boundary covers. Returns `ReproductionArtifact<unknown>`: this
- * function validates every field's SHAPE except `cleanupReport`, which is
- * passed through as whatever the JSON held — narrowing it to a caller's own
- * `TCleanupReport` union would need a guard this file has no way to write
- * generically, and every consumer (`replayReproductionArtifact` included)
- * only round-trips the field, never inspects it.
+ * Validates the artifact fields while preserving `cleanupReport` as unknown.
+ * Its caller-specific shape cannot be checked here; replay round-trips the
+ * report without interpreting it.
  */
 export async function readReproductionArtifact(
   path: string,
@@ -384,12 +377,16 @@ const BASELINE_ARTIFACT_HEADER = {
  */
 export async function assembleBaselineArtifact(
   seeds: {
-    readonly origin?: string;
-    readonly identifierSeed?: string;
-    readonly randomSeed?: string;
+    readonly origin?: string | undefined;
+    readonly identifierSeed?: string | undefined;
+    readonly randomSeed?: string | undefined;
   } = {},
 ): Promise<ReproductionArtifact> {
-  const runtime = createManualRuntimeServices(seeds);
+  const runtime = createManualRuntimeServices({
+    ...(seeds.origin === undefined ? {} : { origin: seeds.origin }),
+    ...(seeds.identifierSeed === undefined ? {} : { identifierSeed: seeds.identifierSeed }),
+    ...(seeds.randomSeed === undefined ? {} : { randomSeed: seeds.randomSeed }),
+  });
   const { causalTrace, firedFaults, terminalResult } = await runBaselineReplayCase(runtime);
 
   return {
@@ -422,7 +419,7 @@ function sortKeysDeep(value: unknown): unknown {
   }
   if (isRecord(value)) {
     const sortedEntries = Object.entries(value)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([key, entryValue]) => [key, sortKeysDeep(entryValue)] as const);
     return Object.fromEntries(sortedEntries);
   }

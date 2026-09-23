@@ -3,7 +3,8 @@ import { z } from 'zod';
 
 import { createTool, createToolCall } from './create-tool';
 import { createToolbox } from './create-toolbox';
-import { ToolboxSettledEvent, ToolSettledEvent } from './events';
+import { ToolSettledEvent } from './tool-lifecycle-events';
+import { ToolboxSettledEvent } from './toolbox-lifecycle-events';
 import type { SignedPendingToolApproval } from './types';
 
 const ownerId = 'approval-test-owner';
@@ -59,13 +60,13 @@ describe('approval settlement contract', () => {
     });
     const call = createToolCall(tool.name, {}, `call-${status}`);
     const events: string[] = [];
-    const starts: Array<{ executionId?: string; ownerId?: string }> = [];
+    const starts: Array<{ executionId?: string | undefined; ownerId?: string | undefined }> = [];
     const settlements: Array<{
-      executionId?: string;
-      ownerId?: string;
+      executionId?: string | undefined;
+      ownerId?: string | undefined;
       callId: string;
-      status?: string;
-      callbackCompletion?: Promise<unknown>;
+      status?: string | undefined;
+      callbackCompletion?: Promise<unknown> | undefined;
     }> = [];
     tool.addEventListener('execute-start', (event) => {
       events.push(event.type);
@@ -132,12 +133,12 @@ describe('approval settlement contract', () => {
       const directStarts: string[] = [];
       const directSettlements: string[] = [];
       const directStatuses: string[] = [];
-      const starts: Array<{ executionId?: string; ownerId?: string }> = [];
+      const starts: Array<{ executionId?: string | undefined; ownerId?: string | undefined }> = [];
       const settlements: Array<{
         callId: string;
-        executionId?: string;
-        ownerId?: string;
-        status?: string;
+        executionId?: string | undefined;
+        ownerId?: string | undefined;
+        status?: string | undefined;
       }> = [];
       toolbox.addEventListener('execute-start', (event) => {
         starts.push({ executionId: event.executionId, ownerId: event.ownerId });
@@ -254,7 +255,7 @@ describe('approval settlement contract', () => {
       },
     });
     const events: string[] = [];
-    let settlement: { callbackCompletion?: Promise<unknown> } | undefined;
+    let settlement: { callbackCompletion?: Promise<unknown> | undefined } | undefined;
     tool.addEventListener('execute-start', (event) => {
       events.push(event.type);
     });
@@ -343,7 +344,7 @@ describe('approval settlement contract', () => {
     let callbackCount = 0;
     const events: string[] = [];
     const logs: Array<{ level?: string; message?: string }> = [];
-    let settlement: { callbackCompletion?: Promise<unknown> } | undefined;
+    let settlement: { callbackCompletion?: Promise<unknown> | undefined } | undefined;
     const tool = createTool({
       name: 'after-hook-approval',
       description: 'Approval after-hook settlement test tool',

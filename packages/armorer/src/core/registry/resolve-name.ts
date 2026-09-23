@@ -1,16 +1,11 @@
-import { ToolboxNameResolvedEvent } from '../../events';
+import { normalizeName, type ResolutionTier } from '../../resolution';
+import { ToolboxNameResolvedEvent } from '../../toolbox-discovery-events';
 import type { ToolRegistry } from './registry';
-
-/**
- * Represents a tier in the name resolution hierarchy.
- * Resolution is attempted in order: exact → case-insensitive → normalized → suffix.
- */
-export type ResolutionTier = 'exact' | 'case-insensitive' | 'normalized' | 'suffix';
 
 /**
  * Result of attempting to resolve a tool name.
  */
-export type ResolutionResult = {
+export type RegistryResolutionResult = {
   /** The resolved tool name, or null if not found or ambiguous. */
   resolved: string | null;
   /** The tier at which resolution succeeded. */
@@ -30,20 +25,6 @@ export type ResolveNameOptions = {
 };
 
 /**
- * Normalizes a tool name for matching.
- * - Lowercases ASCII letters
- * - Replaces underscores, slashes, and dots with hyphens
- * - Trims whitespace
- * - Is idempotent
- *
- * @param name The name to normalize
- * @returns The normalized name
- */
-export function normalizeName(name: string): string {
-  return name.trim().toLowerCase().replace(/[_./]/g, '-');
-}
-
-/**
  * Builds candidate names for matching.
  * This is primarily used for testing normalization behavior.
  * Returns the normalized name and all right-anchored suffixes in order.
@@ -51,7 +32,7 @@ export function normalizeName(name: string): string {
  * @param name The name to build candidates for
  * @returns Array of candidates in deterministic order
  */
-export function buildNameCandidates(name: string): string[] {
+export function buildRegistryNameCandidates(name: string): string[] {
   const normalized = normalizeName(name);
   const candidates: string[] = [normalized];
 
@@ -109,109 +90,117 @@ export function resolveName(
   registry: ToolRegistry,
   options?: ResolveNameOptions,
   dispatchEvent?: (event: Event) => boolean,
-): ResolutionResult {
-  const allowDeprecated = options?.allowDeprecated ?? false;
-  const restrictedTiers = options?.restrictTo;
-
-  // Helper to check if a tier should be tried
-  const shouldTryTier = (tier: ResolutionTier): boolean => {
-    if (!restrictedTiers) return true;
-    return restrictedTiers.includes(tier);
-  };
-
-  const allTools = registry.tools();
-  const toolNames = new Set(allTools.map((tool) => tool.identity.name));
-
-  // Helper to build result and emit event
-  const buildResult = (tier: ResolutionTier, candidates: string[]): ResolutionResult => {
-    const filtered = filterDeprecated(candidates, allTools, allowDeprecated);
-
-    if (filtered.length === 0) {
-      return { resolved: null, tier };
-    }
-
-    if (filtered.length === 1) {
-      const resolved = filtered[0]!;
-      if (dispatchEvent) {
-        dispatchEvent(
-          new ToolboxNameResolvedEvent({
-            originalName: input,
-            resolvedName: resolved,
-            tier,
-          }),
-        );
-      }
-      return { resolved, tier };
-    }
-
-    // Multiple matches: ambiguous
-    return { resolved: null, tier, ambiguous: filtered };
-  };
-
-  // Tier 1: Exact match (case-sensitive, separator-sensitive)
-  if (shouldTryTier('exact')) {
-    if (toolNames.has(input)) {
-      const result = buildResult('exact', [input]);
-      if (result.resolved) return result;
-    }
+): RegistryResolutionResult {
+  const context = createResolutionContext(input, registry, options, dispatchEvent);
+  for (const resolver of tierResolvers) {
+    const result = resolver(context);
+    if (result) return result;
   }
-
-  // Tier 2: Case-insensitive (only lowercase, keep separators)
-  if (shouldTryTier('case-insensitive')) {
-    const inputLowercased = input.toLowerCase();
-    const candidates: string[] = [];
-
-    for (const name of toolNames) {
-      if (name.toLowerCase() === inputLowercased) {
-        candidates.push(name);
-      }
-    }
-
-    if (candidates.length > 0) {
-      const result = buildResult('case-insensitive', candidates);
-      if (result.resolved) return result;
-      if (result.ambiguous) return result;
-    }
-  }
-
-  // Tier 3: Normalized (lowercase + normalize separators)
-  if (shouldTryTier('normalized')) {
-    const normalized = normalizeName(input);
-    const candidates: string[] = [];
-
-    for (const name of toolNames) {
-      if (normalizeName(name) === normalized) {
-        candidates.push(name);
-      }
-    }
-
-    if (candidates.length > 0) {
-      const result = buildResult('normalized', candidates);
-      if (result.resolved) return result;
-      if (result.ambiguous) return result;
-    }
-  }
-
-  // Tier 4: Suffix (substring matching on normalized names)
-  if (shouldTryTier('suffix')) {
-    const normalized = normalizeName(input);
-    const matches: string[] = [];
-
-    for (const name of toolNames) {
-      const nameNormalized = normalizeName(name);
-      // Check if the input (normalized) appears as a substring in the tool name (normalized)
-      if (nameNormalized.includes(normalized)) {
-        matches.push(name);
-      }
-    }
-
-    if (matches.length > 0) {
-      const result = buildResult('suffix', matches);
-      if (result.resolved) return result;
-      if (result.ambiguous) return result;
-    }
-  }
-
-  // No match found
   return { resolved: null, tier: 'exact' };
+}
+
+type ResolutionContext = {
+  input: string;
+  allTools: ReturnType<ToolRegistry['tools']>;
+  toolNames: Set<string>;
+  allowDeprecated: boolean;
+  restrictedTiers: ResolutionTier[] | undefined;
+  dispatchEvent: ((event: Event) => boolean) | undefined;
+};
+
+type TierResolver = (context: ResolutionContext) => RegistryResolutionResult | null;
+
+const tierResolvers: readonly TierResolver[] = [
+  resolveExactTier,
+  resolveCaseInsensitiveTier,
+  resolveNormalizedTier,
+  resolveSuffixTier,
+];
+
+function createResolutionContext(
+  input: string,
+  registry: ToolRegistry,
+  options: ResolveNameOptions | undefined,
+  dispatchEvent: ((event: Event) => boolean) | undefined,
+): ResolutionContext {
+  return {
+    input,
+    allTools: registry.tools(),
+    toolNames: new Set(registry.tools().map((tool) => tool.identity.name)),
+    allowDeprecated: options?.allowDeprecated ?? false,
+    restrictedTiers: options?.restrictTo,
+    dispatchEvent,
+  };
+}
+
+function resolveExactTier(context: ResolutionContext): RegistryResolutionResult | null {
+  if (!shouldTryTier(context, 'exact')) return null;
+  return context.toolNames.has(context.input)
+    ? buildResult(context, 'exact', [context.input])
+    : null;
+}
+
+function resolveCaseInsensitiveTier(context: ResolutionContext): RegistryResolutionResult | null {
+  if (!shouldTryTier(context, 'case-insensitive')) return null;
+  const inputLowercased = context.input.toLowerCase();
+  return buildNonEmptyResult(
+    context,
+    'case-insensitive',
+    [...context.toolNames].filter((name) => name.toLowerCase() === inputLowercased),
+  );
+}
+
+function resolveNormalizedTier(context: ResolutionContext): RegistryResolutionResult | null {
+  if (!shouldTryTier(context, 'normalized')) return null;
+  const normalized = normalizeName(context.input);
+  return buildNonEmptyResult(
+    context,
+    'normalized',
+    [...context.toolNames].filter((name) => normalizeName(name) === normalized),
+  );
+}
+
+function resolveSuffixTier(context: ResolutionContext): RegistryResolutionResult | null {
+  if (!shouldTryTier(context, 'suffix')) return null;
+  const normalized = normalizeName(context.input);
+  return buildNonEmptyResult(
+    context,
+    'suffix',
+    [...context.toolNames].filter((name) => normalizeName(name).includes(normalized)),
+  );
+}
+
+function shouldTryTier(context: ResolutionContext, tier: ResolutionTier): boolean {
+  return context.restrictedTiers ? context.restrictedTiers.includes(tier) : true;
+}
+
+function buildNonEmptyResult(
+  context: ResolutionContext,
+  tier: ResolutionTier,
+  candidates: string[],
+): RegistryResolutionResult | null {
+  return candidates.length ? buildResult(context, tier, candidates) : null;
+}
+
+function buildResult(
+  context: ResolutionContext,
+  tier: ResolutionTier,
+  candidates: string[],
+): RegistryResolutionResult {
+  const filtered = filterDeprecated(candidates, context.allTools, context.allowDeprecated);
+  if (!filtered.length) return { resolved: null, tier };
+  if (filtered.length > 1) return { resolved: null, tier, ambiguous: filtered };
+  const resolved = filtered[0]!;
+  emitResolution(context, resolved, tier);
+  return { resolved, tier };
+}
+
+function emitResolution(
+  context: ResolutionContext,
+  resolvedName: string,
+  tier: ResolutionTier,
+): void {
+  context.dispatchEvent?.(
+    new ToolboxNameResolvedEvent({ originalName: context.input, resolvedName, tier }),
+  );
 }

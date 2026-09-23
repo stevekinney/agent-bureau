@@ -6,9 +6,8 @@
  * live-process concern with no bureau session behind it, so on a crash it is
  * cancelled, never reattached as a session run. Direct handle metadata carries
  * the same tag; the boot sweep still uses the stable id prefix so legacy untagged
- * suspended residue remains cleanupable. Exported through `@lostgradient/operative/durable`
- * (no `@lostgradient/operative/scheduler` subpath export exists) so the gateway recovery path
- * can import it.
+ * suspended residue remains cleanupable. Exported from the `@lostgradient/operative` root entry point
+ * so the gateway recovery path can import it.
  */
 export const SCHEDULER_ORIGIN_TAG = 'bureau:scheduler-origin' as const;
 

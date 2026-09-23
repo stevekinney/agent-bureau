@@ -1,6 +1,6 @@
+import { CompletableEventTarget } from '@lostgradient/lifecycle';
 import { createTool, createToolbox, createToolCall } from 'armorer';
 import { describe, expect, it } from 'bun:test';
-import { CompletableEventTarget } from 'lifecycle';
 
 import type { RequestHumanInputContext } from './create-request-human-input-tool';
 import { createRequestHumanInputTool } from './create-request-human-input-tool';

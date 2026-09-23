@@ -1,11 +1,11 @@
 import {
+  MemoryStorage,
   Scheduler,
   workflow,
+  yieldToPortableEventLoop,
   type WorkflowLogRecord,
   type WorkflowStatus,
 } from '@lostgradient/weft';
-import { MemoryStorage } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { createRunEngine, type RegistryAgnosticEngine } from './create-run-engine';
@@ -30,8 +30,8 @@ import { createRunEngine, type RegistryAgnosticEngine } from './create-run-engin
  * was ever armed; waiting afterward to see whether one fires anyway adds no
  * coverage; it only pads runtime. This split-out issue confirmed there is no
  * `getNow`/clock passthrough on `createRunEngine`'s options or on Weft's
- * `Engine.create` (`grep -n '^\s*[a-zA-Z]\+?:' node_modules/@lostgradient/weft/dist/core/types/options.d.ts`
- * has no `clock`/`now`/`getNow` field), so this is the "replace with an
+ * `Engine.create` (the source options in `packages/weft/src/core/types/options.ts`
+ * have no `clock`/`now`/`getNow` field), so this is the "replace with an
  * equivalent deterministic assertion" path, not a production seam addition.
  */
 

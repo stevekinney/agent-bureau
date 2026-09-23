@@ -1,3 +1,4 @@
+import type { TypedEventTarget } from '@lostgradient/lifecycle';
 import {
   type ActiveRun,
   buildRunReport,
@@ -14,19 +15,18 @@ import {
   type NotificationLevel,
   type RunFrame,
   type RunReport,
+  type RunState,
   type StreamEventMap,
   type SummarizeOptions,
   type ToolFrameStatus,
 } from '@lostgradient/operative';
-import type { RunState } from '@lostgradient/operative/store';
 import { Conversation } from 'conversationalist';
-import type { TypedEventTarget } from 'lifecycle';
 
 import { serializeUnknownError } from './serialization';
 
 /**
  * AB-96 — bureau-side wiring of operative's versioned run envelope
- * (`@lostgradient/operative/run-envelope`). Extends `websocket-frames.ts`'s
+ * (`@lostgradient/operative`). Extends `websocket-frames.ts`'s
  * `streamEventToFrame` concept with the fuller, documented lifecycle frame
  * set (run-started, step, assistant-chunk/final, tool-pre/post,
  * notification, run-finished), and builds the terminal `RunReport` for every
@@ -35,7 +35,7 @@ import { serializeUnknownError } from './serialization';
 
 export interface RunFrameForwarderOptions {
   /** Enhanced-streaming event target, when the runtime has streaming enabled. */
-  streamEventTarget?: TypedEventTarget<StreamEventMap>;
+  streamEventTarget?: TypedEventTarget<StreamEventMap> | undefined;
   /** Redaction/truncation limits applied to tool-pre/tool-post summaries. */
   summarizeOptions?: SummarizeOptions;
   /** Injectable clock for deterministic frame timestamps in tests. */
@@ -51,7 +51,7 @@ export interface RunFrameForwarderOptions {
  */
 export function createRunFrameForwarder(
   runId: string,
-  activeRun: ActiveRun,
+  activeRun: Pick<ActiveRun, 'addEventListener' | 'removeEventListener'>,
   emit: (frame: RunFrame) => void,
   options: RunFrameForwarderOptions = {},
 ): () => void {
@@ -248,8 +248,8 @@ export function createRunFrameForwarder(
 
 /** Extracts `effectiveModel`/`effectiveEffort` from the last step's `GenerateResponse.metadata`. */
 function extractEffectiveModelAndEffort(steps: RunState['steps']): {
-  effectiveModel?: string;
-  effectiveEffort?: string;
+  effectiveModel: string | undefined;
+  effectiveEffort: string | undefined;
 } {
   const lastStep = steps[steps.length - 1];
   const metadata = lastStep?.metadata;
@@ -298,9 +298,9 @@ export function buildTerminalReportFromCompletedEvent(
 export function buildTerminalReportFromAbortedEvent(
   runId: string,
   event: {
-    usage?: BuildRunReportInput['usage'];
+    usage?: BuildRunReportInput['usage'] | undefined;
     costEstimate?: BuildRunReportInput['costEstimate'];
-    reason?: string;
+    reason?: string | undefined;
     error?: unknown;
     steps: RunState['steps'];
     conversation: { current: BuildRunReportInput['transcript'] };
@@ -332,7 +332,7 @@ export function buildTerminalReportFromAbortedEvent(
  */
 export function buildPartialRunReport(
   runId: string,
-  runState: RunState,
+  runState: Pick<RunState, 'steps' | 'usage' | 'error' | 'snapshots'>,
   reason?: string,
 ): RunReport {
   const { effectiveModel, effectiveEffort } = extractEffectiveModelAndEffort(runState.steps);
@@ -363,7 +363,7 @@ export function buildPartialRunReport(
  * `undefined` (an empty transcript) when no step has completed yet.
  */
 function extractLastCompletedTranscript(
-  runState: RunState,
+  runState: Pick<RunState, 'snapshots'>,
 ): BuildRunReportInput['transcript'] | undefined {
   const lastSnapshot = runState.snapshots[runState.snapshots.length - 1];
   return lastSnapshot ? Conversation.from(lastSnapshot).current : undefined;

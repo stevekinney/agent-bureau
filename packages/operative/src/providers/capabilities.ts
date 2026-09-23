@@ -1,6 +1,10 @@
 import { createModelCatalog } from './model-catalog.ts';
 import type { ProviderName } from './types.ts';
 
+function unreachable(value: never): never {
+  throw new Error(`Unsupported provider: ${String(value)}`);
+}
+
 /**
  * What a provider can be asked to do beyond a plain generate call.
  *
@@ -156,5 +160,7 @@ export function getProviderCapabilities(
     case 'voyage':
     case 'ollama':
       return NO_CAPABILITIES;
+    default:
+      return unreachable(provider);
   }
 }

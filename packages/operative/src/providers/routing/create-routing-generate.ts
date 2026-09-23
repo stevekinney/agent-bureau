@@ -74,7 +74,7 @@ function unionDescriptors(
     }
   }
   return [...byKey.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([, descriptor]) => descriptor);
 }
 

@@ -31,50 +31,90 @@ export function serializeToolDefinition(
   definition: ToolDefinition,
   options?: { aliases?: ToolId[] },
 ): SerializedToolDefinition {
-  const metadata = definition.metadata;
-  if (metadata !== undefined) {
-    assertJsonValue(metadata, 'metadata');
-  }
-  const normalizedMetadata =
-    metadata !== undefined ? (sortJsonValue(metadata) as JsonObject) : undefined;
-  const normalizedRisk = definition.risk
-    ? (sortJsonValue(definition.risk) as JsonObject)
-    : undefined;
-  const normalizedLifecycle = definition.lifecycle
-    ? (sortJsonValue(definition.lifecycle) as JsonObject)
-    : undefined;
-
-  if (definition.inputJsonSchema !== undefined) {
-    assertJsonValue(definition.inputJsonSchema, 'inputJsonSchema');
-  }
-  const input = definition.inputJsonSchema
-    ? (sortJsonValue(definition.inputJsonSchema) as JsonSchema)
-    : toJsonSchema(definition.input);
-
+  const normalized = normalizeSerializableParts(definition);
   return {
     schemaVersion: '2020-12',
     id: definition.id,
-    identity: {
-      namespace: definition.identity.namespace,
-      name: definition.identity.name,
-      ...(definition.identity.version ? { version: definition.identity.version } : {}),
-    },
-    display: {
-      ...(definition.display.title ? { title: definition.display.title } : {}),
-      description: definition.display.description,
-      ...(definition.display.examples?.length
-        ? { examples: [...definition.display.examples] }
-        : {}),
-    },
+    identity: serializeIdentity(definition),
+    display: serializeDisplay(definition),
     name: definition.identity.name,
     description: definition.display.description,
-    ...(definition.tags?.length ? { tags: [...definition.tags] } : {}),
-    ...(normalizedMetadata ? { metadata: normalizedMetadata } : {}),
-    ...(normalizedRisk ? { risk: normalizedRisk } : {}),
-    ...(normalizedLifecycle ? { lifecycle: normalizedLifecycle } : {}),
-    aliases: options?.aliases ? [...options.aliases].sort() : [],
-    input,
+    ...optionalTags(definition.tags),
+    ...optionalMetadata(normalized.metadata),
+    ...optionalRisk(normalized.risk),
+    ...optionalLifecycle(normalized.lifecycle),
+    aliases: options?.aliases ? [...options.aliases].toSorted() : [],
+    input: normalized.input,
   };
+}
+
+type SerializableParts = {
+  metadata?: JsonObject;
+  risk?: JsonObject;
+  lifecycle?: JsonObject;
+  input: JsonSchema;
+};
+
+function normalizeSerializableParts(definition: ToolDefinition): SerializableParts {
+  validateSerializableInputs(definition);
+  return {
+    ...optionalNormalizedMetadata(definition.metadata),
+    ...(definition.risk ? { risk: sortJsonObjectValue(definition.risk) } : {}),
+    ...(definition.lifecycle ? { lifecycle: sortJsonObjectValue(definition.lifecycle) } : {}),
+    input: definition.inputJsonSchema
+      ? sortJsonObjectValue(definition.inputJsonSchema)
+      : toJsonSchema(definition.input),
+  };
+}
+
+function optionalNormalizedMetadata(metadata: unknown): Pick<SerializableParts, 'metadata'> | {} {
+  if (!isJsonObjectValue(metadata)) return {};
+  return { metadata: sortJsonObjectValue(metadata) };
+}
+
+function validateSerializableInputs(definition: ToolDefinition): void {
+  if (isJsonObjectValue(definition.metadata)) assertJsonValue(definition.metadata, 'metadata');
+  if (definition.inputJsonSchema !== undefined) {
+    assertJsonValue(definition.inputJsonSchema, 'inputJsonSchema');
+  }
+}
+
+function serializeIdentity(definition: ToolDefinition): SerializedToolDefinition['identity'] {
+  return {
+    namespace: definition.identity.namespace,
+    name: definition.identity.name,
+    ...(definition.identity.version ? { version: definition.identity.version } : {}),
+  };
+}
+
+function serializeDisplay(definition: ToolDefinition): SerializedToolDefinition['display'] {
+  return {
+    ...(definition.display.title ? { title: definition.display.title } : {}),
+    description: definition.display.description,
+    ...(definition.display.examples?.length ? { examples: [...definition.display.examples] } : {}),
+  };
+}
+
+function optionalTags(
+  tags: readonly string[] | undefined,
+): Pick<SerializedToolDefinition, 'tags'> | {} {
+  return tags?.length ? { tags: [...tags] } : {};
+}
+
+function optionalMetadata(
+  metadata: JsonObject | undefined,
+): Pick<SerializedToolDefinition, 'metadata'> | {} {
+  return metadata ? { metadata } : {};
+}
+
+function optionalRisk(risk: JsonObject | undefined): Pick<SerializedToolDefinition, 'risk'> | {} {
+  return risk ? { risk } : {};
+}
+
+function optionalLifecycle(
+  lifecycle: JsonObject | undefined,
+): Pick<SerializedToolDefinition, 'lifecycle'> | {} {
+  return lifecycle ? { lifecycle } : {};
 }
 
 export function serializeRegistry(registry: ToolRegistry): SerializedToolDefinition[] {
@@ -84,11 +124,21 @@ export function serializeRegistry(registry: ToolRegistry): SerializedToolDefinit
 }
 
 function toJsonSchema(schema: z.ZodType): JsonSchema {
-  const json = z.toJSONSchema(schema, {
+  const json: unknown = z.toJSONSchema(schema, {
     target: 'draft-2020-12',
     unrepresentable: 'throw',
     io: 'input',
-  }) as JsonValue;
+  });
+  assertJsonValue(json, 'input');
+  return sortJsonObjectValue(json);
+}
 
-  return sortJsonValue(json) as JsonSchema;
+function sortJsonObjectValue(value: JsonValue): JsonObject {
+  const sorted = sortJsonValue(value);
+  if (isJsonObjectValue(sorted)) return sorted;
+  throw new TypeError('Expected JSON object');
+}
+
+function isJsonObjectValue(value: unknown): value is JsonObject {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }

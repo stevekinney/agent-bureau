@@ -7,7 +7,7 @@
  *   history doesn't meaningfully affect the response.
  */
 
-import { sha256HexSync } from 'interoperability';
+import { sha256HexSync } from '@lostgradient/cryptography';
 
 import type { GenerateContext } from '../types';
 
@@ -28,7 +28,7 @@ export function conversationHashKey(context: GenerateContext): string {
   const toolNames = context.toolbox
     .tools()
     .map((tool) => tool.name)
-    .sort();
+    .toSorted();
 
   parts.push(`tools:${toolNames.join(',')}`);
 

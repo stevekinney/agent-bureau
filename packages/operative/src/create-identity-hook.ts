@@ -16,7 +16,7 @@ export interface CreateIdentityHookOptions {
   /**
    * Optional logger for warnings. Defaults to `console.warn`.
    */
-  warn?: (message: string) => void;
+  warn?: ((message: string) => void) | undefined;
 }
 
 /**

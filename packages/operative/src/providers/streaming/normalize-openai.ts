@@ -29,7 +29,7 @@ export async function* normalizeOpenAIStream(
     findBlock,
   },
 ): AsyncIterable<StreamEvent> {
-  const { buildState, findBlock } = dependencies;
+  const { buildState: dependencyBuildState, findBlock: dependencyFindBlock } = dependencies;
   const state: NormalizerState = {
     blocks: [],
     hasUsageData: false,
@@ -82,7 +82,7 @@ export async function* normalizeOpenAIStream(
         yield { type: 'stream:block-start', block: { ...block } };
       }
 
-      const block = findBlock(blocks, textBlockId);
+      const block = dependencyFindBlock(blocks, textBlockId);
       if (block) {
         block.content += delta.content;
         accumulatedText += delta.content;
@@ -133,7 +133,7 @@ export async function* normalizeOpenAIStream(
           const args = toolCall.function.arguments;
           tracker.arguments += args;
 
-          const block = findBlock(blocks, tracker.blockId);
+          const block = dependencyFindBlock(blocks, tracker.blockId);
           if (block) {
             block.content += args;
             block.partialArguments = tracker.arguments;
@@ -170,7 +170,7 @@ export async function* normalizeOpenAIStream(
     if (finish_reason) {
       // Complete the text block if one exists
       if (textBlockId) {
-        const textBlock = findBlock(blocks, textBlockId);
+        const textBlock = dependencyFindBlock(blocks, textBlockId);
         if (textBlock) {
           textBlock.complete = true;
           yield { type: 'stream:block-complete', block: { ...textBlock } };
@@ -179,7 +179,7 @@ export async function* normalizeOpenAIStream(
 
       // Complete all tool call blocks
       for (const [, tracker] of toolTrackers) {
-        const block = findBlock(blocks, tracker.blockId);
+        const block = dependencyFindBlock(blocks, tracker.blockId);
         if (block) {
           block.complete = true;
           yield { type: 'stream:block-complete', block: { ...block } };
@@ -204,7 +204,7 @@ export async function* normalizeOpenAIStream(
   // Emit stream:complete after the loop so any trailing usage-only chunk
   // has been processed and buildState() includes the final usage data.
   const finalState: StreamState = {
-    ...buildState(state),
+    ...dependencyBuildState(state),
     complete: true,
   };
   yield { type: 'stream:complete', state: finalState };

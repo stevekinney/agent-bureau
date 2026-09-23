@@ -1,6 +1,9 @@
-import { createAgent } from '@lostgradient/operative';
-import { createModelCatalog, withBackendDescriptors } from '@lostgradient/operative/providers';
-import { createMockGenerate } from '@lostgradient/operative/test';
+import {
+  createAgent,
+  createMockGenerate,
+  createModelCatalog,
+  withBackendDescriptors,
+} from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
 
 import { createAgentCatalog } from './agent-catalog';

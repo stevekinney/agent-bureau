@@ -1,7 +1,7 @@
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import { SessionOutboxAppendedEvent } from '../events';
@@ -39,10 +39,10 @@ async function claimAndAcknowledge(store: SessionStore, ordinal: number): Promis
 }
 
 function makeSession(overrides: {
-  agentName?: string;
-  id?: string;
-  createdAt?: string;
-  updatedAt?: string;
+  agentName?: string | undefined;
+  id?: string | undefined;
+  createdAt?: string | undefined;
+  updatedAt?: string | undefined;
 }) {
   const session = createAgentSession({
     agentName: overrides.agentName ?? 'test-agent',
@@ -1134,7 +1134,7 @@ describe('createSessionStore', () => {
     const rawStore = textValueStore(new MemoryStorage());
     const store = createSessionStore(rawStore);
     const session = makeSession({ id: 'occupied' });
-    const occupiedKey = `${BODY_PREFIX}${[...session.id]
+    const occupiedKey = `${BODY_PREFIX}${Array.from(session.id)
       .map((character) => character.charCodeAt(0).toString(16).padStart(4, '0'))
       .join('')}`;
     await rawStore.set(occupiedKey, 'client-owned-value');

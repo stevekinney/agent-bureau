@@ -24,21 +24,22 @@
  * is built from.
  */
 
-import type { AgentPreferences, RunnableAgent, SelectionGate } from '@lostgradient/operative';
-import { createSelectionGate, readGenerationProfile } from '@lostgradient/operative';
-import type { SteeringRequestedValue } from '@lostgradient/operative/durable';
 import type {
+  AgentPreferences,
   BureauInvariants,
   DelegatedAuthority,
   DeploymentInvariants,
   ModelCatalog,
+  RunnableAgent,
+  SelectionGate,
   SelectionPlan,
   SelectionRequest,
   SelectOptions,
+  SteeringRequestedValue,
   TaskClassification,
   UserModelConfiguration,
-} from '@lostgradient/operative/providers';
-import { select } from '@lostgradient/operative/providers';
+} from '@lostgradient/operative';
+import { createSelectionGate, readGenerationProfile, select } from '@lostgradient/operative';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { ModelCatalogService } from './model-catalog-refresh';

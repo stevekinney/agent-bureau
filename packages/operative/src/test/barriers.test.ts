@@ -1,8 +1,8 @@
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { createManualRuntimeServices, HookRegistry } from '@lostgradient/lifecycle';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import { createManualRuntimeServices, HookRegistry } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import { createChildRunRegistry, dispatchChildRun } from '../child-run';

@@ -2,7 +2,7 @@ import type { OutputValidator, ValidationResult, ValidatorContext } from '../typ
 
 /** Options for configuring the code safety validator. */
 export interface CodeSafetyValidatorOptions {
-  blockedPatterns?: RegExp[];
+  blockedPatterns?: RegExp[] | undefined;
 }
 
 /**

@@ -18,10 +18,10 @@ export interface CostBudgetExceededEvent {
 export interface CostBudgetOptions {
   budget: number;
   model: string;
-  thresholds?: number[];
-  onThreshold?: (event: CostBudgetThresholdEvent) => void;
-  onExceeded?: (event: CostBudgetExceededEvent) => void;
-  pricing?: CostEstimationOptions;
+  thresholds?: number[] | undefined;
+  onThreshold?: ((event: CostBudgetThresholdEvent) => void) | undefined;
+  onExceeded?: ((event: CostBudgetExceededEvent) => void) | undefined;
+  pricing?: CostEstimationOptions | undefined;
 }
 
 export interface CostBudgetMonitor {
@@ -35,7 +35,7 @@ export function createCostBudgetMonitor(options: CostBudgetOptions): CostBudgetM
 
   let accumulated = 0;
   const firedThresholds: number[] = [];
-  const sortedThresholds = [...thresholds].sort((a, b) => a - b);
+  const sortedThresholds = [...thresholds].toSorted((a, b) => a - b);
 
   const stopCondition: StopCondition = (context) => {
     if (context.usage) {

@@ -19,8 +19,8 @@
  * so every change (including the deliberately torn one) is deterministic.
  */
 
+import { createManualRuntimeServices, type ManualRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices, type ManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import {
@@ -120,7 +120,11 @@ function createCleanOptions(
 
 describe('runReactiveSourceConformanceSuite: positive self-test', () => {
   const runtime = createManualRuntimeServices({ origin: '2026-01-01T00:00:00.000Z' });
-  runReactiveSourceConformanceSuite(createCleanOptions(runtime));
+  runReactiveSourceConformanceSuite(createCleanOptions(runtime), {
+    describe,
+    it,
+    equal: Bun.deepEquals,
+  });
 });
 
 // --- Negative fixtures -----------------------------------------------------
@@ -141,6 +145,7 @@ function createCapturingTestRunner(): {
 } {
   const registered: { name: string; fn: () => void | Promise<void> }[] = [];
   const runner: ReactiveSourceConformanceTestRunner = {
+    equal: Bun.deepEquals,
     describe(_label, fn) {
       fn();
     },

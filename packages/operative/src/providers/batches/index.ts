@@ -13,9 +13,9 @@
  * The three surfaces are not unified, because the providers' are not. See each
  * module's `*BatchOperations` interface for what its provider actually offers.
  */
-export type { AnthropicBatchClientOptions, AnthropicBatchOperations } from './anthropic.ts';
 export { createAnthropicBatchClient } from './anthropic.ts';
-export type { GeminiBatchClientOptions, GeminiBatchOperations } from './gemini.ts';
+export type { AnthropicBatchClientOptions, AnthropicBatchOperations } from './anthropic.ts';
 export { createGeminiBatchClient } from './gemini.ts';
-export type { OpenAIBatchClientOptions, OpenAIBatchOperations } from './openai.ts';
+export type { GeminiBatchClientOptions, GeminiBatchOperations } from './gemini.ts';
 export { createOpenAIBatchClient } from './openai.ts';
+export type { OpenAIBatchClientOptions, OpenAIBatchOperations } from './openai.ts';

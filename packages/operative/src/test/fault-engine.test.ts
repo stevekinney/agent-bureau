@@ -1,8 +1,7 @@
-import { createTool, createToolbox } from 'armorer';
-import { createTestToolbox } from 'armorer/test';
+import { createManualRuntimeServices, HookRegistry } from '@lostgradient/lifecycle';
+import { createTestToolbox, createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createManualRuntimeServices, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from '../conditions/predicates';
@@ -34,7 +33,7 @@ function baseOptions(
 /** A minimal in-memory key/value+query storage double, recording every call it receives. */
 function createRecordingStore() {
   const data = new Map<string, unknown>();
-  const calls: { verb: string; key?: string }[] = [];
+  const calls: { verb: string; key?: string | undefined }[] = [];
   return {
     calls,
     data,

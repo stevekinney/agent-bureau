@@ -101,31 +101,29 @@
  * that closes its previously KNOWN, ACCEPTED overlapping-incarnations
  * limitation.
  */
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 import type {
   AgentScheduledEvent,
+  DurableEventEnvelope,
+  DurableEventGap,
+  DurableEventOwner,
+  DurableEventPage,
   ScheduleCancelledEvent,
   SchedulePausedEvent,
   ScheduleResumedEvent,
   SessionCreatedEvent,
   SessionDeletedEvent,
   SessionSavedEvent,
+  Subscription,
 } from '@lostgradient/operative';
-import type {
-  DurableEventEnvelope,
-  DurableEventGap,
-  DurableEventOwner,
-  DurableEventPage,
-} from '@lostgradient/operative/durable';
-import type { Subscription } from '@lostgradient/operative/liveness';
-import { encode } from '@lostgradient/weft';
 import {
   createFleetEventFeed,
+  encode,
   type Cursor,
   type FleetEventEnvelope,
   type FleetEventFeed,
-} from '@lostgradient/weft/server/handler';
-import type { Storage } from '@lostgradient/weft/storage';
-import type { RuntimeServices } from 'lifecycle';
+  type Storage,
+} from '@lostgradient/weft';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { EventTimestampResolver } from './event-timestamp';
@@ -194,7 +192,7 @@ function dedupeMarkerKey(owner: DurableEventOwner, kind: string, dedupeKey: stri
 /** Options for {@link DurableEventHistory.page}. */
 export interface DurableEventHistoryPageOptions {
   /** Exclusive cursor — an event AT `since` is never returned. Omit to page from the beginning. */
-  since?: string;
+  since?: string | undefined;
   /** Maximum events to return. Defaults to {@link DEFAULT_PAGE_LIMIT}. Must be a positive integer. */
   limit?: number;
   /**
@@ -274,7 +272,7 @@ export interface RetainedRunOwnerSnapshot {
 /** Options for {@link DurableEventHistory.subscribeEventHistory}. */
 export interface DurableEventHistorySubscribeOptions {
   /** Exclusive cursor to replay from. Omit to replay from the beginning. */
-  since?: string;
+  since?: string | undefined;
   /** Ends the subscription (equivalent to calling `unsubscribe()`) when aborted. */
   signal?: AbortSignal;
 }
@@ -962,7 +960,7 @@ export function createDurableEventHistory(
     async function deliver(): Promise<void> {
       try {
         for await (const envelope of feed.subscribe({
-          fromCursor: since,
+          ...(since === undefined ? {} : { fromCursor: since }),
           signal: combinedSignal,
           filterEnvelope: (candidate) => candidate.workflowId === targetWorkflowId,
         })) {
@@ -1393,7 +1391,7 @@ const SESSION_DURABLE_ACTION_TYPES = new Set<string>([
 
 /**
  * Narrows an action's `detail` to a `sessionId` string field — every
- * `session.*` event class in `@lostgradient/operative/events.ts` carries
+ * `session.*` event class in `@lostgradient/operative.ts` carries
  * one, but `Action.detail` is `unknown` by the time it reaches the bureau
  * action stream (`store.ts` copies the event's own enumerable properties
  * verbatim), so this is a runtime type guard, not a cast.
@@ -1846,6 +1844,7 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
             // starting a second write while this one is pending, so nothing
             // is lost by waiting for success here.
             recordedDeletionEvents.add(event);
+            return undefined;
           },
           (error: unknown) => {
             diagnose({
@@ -1985,11 +1984,11 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       // snapshot-then-await.
       const ownerWrites = activeWritesByOwner.get(encodeOwner(owner));
       if (!ownerWrites || ownerWrites.size === 0) return;
-      await Promise.allSettled([...ownerWrites]);
+      await Promise.allSettled(ownerWrites);
     },
     async waitForAllActiveWrites(): Promise<void> {
       if (activeWrites.size === 0) return;
-      await Promise.allSettled([...activeWrites]);
+      await Promise.allSettled(activeWrites);
     },
     async dispose(): Promise<void> {
       bureau.removeEventListener('action', actionListener);
@@ -2010,7 +2009,7 @@ export function createDurableEventProducer<D extends AgentDefinitions = AgentDef
       bureau.removeEventListener('review.revoked', reviewRevokedListener);
       bureau.removeEventListener('review.canceled', reviewCanceledListener);
       bureau.removeEventListener('review.superseded', reviewSupersededListener);
-      await Promise.allSettled([...activeWrites]);
+      await Promise.allSettled(activeWrites);
     },
   };
 }

@@ -7,6 +7,7 @@ import {
   type ToolIdentityInput,
 } from '../identity';
 import type { AnyToolDefinition as ToolDefinition } from '../tool-definition';
+import { comparePrerelease, compareSemver } from './version-comparison';
 
 export type VersionSelector = (definitions: ToolDefinition[]) => ToolDefinition | undefined;
 
@@ -53,7 +54,7 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
 
   const list = () =>
     Array.from(entries.values())
-      .sort((a, b) => a.order - b.order)
+      .toSorted((a, b) => a.order - b.order)
       .map((entry) => entry.tool);
 
   const tools = () => list();
@@ -61,45 +62,13 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
   const register = (definition: ToolDefinition, registerOptions: RegisterOptions = {}) => {
     const normalized = normalizeDefinition(definition);
     const id = normalized.id;
+    ensureCanRegister(id, entries, registerOptions);
+    if (entries.has(id)) unregister(id);
 
-    if (entries.has(id) && !registerOptions.override) {
-      throw new Error(`Tool already registered: ${id}`);
-    }
-
-    if (entries.has(id) && registerOptions.override) {
-      unregister(id);
-    }
-
-    const entry: RegistryEntry = {
-      tool: normalized,
-      order: order++,
-      aliases: new Set(),
-    };
-
+    const entry: RegistryEntry = { tool: normalized, order: order++, aliases: new Set() };
     entries.set(id, entry);
-    const nameKey = nameKeyFromIdentity(normalized.identity);
-    const listForName = byName.get(nameKey) ?? [];
-    listForName.push(id);
-    byName.set(nameKey, listForName);
-
-    const aliases = registerOptions.aliases ?? [];
-    for (const alias of aliases) {
-      const normalizedAlias = normalizeAlias(alias);
-      if (normalizedAlias === id) {
-        continue;
-      }
-      const existingTarget = aliasLookup.get(normalizedAlias);
-      if (existingTarget && existingTarget !== id && !registerOptions.override) {
-        throw new Error(`Alias already registered: ${normalizedAlias}`);
-      }
-      if (existingTarget && existingTarget !== id && registerOptions.override) {
-        const previousEntry = entries.get(existingTarget);
-        previousEntry?.aliases.delete(normalizedAlias);
-      }
-      aliasLookup.set(normalizedAlias, id);
-      entry.aliases.add(normalizedAlias);
-    }
-
+    addNameIndex(byName, normalized.identity, id);
+    registerAliases(entry, id, registerOptions, entries, aliasLookup);
     return normalized;
   };
 
@@ -134,36 +103,11 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
 
   const resolve = (identityInput: ToolIdentityInput, resolveOptions: ResolveOptions = {}) => {
     const identity = normalizeIdentity(identityInput);
-    const baseId = formatToolId(identity);
-    const resolvedId = resolveAlias(baseId, aliasLookup, maxAliasDepth);
-    if (resolvedId) {
-      const tool = entries.get(resolvedId)?.tool;
-      return allowDeprecated(tool, resolveOptions) ? tool : undefined;
-    }
-
-    if (identity.version) {
-      const tool = entries.get(baseId)?.tool;
-      return allowDeprecated(tool, resolveOptions) ? tool : undefined;
-    }
+    const direct = resolveDirectTool(identity, entries, aliasLookup, maxAliasDepth, resolveOptions);
+    if (direct || identity.version) return direct;
 
     const candidates = selectCandidates(identity, byName, entries, resolveOptions);
-    if (!candidates.length) return undefined;
-
-    if (options.versionSelector) {
-      const selected = options.versionSelector(candidates.map((entry) => entry.tool));
-      if (selected) return selected;
-    }
-
-    const allSemver = candidates.every((entry) => isSemver(entry.tool.identity.version));
-    if (allSemver) {
-      const sorted = [...candidates].sort((a, b) =>
-        compareSemver(a.tool.identity.version!, b.tool.identity.version!),
-      );
-      return sorted[0]?.tool;
-    }
-
-    const ordered = [...candidates].sort((a, b) => a.order - b.order);
-    return ordered[ordered.length - 1]?.tool;
+    return selectResolvedCandidate(candidates, options.versionSelector);
   };
 
   const aliases = (idInput: ToolId | ToolIdentityInput) => {
@@ -186,6 +130,96 @@ export function createRegistry(options: RegistryOptions = {}): ToolRegistry {
     aliases,
     getDeprecatedTools,
   };
+}
+
+function ensureCanRegister(
+  id: ToolId,
+  entries: Map<ToolId, RegistryEntry>,
+  options: RegisterOptions,
+): void {
+  if (entries.has(id) && !options.override) throw new Error(`Tool already registered: ${id}`);
+}
+
+function addNameIndex(byName: Map<string, ToolId[]>, identity: ToolIdentity, id: ToolId): void {
+  const nameKey = nameKeyFromIdentity(identity);
+  const listForName = byName.get(nameKey) ?? [];
+  listForName.push(id);
+  byName.set(nameKey, listForName);
+}
+
+function registerAliases(
+  entry: RegistryEntry,
+  id: ToolId,
+  options: RegisterOptions,
+  entries: Map<ToolId, RegistryEntry>,
+  aliasLookup: Map<ToolId, ToolId>,
+): void {
+  for (const alias of options.aliases ?? [])
+    registerAlias(entry, id, alias, options, entries, aliasLookup);
+}
+
+function registerAlias(
+  entry: RegistryEntry,
+  id: ToolId,
+  alias: ToolId,
+  options: RegisterOptions,
+  entries: Map<ToolId, RegistryEntry>,
+  aliasLookup: Map<ToolId, ToolId>,
+): void {
+  const normalizedAlias = normalizeAlias(alias);
+  if (normalizedAlias === id) return;
+  const existingTarget = aliasLookup.get(normalizedAlias);
+  if (existingTarget && existingTarget !== id)
+    handleAliasConflict(normalizedAlias, existingTarget, options, entries);
+  aliasLookup.set(normalizedAlias, id);
+  entry.aliases.add(normalizedAlias);
+}
+
+function handleAliasConflict(
+  alias: ToolId,
+  existingTarget: ToolId,
+  options: RegisterOptions,
+  entries: Map<ToolId, RegistryEntry>,
+): void {
+  if (!options.override) throw new Error(`Alias already registered: ${alias}`);
+  entries.get(existingTarget)?.aliases.delete(alias);
+}
+
+function resolveDirectTool(
+  identity: ToolIdentity,
+  entries: Map<ToolId, RegistryEntry>,
+  aliasLookup: Map<ToolId, ToolId>,
+  maxAliasDepth: number,
+  options: ResolveOptions,
+): ToolDefinition | undefined {
+  const baseId = formatToolId(identity);
+  const resolvedId = resolveAlias(baseId, aliasLookup, maxAliasDepth) ?? baseId;
+  const tool = entries.get(resolvedId)?.tool;
+  return allowDeprecated(tool, options) ? tool : undefined;
+}
+
+function selectResolvedCandidate(
+  candidates: RegistryEntry[],
+  versionSelector: VersionSelector | undefined,
+): ToolDefinition | undefined {
+  if (!candidates.length) return undefined;
+  const selected = versionSelector?.(candidates.map((entry) => entry.tool));
+  if (selected) return selected;
+  return candidates.every((entry) => isSemver(entry.tool.identity.version))
+    ? selectHighestSemver(candidates)
+    : selectNewestRegistered(candidates);
+}
+
+function selectHighestSemver(candidates: RegistryEntry[]): ToolDefinition | undefined {
+  const sorted = candidates.toSorted((a, b) =>
+    compareSemver(a.tool.identity.version ?? '', b.tool.identity.version ?? ''),
+  );
+  return sorted[0]?.tool;
+}
+
+function selectNewestRegistered(candidates: RegistryEntry[]): ToolDefinition | undefined {
+  const ordered = candidates.toSorted((a, b) => a.order - b.order);
+  return ordered.at(-1)?.tool;
 }
 
 function normalizeDefinition(definition: ToolDefinition): ToolDefinition {
@@ -283,59 +317,6 @@ function selectCandidates(
 function isSemver(value: string | undefined): boolean {
   if (!value) return false;
   return /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value);
-}
-
-function compareSemver(a: string, b: string): number {
-  const parsedA = parseSemver(a);
-  const parsedB = parseSemver(b);
-  if (!parsedA || !parsedB) return 0;
-
-  if (parsedA.major !== parsedB.major) return parsedB.major - parsedA.major;
-  if (parsedA.minor !== parsedB.minor) return parsedB.minor - parsedA.minor;
-  if (parsedA.patch !== parsedB.patch) return parsedB.patch - parsedA.patch;
-
-  if (!parsedA.prerelease && parsedB.prerelease) return -1;
-  if (parsedA.prerelease && !parsedB.prerelease) return 1;
-  if (!parsedA.prerelease && !parsedB.prerelease) return 0;
-
-  return comparePrerelease(parsedA.prerelease!, parsedB.prerelease!);
-}
-
-function parseSemver(
-  value: string,
-): { major: number; minor: number; patch: number; prerelease?: string } | undefined {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(value);
-  if (!match) return undefined;
-  return {
-    major: Number(match[1]),
-    minor: Number(match[2]),
-    patch: Number(match[3]),
-    ...(match[4] !== undefined ? { prerelease: match[4] } : {}),
-  };
-}
-
-function comparePrerelease(a: string, b: string): number {
-  const aParts = a.split('.');
-  const bParts = b.split('.');
-  const len = Math.max(aParts.length, bParts.length);
-  for (let i = 0; i < len; i += 1) {
-    const aPart = aParts[i];
-    const bPart = bParts[i];
-    if (aPart === undefined) return -1;
-    if (bPart === undefined) return 1;
-    const aNum = Number(aPart);
-    const bNum = Number(bPart);
-    const aIsNum = !Number.isNaN(aNum) && aPart.trim() !== '';
-    const bIsNum = !Number.isNaN(bNum) && bPart.trim() !== '';
-    if (aIsNum && bIsNum) {
-      if (aNum !== bNum) return bNum - aNum;
-      continue;
-    }
-    if (aIsNum) return -1;
-    if (bIsNum) return 1;
-    if (aPart !== bPart) return bPart.localeCompare(aPart);
-  }
-  return 0;
 }
 
 export const internalRegistryModuleTestUtilities = {

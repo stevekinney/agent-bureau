@@ -10,6 +10,13 @@
  * storage-fixture code — and never sleep: every ordering assertion relies
  * on `createManualRuntimeServices()`'s manual clock.
  */
+import { CompletableEventTarget, createManualRuntimeServices } from '@lostgradient/lifecycle';
+import type {
+  Action,
+  DurableEventEnvelope,
+  DurableEventOwner,
+  Subscription,
+} from '@lostgradient/operative';
 import {
   AgentScheduledEvent,
   ScheduleCancelledEvent,
@@ -21,13 +28,14 @@ import {
   SessionDeletedEvent,
   SessionSavedEvent,
 } from '@lostgradient/operative';
-import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
-import type { Subscription } from '@lostgradient/operative/liveness';
-import type { Action } from '@lostgradient/operative/store';
-import { createFleetEventFeed, type FleetEventFeed } from '@lostgradient/weft/server/handler';
-import { KEYS, resolveStorage, type Storage } from '@lostgradient/weft/storage';
+import {
+  createFleetEventFeed,
+  type FleetEventFeed,
+  KEYS,
+  resolveStorage,
+  type Storage,
+} from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
-import { CompletableEventTarget, createManualRuntimeServices } from 'lifecycle';
 
 import {
   createDurableEventHistory,

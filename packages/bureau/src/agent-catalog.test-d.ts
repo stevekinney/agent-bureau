@@ -8,8 +8,7 @@
 // instantiation of `RunnableAgent<O, H>`.
 
 import type { RunnableAgent } from '@lostgradient/operative';
-import { createAgent, createLazyAgent } from '@lostgradient/operative';
-import { createMockGenerate } from '@lostgradient/operative/test';
+import { createAgent, createLazyAgent, createMockGenerate } from '@lostgradient/operative';
 import { z } from 'zod';
 
 import type {

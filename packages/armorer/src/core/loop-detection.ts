@@ -1,4 +1,4 @@
-import { sha256HexSync } from 'interoperability';
+import { sha256HexSync } from '@lostgradient/cryptography';
 
 export interface LoopDetectionOptions {
   /** Number of consecutive alternating calls to consider a ping-pong loop. Default: 10 */
@@ -351,11 +351,14 @@ export function stableStringify(value: unknown): string {
   if (typeof value === 'bigint') return JSON.stringify(value.toString());
   if (typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
-  const record = value as Record<string, unknown>;
-  const sorted = Object.keys(record)
-    .filter((k) => !isOmittedByJson(record[k]))
-    .sort();
+  const sorted = Object.keys(value)
+    .filter((key) => !isOmittedByJson(Reflect.get(value, key)))
+    .toSorted();
   return (
-    '{' + sorted.map((k) => JSON.stringify(k) + ':' + stableStringify(record[k])).join(',') + '}'
+    '{' +
+    sorted
+      .map((key) => JSON.stringify(key) + ':' + stableStringify(Reflect.get(value, key)))
+      .join(',') +
+    '}'
   );
 }

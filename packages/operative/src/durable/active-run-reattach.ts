@@ -1,8 +1,8 @@
-import type { RuntimeServices } from 'lifecycle';
-import { CompletableEventTarget, createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { CompletableEventTarget, createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { ChildRunRegistry } from '../child-run';
-import { createClosedAcknowledgement } from '../closed-acknowledgement';
+import { createClosedAcknowledgement, foldTerminalCleanup } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
 import type { CombinedOperativeEventMap, OperativeEventEmitter } from '../events';
 import { ToolProgressBubbleEvent, ToolSettledBubbleEvent, ToolStartedBubbleEvent } from '../events';
@@ -15,6 +15,14 @@ import type { RecoveredRunHandle } from './active-run-event-surface';
 import { wireHumanWaitLiveness } from './active-run-event-surface';
 import { driveReattachedRun } from './active-run-reattach-driver';
 
+function cancelSucceeded(): boolean {
+  return true;
+}
+
+function cancelFailed(): boolean {
+  return false;
+}
+
 export function reattachDurableActiveRun(
   context: DurableActiveRunContext,
   reattach: {
@@ -26,15 +34,15 @@ export function reattachDurableActiveRun(
      * surface, so `runStep` events are observable before resumed user code can
      * advance. Omit when reattaching outside that recovery hook.
      */
-    emitter?: OperativeEventEmitter;
+    emitter?: OperativeEventEmitter | undefined;
     /**
      * Cleanup for the `toolbox → emitter` forwarding the recovery hook wired.
      * Reattach owns it and runs it when the recovered run completes.
      */
-    stopToolboxForward?: () => void;
-    abort?: (reason?: string) => void;
+    stopToolboxForward?: (() => void) | undefined;
+    abort?: ((reason?: string) => void) | undefined;
     /** Test-only clock seam for this run's watchdogs (AB-214/obs-01). */
-    livenessClock?: StallWatchdogClock;
+    livenessClock?: StallWatchdogClock | undefined;
     /**
      * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
      * exactly once here — omitted, this reattach reads the real globals via
@@ -42,7 +50,7 @@ export function reattachDurableActiveRun(
      * runtime (e.g. `SessionHandleContext.runtime`) passes it through so the
      * reattached run's own duration measurement stays deterministic too.
      */
-    runtime?: RuntimeServices;
+    runtime?: RuntimeServices | undefined;
     /**
      * AB-304: the same `ChildRunRegistry` `RunOptions.childRegistry` supplies
      * to a fresh run, forwarded through for a REATTACHED one. A reattached
@@ -54,7 +62,7 @@ export function reattachDurableActiveRun(
      * be for a fresh run. Omitted, `closed()` behaves identically to before
      * this option existed.
      */
-    childRegistry?: ChildRunRegistry;
+    childRegistry?: ChildRunRegistry | undefined;
   },
 ): ActiveRun {
   const { runId, handle } = reattach;
@@ -154,14 +162,6 @@ export function reattachDurableActiveRun(
     return driveReattachedRun(context, runId, handle, emitter, abortOutcome, reachability, runtime);
   }
 
-  function cancelSucceeded(): boolean {
-    return true;
-  }
-
-  function cancelFailed(): boolean {
-    return false;
-  }
-
   // A reattached run has no abort SIGNAL (the recovered generator runs under the
   // engine, not this adapter's controller), so abort cancels the run at the
   // engine instead (committee MF-3): a recovered run is now visible via
@@ -200,6 +200,14 @@ export function reattachDurableActiveRun(
     )
     .finally(complete);
 
+  // COR-625: the composer's terminal-cleanup step, folded in only on the
+  // paths that would otherwise report `completed` — see
+  // `createDurableActiveRun`'s identical fold and `foldTerminalCleanup`'s own
+  // doc comment for why the step only ever downgrades.
+  const terminalCleanupStep = context.terminalCleanup
+    ? (): Promise<CleanupAcknowledgement> => context.terminalCleanup!(runId)
+    : undefined;
+
   async function resolveReattachOutcome(): Promise<CleanupAcknowledgement> {
     if (reachability.unreachable) return { status: 'unresolved', reason: 'unreachable' };
     if (abortCancelled === undefined) {
@@ -207,7 +215,7 @@ export function reattachDurableActiveRun(
       // registered child's own `closed()` must settle before this
       // reattached parent reports `completed`, not merely its `result()`.
       await (childRegistry?.awaitChildrenClosed() ?? Promise.resolve());
-      return { status: 'completed' };
+      return foldTerminalCleanup({ status: 'completed' }, terminalCleanupStep);
     }
     // Wait for the SAME cancel attempt abort() fired (never rejects: it is
     // already `.then(cancelSucceeded, cancelFailed)`), then re-read the
@@ -224,7 +232,7 @@ export function reattachDurableActiveRun(
       }
       // AB-304: same children-closed fold-in as the uncancelled branch above.
       await (childRegistry?.awaitChildrenClosed() ?? Promise.resolve());
-      return { status: 'completed' };
+      return foldTerminalCleanup({ status: 'completed' }, terminalCleanupStep);
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };
     }
@@ -236,7 +244,12 @@ export function reattachDurableActiveRun(
     // `reachability.unreachable` — otherwise the fast path could resolve
     // not-required for a run `resolveReattachOutcome` would have classified
     // unresolved/unreachable (AC8), silently hiding the teardown race.
-    disqualifiesFastPath: () => abortCancelled !== undefined || reachability.unreachable,
+    disqualifiesFastPath: () =>
+      abortCancelled !== undefined ||
+      reachability.unreachable ||
+      // COR-625: same reasoning as `createDurableActiveRun`'s identical
+      // disqualification — see `foldTerminalCleanup`'s doc comment.
+      terminalCleanupStep !== undefined,
     // No toolbox forwarding is owned by this adapter — see `reattach.stopToolboxForward`
     // above — so no in-flight-tool count is available to track here. AB-304:
     // a registered child still disqualifies the fast path the same way it
@@ -249,6 +262,11 @@ export function reattachDurableActiveRun(
   return {
     result,
     abort,
+    // COR-1270/COR-1267 — always `undefined`, and meaningfully so: a
+    // reattachment to an already-terminal run rebuilds no hook plan, because
+    // no further execution happens for one to govern. See
+    // `active-run-reattach-driver.ts`'s `hooks: undefined`.
+    describeHookPlan: () => undefined,
     closed,
     // AB-361: a reattached/recovered run's durable record was committed
     // before this process even started — nothing left to await.

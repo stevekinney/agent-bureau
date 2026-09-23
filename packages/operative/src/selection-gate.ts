@@ -83,7 +83,7 @@ export interface CreateSelectionGateOptions extends SelectionGateSource {
   /** The plan this gate starts with — typically the result of an earlier,
    *  standalone `planSelection(...)` call made before the run began.
    *  Absent when no selection has been planned yet. */
-  readonly initialPlan?: SelectionPlan;
+  readonly initialPlan?: SelectionPlan | undefined;
 }
 
 /**

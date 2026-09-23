@@ -31,7 +31,8 @@ function createManualClock(): StallWatchdogClock & {
       let fired = true;
       while (fired) {
         fired = false;
-        for (const [handle, timer] of [...timers.entries()]) {
+        const timerSnapshot = [...timers.entries()];
+        for (const [handle, timer] of timerSnapshot) {
           if (timer.at <= time) {
             timers.delete(handle);
             timer.callback();

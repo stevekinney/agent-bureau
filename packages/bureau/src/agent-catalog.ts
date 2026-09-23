@@ -9,8 +9,7 @@
  */
 
 import type { AgentGenerationProfile, AgentRun, RunnableAgent } from '@lostgradient/operative';
-import { readGenerationProfile } from '@lostgradient/operative';
-import { projectDescriptor } from '@lostgradient/operative/providers';
+import { projectDescriptor, readGenerationProfile } from '@lostgradient/operative';
 
 /**
  * A plain literal map of agent name to `RunnableAgent`. There is no
@@ -41,7 +40,7 @@ import { projectDescriptor } from '@lostgradient/operative/providers';
  */
 export type AnyRunnableAgent =
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- required for the has-output union member; see comment above.
-  RunnableAgent<never, false> | RunnableAgent<any, true>;
+  RunnableAgent | RunnableAgent<any, true>;
 
 export type AgentDefinitions = Record<string, AnyRunnableAgent>;
 
@@ -68,12 +67,14 @@ export type AgentNames<D extends AgentDefinitions> = keyof D & string;
  * a literal on each side, so the `H`-conditional members never collapse and
  * `O` infers correctly.
  */
-export type AgentOutput<D extends AgentDefinitions, TName extends keyof D> =
-  D[TName] extends RunnableAgent<never, false>
-    ? never
-    : D[TName] extends RunnableAgent<infer O, true>
-      ? O
-      : never;
+export type AgentOutput<
+  D extends AgentDefinitions,
+  TName extends keyof D,
+> = D[TName] extends RunnableAgent
+  ? never
+  : D[TName] extends RunnableAgent<infer O, true>
+    ? O
+    : never;
 
 /** Whether `D[TName]` was built with an `output` schema. */
 export type AgentHasOutput<D extends AgentDefinitions, TName extends keyof D> =
@@ -283,16 +284,7 @@ function buildCatalogGenerationProfile(
   agent: AnyRunnableAgent,
   selectorAvailable: boolean,
 ): AgentGenerationProfile {
-  // `readGenerationProfile` only ever reads `agent.generationProfile`, a
-  // field whose presence and shape don't depend on `RunnableAgent`'s `O`/`H`
-  // type parameters — but its parameter type defaults to
-  // `RunnableAgent<never, false>`, which `RunnableAgent<any, true>` (half of
-  // `AnyRunnableAgent`) isn't structurally assignable to, for the same
-  // `run()`-return-type reason `AgentDefinitions`'s own doc comment above
-  // documents. This is a type-level-only correction, mirroring the other
-  // casts in this file: at runtime `agent` genuinely has whatever
-  // `generationProfile` it has, regardless of `O`/`H`.
-  const profile = readGenerationProfile(agent as RunnableAgent);
+  const profile = readGenerationProfile(agent);
   const descriptors = Object.freeze(
     profile.descriptors.map((descriptor) => projectDescriptor(descriptor, 'general')),
   );

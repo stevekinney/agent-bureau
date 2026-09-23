@@ -1,5 +1,5 @@
+import type { TypedEventTarget } from '@lostgradient/lifecycle';
 import { createTool } from 'armorer';
-import type { TypedEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import type { OperativeEventMap } from './events';
@@ -24,7 +24,7 @@ export interface HandoffTarget {
   // (handoff is marker-based — see below), so nothing here actually reads a
   // value at this widened type.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- required for the has-output union member; see the identical note on bureau's AgentDefinitions.
-  readonly agent: RunnableAgent<never, false> | RunnableAgent<any, true>;
+  readonly agent: RunnableAgent | RunnableAgent<any, true>;
 }
 
 /**
@@ -38,13 +38,13 @@ export const HANDOFF_MARKER = '__handoff__' as const;
  */
 export interface CreateHandoffToolOptions {
   /** Tool name. Defaults to `transfer_to_<agent.name>`. */
-  name?: string;
+  name?: string | undefined;
   /** Tool description shown to the model. */
-  description?: string;
+  description?: string | undefined;
   /** The agent to hand off to. */
   agent: HandoffTarget;
   /** Optional Zod schema for the tool's input. Defaults to an empty object. */
-  input?: z.ZodType;
+  input?: z.ZodType | undefined;
   /**
    * F2 — source agent context for event emission + durable session continuation.
    *
@@ -57,12 +57,14 @@ export interface CreateHandoffToolOptions {
    * (durable session continuation, F2). Without a sessionId the handoff is the
    * legacy marker-based in-process pattern.
    */
-  sourceContext?: {
-    emitter: TypedEventTarget<OperativeEventMap>;
-    sourceAgentName: string;
-    /** Session id when the handoff is a durable session-continuation (F2). */
-    sessionId?: string;
-  };
+  sourceContext?:
+    | {
+        emitter: TypedEventTarget<OperativeEventMap>;
+        sourceAgentName: string;
+        /** Session id when the handoff is a durable session-continuation (F2). */
+        sessionId?: string;
+      }
+    | undefined;
 }
 
 /**

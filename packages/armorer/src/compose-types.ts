@@ -1,12 +1,7 @@
 import type { z } from 'zod';
 
-import type {
-  DefaultToolEvents,
-  Tool,
-  ToolEventsMap,
-  ToolMetadata,
-  ToolParametersSchema,
-} from './is-tool';
+import type { DefaultToolEvents, Tool, ToolEventsMap, ToolMetadata } from './is-tool';
+import type { ToolCallReturn } from './types';
 
 /** Extract input type from a tool's schema */
 export type InferToolInput<T> =
@@ -19,20 +14,24 @@ export type InferToolInput<T> =
 /** Extract output type from a tool */
 export type InferToolOutput<T> = T extends Tool<infer _S, infer _E, infer R, infer _M> ? R : never;
 
+/** The value exposed by a tool's parameter-based execute overload. */
+export type InferToolExecutionOutput<T> =
+  T extends Tool<infer _S, infer _E, infer R, infer _M> ? ToolCallReturn<R> : never;
+
+/** Preserve the concrete input schema when composing tools. */
+export type InferToolSchema<T> = T extends Tool<infer S, infer _E, infer _R, infer _M> ? S : never;
+
 /** Extract the metadata type from a tool. */
 export type InferToolMetadata<T> =
   T extends Tool<infer _S, infer _E, infer _R, infer M> ? M : ToolMetadata | undefined;
 
 /** Any tool (for constraint purposes) */
-export type AnyTool = Tool<ToolParametersSchema, ToolEventsMap, unknown, ToolMetadata | undefined>;
+export type AnyTool = Tool<z.ZodType, ToolEventsMap>;
 
 /** Tool that accepts a specific input type */
-export type ToolWithInput<I extends object> = Tool<
-  ToolParametersSchema,
-  ToolEventsMap,
-  unknown,
-  ToolMetadata | undefined
-> & { __toolInput?: I };
+export type ToolWithInput<I extends object> = Tool<z.ZodType<I>, ToolEventsMap> & {
+  __toolInput?: I;
+};
 
 /** Step event detail for composed tools */
 export interface StepStartDetail {
@@ -71,7 +70,7 @@ export type ComposedToolEvents = DefaultToolEvents & {
  * at runtime, so a composed tool's `.metadata` is not always `undefined`.
  */
 export type ComposedTool<
-  TInput extends object,
+  TInput,
   TOutput,
   TMetadata extends ToolMetadata | undefined = ToolMetadata | undefined,
 > = Tool<z.ZodType<TInput>, DefaultToolEvents, TOutput, TMetadata>;

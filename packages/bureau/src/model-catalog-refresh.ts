@@ -1,4 +1,4 @@
-import type { BackendDescriptor, ModelCatalog } from '@lostgradient/operative/providers';
+import type { BackendDescriptor, ModelCatalog } from '@lostgradient/operative';
 
 /**
  * Bureau-local model-catalog refresh mechanism.
@@ -199,7 +199,7 @@ export interface CatalogRefreshHandle {
  *
  * This is deliberately the seam AB-246 leaves for a future live provider
  * probe: today every caller supplies a source that returns static rows (or,
- * in `createBureau`'s default, re-derives `@lostgradient/operative/providers`'s
+ * in `createBureau`'s default, re-derives `@lostgradient/operative`'s
  * static seed), but the signature — request in, descriptors out, abortable —
  * is shaped so a later probe-backed source can be substituted without
  * changing this module. Rate limiting and the probe itself are out of scope
@@ -408,7 +408,8 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
   /** Delivers `next` to every current observer, isolating a throwing one. */
   function deliver(next: CatalogRefreshSnapshot, onObserverThrow?: () => void): void {
     currentSnapshot = next;
-    for (const observer of [...observers.values()]) {
+    const currentObservers = [...observers.values()];
+    for (const observer of currentObservers) {
       try {
         observer(next);
       } catch {

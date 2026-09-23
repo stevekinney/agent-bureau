@@ -4,16 +4,16 @@ import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { readBackendDescriptors, withBackendDescriptors } from '../backend-descriptor-attachment';
 import type { GenerateFunction, GenerateResponse, ProviderName } from '../types';
 
-export type InstrumentationOptions = {
-  tracer?: Tracer;
-  tracerName?: string;
-  tracerVersion?: string;
+export type GenerateInstrumentationOptions = {
+  tracer?: Tracer | undefined;
+  tracerName?: string | undefined;
+  tracerVersion?: string | undefined;
 };
 
 export type InstrumentableGenerateOptions = {
   provider: ProviderName;
   model: string;
-  maximumTokens?: number;
+  maximumTokens?: number | undefined;
 };
 
 /**
@@ -22,8 +22,8 @@ export type InstrumentableGenerateOptions = {
  * well-known value pass through unchanged — the conventions explicitly
  * allow a custom value when none of the predefined ones applies.
  *
- * See the mapping table in the package README (`@lostgradient/operative/instrumentation`
- * section) for the pinned conventions version.
+ * See the mapping table in the package README's instrumentation section for the
+ * pinned conventions version.
  */
 function toGenAiProviderName(provider: ProviderName): string {
   switch (provider) {
@@ -39,6 +39,8 @@ function toGenAiProviderName(provider: ProviderName): string {
     case 'ollama':
       // No well-known value is registered for these providers; a custom
       // value is explicitly permitted by the conventions.
+      return provider;
+    default:
       return provider;
   }
 }
@@ -72,9 +74,9 @@ function toGenAiOperationName(provider: ProviderName): 'chat' | 'generate_conten
  * @param options - Provider metadata and optional tracer configuration.
  * @returns A wrapped GenerateFunction with tracing.
  */
-export function instrument(
+export function instrumentGenerate(
   generateFunction: GenerateFunction,
-  options: InstrumentableGenerateOptions & InstrumentationOptions,
+  options: InstrumentableGenerateOptions & GenerateInstrumentationOptions,
 ): GenerateFunction {
   const tracer =
     options.tracer ??

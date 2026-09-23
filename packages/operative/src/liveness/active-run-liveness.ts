@@ -1,4 +1,8 @@
-import { createDefaultRuntimeServices, type RuntimeServices, type Subscription } from 'lifecycle';
+import {
+  createDefaultRuntimeServices,
+  type RuntimeServices,
+  type Subscription,
+} from '@lostgradient/lifecycle';
 
 import type { ChildRunDescriptor, ChildRunRegistry } from '../child-run';
 import {
@@ -24,7 +28,7 @@ export type AgentRunLivenessSnapshot = LivenessSnapshot & { kind: 'agent-run' };
 export interface ActiveRunLivenessOptions {
   readonly id: string;
   readonly durability: 'process-local' | 'durable';
-  readonly clock?: StallWatchdogClock;
+  readonly clock?: StallWatchdogClock | undefined;
   /**
    * The AB-92/AB-252 `RuntimeServices` seam (AB-325) — its `monotonic` and
    * `timers` back the default `StallWatchdogClock` when `options.clock` is
@@ -34,7 +38,7 @@ export interface ActiveRunLivenessOptions {
    * are supplied, for backward compatibility with a caller that customizes
    * only the monotonic/timer seam.
    */
-  readonly runtime?: RuntimeServices;
+  readonly runtime?: RuntimeServices | undefined;
   /**
    * The authenticated principal or Bureau identifier that owns this run
    * (AC4's `owner` field) — absent for a standalone (non-Bureau) run, per
@@ -43,14 +47,14 @@ export interface ActiveRunLivenessOptions {
    * ruling): `owner` records who started the run, `projection` records what
    * detail level THIS caller sees.
    */
-  readonly owner?: string;
+  readonly owner?: string | undefined;
   /**
    * Backs `LivenessSnapshot.worstChildAssessment` (AB-216). Optional and
    * opt-in, matching `children()`/`abortChild()`'s own opt-in pattern
    * (AB-50): omit it and `worstChildAssessment` stays permanently absent,
    * never a throw.
    */
-  readonly childRegistry?: ChildRunRegistry;
+  readonly childRegistry?: ChildRunRegistry | undefined;
 }
 
 /**
@@ -324,7 +328,7 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
       toolAssessment?.missedPulseCount ?? 0,
     );
     const evidence = Object.freeze(
-      [...agentAssessment.evidence, ...(toolAssessment?.evidence ?? [])].sort(
+      [...agentAssessment.evidence, ...(toolAssessment?.evidence ?? [])].toSorted(
         (a, b) => a.at - b.at,
       ),
     );
@@ -400,7 +404,8 @@ export function createActiveRunLiveness(options: ActiveRunLivenessOptions): Acti
   function notify(): void {
     if (disposed && status !== 'terminal') return;
     const snapshot = readSnapshot();
-    for (const record of [...subscribers]) {
+    const subscriberSnapshot = [...subscribers];
+    for (const record of subscriberSnapshot) {
       if (record.closed) continue;
       try {
         record.observer(snapshot);

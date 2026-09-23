@@ -34,12 +34,12 @@ export interface TokenBudget {
 }
 
 /** Options for `createTokenBudget`. */
-export interface TokenBudgetOptions {
+export interface ContextTokenBudgetOptions {
   maxTokens: number;
-  minimumResponseTokens?: number;
-  warningThreshold?: number;
-  compactionThreshold?: number;
-  tokenEstimator?: (text: string) => number;
+  minimumResponseTokens?: number | undefined;
+  warningThreshold?: number | undefined;
+  compactionThreshold?: number | undefined;
+  tokenEstimator?: ((text: string) => number) | undefined;
 }
 
 /** Default token estimator: roughly 4 characters per token. */
@@ -52,7 +52,7 @@ const defaultTokenEstimator = (text: string): number => Math.ceil(text.length / 
  * - `warning` flips to `true` when `remaining <= warningThreshold` (default 20%).
  * - `allocate()` reserves room for `minimumResponseTokens` (default 1500).
  */
-export function createTokenBudget(options: TokenBudgetOptions): TokenBudget {
+export function createTokenBudget(options: ContextTokenBudgetOptions): TokenBudget {
   const {
     maxTokens,
     minimumResponseTokens = 1500,

@@ -1,3 +1,4 @@
+import type { MultiModalContent } from '../multi-modal';
 import type { JSONValue, MessageInput, MessagePlugin } from '../types';
 
 /**
@@ -39,7 +40,7 @@ export interface PIIRedactionOptions {
  * Creates a PII redaction function with custom rules.
  */
 export function createPIIRedaction(options: PIIRedactionOptions = {}): (text: string) => string {
-  const rules = { ...DEFAULT_PII_RULES, ...(options.rules ?? {}) };
+  const rules = { ...DEFAULT_PII_RULES, ...options.rules };
   const activeRules = Object.entries(rules).filter(
     ([name]) => !options.excludeRules?.includes(name),
   );
@@ -48,8 +49,10 @@ export function createPIIRedaction(options: PIIRedactionOptions = {}): (text: st
     let result = text;
     for (const [, rule] of activeRules) {
       const replacer = rule.replace;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument
-      result = result.replace(rule.regex, replacer as any);
+      result =
+        typeof replacer === 'string'
+          ? result.replace(rule.regex, replacer)
+          : result.replace(rule.regex, replacer);
     }
     return result;
   };
@@ -58,15 +61,44 @@ export function createPIIRedaction(options: PIIRedactionOptions = {}): (text: st
 /**
  * Recursively redacts string leaves in a JSON value using the provided redaction function.
  */
-function redactJSONValue(value: unknown, redact: (text: string) => string): unknown {
+function redactJSONValue(value: JSONValue, redact: (text: string) => string): JSONValue {
   if (typeof value === 'string') return redact(value);
-  if (value === null || value === undefined || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map((item) => redactJSONValue(item, redact));
-  const result: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-    result[key] = redactJSONValue(val, redact);
+  if (value === null || typeof value !== 'object') return value;
+  if (isJSONArray(value)) return value.map((item) => redactJSONValue(item, redact));
+  return redactJSONRecord(value, redact);
+}
+
+function isJSONArray(value: JSONValue): value is readonly JSONValue[] {
+  return Array.isArray(value);
+}
+
+function redactJSONRecord(
+  value: Record<string, JSONValue>,
+  redact: (text: string) => string,
+): Record<string, JSONValue> {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [key, redactJSONValue(nested, redact)]),
+  );
+}
+
+function redactContentPart(
+  part: MultiModalContent,
+  redact: (text: string) => string,
+): MultiModalContent {
+  if (part.type === 'text') {
+    const text = part.text ? redact(part.text) : part.text;
+    if (part.citations === undefined) return part.text ? { ...part, text } : part;
+    return { ...part, text, citations: redactJSONValue(part.citations, redact) };
   }
-  return result;
+  if (part.type === 'server_tool_use') {
+    return { ...part, input: redactJSONValue(part.input, redact) };
+  }
+  if ('tool_use_id' in part) {
+    return { ...part, content: redactJSONValue(part.content, redact) };
+  }
+  // Signed thinking payloads must remain byte-for-byte intact for replay.
+  // Images, document references and upload identifiers are unchanged.
+  return part;
 }
 
 /**
@@ -86,45 +118,7 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
     } else {
       result = {
         ...input,
-        content: input.content.map((part) => {
-          switch (part.type) {
-            case 'text': {
-              // Redact both the visible text and any citation metadata
-              // (cited_text, titles, urls) which can carry PII.
-              const text = part.text ? redact(part.text) : part.text;
-              if (part.citations === undefined) {
-                return part.text ? { ...part, text } : part;
-              }
-              return {
-                ...part,
-                text,
-                citations: redactJSONValue(part.citations, redact) as typeof part.citations,
-              };
-            }
-            case 'server_tool_use':
-              // Tool input JSON (e.g. a web_search query) can carry PII.
-              return { ...part, input: redactJSONValue(part.input, redact) as typeof part.input };
-            case 'web_search_tool_result':
-            case 'web_fetch_tool_result':
-            case 'code_execution_tool_result':
-            case 'bash_code_execution_tool_result':
-            case 'text_editor_code_execution_tool_result':
-              // Structural tool-result payloads (search snippets, fetched page
-              // text, stdout) can contain emails/keys — redact their string
-              // leaves like role-level tool results.
-              return {
-                ...part,
-                content: redactJSONValue(part.content, redact) as typeof part.content,
-              };
-            default:
-              // image; container_upload (id only); and intentionally `thinking` /
-              // `redacted_thinking`: their text/data is paired byte-for-byte with
-              // a signature for extended-thinking replay, so rewriting it would
-              // break replay. Thinking content is internal reasoning, not
-              // user-facing output, so it is left intact.
-              return part;
-          }
-        }),
+        content: input.content.map((part) => redactContentPart(part, redact)),
       };
     }
 
@@ -133,10 +127,7 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
         ...result,
         toolCall: {
           ...result.toolCall,
-          arguments: redactJSONValue(
-            result.toolCall.arguments,
-            redact,
-          ) as MessageInput['toolCall'] extends { arguments: infer A } ? A : never,
+          arguments: redactJSONValue(result.toolCall.arguments, redact),
         },
       };
     }
@@ -146,10 +137,7 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
         ...result,
         toolResult: {
           ...result.toolResult,
-          content: redactJSONValue(
-            result.toolResult.content,
-            redact,
-          ) as MessageInput['toolResult'] extends { content: infer C } ? C : never,
+          content: redactJSONValue(result.toolResult.content, redact),
         },
       };
     }
@@ -157,7 +145,7 @@ export function createPIIRedactionPlugin(options: PIIRedactionOptions = {}): Mes
     if (result.metadata !== undefined) {
       result = {
         ...result,
-        metadata: redactJSONValue(result.metadata, redact) as Record<string, JSONValue>,
+        metadata: redactJSONRecord(result.metadata, redact),
       };
     }
 

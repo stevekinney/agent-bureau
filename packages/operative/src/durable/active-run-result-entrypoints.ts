@@ -1,5 +1,5 @@
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import { type RunOptions, type RunResult } from '../types';
 import type { DurableActiveRunContext } from './active-run-adapter';
@@ -33,19 +33,19 @@ export interface StartDurableRunResultOptions {
    * The name of the agent running this workflow (F2 — RunRef.agentName).
    * Defaults to `options.agentName ?? ''` when omitted.
    */
-  agentName?: string;
+  agentName?: string | undefined;
   /** The run behavior (generate, toolbox, hooks, stopWhen, …). */
   options: RunOptions;
   /** First user message to seed a brand-new run. */
-  prompt?: string;
+  prompt?: string | undefined;
   /** Abort signal for the run (the scheduler's combined signal). */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
   /**
    * Tags for the durable workflow start (e.g. {@link SCHEDULER_ORIGIN_TAG}). The
    * scheduler stamps its origin tag here so boot recovery can distinguish these
    * runs from session runs and the boot sweep can find suspended residue.
    */
-  tags?: string[];
+  tags?: string[] | undefined;
 }
 
 /**

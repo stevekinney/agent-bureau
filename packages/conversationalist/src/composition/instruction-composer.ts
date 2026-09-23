@@ -129,5 +129,5 @@ export function sectionsToMessageInputs(
 }
 
 function sortedSections(sections: readonly InstructionSection[]): InstructionSection[] {
-  return [...sections].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+  return [...sections].toSorted((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
 }

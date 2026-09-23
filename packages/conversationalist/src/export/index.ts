@@ -2,8 +2,6 @@ import type { ConversationHistory as Conversation, ToMarkdownOptions } from '../
 import { normalizeLineEndings } from '../utilities/line-endings';
 import { toMarkdown } from '../utilities/markdown';
 
-export { normalizeLineEndings } from '../utilities/line-endings';
-
 /**
  * Exports a conversation to Markdown with normalized line endings.
  */

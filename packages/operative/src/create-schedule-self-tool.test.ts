@@ -17,6 +17,7 @@ const mockSummary: ScheduleSummary = {
   createdAt: 0,
   updatedAt: 0,
   missedFireCount: 0,
+  skippedCount: 0,
   nextFireAt: null,
   queuedRuns: [],
 };

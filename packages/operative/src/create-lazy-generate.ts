@@ -7,7 +7,7 @@ export type LazyGenerateLoader = () => GenerateFunction | PromiseLike<GenerateFu
 
 export interface CreateLazyGenerateOptions {
   /** Human-readable label included in lazy loading error messages. */
-  label?: string;
+  label?: string | undefined;
 
   /**
    * `BackendDescriptor`(s) attached to the RETURNED wrapper function at
@@ -16,7 +16,7 @@ export interface CreateLazyGenerateOptions {
    * the wrapper (`readBackendDescriptors`/`readGenerationProfile`) reports
    * these without ever invoking `loader`.
    */
-  descriptors?: readonly BackendDescriptor[];
+  descriptors?: readonly BackendDescriptor[] | undefined;
 }
 
 function isGenerateFunction(value: unknown): value is GenerateFunction {
@@ -64,6 +64,7 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined)
       .then((value) => {
         signal.removeEventListener('abort', onAbort);
         resolve(value);
+        return undefined;
       })
       .catch((error: unknown) => {
         signal.removeEventListener('abort', onAbort);
@@ -110,11 +111,13 @@ export function createLazyGenerate(
         if (state.kind === 'loading' && state.pending === pending) {
           state = { kind: 'loaded', generate };
         }
+        return undefined;
       },
       () => {
         if (state.kind === 'loading' && state.pending === pending) {
           state = { kind: 'unloaded' };
         }
+        return undefined;
       },
     );
     return pending;

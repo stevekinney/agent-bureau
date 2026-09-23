@@ -1,6 +1,6 @@
 import type { SerializedToolDefinition } from '../../core/serialization';
 import type { AnyToolDefinition } from '../../core/tool-definition';
-import type { ImportedToolConfiguration } from '../../create-toolbox';
+import type { ImportedToolConfiguration } from '../../toolbox-type-inference';
 import { isAsyncIterable } from '../../type-guards';
 import type { ToolCallInput, ToolResultLike } from '../../types';
 import { importToolSchema } from '../imported-schema';
@@ -36,9 +36,11 @@ type OpenAIToolCallSource =
       message?: { tool_calls?: OpenAIToolCall[] | null | undefined } | null | undefined;
     }
   | {
-      choices?: ReadonlyArray<{
-        message?: { tool_calls?: OpenAIToolCall[] | null | undefined } | null | undefined;
-      }>;
+      choices?:
+        | ReadonlyArray<{
+            message?: { tool_calls?: OpenAIToolCall[] | null | undefined } | null | undefined;
+          }>
+        | undefined;
     }
   | undefined
   | null;
@@ -69,7 +71,7 @@ export function createNameMapper(
  *
  * @example
  * ```ts
- * import { toOpenAITools } from 'armorer/adapters/openai';
+ * import { toOpenAITools } from 'armorer';
  *
  * // Single tool
  * const tool = toOpenAITools(myTool);

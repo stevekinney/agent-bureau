@@ -31,11 +31,11 @@ export interface InputGuardrailOptions {
    * blocked response — it hard-halts the run rather than letting the loop
    * continue. See `GuardrailsOptions.mode`, which sets this for you.
    */
-  action?: 'block' | 'warn' | 'sanitize' | 'tripwire';
-  onTriggered?: (event: GuardrailTriggeredEvent) => void;
-  mode?: 'parallel' | 'sequential';
+  action?: ('block' | 'warn' | 'sanitize' | 'tripwire') | undefined;
+  onTriggered?: ((event: GuardrailTriggeredEvent) => void) | undefined;
+  mode?: ('parallel' | 'sequential') | undefined;
   /** Getter that returns the current session taint state. When provided, detectors receive the live value. */
-  getSessionTainted?: () => boolean;
+  getSessionTainted?: (() => boolean) | undefined;
 }
 
 /** Context provided to output validators. */
@@ -50,8 +50,8 @@ export interface ValidationResult {
   valid: boolean;
   category: string;
   confidence: number;
-  detail?: string;
-  redacted?: string;
+  detail?: string | undefined;
+  redacted?: string | undefined;
 }
 
 /** An output validator that inspects model responses for policy violations. */
@@ -67,7 +67,7 @@ export interface OutputGuardrailTriggeredEvent {
   confidence: number;
   action: 'block' | 'warn' | 'redact' | 'tripwire';
   output: string;
-  detail?: string;
+  detail?: string | undefined;
 }
 
 /** Options for configuring output guardrails. */
@@ -78,9 +78,9 @@ export interface OutputGuardrailOptions {
    * blocked/redacted response — it hard-halts the run rather than letting the
    * loop continue. See `GuardrailsOptions.mode`, which sets this for you.
    */
-  action?: 'block' | 'warn' | 'redact' | 'tripwire';
-  onTriggered?: (event: OutputGuardrailTriggeredEvent) => void;
-  blockMessage?: string;
+  action?: ('block' | 'warn' | 'redact' | 'tripwire') | undefined;
+  onTriggered?: ((event: OutputGuardrailTriggeredEvent) => void) | undefined;
+  blockMessage?: string | undefined;
 }
 
 /** Event emitted when a session becomes tainted. */
@@ -96,22 +96,22 @@ export interface SessionTaintedEvent {
    * their own `GuardrailTriggeredEvent`s into a taint tracker should pass
    * their `event.provenance` through here.
    */
-  provenance?: GuardrailProvenance;
+  provenance?: GuardrailProvenance | undefined;
 }
 
 /** Options for configuring session tainting behavior. */
 export interface SessionTaintOptions {
-  taintThreshold?: number;
-  escalatedDetectors?: InputDetector[];
-  escalatedValidators?: OutputValidator[];
-  onTainted?: (event: SessionTaintedEvent) => void;
+  taintThreshold?: number | undefined;
+  escalatedDetectors?: InputDetector[] | undefined;
+  escalatedValidators?: OutputValidator[] | undefined;
+  onTainted?: ((event: SessionTaintedEvent) => void) | undefined;
 }
 
 /** Combined options for the guardrails composition factory. */
 export interface GuardrailsOptions {
-  input?: InputGuardrailOptions;
-  output?: OutputGuardrailOptions;
-  taint?: SessionTaintOptions;
+  input?: InputGuardrailOptions | undefined;
+  output?: OutputGuardrailOptions | undefined;
+  taint?: SessionTaintOptions | undefined;
   /**
    * `'validate'` (default) — a tripped detector/validator substitutes a
    * blocked/sanitized/redacted response and the run continues, per each
@@ -125,7 +125,7 @@ export interface GuardrailsOptions {
    * behavior. Overrides `input.action`/`output.action` to `'tripwire'`
    * regardless of what they were set to.
    */
-  mode?: 'validate' | 'tripwire';
+  mode?: ('validate' | 'tripwire') | undefined;
 }
 
 /** Hooks returned by the guardrails composition factory. */

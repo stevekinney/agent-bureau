@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import type {
   AgentIdentity,
@@ -7,6 +7,27 @@ import type {
   SoulHistoryEntry,
   SoulItem,
 } from './types';
+
+function initializeIdentity(
+  initial: Partial<AgentIdentity> | undefined,
+  souls: Map<string, SoulItem[]>,
+  personas: Map<string, { descriptor?: PersonaDescriptor; text?: string }>,
+): string | undefined {
+  if (initial?.soul?.length) souls.set('orchestrator', [...initial.soul]);
+  initializePersona(initial, personas);
+  return initial?.userContext;
+}
+
+function initializePersona(
+  initial: Partial<AgentIdentity> | undefined,
+  personas: Map<string, { descriptor?: PersonaDescriptor; text?: string }>,
+): void {
+  if (!initial?.persona && !initial?.personaText) return;
+  personas.set('orchestrator', {
+    ...(initial.persona !== undefined ? { descriptor: initial.persona } : {}),
+    ...(initial.personaText !== undefined ? { text: initial.personaText } : {}),
+  });
+}
 
 /**
  * Creates an in-memory identity provider.
@@ -23,21 +44,11 @@ export function createStaticIdentityProvider(
   const personas = new Map<string, { descriptor?: PersonaDescriptor; text?: string }>();
   const pendingUpdates = new Map<string, SoulItem[]>();
   const history = new Map<string, SoulHistoryEntry[]>();
-  let userContext: string | undefined = initial?.userContext;
+  let userContext: string | undefined;
 
   const orchestratorKey = 'orchestrator';
 
-  // Initialize with seed data
-  if (initial?.soul && initial.soul.length > 0) {
-    souls.set(orchestratorKey, [...initial.soul]);
-  }
-
-  if (initial?.persona || initial?.personaText) {
-    personas.set(orchestratorKey, {
-      descriptor: initial.persona,
-      text: initial.personaText,
-    });
-  }
+  userContext = initializeIdentity(initial, souls, personas);
 
   function resolveKey(agentId?: string): string {
     return agentId ?? orchestratorKey;

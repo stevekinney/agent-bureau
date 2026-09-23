@@ -1,7 +1,7 @@
+import { CompletableEventTarget, createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import { Conversation, isConversation } from 'conversationalist';
-import { CompletableEventTarget, createDefaultRuntimeServices } from 'lifecycle';
 
-import { createClosedAcknowledgement } from '../closed-acknowledgement';
+import { createClosedAcknowledgement, foldTerminalCleanup } from '../closed-acknowledgement';
 import type { ActiveRun } from '../create-run';
 import { toAgentRunError } from '../errors';
 import type { CombinedOperativeEventMap } from '../events';
@@ -63,7 +63,7 @@ export function createDurableActiveRun(
   // `Conversation.from(snapshot)` instances and never mutates this input
   // instance — it only snapshots it once to seed. Forwarding from it would be
   // inert (no events ever fire). Durable per-step conversation streaming is
-  // TODO(weft-integration): #10 (in-process streaming progress).
+  // therefore not exposed by this adapter.
   const cleanups: (() => void)[] = [];
   cleanups.push(wireHumanWaitLiveness(emitter, liveness));
   // closed()'s not-required fast path (coordinator ruling, AB-204) — see the
@@ -75,7 +75,7 @@ export function createDurableActiveRun(
   // toolbox-wide, not scoped to any one run. `run-step.ts` stamps this
   // run's own id as `ownerId` on every `Toolbox.execute()` call it makes;
   // armorer echoes it back verbatim.
-  const isOwnEvent = (event: { ownerId?: string }): boolean => event.ownerId === runId;
+  const isOwnEvent = (event: { ownerId?: string | undefined }): boolean => event.ownerId === runId;
   // AB-291 (AC1 — durable parity with AB-204's in-memory fix): every
   // run-owned hook (`onRunStart`/`onRunAbort`/`onRunError`/`onRunComplete`)
   // fires via `runHookSilently`'s fire-and-forget `Promise.allSettled`
@@ -316,6 +316,15 @@ export function createDurableActiveRun(
     cleanups.push(() => combinedSignal.removeEventListener('abort', onCombinedSignalAbort));
   }
 
+  // COR-625: the composer's terminal-cleanup step, folded in only on the
+  // paths that would otherwise report `completed`. An `unresolved` or
+  // `unreachable` run never reached a truthful terminal state, so there is
+  // nothing for a retention step to act on and no acknowledgement of its own
+  // to fold.
+  const terminalCleanupStep = context.terminalCleanup
+    ? (): Promise<CleanupAcknowledgement> => context.terminalCleanup!(runId)
+    : undefined;
+
   async function resolveDurableOutcome(): Promise<CleanupAcknowledgement> {
     if (reachability.unreachable) return { status: 'unresolved', reason: 'unreachable' };
     if (!cancelRequested && !combinedSignal.aborted) {
@@ -323,14 +332,14 @@ export function createDurableActiveRun(
         Promise.allSettled(pendingHookPromises),
         childRegistry?.awaitChildrenClosed() ?? Promise.resolve(),
       ]);
-      return { status: 'completed' };
+      return foldTerminalCleanup({ status: 'completed' }, terminalCleanupStep);
     }
     if (neverLaunched.value) {
       await Promise.all([
         Promise.allSettled(pendingHookPromises),
         childRegistry?.awaitChildrenClosed() ?? Promise.resolve(),
       ]);
-      return { status: 'completed' };
+      return foldTerminalCleanup({ status: 'completed' }, terminalCleanupStep);
     }
     await cancelSettled;
     try {
@@ -342,7 +351,7 @@ export function createDurableActiveRun(
         Promise.allSettled(pendingHookPromises),
         childRegistry?.awaitChildrenClosed() ?? Promise.resolve(),
       ]);
-      return { status: 'completed' };
+      return foldTerminalCleanup({ status: 'completed' }, terminalCleanupStep);
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };
     }
@@ -353,7 +362,16 @@ export function createDurableActiveRun(
   const closed = createClosedAcknowledgement({
     result: closedGate,
     disqualifiesFastPath: () =>
-      cancelRequested || combinedSignal.aborted || reachability.unreachable,
+      cancelRequested ||
+      combinedSignal.aborted ||
+      reachability.unreachable ||
+      // COR-625: a registered terminal-cleanup step means this run genuinely
+      // DOES have cleanup left to do, which is precisely what the
+      // `not-required` fast path asserts is false. Taking the fast path here
+      // would skip `resolveOutcome` — and with it the step — so `closed()`
+      // would report `not-required` for a run whose retention step had not
+      // run, or had failed. A composer that registers no step is unaffected.
+      terminalCleanupStep !== undefined,
     hasInFlightWork: () => inFlightTools > 0 || (childRegistry?.children().length ?? 0) > 0,
     resolveOutcome: resolveDurableOutcome,
   });
@@ -361,6 +379,9 @@ export function createDurableActiveRun(
   return {
     result,
     abort,
+    // COR-1270 — the durable branch reads the same snapshot the in-memory
+    // branch does: whatever plan this run was dispatched with.
+    describeHookPlan: () => options.hooks?.describePlan(),
     closed,
     durablyStarted,
     addEventListener: emitter.addEventListener.bind(emitter),
@@ -372,7 +393,8 @@ export function createDurableActiveRun(
     toObservable: emitter.toObservable.bind(emitter),
     complete,
     snapshot: () => liveness.snapshot(),
-    subscribeSnapshot: (observer, options) => liveness.subscribeSnapshot(observer, options),
+    subscribeSnapshot: (observer, subscriptionOptions) =>
+      liveness.subscribeSnapshot(observer, subscriptionOptions),
     [Symbol.dispose](): void {
       abort();
       complete();

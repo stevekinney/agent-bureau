@@ -51,7 +51,7 @@ export interface SignalContinuationInput<TPayload = unknown> {
    */
   readonly denied: boolean;
   /** Present only when `denied` is `true` and the sentinel carried a `reason`. */
-  readonly denialReason?: string;
+  readonly denialReason?: string | undefined;
   /**
    * `true` when `payload` is the AB-46-ratified `human-wait` `reject`
    * sentinel (`{ __abRejected: true, reason: string }`) — see
@@ -61,7 +61,7 @@ export interface SignalContinuationInput<TPayload = unknown> {
    */
   readonly rejected: boolean;
   /** Present only when `rejected` is `true`. */
-  readonly rejectionReason?: string;
+  readonly rejectionReason?: string | undefined;
 }
 
 /**
@@ -75,7 +75,7 @@ export interface SignalContinuationInput<TPayload = unknown> {
  */
 interface DeniedSignalSentinel {
   readonly __abDenied: true;
-  readonly reason?: string;
+  readonly reason?: string | undefined;
 }
 
 /**
@@ -193,7 +193,7 @@ export interface WakeupContinuationInput {
   /** The `scheduleWakeup({ in })` duration this run parked on, exactly as requested. */
   readonly requestedDuration: number | string;
   /** The note the agent attached to the wakeup request, if any. */
-  readonly note?: string;
+  readonly note?: string | undefined;
 }
 
 /**
@@ -290,7 +290,7 @@ export function renderSignalContinuation(input: SignalContinuationInput): string
 
   let rendered: string;
   try {
-    rendered = String(JSON.stringify(input.payload));
+    rendered = JSON.stringify(input.payload);
   } catch {
     rendered = UNSERIALIZABLE_PAYLOAD_PLACEHOLDER;
   }

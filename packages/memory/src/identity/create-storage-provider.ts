@@ -1,5 +1,5 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
+import type { TextValueStore } from '@lostgradient/weft';
 
 import type { IdentityProvider, PersonaDescriptor, SoulHistoryEntry, SoulItem } from './types';
 
@@ -25,6 +25,45 @@ const PERSONA_PREFIX = 'identity:persona:';
 const HISTORY_PREFIX = 'identity:history:';
 const USER_CONTEXT_KEY = 'identity:user-context';
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isSoulItem(value: unknown): value is SoulItem {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value['id'] === 'string' &&
+    typeof value['content'] === 'string' &&
+    (value['source'] === 'seed' ||
+      value['source'] === 'graduated' ||
+      value['source'] === 'user-edit') &&
+    typeof value['pinned'] === 'boolean' &&
+    typeof value['updatedAt'] === 'string' &&
+    typeof value['reinforcementCount'] === 'number'
+  );
+}
+
+function isSoulItems(value: unknown): value is SoulItem[] {
+  return Array.isArray(value) && value.every(isSoulItem);
+}
+
+function isPersona(value: unknown): value is { descriptor?: PersonaDescriptor; text?: string } {
+  return (
+    isRecord(value) &&
+    (value['descriptor'] === undefined || isRecord(value['descriptor'])) &&
+    (value['text'] === undefined || typeof value['text'] === 'string')
+  );
+}
+
+function isSoulHistoryEntry(value: unknown): value is SoulHistoryEntry {
+  return (
+    isRecord(value) &&
+    typeof value['version'] === 'number' &&
+    typeof value['timestamp'] === 'string' &&
+    isSoulItems(value['items'])
+  );
+}
+
 /**
  * Creates an identity provider backed by a key-value storage adapter.
  *
@@ -40,11 +79,15 @@ export function createStorageIdentityProvider(
   adapter: TextValueStore,
   runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): IdentityProvider {
-  async function loadJson<T>(key: string): Promise<T | undefined> {
+  async function loadJson<T>(
+    key: string,
+    guard: (value: unknown) => value is T,
+  ): Promise<T | undefined> {
     const raw = await adapter.get(key);
     if (raw === null) return undefined;
     try {
-      return JSON.parse(raw) as T;
+      const value: unknown = JSON.parse(raw);
+      return guard(value) ? value : undefined;
     } catch {
       // If stored data is not valid JSON (e.g., from corruption or migration),
       // treat it as missing instead of throwing.
@@ -58,20 +101,20 @@ export function createStorageIdentityProvider(
 
   return {
     async loadSoul(agentId?: string): Promise<SoulItem[]> {
-      return (await loadJson<SoulItem[]>(soulKey(agentId))) ?? [];
+      return (await loadJson(soulKey(agentId), isSoulItems)) ?? [];
     },
 
     async saveSoul(items: SoulItem[], agentId?: string): Promise<void> {
       const key = soulKey(agentId);
 
       // Archive current soul in history before overwriting
-      const current = await loadJson<SoulItem[]>(key);
+      const current = await loadJson(key, isSoulItems);
       if (current && current.length > 0) {
         const agentKey = agentId ?? ORCHESTRATOR_KEY;
         const prefix = `${HISTORY_PREFIX}${agentKey}:`;
         const historyKeys = await adapter.list(prefix);
-        const maxVersion = historyKeys.reduce((max, key) => {
-          const versionString = key.slice(prefix.length);
+        const maxVersion = historyKeys.reduce((max, historyEntryKey) => {
+          const versionString = historyEntryKey.slice(prefix.length);
           const version = parseInt(versionString, 10);
           return Number.isFinite(version) && version > max ? version : max;
         }, 0);
@@ -95,7 +138,7 @@ export function createStorageIdentityProvider(
     async loadPersona(
       agentId: string,
     ): Promise<{ descriptor?: PersonaDescriptor; text?: string } | undefined> {
-      return loadJson(personaKey(agentId));
+      return loadJson(personaKey(agentId), isPersona);
     },
 
     async savePersona(
@@ -119,7 +162,7 @@ export function createStorageIdentityProvider(
     },
 
     async loadPendingSoulUpdate(agentId?: string): Promise<SoulItem[] | undefined> {
-      return loadJson(pendingKey(agentId));
+      return loadJson(pendingKey(agentId), isSoulItems);
     },
 
     async savePendingSoulUpdate(items: SoulItem[], agentId?: string): Promise<void> {
@@ -136,11 +179,11 @@ export function createStorageIdentityProvider(
 
       const entries: SoulHistoryEntry[] = [];
       for (const key of keys) {
-        const entry = await loadJson<SoulHistoryEntry>(key);
+        const entry = await loadJson(key, isSoulHistoryEntry);
         if (entry) entries.push(entry);
       }
 
-      return entries.sort((a, b) => a.version - b.version);
+      return entries.toSorted((a, b) => a.version - b.version);
     },
   };
 }

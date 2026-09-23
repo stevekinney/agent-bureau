@@ -1,7 +1,7 @@
-import { createTestToolbox } from 'armorer/test';
+import { TypedEventTarget } from '@lostgradient/lifecycle';
+import { createTestToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { TypedEventTarget } from 'lifecycle';
 
 import { createAgent } from '../create-agent';
 import { readGenerationProfile } from '../generation-profile';
@@ -257,7 +257,7 @@ describe('withEnhancedStreaming live tool calls', () => {
   function recordEvents(eventTarget: TypedEventTarget<StreamEventMap>): StreamEvent[] {
     const events: StreamEvent[] = [];
 
-    function record<K extends keyof StreamEventMap>(type: K): void {
+    function record(type: keyof StreamEventMap): void {
       eventTarget.addEventListener(type, (event) => {
         events.push(event.detail);
       });

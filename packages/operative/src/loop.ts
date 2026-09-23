@@ -1,6 +1,6 @@
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { AnyToolbox } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { MaximumStepsExceededError } from './errors';
 import { RunErrorEvent } from './events';
@@ -13,7 +13,6 @@ import {
 import {
   DEFAULT_MAXIMUM_STEPS,
   type EventDispatcher,
-  normalizeToArray,
   type RunState,
   runStep,
   type StepDeps,
@@ -63,14 +62,8 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     defaultToolChoice: options.toolChoice,
     steering: options.steering,
     selection: options.selection,
+    contextEpoch: options.contextEpoch,
     stopConditions,
-    prepareStepHooks: normalizeToArray(options.prepareStep),
-    beforeToolExecutionHooks: normalizeToArray(options.beforeToolExecution),
-    afterToolExecutionHooks: normalizeToArray(options.afterToolExecution),
-    onStepHooks: normalizeToArray(options.onStep),
-    selectToolsHooks: normalizeToArray(options.selectTools),
-    validateResponseHooks: normalizeToArray(options.validateResponse),
-    validateToolResultHooks: normalizeToArray(options.validateToolResult),
     /** Maximum number of retries the onError hook can request per step. */
     maxErrorRetries: 3,
     // AB-92/AB-252: `createActiveRun` already resolves and snapshots this
@@ -113,7 +106,31 @@ export function createRunState(initialAppliedConfigVersion = 0): RunState {
  * calls the same {@link runStep} once per checkpointed step, so there is exactly
  * one step implementation across the in-memory and durable paths.
  */
+/**
+ * Runs the step loop, releasing this run's hook-plan observer on every exit.
+ *
+ * A wrapper rather than a `try`/`finally` inside the loop itself: the loop
+ * returns from a dozen places (abort, error, stop condition, maximum steps),
+ * and a teardown that has to be repeated at each of them is one someone will
+ * eventually add a thirteenth return past.
+ */
 export async function executeLoop(
+  options: RunOptions,
+  emitter?: EventDispatcher,
+  hookTracker?: (promise: Promise<unknown>) => void,
+  onStepToolbox?: (toolbox: AnyToolbox) => void,
+): Promise<RunResult> {
+  let stopObservingHookPlan: (() => void) | undefined;
+  try {
+    return await executeLoopBody(options, emitter, hookTracker, onStepToolbox, (stop) => {
+      stopObservingHookPlan = stop;
+    });
+  } finally {
+    stopObservingHookPlan?.();
+  }
+}
+
+async function executeLoopBody(
   options: RunOptions,
   emitter?: EventDispatcher,
   // AB-204: forwarded to `buildStepDeps`'s output and to every
@@ -126,6 +143,9 @@ export async function executeLoop(
   // resolved toolbox (base or `selectTools`-swapped). Not part of RunOptions —
   // it is a driver-internal wire, not user-facing configuration.
   onStepToolbox?: (toolbox: AnyToolbox) => void,
+  // Handed back to `executeLoop` so its `finally` can release the observer
+  // `startRunLifecycle` attaches partway through this function.
+  onHookPlanObserverAttached?: (stop: () => void) => void,
 ): Promise<RunResult> {
   const { maximumSteps = DEFAULT_MAXIMUM_STEPS, hooks, onMaximumSteps, costEstimation } = options;
 
@@ -148,7 +168,12 @@ export async function executeLoop(
   const runStartTime = deps.runtime.monotonic.now();
 
   // RunStartedEvent + onRunStart (error aborts the run). Shared with the adapter.
-  const startError = await startRunLifecycle(options, conversation, emitter);
+  const { error: startError, stopObservingHookPlan } = await startRunLifecycle(
+    options,
+    conversation,
+    emitter,
+  );
+  onHookPlanObserverAttached?.(stopObservingHookPlan);
   if (startError !== undefined) {
     return makeErrorResult(
       runState,

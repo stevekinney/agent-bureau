@@ -15,11 +15,10 @@
  * manually-resolved gate double (`createTestSteeringGate` below), never a
  * `setTimeout`.
  */
-import { createTool } from 'armorer';
-import { createTestToolbox } from 'armorer/test';
+import { createManualRuntimeServices, HookRegistry } from '@lostgradient/lifecycle';
+import { createTestToolbox, createTool } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createManualRuntimeServices, HookRegistry } from 'lifecycle';
 import { z } from 'zod';
 
 import { noToolCalls } from './conditions/predicates';
@@ -605,6 +604,71 @@ describe('runStep: AB-67 steering boundary read', () => {
 
     expect(observedRoutes).toEqual(['r1', 'r2']);
     expect(result.finishReason).toBe('stop-condition');
+  });
+
+  it("COR-766: a second prepareStep handler receives a step context, not the first one's return", async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const observedSteps: unknown[] = [];
+
+    hooks.on('prepareStep', async (context) => {
+      observedSteps.push(context.step);
+      return undefined;
+    });
+    hooks.on('prepareStep', async (context) => {
+      observedSteps.push(context.step);
+      return undefined;
+    });
+
+    await executeLoop({
+      generate: async () => textResponse('done'),
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+      runId: 'run-1',
+    });
+
+    // Under the waterfall both handlers ran, but a handler that ANSWERED would
+    // have replaced the next one's context with its own `GenerateResponse`.
+    expect(observedSteps).toEqual([0, 0]);
+  });
+
+  it('COR-766: a prepareStep handler that answers short-circuits the rest of the plan', async () => {
+    const hooks = new HookRegistry<OperativeHookMap>();
+    const called: string[] = [];
+    let generateCalls = 0;
+
+    hooks.on(
+      'prepareStep',
+      async () => {
+        called.push('first');
+        return textResponse('short-circuit');
+      },
+      { priority: 10 },
+    );
+    hooks.on('prepareStep', async (context) => {
+      called.push('second');
+      // Would throw if it were handed the first handler's response instead of
+      // a real context, which is precisely the defect being pinned.
+      expect(typeof context.step).toBe('number');
+      return undefined;
+    });
+
+    const result = await executeLoop({
+      generate: async () => {
+        generateCalls += 1;
+        return textResponse('provider');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      stopWhen: noToolCalls(),
+      hooks,
+      runId: 'run-1',
+    });
+
+    expect(called).toEqual(['first']);
+    expect(generateCalls).toBe(0);
+    expect(result.content).toBe('short-circuit');
   });
 
   it('AB-67: steering desired state survives a beforeGenerate hook that returns a replacement context', async () => {
@@ -1326,6 +1390,8 @@ describe('runStep: AB-302 generate.completed carries post-guardrail content', ()
     const guardrails = createGuardrails({
       output: { validators: [secretValidator], action: 'redact' },
     });
+    const builtInHooks = new HookRegistry<OperativeHookMap>();
+    builtInHooks.on('validateResponse', guardrails.validateResponse);
 
     const result = await executeLoop(
       {
@@ -1333,7 +1399,7 @@ describe('runStep: AB-302 generate.completed carries post-guardrail content', ()
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),
         stopWhen: noToolCalls(),
-        validateResponse: guardrails.validateResponse,
+        hooks: builtInHooks,
       },
       recorder,
     );
@@ -1376,6 +1442,8 @@ describe('runStep: AB-302 generate.completed carries post-guardrail content', ()
 
   it('a step whose generation is entirely short-circuited by prepareStep never dispatches generate.completed', async () => {
     const recorder = createEventRecorder();
+    const shortCircuitHooks = new HookRegistry<OperativeHookMap>();
+    shortCircuitHooks.on('prepareStep', async () => textResponse('short-circuited'));
 
     await executeLoop(
       {
@@ -1383,7 +1451,7 @@ describe('runStep: AB-302 generate.completed carries post-guardrail content', ()
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),
         stopWhen: noToolCalls(),
-        prepareStep: async () => textResponse('short-circuited'),
+        hooks: shortCircuitHooks,
       },
       recorder,
     );
@@ -1400,6 +1468,8 @@ describe('runStep: AB-302 generate.completed carries post-guardrail content', ()
       output: { validators: [secretValidator] },
       mode: 'tripwire',
     });
+    const tripwireHooks = new HookRegistry<OperativeHookMap>();
+    tripwireHooks.on('validateResponse', guardrails.validateResponse);
 
     const result = await executeLoop(
       {
@@ -1407,7 +1477,7 @@ describe('runStep: AB-302 generate.completed carries post-guardrail content', ()
         toolbox: createTestToolbox([]),
         conversation: new Conversation(),
         stopWhen: noToolCalls(),
-        validateResponse: guardrails.validateResponse,
+        hooks: tripwireHooks,
       },
       recorder,
     );

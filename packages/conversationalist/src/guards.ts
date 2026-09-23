@@ -27,7 +27,7 @@ type SchemaGuard = {
   safeParse: (value: unknown) => { success: boolean };
 };
 
-function isSchema<T>(schema: SchemaGuard, value: unknown): value is T {
+function isSchema(schema: SchemaGuard, value: unknown): boolean {
   return schema.safeParse(value).success;
 }
 
@@ -72,17 +72,17 @@ export function isToolResult(value: unknown): value is ToolResult {
 }
 
 /**
- * Duck-type guard for the Conversation class. Uses structural checks rather
- * than `instanceof` to avoid the dual-package hazard when operative bundles
- * its own copy of conversationalist.
+ * Checks the mutable conversation operations used by runtime consumers.
  */
 export function isConversation(value: unknown): value is import('./history').Conversation {
   if (value === null || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
   return (
-    typeof v['appendAssistantMessage'] === 'function' &&
-    typeof v['appendToolCalls'] === 'function' &&
-    typeof v['appendToolResults'] === 'function' &&
-    'current' in v
+    'appendAssistantMessage' in value &&
+    typeof value.appendAssistantMessage === 'function' &&
+    'appendToolCalls' in value &&
+    typeof value.appendToolCalls === 'function' &&
+    'appendToolResults' in value &&
+    typeof value.appendToolResults === 'function' &&
+    'current' in value
   );
 }

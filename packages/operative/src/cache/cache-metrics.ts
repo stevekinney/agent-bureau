@@ -18,7 +18,7 @@ import { withCache } from './with-cache';
 /** Options for `withCacheMetrics`, extending `CacheOptions` with an optional model for cost estimation. */
 export type CacheMetricsOptions = CacheOptions & {
   /** Model identifier used for cost estimation. When omitted, `estimatedSavedCost` stays at 0. */
-  model?: string;
+  model?: string | undefined;
 };
 
 /** Resolves the key strategy option to a concrete key function. */

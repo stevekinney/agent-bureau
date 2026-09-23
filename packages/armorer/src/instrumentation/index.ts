@@ -7,7 +7,7 @@ import {
   type Tracer,
 } from '@opentelemetry/api';
 
-import type { Toolbox } from '../create-toolbox';
+import type { Toolbox } from '../toolbox-interface';
 
 type InstrumentableToolbox = {
   addEventListener: Toolbox['addEventListener'];

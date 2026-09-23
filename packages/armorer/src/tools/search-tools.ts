@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { queryTools, type ToolQuery, type ToolQueryInput } from '../core/registry';
 import { createTool } from '../create-tool';
 import type { Tool } from '../is-tool';
-import { isTestRuntime } from '../type-guards';
 
 type SearchableToolbox = {
   tools: () => readonly Tool[];
@@ -84,7 +83,7 @@ export interface SearchToolsInput {
  * @example
  * ```typescript
  * import { createToolbox } from 'armorer';
- * import { createSearchTool } from 'armorer/tools';
+ * import { createSearchTool } from 'armorer';
  *
  * const toolbox = createToolbox();
  *
@@ -99,7 +98,7 @@ export interface SearchToolsInput {
  * @example With embeddings for semantic search
  * ```typescript
  * import { createToolbox } from 'armorer';
- * import { createSearchTool } from 'armorer/tools';
+ * import { createSearchTool } from 'armorer';
  * import OpenAI from 'openai';
  *
  * const openai = new OpenAI();
@@ -162,10 +161,10 @@ export function createSearchTool(
           : (toolbox as unknown as ToolQueryInput);
       const results = await Promise.resolve(queryTools(queryInput, criteria));
 
-      return results.map((tool, index) => ({
-        name: tool.identity.name,
-        description: tool.display.description,
-        ...(tool.tags?.length ? { tags: tool.tags } : {}),
+      return results.map((matchedTool, index) => ({
+        name: matchedTool.identity.name,
+        description: matchedTool.display.description,
+        ...(matchedTool.tags?.length ? { tags: matchedTool.tags } : {}),
         score: Math.max(0, 1 - index * 0.1),
         ...(explain
           ? {
@@ -179,14 +178,6 @@ export function createSearchTool(
     },
   });
 
-  // Backward compatibility for legacy mutable-toolbox tests.
-  if (isTestRuntime()) {
-    const legacyOptions = options as CreateSearchToolOptions & { register?: boolean };
-    if (legacyOptions.register !== false && hasLegacyRegister(toolbox)) {
-      toolbox.register(tool);
-    }
-  }
-
   return tool;
 }
 
@@ -194,11 +185,3 @@ export function createSearchTool(
  * Type alias for the search tools tool.
  */
 export type SearchTool = ReturnType<typeof createSearchTool>;
-
-function hasLegacyRegister(value: unknown): value is { register: (...entries: Tool[]) => unknown } {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const candidate = value as { register?: unknown };
-  return typeof candidate.register === 'function';
-}

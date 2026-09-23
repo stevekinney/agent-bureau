@@ -1,5 +1,5 @@
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import { createDefaultRunIdentifierSeam, defaultRunIdentifierSeam } from './identifiers';
 

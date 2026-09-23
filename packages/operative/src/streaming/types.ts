@@ -1,5 +1,5 @@
+import type { TypedEventTarget } from '@lostgradient/lifecycle';
 import type { TokenUsage } from 'conversationalist';
-import type { TypedEventTarget } from 'lifecycle';
 
 /** Discriminator for blocks within a stream. */
 export type BlockType = 'text' | 'tool-call' | 'thinking' | 'metadata';
@@ -12,9 +12,9 @@ export type StreamBlock = {
   content: string;
   complete: boolean;
   /** For tool-call blocks: the tool name once known. */
-  toolName?: string;
+  toolName?: string | undefined;
   /** For tool-call blocks: partial JSON arguments as they arrive. */
-  partialArguments?: string;
+  partialArguments?: string | undefined;
 };
 
 /** Read-only snapshot of the current stream state. */
@@ -24,7 +24,7 @@ export type StreamState = {
   readonly textContent: string;
   readonly toolCalls: ReadonlyArray<StreamBlock>;
   readonly complete: boolean;
-  readonly usage?: TokenUsage;
+  readonly usage?: TokenUsage | undefined;
 };
 
 /**
@@ -79,13 +79,13 @@ export type StreamEventMap = {
 /** Options for the enhanced streaming wrapper. */
 export type EnhancedStreamingOptions = {
   /** Event target to emit structured stream events on. */
-  eventTarget?: TypedEventTarget<StreamEventMap>;
+  eventTarget?: TypedEventTarget<StreamEventMap> | undefined;
   /** Called with each text delta. */
-  onTextDelta?: (delta: string, accumulated: string) => void;
+  onTextDelta?: ((delta: string, accumulated: string) => void) | undefined;
   /** Called when a tool call starts. */
-  onToolCallStart?: (toolName: string) => void;
+  onToolCallStart?: ((toolName: string) => void) | undefined;
   /** Called with partial tool call arguments. */
-  onToolCallDelta?: (toolName: string, partialArgs: string) => void;
+  onToolCallDelta?: ((toolName: string, partialArgs: string) => void) | undefined;
   /**
    * Installs `StreamingHandle.report`, letting the wrapped
    * `StreamingGenerateFunction` push tool-call events through while the
@@ -103,12 +103,12 @@ export type EnhancedStreamingOptions = {
    * Gemini adapter — falls back to reconstructing the tool-call events from
    * the resolved `GenerateResponse`, exactly as with this option off.
    */
-  liveToolCalls?: boolean;
+  liveToolCalls?: boolean | undefined;
 };
 
 /** Input commands the state machine accepts. */
 export type StreamCommand =
-  | { type: 'block-start'; id: string; blockType: BlockType; toolName?: string }
+  | { type: 'block-start'; id: string; blockType: BlockType; toolName?: string | undefined }
   | { type: 'block-delta'; id: string; delta: string }
   | { type: 'set-block-tool-name'; id: string; toolName: string }
   | { type: 'block-complete'; id: string }

@@ -1,17 +1,17 @@
+export {
+  MetadataFlagsSchema,
+  RegistryInspectionSchema,
+  SchemaSummarySchema,
+  ToolInspectionSchema,
+  extractMetadataFlags,
+  extractSchemaSummary,
+  inspectRegistry,
+  inspectTool,
+} from '../core/inspect';
 export type {
   InspectorDetailLevel,
   MetadataFlags,
   RegistryInspection,
   SchemaSummary,
   ToolInspection,
-} from '../core/inspect';
-export {
-  extractMetadataFlags,
-  extractSchemaSummary,
-  inspectRegistry,
-  inspectTool,
-  MetadataFlagsSchema,
-  RegistryInspectionSchema,
-  SchemaSummarySchema,
-  ToolInspectionSchema,
 } from '../core/inspect';

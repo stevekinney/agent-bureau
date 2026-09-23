@@ -20,4 +20,4 @@ export type ToolChoice = 'auto' | 'required' | 'none' | { tool: string };
 export type ResponseFormat =
   | { type: 'text' }
   | { type: 'json' }
-  | { type: 'json_schema'; schema: Record<string, unknown>; name?: string };
+  | { type: 'json_schema'; schema: Record<string, unknown>; name?: string | undefined };

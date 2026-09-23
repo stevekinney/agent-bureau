@@ -1,11 +1,15 @@
-import { workflow, type WorkflowState } from '@lostgradient/weft';
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
+import {
+  MemoryStorage,
+  textValueStore,
+  workflow,
+  yieldToPortableEventLoop,
+  type WorkflowState,
+} from '@lostgradient/weft';
 import type { Toolbox } from 'armorer';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgentSession } from '../agent-session';
 import { createCheckpointStore } from '../durable/checkpoint-store';
@@ -161,7 +165,7 @@ describe('D2 — Recovery-on-boot: session.recover() durable re-attach path — 
       expect(state?.status).toBe('completed');
       // The real shape engine.get() returns .result in — this is exactly
       // what readTerminalRunOutcome() reads to derive the RunRef status.
-      const summary = state?.result as { finishReason?: string } | undefined;
+      const summary = state?.result as { finishReason?: string | undefined } | undefined;
       expect(summary?.finishReason).toBe('stop-condition');
 
       const h = createSessionHandle(sessionId, {

@@ -8,14 +8,14 @@ const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 export class ProviderError extends Error {
   readonly provider: ProviderName;
   override readonly cause: unknown;
-  readonly statusCode?: number;
+  readonly statusCode?: number | undefined;
   readonly retryable: boolean;
 
   constructor(options: {
     provider: ProviderName;
     cause: unknown;
-    message?: string;
-    statusCode?: number;
+    message?: string | undefined;
+    statusCode?: number | undefined;
   }) {
     const statusCode = options.statusCode ?? extractStatusCode(options.cause);
     const message =
@@ -75,11 +75,9 @@ export class ToolCallParseError extends ProviderError {
 
 /**
  * Structural type guard for `ToolCallParseError`, for use alongside (not instead of)
- * `instanceof`. Operative's build produces one bundle per public entrypoint (`operative`,
- * `@lostgradient/operative/openai`, `@lostgradient/operative/providers`, ...) without shared chunks, so an error thrown
- * from one entrypoint's bundle and an `instanceof` check imported from another entrypoint's
- * bundle can reference distinct copies of this class — `instanceof` alone would miss it.
- * Checks the same fields the constructor always sets.
+ * `instanceof`. The structural check also covers errors crossing a separately loaded
+ * package copy, where the class identity is different. It checks the same fields the
+ * constructor always sets.
  */
 export function isToolCallParseError(error: unknown): error is ToolCallParseError {
   if (error instanceof ToolCallParseError) return true;

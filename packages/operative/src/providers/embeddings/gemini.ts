@@ -1,4 +1,4 @@
-import type { Embedder, EmbeddingVector } from 'interoperability';
+import type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
 
 import { ProviderError } from '../errors.ts';
 
@@ -14,7 +14,7 @@ export interface GeminiEmbeddingModel {
   embedContent(params: {
     model: string;
     contents: Array<{ parts: Array<{ text: string }> }>;
-  }): Promise<{ embeddings?: Array<{ values?: number[] }> }>;
+  }): Promise<{ embeddings?: Array<{ values?: number[] }> | undefined }>;
 }
 
 /**
@@ -31,9 +31,9 @@ export interface GeminiEmbeddingClient {
  * Options for createGeminiEmbedder.
  */
 export interface GeminiEmbedderOptions {
-  client?: GeminiEmbeddingClient;
-  apiKey?: string;
-  model?: string;
+  client?: GeminiEmbeddingClient | undefined;
+  apiKey?: string | undefined;
+  model?: string | undefined;
 }
 
 /**

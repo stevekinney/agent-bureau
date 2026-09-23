@@ -137,14 +137,13 @@ describe('createInputGuardrail', () => {
 
       // The conversation should have the sanitized content appended
       const messages = context.conversation.getMessages();
-      const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+      const lastUserMessage = [...messages].toReversed().find((m) => m.role === 'user');
       expect(lastUserMessage?.content).toBe('cleaned input');
     });
 
     it('blocks when no sanitized version is available', async () => {
       const detector = createMockDetector('test-detector', {
         ...triggeredResult,
-        sanitized: undefined,
       });
       const hook = createInputGuardrail({
         detectors: [detector],
