@@ -1,6 +1,6 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 import { HISTORY_CIRCUIT_BREAKER_REASON } from '@lostgradient/weft';
 import { Conversation } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import {
@@ -109,12 +109,12 @@ export async function reconstructRunResult(
 interface ReconstructTerminalRunErrorArgs {
   finishReason: FinishReason;
   steps: number;
-  errorMessage?: string;
-  errorKind?: AgentRunError['kind'];
-  errorCode?: AgentRunError['code'];
-  abortReason?: string;
-  schemaValidation?: { success: boolean; error?: string };
-  tripwire?: AgentRunWorkflowResult['tripwire'];
+  errorMessage?: string | undefined;
+  errorKind?: AgentRunError['kind'] | undefined;
+  errorCode?: AgentRunError['code'] | undefined;
+  abortReason?: string | undefined;
+  schemaValidation?: { success: boolean; error?: string | undefined } | undefined;
+  tripwire?: AgentRunWorkflowResult['tripwire'] | undefined;
 }
 
 export function reconstructTerminalRunError(
@@ -262,17 +262,17 @@ interface FinalizeArgs {
    */
   runtime: RuntimeServices;
   /** Serialized terminal error message (when the durable run errored). */
-  errorMessage?: string;
+  errorMessage?: string | undefined;
   /** The exact terminal error object captured from the live run event, when available. */
-  terminalError?: AgentRunError;
+  terminalError?: AgentRunError | undefined;
   /** The abort reason (when the durable run was aborted). */
-  abortReason?: string;
+  abortReason?: string | undefined;
   /**
    * The structured-output validation outcome carried out of the workflow, so a
    * completed durable run's `RunResult.schemaValidation` matches the in-memory
    * loop. Its serialized error message is rebuilt into an `Error` for parity.
    */
-  schemaValidation?: { success: boolean; error?: string };
+  schemaValidation?: { success: boolean; error?: string | undefined } | undefined;
   /**
    * The `output`-validated structured output carried out of the
    * workflow, mirroring `RunResult.output` on the in-memory path.
@@ -282,20 +282,22 @@ interface FinalizeArgs {
   output?: unknown;
   /** Forwarded from `RunOptions.costEstimation` so a durable run's terminal
    * `RunResult.costEstimate` matches the in-memory loop's. */
-  costEstimation?: RunOptions['costEstimation'];
+  costEstimation?: RunOptions['costEstimation'] | undefined;
   /**
    * The tripped guardrail's identity, carried out of the workflow summary when
    * `finishReason` is `'tripwire'`. Used to rebuild the same `GuardrailTripwireError`
    * subclass the workflow classified, so `makeErrorResult`'s `instanceof` check
    * lands on `finishReason: 'tripwire'` again and `RunTripwireEvent` fires.
    */
-  tripwire?: {
-    guardrailName: string;
-    category: string;
-    phase: 'input' | 'output';
-    confidence: number;
-    detail?: string;
-  };
+  tripwire?:
+    | {
+        guardrailName: string;
+        category: string;
+        phase: 'input' | 'output';
+        confidence: number;
+        detail?: string;
+      }
+    | undefined;
   /**
    * AB-291 (AC1): collects every run-owned hook's fire-and-forget promise so
    * `createDurableActiveRun`'s `resolveDurableOutcome` can await genuine hook
@@ -304,7 +306,7 @@ interface FinalizeArgs {
    * `driveReattachedRun`'s call sites (`hooks: undefined` there — reattach
    * never fires run hooks, so nothing to track).
    */
-  hookTracker?: (promise: Promise<unknown>) => void;
+  hookTracker?: ((promise: Promise<unknown>) => void) | undefined;
 }
 
 /**

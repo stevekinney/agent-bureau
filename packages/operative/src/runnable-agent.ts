@@ -8,11 +8,13 @@
  * contract; `create-lazy-agent.ts` is its lazy-loading implementation.
  */
 
+import type { HookObservationCorrelation, HookRegistry } from '@lostgradient/lifecycle';
 import type { ConversationHistory } from 'conversationalist';
 
 import type { AgentRun, RunEvent } from './agent-run';
 import type { ChildRunRegistry } from './child-run';
 import type { AgentGenerationProfile } from './generation-profile';
+import type { OperativeHookMap } from './hooks';
 import type { DelegatedAuthority } from './providers/policy.ts';
 import type { RunOptions } from './types';
 
@@ -34,10 +36,10 @@ export type AgentInput = string | { conversation: ConversationHistory };
  * identity stamped on curated `tool.*` events.
  */
 export interface AgentRunContext {
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
   traceContext?: unknown;
-  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
-  agentName?: string;
+  withTraceContext?: (<T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>) | undefined;
+  agentName?: string | undefined;
   /**
    * AB-50 — backs the returned `AgentRun`'s `children()`/`abortChild()`.
    * Opt-in. AB-233: for a `createSubagentTool` reached through the ordinary
@@ -49,7 +51,7 @@ export interface AgentRunContext {
    * construction-time fallback that remains for direct `dispatchChildRun`
    * callers.
    */
-  childRegistry?: ChildRunRegistry;
+  childRegistry?: ChildRunRegistry | undefined;
   /**
    * AB-64/AB-250 — this child's ALREADY-attenuated delegated-authority
    * grant, forwarded from `dispatchChildRun`'s `DispatchChildRunOptions.delegatedAuthority`
@@ -57,7 +59,7 @@ export interface AgentRunContext {
    * run inherits no additional narrowing from a dispatching parent beyond
    * whatever its own `RunOptions.selection` gate already enforces.
    */
-  delegatedAuthority?: DelegatedAuthority;
+  delegatedAuthority?: DelegatedAuthority | undefined;
   /**
    * AB-241 — the authenticated principal attributed with this run, forwarded
    * unchanged into `RunOptions.principal` by `createAgent`'s run path
@@ -67,7 +69,20 @@ export interface AgentRunContext {
    * means this run carries no attribution beyond whatever the caller's own
    * bookkeeping tracks outside this contract.
    */
-  principal?: string;
+  principal?: string | undefined;
+  /**
+   * COR-1269 — set by `dispatchChildRun` when this run is somebody's child,
+   * forwarded unchanged into `RunOptions.childCorrelation` by `createAgent`'s
+   * run path (the same way `signal`/`principal` forward).
+   *
+   * This is correlation DATA and deliberately not a hook surface. It exists so
+   * every hook observation a child produces names the parent-child pair that
+   * produced it; nothing reachable through it can add, remove or reorder a
+   * handler, which is what keeps "no parent hook reaches a child" a property of
+   * the composition rather than a convention. COR-567 Decision 4 declines a
+   * `hooks` field here and that is unchanged.
+   */
+  childCorrelation?: HookObservationCorrelation | undefined;
 }
 
 /**
@@ -118,7 +133,28 @@ export interface RunnableAgent<O = never, H extends boolean = false> {
    * information", since that duplicates the fallback `readGenerationProfile`
    * already centralizes.
    */
-  readonly generationProfile?: AgentGenerationProfile;
+  readonly generationProfile?: AgentGenerationProfile | undefined;
+  /**
+   * This agent's own hook tier (COR-1265, COR-567's ownership assignment).
+   *
+   * Optional, so a third-party `RunnableAgent` implementation that predates
+   * this field still type-checks unchanged — the same compatibility shape
+   * `generationProfile` above uses.
+   *
+   * `readonly` because the tier is construction-time only: supplied through
+   * `createAgent({ hooks })` and never reassigned. An agent definition is
+   * reused across runs and across a whole `AgentDefinitions` map, so a
+   * registry swapped in afterwards would retroactively change the behavior
+   * of runs already dispatched from it.
+   *
+   * This is the SOURCE registry, not an effective plan. A run's plan is a
+   * merged snapshot composed at dispatch — Bureau's invariants first, this
+   * tier under them, a direct `RunOptions.hooks` tier last where one exists
+   * — so registering here after a run started cannot reach that run. An
+   * agent tier may add behavior; it can never suppress a Bureau
+   * registration or widen the authority a run inherited.
+   */
+  readonly hooks?: HookRegistry<OperativeHookMap> | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,5 +202,15 @@ export type ResolveRunOptions = (
  * @internal
  */
 export interface DefinitionResolvingAgent {
-  readonly [OPERATIVE_RESOLVE_RUN_OPTIONS]?: ResolveRunOptions;
+  readonly [OPERATIVE_RESOLVE_RUN_OPTIONS]?: ResolveRunOptions | undefined;
+}
+
+export type DefinitionResolvingAgentWithResolver = DefinitionResolvingAgent & {
+  readonly [OPERATIVE_RESOLVE_RUN_OPTIONS]: ResolveRunOptions;
+};
+
+export function hasDefinitionResolver(
+  value: object,
+): value is DefinitionResolvingAgentWithResolver {
+  return typeof Reflect.get(value, OPERATIVE_RESOLVE_RUN_OPTIONS) === 'function';
 }

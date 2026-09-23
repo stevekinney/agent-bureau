@@ -1,4 +1,4 @@
-import { cosineSimilarity } from 'interoperability';
+import { cosineSimilarity } from '@lostgradient/embeddings';
 
 export interface MaximalMarginalRelevanceOptions {
   /** Tradeoff between relevance (1) and diversity (0). */
@@ -26,7 +26,7 @@ export function applyMaximalMarginalRelevance<T extends { score: number; vector?
   // If no items have vectors, fall back to score-only ordering
   const hasAnyVectors = results.some((r) => r.vector !== undefined);
   if (!hasAnyVectors) {
-    return [...results].sort((a, b) => b.score - a.score).slice(0, limit);
+    return [...results].toSorted((a, b) => b.score - a.score).slice(0, limit);
   }
 
   const { lambda } = options;

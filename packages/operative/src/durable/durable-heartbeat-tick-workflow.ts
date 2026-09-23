@@ -22,9 +22,9 @@ export interface DurableHeartbeatTickResult {
 export interface DurableHeartbeatTickServices {
   scheduler: Scheduler;
   createHeartbeatRun: () => SchedulerRunOptions | Promise<SchedulerRunOptions>;
-  priority?: SchedulerPriority;
-  onTick?: (result: RunResult | null) => void | Promise<void>;
-  onFailure?: (error: unknown) => void | Promise<void>;
+  priority?: SchedulerPriority | undefined;
+  onTick?: ((result: RunResult | null) => void | Promise<void>) | undefined;
+  onFailure?: ((error: unknown) => void | Promise<void>) | undefined;
 }
 
 export type DurableHeartbeatServicesStore = Map<string, DurableHeartbeatTickServices[]>;

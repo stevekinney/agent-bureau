@@ -6,7 +6,7 @@ import type {
   ToolWithInput,
 } from '../compose-types';
 import { createTool } from '../create-tool';
-import type { DefaultToolEvents, ToolContext } from '../is-tool';
+import type { ToolContext } from '../is-tool';
 
 /** Parallelize 2 tools */
 export function parallel<A extends AnyTool, B extends ToolWithInput<InferToolInput<A>>>(
@@ -199,11 +199,7 @@ export function parallel(...tools: AnyTool[]): AnyTool {
   const first = tools[0]!;
   const toolNames = tools.map((t) => t.name);
 
-  const emit = (
-    dispatch: ToolContext<DefaultToolEvents>['dispatch'],
-    type: string,
-    detail: unknown,
-  ) => {
+  const emit = (dispatch: ToolContext['dispatch'], type: string, detail: unknown) => {
     const event = new Event(type);
     if (detail && typeof detail === 'object') {
       Object.assign(event, detail);
@@ -211,7 +207,7 @@ export function parallel(...tools: AnyTool[]): AnyTool {
     return dispatch(event);
   };
 
-  const runParallel = async (input: unknown, context: ToolContext<DefaultToolEvents>) => {
+  const runParallel = async (input: unknown, context: ToolContext) => {
     const executeOptions =
       context.signal || context.timeout !== undefined || context.stream !== undefined
         ? {
@@ -255,7 +251,7 @@ export function parallel(...tools: AnyTool[]): AnyTool {
     name: `parallel(${toolNames.join(', ')})`,
     description: `Parallel tools: ${toolNames.join(' | ')}`,
     input: first.input,
-    async execute(input: unknown, context: ToolContext<DefaultToolEvents>) {
+    async execute(input: unknown, context: ToolContext) {
       return runParallel(input, context);
     },
   });

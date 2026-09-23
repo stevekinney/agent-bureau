@@ -33,14 +33,14 @@ export class TaskDispatchedEvent extends Event {
 /**
  * Emitted when a task finishes successfully.
  */
-export class TaskCompletedEvent extends Event {
+export class SchedulerTaskCompletedEvent extends Event {
   static readonly type = 'task.completed' as const;
 
   constructor(
     readonly taskId: string,
     readonly result: RunResult,
   ) {
-    super(TaskCompletedEvent.type);
+    super(SchedulerTaskCompletedEvent.type);
   }
 }
 
@@ -62,14 +62,14 @@ export class TaskPreemptedEvent extends Event {
 /**
  * Emitted when a task throws an error.
  */
-export class TaskFailedEvent extends Event {
+export class SchedulerTaskFailedEvent extends Event {
   static readonly type = 'task.failed' as const;
 
   constructor(
     readonly taskId: string,
     readonly error: unknown,
   ) {
-    super(TaskFailedEvent.type);
+    super(SchedulerTaskFailedEvent.type);
   }
 }
 
@@ -126,9 +126,9 @@ export class SchedulerStoppedEvent extends Event {
 export interface SchedulerEventMap {
   [TaskQueuedEvent.type]: TaskQueuedEvent;
   [TaskDispatchedEvent.type]: TaskDispatchedEvent;
-  [TaskCompletedEvent.type]: TaskCompletedEvent;
+  [SchedulerTaskCompletedEvent.type]: SchedulerTaskCompletedEvent;
   [TaskPreemptedEvent.type]: TaskPreemptedEvent;
-  [TaskFailedEvent.type]: TaskFailedEvent;
+  [SchedulerTaskFailedEvent.type]: SchedulerTaskFailedEvent;
   [TaskCancelledEvent.type]: TaskCancelledEvent;
   [SchedulerIdleEvent.type]: SchedulerIdleEvent;
   [SchedulerStartedEvent.type]: SchedulerStartedEvent;

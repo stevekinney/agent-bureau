@@ -1,15 +1,14 @@
+import { toolResultSchema } from '../schemas';
 import type { JSONValue, ToolResult } from '../types';
+
+const canonicalToolResultSchema = toolResultSchema.omit({ callId: true }).strip();
 
 /**
  * Coerces an unknown value into a JSON-serializable value.
  */
 export function toJSONValue(value: unknown): JSONValue {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
+  if (value === null) return null;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
     return value;
   }
 
@@ -19,25 +18,15 @@ export function toJSONValue(value: unknown): JSONValue {
 
   // `null` returned above, so this is a non-null, non-array object.
   if (typeof value === 'object') {
-    const record: Record<string, JSONValue> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      record[key] = toJSONValue(entry);
-    }
-    return record;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, toJSONValue(entry)]),
+    );
   }
 
-  // Only `undefined`, `bigint`, `symbol`, and functions remain — none are JSON
-  // values, so they degrade to their string form rather than silently vanish.
-  // Each is narrowed explicitly so the call resolves to that type's own
-  // `toString`, never `Object.prototype.toString`.
   if (typeof value === 'bigint' || typeof value === 'symbol' || typeof value === 'function') {
     return value.toString();
   }
 
-  // Every other `typeof` result is handled above, so only `undefined` reaches
-  // here. The compiler still sees `unknown` — narrowing `unknown` only refines
-  // the positive branch — so return the string form directly instead of
-  // calling `String` on a value whose type says it could be anything.
   return 'undefined';
 }
 
@@ -46,7 +35,8 @@ export function toJSONValue(value: unknown): JSONValue {
  */
 export function parseJSONValue(value: string): JSONValue | undefined {
   try {
-    return JSON.parse(value) as JSONValue;
+    const parsed: unknown = JSON.parse(value);
+    return toJSONValue(parsed);
   } catch {
     return undefined;
   }
@@ -64,15 +54,5 @@ export function isCanonicalToolResultPayload(value: JSONValue): value is JSONVal
   inputDigest?: string;
   outputDigest?: string;
 } {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  return (
-    'outcome' in value &&
-    (value['outcome'] === 'success' ||
-      value['outcome'] === 'error' ||
-      value['outcome'] === 'action_required') &&
-    'content' in value
-  );
+  return canonicalToolResultSchema.safeParse(value).success;
 }

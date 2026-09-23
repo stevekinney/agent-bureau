@@ -23,8 +23,8 @@ import {
  */
 
 export interface ToolCallProgressUpdate {
-  readonly percent?: number;
-  readonly message?: string;
+  readonly percent?: number | undefined;
+  readonly message?: string | undefined;
   readonly checkpoint?: unknown;
 }
 

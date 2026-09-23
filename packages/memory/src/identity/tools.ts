@@ -9,7 +9,7 @@ import {
   rejectSoulUpdate,
   unpinSoulItem,
 } from './soul-approval';
-import type { IdentityProvider } from './types';
+import type { IdentityProvider, PersonaDescriptor } from './types';
 
 // ── Soul Tools ─────────────────────────────────────────────────────
 
@@ -109,9 +109,9 @@ export function createSoulViewTool(provider: IdentityProvider) {
 
       const resolved = resolveIdentity({
         soul,
-        persona: persona?.descriptor,
-        personaText: persona?.text,
-        userContext,
+        ...(persona?.descriptor !== undefined ? { persona: persona.descriptor } : {}),
+        ...(persona?.text !== undefined ? { personaText: persona.text } : {}),
+        ...(userContext !== undefined ? { userContext } : {}),
       });
 
       return { items: soul, rendered: resolved };
@@ -183,9 +183,16 @@ export function createPersonaCreateTool(provider: IdentityProvider) {
       text: z.string().optional().describe('Free-text behavioral instructions'),
     }),
     async execute(params) {
+      const { expertise, taskContext, domain } = params.descriptor;
       await provider.savePersona(params.agentId, {
-        descriptor: params.descriptor,
-        text: params.text,
+        descriptor: {
+          name: params.descriptor.name,
+          role: params.descriptor.role,
+          ...(expertise !== undefined ? { expertise } : {}),
+          ...(taskContext !== undefined ? { taskContext } : {}),
+          ...(domain !== undefined ? { domain } : {}),
+        },
+        ...(params.text !== undefined ? { text: params.text } : {}),
       });
       return { created: true, agentId: params.agentId };
     },
@@ -213,20 +220,40 @@ export function createPersonaUpdateTool(provider: IdentityProvider) {
         return { updated: false, reason: `Persona "${params.agentId}" not found.` };
       }
 
-      const updatedDescriptor = params.descriptor
-        ? existing.descriptor
-          ? { ...existing.descriptor, ...params.descriptor }
-          : undefined
-        : existing.descriptor;
+      const updatedDescriptor = mergePersonaDescriptor(existing.descriptor, params.descriptor);
 
+      const nextText = params.text ?? existing.text;
       await provider.savePersona(params.agentId, {
-        descriptor: updatedDescriptor,
-        text: params.text ?? existing.text,
+        ...(updatedDescriptor !== undefined ? { descriptor: updatedDescriptor } : {}),
+        ...(nextText !== undefined ? { text: nextText } : {}),
       });
 
       return { updated: true, agentId: params.agentId };
     },
   });
+}
+
+function mergePersonaDescriptor(
+  existing: PersonaDescriptor | undefined,
+  update:
+    | {
+        name?: string | undefined;
+        role?: string | undefined;
+        expertise?: string | undefined;
+        taskContext?: string | undefined;
+        domain?: string | undefined;
+      }
+    | undefined,
+): PersonaDescriptor | undefined {
+  if (!update || !existing) return existing;
+  return {
+    ...existing,
+    ...(update.name !== undefined ? { name: update.name } : {}),
+    ...(update.role !== undefined ? { role: update.role } : {}),
+    ...(update.expertise !== undefined ? { expertise: update.expertise } : {}),
+    ...(update.taskContext !== undefined ? { taskContext: update.taskContext } : {}),
+    ...(update.domain !== undefined ? { domain: update.domain } : {}),
+  };
 }
 
 /**

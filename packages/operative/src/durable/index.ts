@@ -1,14 +1,13 @@
 export type { DurableActiveRunContext, DurableActiveRunOptions } from './active-run-adapter';
 export { SCHEDULER_ORIGIN_TAG, SCHEDULER_RUN_ID_PREFIX } from './active-run-constants';
 export { createDurableActiveRun } from './active-run-create';
-export type { RecoveredRunHandle } from './active-run-event-surface';
 export { createRecoveredRunEventSurface } from './active-run-event-surface';
+export type { RecoveredRunHandle } from './active-run-event-surface';
 export { reattachDurableActiveRun } from './active-run-reattach';
-export type { StartDurableRunResultOptions } from './active-run-result-entrypoints';
 export { resumeDurableRunResult, startDurableRunResult } from './active-run-result-entrypoints';
-export type { CheckpointStore } from './checkpoint-store';
+export type { StartDurableRunResultOptions } from './active-run-result-entrypoints';
 export { createCheckpointStore } from './checkpoint-store';
-export type { SignalContinuationInput, WakeupContinuationInput } from './continuation-input';
+export type { CheckpointStore } from './checkpoint-store';
 export {
   buildSignalContinuationInput,
   buildWakeupContinuationInput,
@@ -18,13 +17,14 @@ export {
   renderSignalContinuation,
   renderWakeupContinuation,
 } from './continuation-input';
+export type { SignalContinuationInput, WakeupContinuationInput } from './continuation-input';
+export { createRunEngine } from './create-run-engine';
 export type {
   CreateRunEngineOptions,
   RegistryAgnosticEngine,
   RunEngine,
   RunEngineObservability,
 } from './create-run-engine';
-export { createRunEngine } from './create-run-engine';
 export { DurableCapabilityUnavailableError } from './durable-capability-unavailable-error';
 export type {
   DurableEventEnvelope,
@@ -34,9 +34,15 @@ export type {
   DurableEventPage,
 } from './event-history-types';
 export { createRunWorkflow } from './run-workflow';
-export type { AgentRunWorkflowInput, CreateRunWorkflowOptions } from './run-workflow-input';
 export { isAgentRunWorkflowInput } from './run-workflow-input';
+export type { AgentRunWorkflowInput, CreateRunWorkflowOptions } from './run-workflow-input';
 export type { AgentRunWorkflowResult } from './run-workflow-result';
+export {
+  InvalidScheduleError,
+  createAgentSchedule,
+  createAgentScheduler,
+  isScheduledAgentRunInput,
+} from './schedule-agent';
 export type {
   AgentScheduleHandle,
   AgentScheduleOptions,
@@ -45,20 +51,14 @@ export type {
   ScheduledAgentRunInput,
   SchedulingEngine,
 } from './schedule-agent';
-export {
-  createAgentSchedule,
-  createAgentScheduler,
-  InvalidScheduleError,
-  isScheduledAgentRunInput,
-} from './schedule-agent';
 export { createStorageActivities } from './storage-activities';
-export type { ToolCallLivenessWatchdog, ToolCallProgressUpdate } from './tool-activity-liveness';
 export {
   createToolCallLivenessWatchdog,
   recordToolCallProgress,
   selectToolCallClockSource,
   selectToolCallStallPolicy,
 } from './tool-activity-liveness';
+export type { ToolCallLivenessWatchdog, ToolCallProgressUpdate } from './tool-activity-liveness';
 export type {
   DurableRunDeps,
   PendingWakeup,

@@ -1,4 +1,4 @@
-import type { ResponseFormat } from './types.ts';
+import type { ResponseFormat } from '../../structured-output/types.ts';
 
 /**
  * OpenAI response_format parameter shape.
@@ -15,7 +15,8 @@ type OpenAIResponseFormat =
  * Gemini `GenerateContentConfig` fields for response format (camelCase per @google/genai).
  */
 type GeminiResponseFormat =
-  { responseMimeType: 'application/json'; responseSchema?: Record<string, unknown> } | undefined;
+  | { responseMimeType: 'application/json'; responseSchema?: Record<string, unknown> | undefined }
+  | undefined;
 
 /**
  * Converts a ResponseFormat to the OpenAI API's response_format parameter.

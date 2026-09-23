@@ -1,10 +1,7 @@
 // Content normalization
 export { normalizeContent, toMultiModalArray } from './content';
 
-// Markdown conversion is exported via `conversationalist/markdown`
-
 // Message utilities
-export type { AppendableMessageInput, MessageBuildEnvironment } from './message';
 export {
   buildMessageFromInput,
   createMessage,
@@ -16,9 +13,9 @@ export {
   messageToString,
   repositionMessage,
 } from './message';
+export type { AppendableMessageInput, MessageBuildEnvironment } from './message';
 
 // Tool call pairing
-export type { MaterializeToolCallOptions } from '../conversation/tool-interactions';
 export {
   materializeToolCall,
   materializeToolCalls,
@@ -27,8 +24,9 @@ export {
   materializeToolResults,
   materializeToolResultsAsync,
 } from '../conversation/tool-interactions';
-export type { ToolCallPair } from './tool-calls';
+export type { MaterializeToolCallOptions } from '../conversation/tool-interactions';
 export { pairToolCallsWithResults } from './tool-calls';
+export type { ToolCallPair } from './tool-calls';
 
 // Transient metadata
 export { isTransientKey, stripTransientFromRecord, stripTransientMetadata } from './transient';

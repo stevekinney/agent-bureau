@@ -1,8 +1,8 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+import type { JSONValue } from '@lostgradient/tool-protocol';
 import type { Conversation as ConversationType } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import type { JSONValue } from 'interoperability';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
 import { createAgentSession } from '../agent-session';
@@ -13,14 +13,14 @@ import type { SessionStore } from './types';
  */
 export interface ResumeSessionOptions {
   agentName: string;
-  metadata?: Record<string, JSONValue>;
+  metadata?: Record<string, JSONValue> | undefined;
   /**
    * AB-92/AB-252/AB-321 — the injectable runtime-service seam. Defaults to
    * the real implementation ({@link createDefaultRuntimeServices}). A test
-   * composes its own deterministic instance from
-   * `@lostgradient/operative/test`'s `createManualRuntimeServices`.
+   * composes its own deterministic instance from the `@lostgradient/operative` root
+   * API's `createManualRuntimeServices`.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 /**

@@ -1,7 +1,7 @@
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
 import type { JSONValue } from 'conversationalist';
 import { Conversation } from 'conversationalist';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import { createContextAssembler } from './assembly';
 import { createTokenBudget } from './token-budget';
@@ -14,14 +14,16 @@ function buildConversation(
   messages: Array<{
     role: 'system' | 'user' | 'assistant' | 'tool-call' | 'tool-result';
     content: string;
-    hidden?: boolean;
-    metadata?: Record<string, JSONValue>;
-    toolCall?: { id: string; name: string; arguments: string };
-    toolResult?: {
-      callId: string;
-      content: string;
-      outcome: 'success' | 'error' | 'action_required';
-    };
+    hidden?: boolean | undefined;
+    metadata?: Record<string, JSONValue> | undefined;
+    toolCall?: { id: string; name: string; arguments: string } | undefined;
+    toolResult?:
+      | {
+          callId: string;
+          content: string;
+          outcome: 'success' | 'error' | 'action_required';
+        }
+      | undefined;
   }>,
 ): Conversation {
   const conversation = new Conversation();
@@ -272,7 +274,7 @@ describe('createContextAssembler stable-prefix mode', () => {
   /** Returns the (role, content) shape of the stable-prefix messages: everything up to and including the cache boundary. */
   function stablePrefixOf(messages: readonly { role: string; content: unknown }[]) {
     const boundaryIndex = messages.findIndex(
-      (m) => (m as { cacheBoundary?: boolean }).cacheBoundary === true,
+      (m) => (m as { cacheBoundary?: boolean | undefined }).cacheBoundary === true,
     );
     return messages.slice(0, boundaryIndex + 1).map((m) => ({ role: m.role, content: m.content }));
   }

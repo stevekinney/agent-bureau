@@ -1,5 +1,11 @@
 import type { Message, ToolCall, ToolResult } from '../types';
 
+function isMessageArray(
+  value: ReadonlyArray<Message> | Readonly<Record<string, Message>>,
+): value is ReadonlyArray<Message> {
+  return Array.isArray(value);
+}
+
 /**
  * Represents a paired tool call with its optional result.
  */
@@ -30,13 +36,9 @@ export interface ToolCallPair {
 export function pairToolCallsWithResults(
   messages: ReadonlyArray<Message> | Readonly<Record<string, Message>>,
 ): ToolCallPair[] {
-  const isMessageArray = (
-    value: ReadonlyArray<Message> | Readonly<Record<string, Message>>,
-  ): value is ReadonlyArray<Message> => Array.isArray(value);
-
   const ordered = isMessageArray(messages)
     ? messages
-    : Object.values(messages).sort((a, b) => a.position - b.position);
+    : Object.values(messages).toSorted((a, b) => a.position - b.position);
   const pairs: ToolCallPair[] = [];
   const resultsMap = new Map<string, ToolResult>();
 

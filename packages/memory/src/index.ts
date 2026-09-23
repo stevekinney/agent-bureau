@@ -1,62 +1,64 @@
-export type { ChunkingOptions, ContentChunk, ExtractedDocument, StructureHint } from './chunking';
 export { chunkMarkdown, chunkText } from './chunking';
+export type { ChunkingOptions, ContentChunk, ExtractedDocument, StructureHint } from './chunking';
+export { createConsolidationTask } from './consolidation';
 export type {
   ConsolidationChunkedTaskOptions,
   ConsolidationState,
   CreateConsolidationOptions,
 } from './consolidation';
-export { createConsolidationTask } from './consolidation';
 export { createMemory } from './create-memory';
-export type { CreateWeftMemoryRecordStorageOptions } from './create-weft-memory-record-storage';
 export {
-  createWeftMemoryRecordStorage,
   DEFAULT_MEMORY_KEY_PREFIX,
+  createWeftMemoryRecordStorage,
 } from './create-weft-memory-record-storage';
-export type { DualNamespaceMemoryOptions } from './dual-namespace-memory';
+export type { CreateWeftMemoryRecordStorageOptions } from './create-weft-memory-record-storage';
 export { createDualNamespaceMemory } from './dual-namespace-memory';
-export type { CachedEmbedder, EmbeddingCacheOptions } from './embedding-cache';
+export type { DualNamespaceMemoryOptions } from './dual-namespace-memory';
 export { withEmbeddingCache } from './embedding-cache';
-export type { RunCaptureHookOptions, StepResultLike } from './experiential';
+export type { CachedEmbedder, EmbeddingCacheOptions } from './embedding-cache';
 export { createRunCaptureHook, summarizeRun } from './experiential';
+export type { RunCaptureHookOptions, StepResultLike } from './experiential';
+export { createFileSynchronizer } from './file-synchronizer';
 export type {
   FileSynchronizer,
   FileSynchronizerOptions,
   SynchronizeResult,
 } from './file-synchronizer';
-export { createFileSynchronizer } from './file-synchronizer';
-export type { MemoryGuardrailOptions, ScannedMemoryContent } from './guardrail';
 export { provenanceForMemoryEntry, scanMemoryContent } from './guardrail';
-export type { MemoryHookOptions } from './hooks';
+export type { MemoryGuardrailOptions, ScannedMemoryContent } from './guardrail';
 export { createMemoryHooks } from './hooks';
+export type { MemoryHookOptions } from './hooks';
 export { chunkHtml } from './html-chunking';
+export { mergeHybridResults } from './hybrid-search';
 export type {
   HybridSearchCandidate,
   HybridSearchOptions,
   HybridSearchResult,
   VectorSearchResult,
 } from './hybrid-search';
-export { mergeHybridResults } from './hybrid-search';
-export type { CreateHyDEGeneratorOptions, HyDEOptions, HypotheticalAnswerGenerator } from './hyde';
 export { createHyDEGenerator, withHyDE } from './hyde';
+export type { CreateHyDEGeneratorOptions, HyDEOptions, HypotheticalAnswerGenerator } from './hyde';
+export { CHUNK_INDEX_KEY, SOURCE_DOCUMENT_KEY, ingest } from './ingest';
 export type { ChunkerFunction, IngestOptions, IngestResult } from './ingest';
-export { CHUNK_INDEX_KEY, ingest, SOURCE_DOCUMENT_KEY } from './ingest';
-export type { MaximalMarginalRelevanceOptions } from './maximal-marginal-relevance';
 export { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';
+export type { MaximalMarginalRelevanceOptions } from './maximal-marginal-relevance';
 export { withNamespaceIsolation } from './namespace-isolation';
 export { extractKeywords, isStopWord } from './query-expansion';
-export type { CreateReflectionHookOptions } from './reflection';
 export { createReflectionHook } from './reflection';
-export type { GetMemoryStatusOptions, MemoryStatus } from './status';
+export type { CreateReflectionHookOptions } from './reflection';
 export { getMemoryStatus } from './status';
-export type { TemporalDecayOptions } from './temporal-decay';
+export type { GetMemoryStatusOptions, MemoryStatus } from './status';
 export { applyTemporalDecay, computeTemporalDecay } from './temporal-decay';
-export type { TemporalValidityMetadata } from './temporal-validity';
+export type { TemporalDecayOptions } from './temporal-decay';
 export { filterByValidity, isValidAtTimestamp, stampSupersession } from './temporal-validity';
-export type { BM25Options } from './text-search';
+export type { TemporalValidityMetadata } from './temporal-validity';
+export { createInMemoryMemoryRecordStorage, createMockEmbedder } from './test/index';
+export type { InMemoryMemoryRecordStorageOptions } from './test/index';
 export { computeBM25Scores, tokenize } from './text-search';
+export type { BM25Options } from './text-search';
 export type { TextSearchProvider } from './text-search-provider';
-export type { CreateMemoryRecallToolOptions } from './tools';
 export { createMemoryForgetTool, createMemoryRecallTool, createMemoryStoreTool } from './tools';
+export type { CreateMemoryRecallToolOptions } from './tools';
 export type {
   CreateMemoryOptions,
   Embedder,
@@ -77,20 +79,6 @@ export type {
 } from './types';
 
 // ── Identity ───────────────────────────────────────────────────────
-export type {
-  AgentIdentity,
-  CreateSoulDistillationOptions,
-  CreateSoulSeedOptions,
-  IdentityProvider,
-  PersonaDescriptor,
-  SoulBudget,
-  SoulDiff,
-  SoulDiffEntry,
-  SoulDistillationChunkedTaskOptions,
-  SoulDistillationState,
-  SoulHistoryEntry,
-  SoulItem,
-} from './identity';
 export {
   acceptSoulUpdate,
   createIdentityToolbox,
@@ -113,4 +101,18 @@ export {
   rejectSoulUpdate,
   resolveIdentity,
   unpinSoulItem,
+} from './identity';
+export type {
+  AgentIdentity,
+  CreateSoulDistillationOptions,
+  CreateSoulSeedOptions,
+  IdentityProvider,
+  PersonaDescriptor,
+  SoulBudget,
+  SoulDiff,
+  SoulDiffEntry,
+  SoulDistillationChunkedTaskOptions,
+  SoulDistillationState,
+  SoulHistoryEntry,
+  SoulItem,
 } from './identity';

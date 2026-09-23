@@ -1,3 +1,4 @@
+import { readEnvironmentConfiguration } from '../../environment-configuration.ts';
 import { ProviderError } from '../errors.ts';
 
 /**
@@ -14,9 +15,7 @@ import { ProviderError } from '../errors.ts';
  * diagnosis at the call site that is actually missing configuration.
  */
 export function resolveGeminiApiKey(apiKey: string | undefined): string {
-  const resolved =
-    apiKey ??
-    (typeof Bun !== 'undefined' ? Bun.env['GOOGLE_API_KEY'] : process.env['GOOGLE_API_KEY']);
+  const resolved = apiKey ?? readEnvironmentConfiguration().googleApiKey;
   if (!resolved) {
     throw new ProviderError({
       provider: 'gemini',

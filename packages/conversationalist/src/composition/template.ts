@@ -31,18 +31,11 @@ export function renderTemplate(
 
   return source.replace(TEMPLATE_VARIABLE_REGEX, (original, rawKey: string) => {
     const key = rawKey.trim();
-    if (key in variables) {
-      return variables[key]!;
-    }
-
-    switch (strategy) {
-      case 'throw':
-        throw new Error(`Missing template variable: "${key}"`);
-      case 'preserve':
-        return original;
-      case 'empty':
-        return '';
-    }
+    const value = variables[key];
+    if (Object.hasOwn(variables, key) && value !== undefined) return value;
+    if (strategy === 'preserve') return original;
+    if (strategy === 'empty') return '';
+    throw new Error(`Missing template variable: "${key}"`);
   });
 }
 

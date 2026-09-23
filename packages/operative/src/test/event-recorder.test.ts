@@ -1,7 +1,11 @@
+import {
+  createDefaultRuntimeServices,
+  createManualRuntimeServices,
+  TypedEventTarget,
+} from '@lostgradient/lifecycle';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createDefaultRuntimeServices, createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import { createAgentRun } from '../agent-run';
@@ -230,11 +234,11 @@ describe('EventRecorder', () => {
     it('rewrites identifier-shaped strings to first-seen logical positions', () => {
       const runtime = createManualRuntimeServices();
       const recorder = createEventRecorder(runtime);
-      const target = new EventTarget();
-
       interface IdEventMap {
         'id.seen': Event & { readonly runId: string };
       }
+
+      const target = new TypedEventTarget<Record<string, Event>>();
 
       recorder.attach<IdEventMap>(target, { kind: 'local', id: 't' }, ['id.seen']);
 
@@ -258,11 +262,11 @@ describe('EventRecorder', () => {
     it("rewrites the default runtime's `${kind}-${n}-${uuid}` identifiers too, not only the manual runtime's shape", () => {
       const runtime = createDefaultRuntimeServices();
       const recorder = createEventRecorder(runtime);
-      const target = new EventTarget();
-
       interface IdEventMap {
         'id.seen': Event & { readonly runId: string };
       }
+
+      const target = new TypedEventTarget<Record<string, Event>>();
 
       recorder.attach<IdEventMap>(target, { kind: 'local', id: 't' }, ['id.seen']);
 

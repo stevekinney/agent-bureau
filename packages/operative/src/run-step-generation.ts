@@ -4,6 +4,7 @@ import { Conversation } from 'conversationalist';
 import type { SteeringDesiredState } from './durable/types';
 import { GuardrailTripwireError } from './errors';
 import { GenerateErrorEvent, GenerateStartedEvent, RunErrorEvent } from './events';
+import { composeGenerationSelectionRecord } from './generation-selection-record';
 import type { ErrorRecoveryAction } from './hooks/types';
 import type { EventDispatcher, StepDeps, StepOutcome } from './run-step';
 import { createElicit } from './run-step-support';
@@ -71,13 +72,13 @@ export async function executeGeneration(
     generateDurationMilliseconds = undefined;
     try {
       let prepareResult: GenerateResponse | void = undefined;
-      for (const hook of deps.prepareStepHooks) {
-        prepareResult = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
-        if (prepareResult) break;
-      }
-      if (!prepareResult && hooks?.has('prepareStep')) {
+      if (hooks?.has('prepareStep')) {
         const prepareContext = { conversation, step, signal: stepSignal, abortStep, elicit };
-        const registryResult = await hooks.run('prepareStep', prepareContext);
+        // `runFirst`, not `run`: a `prepareStep` handler returns a
+        // `GenerateResponse` but receives a `StepContext`, so the waterfall
+        // would hand the next handler a response where it expects a context.
+        // First answer wins and the rest are skipped.
+        const registryResult = await hooks.runFirst('prepareStep', prepareContext);
         if (registryResult !== undefined) {
           prepareResult = registryResult;
         }
@@ -123,7 +124,14 @@ export async function executeGeneration(
           for (const [index, entry] of handlers.entries()) {
             let handlerResult: GenerateContext | void;
             try {
-              handlerResult = await entry.handler(beforeGenContext);
+              // `runHandler`, not `entry.handler(...)` directly: it applies
+              // this registry's invocation observation, so a hand-iterated
+              // hook is visible to a plan observer exactly as a dispatched
+              // one is. Error policy stays here, where this loop's own
+              // reapply-steering semantics live.
+              handlerResult = (await hooks.runHandler('beforeGenerate', entry, [
+                beforeGenContext,
+              ])) as GenerateContext | void;
             } catch (error) {
               applyWaterfallHandlerErrorPolicy(
                 error,
@@ -131,6 +139,7 @@ export async function executeGeneration(
                 index,
                 entry.options,
                 hooks.onError,
+                entry.id,
               );
               continue;
             }
@@ -161,9 +170,61 @@ export async function executeGeneration(
         });
         hookTracker?.(onLLMInputHookPromise);
 
-        emitter?.dispatch(new GenerateStartedEvent(step));
+        // COR-581: seal the effective-context epoch here, and nowhere
+        // else. This is the last point at which nothing further can change
+        // the request — the prepareStep hook waterfall above has run
+        // (identity, memory, guardrails), `beforeGenerate` has run, and
+        // the short-circuit path that would skip the provider call
+        // entirely has already returned. Sealing earlier would produce an
+        // epoch that omits sources the model genuinely saw.
+        //
+        // Inside the retry loop deliberately: a guardrail that sanitizes
+        // the user message between attempts changed what the model sees,
+        // so the next attempt seals its own epoch.
+        const sealedEpoch = deps.contextEpoch?.seal({
+          conversation: generateContext.conversation,
+          steering: steeringDesiredState,
+          plan: deps.selection?.getPlan(),
+          toolNames: generateContext.toolbox.tools().map((tool) => tool.name),
+          consumer: { runId: deps.runId, step, attempt: stepRetryCount },
+        });
+
+        // AB-68: record the configuration this call is issued under. Read
+        // from the gate rather than re-planning — `prepareStep` already
+        // revalidated it at this step's boundary, so `getPlan()` returns
+        // the exact plan this step acted on.
+        emitter?.dispatch(
+          new GenerateStartedEvent(
+            step,
+            composeGenerationSelectionRecord(deps.selection?.getPlan(), steeringDesiredState),
+            sealedEpoch?.epochId,
+          ),
+        );
         const generateStart = deps.runtime.monotonic.now();
         let durationMilliseconds: number;
+        // COR-581: a provider-level retry whose mutator changed the
+        // request seals a successor epoch, referenced from
+        // `generate.retry`. Without this the mutation would be invisible —
+        // the seal above happens once, before the call, and a mutated
+        // retry sends the model something the epoch does not describe.
+        const sealMutatedEpoch =
+          deps.contextEpoch === undefined
+            ? undefined
+            : (mutatedContext: GenerateContext, providerAttempt: number): string =>
+                deps.contextEpoch!.seal({
+                  conversation: mutatedContext.conversation,
+                  steering: steeringDesiredState,
+                  plan: deps.selection?.getPlan(),
+                  toolNames: mutatedContext.toolbox.tools().map((tool) => tool.name),
+                  consumer: {
+                    runId: deps.runId,
+                    step,
+                    // Offset past the error-recovery attempt index so a
+                    // provider retry and an error-recovery retry of the
+                    // same step are never reported as the same attempt.
+                    attempt: stepRetryCount + providerAttempt,
+                  },
+                }).epochId;
         try {
           response =
             deps.parentContext !== undefined && deps.withTraceContext !== undefined
@@ -174,6 +235,7 @@ export async function executeGeneration(
                     deps.retry,
                     emitter,
                     deps.runtime,
+                    sealMutatedEpoch,
                   ),
                 )
               : await callGenerateWithRetry(
@@ -182,6 +244,7 @@ export async function executeGeneration(
                   deps.retry,
                   emitter,
                   deps.runtime,
+                  sealMutatedEpoch,
                 );
           durationMilliseconds = deps.runtime.monotonic.now() - generateStart;
         } catch (generateError) {
@@ -229,7 +292,10 @@ export async function executeGeneration(
             };
             let handlerResult: GenerateResponse | void;
             try {
-              handlerResult = await entry.handler(afterGenContext);
+              // Observed invocation — see the `beforeGenerate` loop above.
+              handlerResult = (await hooks.runHandler('afterGenerate', entry, [
+                afterGenContext,
+              ])) as GenerateResponse | void;
             } catch (error) {
               applyWaterfallHandlerErrorPolicy(
                 error,
@@ -237,6 +303,7 @@ export async function executeGeneration(
                 index,
                 entry.options,
                 hooks.onError,
+                entry.id,
               );
               continue;
             }
@@ -289,9 +356,9 @@ export async function executeGeneration(
           let errorAction: ErrorRecoveryAction | undefined;
           const handlers = hooks.getHandlers('onError');
           for (const entry of handlers) {
-            const result = await (
-              entry.handler as (context: typeof errorContext) => Promise<ErrorRecoveryAction | void>
-            )(errorContext);
+            // Observed invocation — see the `beforeGenerate` loop above.
+            const result = (await hooks.runHandler('onError', entry, [errorContext])) as
+              ErrorRecoveryAction | undefined;
             if (result !== undefined) {
               errorAction = result;
               break; // first non-void return wins

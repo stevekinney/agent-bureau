@@ -16,9 +16,9 @@
  * the bureau exists here — operative stays bureau-agnostic.
  */
 
+import type { JSONValue } from '@lostgradient/tool-protocol';
 import type { AnyToolbox } from 'armorer';
 import { combineToolboxes } from 'armorer';
-import type { JSONValue } from 'interoperability';
 
 import type { MemoryLike } from './create-memory-bridge';
 import type { GenerateFunction, PrepareStepHook } from './types';
@@ -75,45 +75,21 @@ export function combineProvider(
 // Hooks — bureau-first, additive-only
 // ---------------------------------------------------------------------------
 
-/**
- * A hook value as accepted by RunOptions — single function or array.
- * @internal
- */
-type HookInput<H> = H | H[] | undefined;
-
-/**
- * Combines bureau hooks and agent hooks in bureau-first order.
- *
- * Rules (from architecture.md):
- * - Bureau hooks run **before** agent hooks (bureau frames; agent specializes).
- * - Agent hooks **add** — they cannot suppress or remove bureau hooks.
- * - A bureau-level guardrail (policy, audit) cannot be disabled by an agent.
- *
- * Returns a flat array. When both sides are undefined, returns `undefined`.
- * When only one side has hooks, returns that side's hooks normalized to an array.
- *
- * @example
- * ```ts
- * const hooks = combineHooks(bureauPrepareStep, agentPrepareStep);
- * // bureau hooks fire first, then agent hooks
- * ```
- */
-export function combineHooks<H>(
-  bureauHooks: HookInput<H>,
-  agentHooks: HookInput<H>,
-): H[] | undefined {
-  const bureau = normalizeHooks(bureauHooks);
-  const agent = normalizeHooks(agentHooks);
-
-  if (bureau.length === 0 && agent.length === 0) return undefined;
-  return [...bureau, ...agent];
-}
-
-/** Normalize a hook value to a flat array. */
-function normalizeHooks<H>(hooks: HookInput<H>): H[] {
-  if (!hooks) return [];
-  return Array.isArray(hooks) ? hooks : [hooks];
-}
+// ---------------------------------------------------------------------------
+// The hooks axis used to live here as `combineHooks` (bureau-first,
+// additive-only). It is gone (COR-1268).
+//
+// It composed the `Hook | Hook[]` shape the `RunOptions` hook arrays used, and
+// that shape no longer exists — `HookRegistry` is the only hook surface on a
+// run. It also never had a production caller: the axis it documented was real,
+// but nothing wired it up.
+//
+// The rule itself is preserved, not dropped. `mergeHookRegistries(bureau,
+// agent, direct)` composes the tiers in that order, and Bureau's invariants
+// additionally pin themselves first or last per dispatch shape so a lower tier
+// cannot pre-empt or post-empt them (COR-1265). Re-adding a second mechanism
+// here would give the same rule two implementations to disagree about.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Memory — merged-read / private-write
@@ -127,7 +103,7 @@ interface MemorySide {
   /** The memory instance to read from or write to. */
   memory: MemoryLike;
   /** The namespace that this side writes to. */
-  namespace?: string;
+  namespace?: string | undefined;
 }
 
 /**
@@ -176,8 +152,16 @@ export function combineMemory(
       const limit = options?.limit ?? 5;
 
       const [agentResults, bureauResults] = await Promise.all([
-        agentMemory.recall(query, { ...options, namespace: agentNamespace, limit }),
-        bureauMemory.recall(query, { ...options, namespace: bureauNamespace, limit }),
+        agentMemory.recall(query, {
+          ...options,
+          ...(agentNamespace === undefined ? {} : { namespace: agentNamespace }),
+          limit,
+        }),
+        bureauMemory.recall(query, {
+          ...options,
+          ...(bureauNamespace === undefined ? {} : { namespace: bureauNamespace }),
+          limit,
+        }),
       ]);
 
       // Merge and sort by score descending; deduplicate by content.
@@ -191,7 +175,7 @@ export function combineMemory(
           seen.add(r.content);
           return true;
         })
-        .sort((a, b) => b.score - a.score)
+        .toSorted((a, b) => b.score - a.score)
         .slice(0, limit);
 
       return combined;
@@ -247,7 +231,7 @@ interface IdentityLayer {
 export function combineIdentity(
   bureauIdentity: IdentityLayer | undefined,
   agentIdentity: IdentityLayer | undefined,
-  options: { warn?: (message: string) => void } = {},
+  options: { warn?: ((message: string) => void) | undefined } = {},
 ): PrepareStepHook | undefined {
   const warn = options.warn ?? console.warn;
 

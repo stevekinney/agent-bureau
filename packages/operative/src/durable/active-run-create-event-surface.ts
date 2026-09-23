@@ -1,5 +1,5 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 import type { AnyToolbox, ToolboxEventMap } from 'armorer';
-import type { RuntimeServices } from 'lifecycle';
 
 import type { OperativeEventEmitter } from '../events';
 import {
@@ -21,7 +21,7 @@ export function createDurableToolboxForwarder(args: {
   agentName: string;
   runtime: RuntimeServices;
   liveness: ActiveRunLiveness;
-  isOwnEvent: (event: { ownerId?: string }) => boolean;
+  isOwnEvent: (event: { ownerId?: string | undefined }) => boolean;
   onToolStarted: () => void;
   onToolSettled: () => void;
 }) {
@@ -177,11 +177,13 @@ export function createDurableToolboxForwarder(args: {
   // whether the toolbox is the base instance or a swapped step toolbox.
   const attachToolboxCuratedListeners = (toolboxInstance: AnyToolbox): (() => void) => {
     const toolboxWithListener = toolboxInstance as unknown as {
-      addEventListener?: <K extends keyof ToolboxEventMap>(
-        type: K,
-        listener: (e: ToolboxEventMap[K]) => void,
-        options?: AddEventListenerOptions,
-      ) => () => void;
+      addEventListener?:
+        | (<K extends keyof ToolboxEventMap>(
+            type: K,
+            listener: (e: ToolboxEventMap[K]) => void,
+            options?: AddEventListenerOptions,
+          ) => () => void)
+        | undefined;
     };
     if (!toolboxWithListener.addEventListener) return () => {};
     const addListener = toolboxWithListener.addEventListener.bind(toolboxWithListener);

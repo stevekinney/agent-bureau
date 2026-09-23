@@ -88,7 +88,8 @@ export async function prepareStep(
   // desired pause always wins.
   let steeringDesiredState = steeringGate ? { ...steeringGate.getDesiredState() } : undefined;
   if (steeringDesiredState) maybeDispatchSteeringApplied(steeringDesiredState);
-  while (steeringDesiredState?.paused && steeringGate) {
+  for (;;) {
+    if (!(steeringDesiredState?.paused && steeringGate)) break;
     const { aborted } = await awaitResumeOrAbort(steeringGate, signal);
     if (aborted) {
       return { kind: 'abort', reason: explicitAbortReason(signal) };
@@ -188,7 +189,8 @@ export async function prepareStep(
       let shouldCompact = true;
       if (hooks?.has('beforeCompaction')) {
         try {
-          const hookResult = await hooks.run('beforeCompaction', {
+          // `runFirst`: the first handler to return a verdict decides.
+          const hookResult = await hooks.runFirst('beforeCompaction', {
             conversation,
             step,
             budget: {
@@ -260,12 +262,11 @@ export async function prepareStep(
 
   // Resolve per-step toolbox
   let stepToolbox: AnyToolbox = deps.toolbox;
-  for (const hook of deps.selectToolsHooks) {
-    stepToolbox = await hook({ conversation, step, signal: stepSignal, abortStep, elicit });
-  }
   if (hooks?.has('selectTools')) {
     const selectContext = { conversation, step, signal: stepSignal, abortStep, elicit };
-    const registryToolbox = await hooks.run('selectTools', selectContext);
+    // `runLast`: every handler is consulted against the same context and
+    // the lowest-priority one to answer wins, because it ran last.
+    const registryToolbox = await hooks.runLast('selectTools', selectContext);
     if (registryToolbox !== undefined) {
       stepToolbox = registryToolbox;
     }
@@ -276,7 +277,8 @@ export async function prepareStep(
   let stepToolChoice: ToolChoice | undefined = deps.defaultToolChoice;
   if (hooks?.has('selectToolChoice')) {
     const selectToolChoiceContext = { conversation, step, signal: stepSignal, abortStep, elicit };
-    const hookResult = await hooks.run('selectToolChoice', selectToolChoiceContext);
+    // `runLast`, for the same reason as `selectTools` directly above.
+    const hookResult = await hooks.runLast('selectToolChoice', selectToolChoiceContext);
     if (hookResult !== undefined) {
       stepToolChoice = hookResult;
     }

@@ -1,10 +1,10 @@
-import type { GeminiPart } from 'armorer/adapters/gemini';
-import { parseGeminiToolCalls } from 'armorer/adapters/gemini';
+import { sha256HexSync } from '@lostgradient/cryptography';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+import type { GeminiPart } from 'armorer';
+import { parseGeminiToolCalls } from 'armorer';
 import type { ConversationHistory } from 'conversationalist';
-import { toGeminiMessages } from 'conversationalist/adapters/gemini';
-import { sha256HexSync } from 'interoperability';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { toGeminiMessages } from 'conversationalist';
 
 import { withBackendDescriptors } from './backend-descriptor-attachment.ts';
 import { ProviderError } from './errors.ts';
@@ -868,7 +868,7 @@ export function createGeminiProvider(options: GeminiProviderOptions): GenerateFu
  * the `GOOGLE_API_KEY` env var.
  */
 export function createGeminiProviderStream(
-  options: Omit<GeminiProviderOptions, 'client'> & { client?: GeminiStreamingModel },
+  options: Omit<GeminiProviderOptions, 'client'> & { client?: GeminiStreamingModel | undefined },
 ): StreamingGenerateFunction {
   const runtime = options.runtime ?? createDefaultRuntimeServices();
   const resolvedModel = resolveGeminiModel(options.model);
@@ -1004,9 +1004,9 @@ export interface GeminiTokenCounterOptions {
    * {@link GeminiTokenCountingClient} with no cast — see
    * `providers/gemini-client-assignability.test-d.ts`.
    */
-  client?: GeminiTokenCountingClient;
+  client?: GeminiTokenCountingClient | undefined;
   /** Falls back to the `GOOGLE_API_KEY` environment variable when omitted. */
-  apiKey?: string;
+  apiKey?: string | undefined;
   /**
    * Overrides the Gemini SDK's default base URL (`HttpOptions.baseUrl`).
    * Accepts any string — including a credential-injecting proxy origin — with
@@ -1015,7 +1015,7 @@ export interface GeminiTokenCounterOptions {
    * `getProviderCapabilities('gemini')` keeps reporting
    * `serverSideTokenCounting: true` regardless of this value.
    */
-  baseURL?: string;
+  baseURL?: string | undefined;
 }
 
 /**

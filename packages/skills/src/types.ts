@@ -1,4 +1,4 @@
-import type { ToolPolicy } from 'interoperability';
+import type { ToolPolicy } from '@lostgradient/tool-protocol';
 
 export type { ToolPolicy };
 
@@ -54,8 +54,15 @@ export interface SkillContent {
 export interface SkillResource {
   /** Relative path within the skill directory (e.g., "scripts/extract.py"). */
   path: string;
-  /** The resource content. */
-  content: string;
+  /**
+   * Raw resource content.
+   *
+   * Bytes rather than a string because a skill bundle legitimately carries images, fonts and
+   * other binary assets, and decoding one as UTF-8 replaces every invalid sequence with U+FFFD —
+   * silent, irreversible corruption. Decoding is the caller's decision, made per resource at the
+   * point where text is actually needed.
+   */
+  content: Uint8Array;
 }
 
 // ── Skill Provider ───────────────────────────────────────────────────
@@ -65,24 +72,23 @@ export interface SkillResource {
  * Follows the storage-first model: skills are strings in the shared storage adapter,
  * not files on disk.
  */
-export interface SkillProvider {
-  /** List all available skills (catalog tier). */
-  listSkills(): Promise<SkillCatalogEntry[]>;
-  /** Load full skill content (instructions tier). */
-  loadSkill(name: string): Promise<SkillContent | undefined>;
-  /** Save a skill (from ingestion or self-improvement proposal). */
+/**
+ * Persists skills into a durable store.
+ *
+ * Writes only. Reading skills back is discovery's job — a skill admitted through a read method
+ * here would have no catalog entry, no trust decision, no artifact digest and no compatibility
+ * verdict, which is the duplication this interface was narrowed to remove. The self-improvement
+ * flow is what genuinely needs a write path: an accepted proposal has to land somewhere the next
+ * run's discovery will find it.
+ */
+export interface SkillWriter {
+  /** Save a skill, from ingestion or an accepted self-improvement proposal. */
   saveSkill(name: string, content: SkillContent): Promise<void>;
-  /** Delete a skill. */
+  /** Delete a skill and everything stored under it. */
   deleteSkill(name: string): Promise<void>;
-  /** List resources bundled with a skill. */
-  listResources(name: string): Promise<string[]>;
-  /** Load a specific resource. */
-  loadResource(name: string, path: string): Promise<string | undefined>;
-  /** Save a resource. */
-  saveResource(name: string, path: string, content: string): Promise<void>;
-  /** Get enabled status. Defaults to true if not explicitly set. */
-  isEnabled(name: string): Promise<boolean>;
-  /** Set enabled status. */
+  /** Save one bundled resource from raw bytes. */
+  saveResource(name: string, path: string, content: Uint8Array): Promise<void>;
+  /** Set enabled status. An absent value means enabled. */
   setEnabled(name: string, enabled: boolean): Promise<void>;
 }
 
@@ -112,3 +118,15 @@ export interface Proposal {
   /** If rejected, the reason. */
   rejectionReason?: string;
 }
+
+// ── Events (COR-767) ─────────────────────────────────────────────────
+// COR-767 requires the EventMap to be exported from this module, matching the
+// package rule that type re-exports live here rather than in a barrel.
+export type {
+  SkillAdmissionRule,
+  SkillEventClassMap,
+  SkillEventCorrelation,
+  SkillEventMap,
+  SkillEventType,
+  SkillRejectionReason,
+} from './events';

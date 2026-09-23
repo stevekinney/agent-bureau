@@ -5,7 +5,7 @@
  * the middleware — useful for admin tasks like bulk invalidation.
  */
 
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { TextValueStore } from '@lostgradient/weft';
 
 /**
  * Deletes all cache entries under the given namespace prefix.

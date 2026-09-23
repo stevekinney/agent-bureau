@@ -12,10 +12,10 @@ import type { ActiveRun } from '../create-run';
 import { AgentRunError } from '../errors';
 import type { TokenUsage } from '../types';
 
-export type InstrumentationOptions = {
-  tracer?: Tracer;
-  tracerName?: string;
-  tracerVersion?: string;
+export type RunInstrumentationOptions = {
+  tracer?: Tracer | undefined;
+  tracerName?: string | undefined;
+  tracerVersion?: string | undefined;
   /**
    * Human-readable agent name. When supplied, the run span is named
    * `invoke_agent {agentName}` and carries `gen_ai.agent.name`, matching
@@ -23,12 +23,25 @@ export type InstrumentationOptions = {
    * fall back to the bare `invoke_agent` name the conventions specify for
    * unnamed agents.
    */
-  agentName?: string;
+  agentName?: string | undefined;
 };
 
 type InstrumentableActiveRun = {
   addEventListener: ActiveRun['addEventListener'];
 };
+
+function setUsageAttributes(span: Span, usage: TokenUsage): void {
+  span.setAttributes({
+    'gen_ai.usage.input_tokens': usage.prompt,
+    'gen_ai.usage.output_tokens': usage.completion,
+    ...(usage.cacheCreationTokens !== undefined && {
+      'gen_ai.usage.cache_creation.input_tokens': usage.cacheCreationTokens,
+    }),
+    ...(usage.cacheReadTokens !== undefined && {
+      'gen_ai.usage.cache_read.input_tokens': usage.cacheReadTokens,
+    }),
+  });
+}
 
 function getTelemetryError(error: unknown): unknown {
   return error instanceof AgentRunError && error.cause instanceof Error ? error.cause : error;
@@ -41,16 +54,15 @@ function getTelemetryError(error: unknown): unknown {
  * Span shape follows the OTel GenAI semantic conventions where a direct
  * mapping exists (the run span is `invoke_agent`); spans with no spec
  * equivalent (step, generate, tool batch) are kept as documented,
- * non-normative extensions. See the mapping table in the package README
- * (`@lostgradient/operative/instrumentation` section) for the full rationale and the
- * pinned conventions version.
+ * non-normative extensions. See the mapping table in the package README's
+ * instrumentation section for the full rationale and the pinned conventions version.
  *
  * Returns an unsubscribe function that removes all listeners and ends
  * any spans still open.
  */
-export function instrument(
+export function instrumentRun(
   activeRun: InstrumentableActiveRun,
-  options: InstrumentationOptions = {},
+  options: RunInstrumentationOptions = {},
 ): () => void {
   const tracer =
     options.tracer ??
@@ -66,19 +78,6 @@ export function instrument(
 
   const controller = new AbortController();
   const signal = controller.signal;
-
-  function setUsageAttributes(span: Span, usage: TokenUsage): void {
-    span.setAttributes({
-      'gen_ai.usage.input_tokens': usage.prompt,
-      'gen_ai.usage.output_tokens': usage.completion,
-      ...(usage.cacheCreationTokens !== undefined && {
-        'gen_ai.usage.cache_creation.input_tokens': usage.cacheCreationTokens,
-      }),
-      ...(usage.cacheReadTokens !== undefined && {
-        'gen_ai.usage.cache_read.input_tokens': usage.cacheReadTokens,
-      }),
-    });
-  }
 
   function endAllOpenSpans(): void {
     for (const span of generateSpans.values()) {
@@ -150,7 +149,7 @@ export function instrument(
       // details. It is intentionally NOT labeled with `gen_ai.operation.name`
       // or a `chat`-style span name: the canonical, spec-compliant chat span
       // (with model, provider, and gen_ai.usage.*) comes from
-      // `@lostgradient/operative/providers/instrumentation`, wrapped around the same
+      // `@lostgradient/operative` provider instrumentation API, wrapped around the same
       // GenerateFunction. Usage here is namespaced under `operative.*` so
       // the two instrumentation points never double-report gen_ai.usage.*
       // for the same call when both are wired up.

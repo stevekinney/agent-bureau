@@ -14,9 +14,9 @@ export const RETRY_TEMPERATURE_KEY = 'retryTemperature';
 /** Options for the temperature escalation mutator. */
 export interface TemperatureEscalationOptions {
   /** Amount to increase temperature per retry attempt. Defaults to 0.2. */
-  increment?: number;
+  increment?: number | undefined;
   /** Maximum temperature value. Defaults to 1.0. */
-  max?: number;
+  max?: number | undefined;
 }
 
 /**

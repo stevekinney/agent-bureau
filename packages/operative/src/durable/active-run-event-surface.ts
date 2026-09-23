@@ -1,5 +1,5 @@
+import { CompletableEventTarget, createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { AnyToolbox, ToolboxEventMap } from 'armorer';
-import { CompletableEventTarget, createDefaultRuntimeServices } from 'lifecycle';
 
 import type { CombinedOperativeEventMap, OperativeEventEmitter } from '../events';
 import {
@@ -96,14 +96,16 @@ export function createRecoveredRunEventSurface(
   //
   // AB-290: mirrors `createDurableActiveRun`'s identically-named helper —
   // see its comment.
-  const isOwnEvent = (event: { ownerId?: string }): boolean => event.ownerId === runId;
+  const isOwnEvent = (event: { ownerId?: string | undefined }): boolean => event.ownerId === runId;
   const attachToolboxCuratedListeners = (toolboxInstance: AnyToolbox): (() => void) => {
     const toolboxWithListener = toolboxInstance as unknown as {
-      addEventListener?: <K extends keyof ToolboxEventMap>(
-        type: K,
-        listener: (event: ToolboxEventMap[K]) => void,
-        options?: AddEventListenerOptions,
-      ) => () => void;
+      addEventListener?:
+        | (<K extends keyof ToolboxEventMap>(
+            type: K,
+            listener: (event: ToolboxEventMap[K]) => void,
+            options?: AddEventListenerOptions,
+          ) => () => void)
+        | undefined;
     };
     if (!toolboxWithListener.addEventListener) return () => {};
     const addListener = toolboxWithListener.addEventListener.bind(toolboxWithListener);

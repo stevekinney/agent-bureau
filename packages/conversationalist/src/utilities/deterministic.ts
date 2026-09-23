@@ -1,3 +1,9 @@
+import type { JSONValue } from '../types';
+
+function isJSONArray(value: JSONValue): value is readonly JSONValue[] {
+  return Array.isArray(value);
+}
+
 /**
  * Recursively sorts object keys alphabetically for deterministic JSON output.
  * Arrays are processed recursively but maintain their element order.
@@ -15,23 +21,21 @@
  * // Returns: { a: 1, b: { x: 2, y: 1 } }
  * ```
  */
-export function sortObjectKeys<T>(obj: T): T {
+export function sortObjectKeys<T extends JSONValue | undefined>(obj: T): T;
+export function sortObjectKeys(obj: JSONValue | undefined): JSONValue | undefined {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
 
-  if (Array.isArray(obj)) {
-    return obj.map(sortObjectKeys) as T;
+  if (isJSONArray(obj)) {
+    return obj.map((value) => sortObjectKeys(value));
   }
 
-  const sorted: Record<string, unknown> = {};
-  const keys = Object.keys(obj).sort();
-
-  for (const key of keys) {
-    sorted[key] = sortObjectKeys((obj as Record<string, unknown>)[key]);
-  }
-
-  return sorted as T;
+  return Object.fromEntries(
+    Object.entries(obj)
+      .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, value]) => [key, sortObjectKeys(value)]),
+  );
 }
 
 /**
@@ -50,7 +54,7 @@ export function sortObjectKeys<T>(obj: T): T {
 export function sortMessagesByPosition<
   T extends { position: number; createdAt: string; id: string },
 >(messages: readonly T[]): T[] {
-  return [...messages].sort((a, b) => {
+  return messages.toSorted((a, b) => {
     if (a.position !== b.position) {
       return a.position - b.position;
     }

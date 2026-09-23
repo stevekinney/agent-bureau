@@ -22,9 +22,9 @@ export interface AgentRunWorkflowInput {
    */
   agentName: string;
   /** The first user message to seed a brand-new run (ignored on resume). */
-  prompt?: string;
+  prompt?: string | undefined;
   /** Safety bound on step count, mirroring `RunOptions.maximumSteps`. */
-  maximumSteps?: number;
+  maximumSteps?: number | undefined;
 }
 
 /**
@@ -71,7 +71,7 @@ export interface CreateRunWorkflowOptions {
    * every run's `workflowVersion` is then `undefined` and no mismatch is ever
    * reported.
    */
-  version?: string;
+  version?: string | undefined;
 }
 /** Build the cloneable cursor for a new workflow run. */
 export function initialCursor(

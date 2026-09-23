@@ -69,7 +69,7 @@ export async function scanContent(
     confidence: top.result.confidence,
     action,
     input: content,
-    detail: top.result.detail,
+    ...(top.result.detail !== undefined ? { detail: top.result.detail } : {}),
     provenance: context.provenance,
   };
 

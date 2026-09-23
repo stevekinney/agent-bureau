@@ -30,7 +30,7 @@ import type {
   FaultPlan,
   FaultPlanEntry,
   FiredFault,
-} from '@lostgradient/operative/test';
+} from '@lostgradient/operative';
 
 import type { AuditRecord } from '../audit-trail';
 import { encodeKey } from '../audit-trail';

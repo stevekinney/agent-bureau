@@ -176,19 +176,7 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
       input: structuredClone(item.input),
     };
   }
-  if (item.type === 'web_search_tool_result') {
-    return {
-      type: 'web_search_tool_result',
-      tool_use_id: item.tool_use_id,
-      content: structuredClone(item.content),
-    };
-  }
-  if (
-    item.type === 'code_execution_tool_result' ||
-    item.type === 'bash_code_execution_tool_result' ||
-    item.type === 'text_editor_code_execution_tool_result' ||
-    item.type === 'web_fetch_tool_result'
-  ) {
+  if ('tool_use_id' in item) {
     return {
       type: item.type,
       tool_use_id: item.tool_use_id,
@@ -198,10 +186,10 @@ export function copyMultiModalContent(item: MultiModalContent): MultiModalConten
   if (item.type === 'container_upload') {
     return { type: 'container_upload', file_id: item.file_id };
   }
-  // All non-image variants are handled above. TypeScript cannot fully narrow
-  // `item` to ImageContent here because ServerToolResultContent's `type`
-  // is itself a union alias, so we assert the exhausted remainder.
-  const image = item as ImageContent;
+  return copyImageContent(item);
+}
+
+function copyImageContent(image: ImageContent): ImageContent {
   return {
     type: 'image',
     url: image.url,

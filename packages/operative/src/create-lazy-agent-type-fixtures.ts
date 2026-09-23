@@ -11,7 +11,7 @@ import type { GenerateFunction, GenerateResponse } from './types';
 const response = { content: 'fixture', toolCalls: [] } satisfies GenerateResponse;
 const generate: GenerateFunction = () => Promise.resolve(response);
 
-function buildRun(): AgentRun<never, false> {
+function buildRun(): AgentRun {
   const conversation = new Conversation();
   conversation.appendUserMessage('fixture');
   const activeRun = createActiveRun({
@@ -20,16 +20,16 @@ function buildRun(): AgentRun<never, false> {
     conversation,
     stopWhen: noToolCalls(),
   });
-  return createAgentRun<never, false>(activeRun);
+  return createAgentRun(activeRun);
 }
 
-export const namedAgent: RunnableAgent<never, false> = {
+export const namedAgent: RunnableAgent = {
   name: 'named-fixture',
   hasOutput: false,
   run: () => buildRun(),
 };
 
-const defaultAgent: RunnableAgent<never, false> = {
+const defaultAgent: RunnableAgent = {
   name: 'default-fixture',
   hasOutput: false,
   run: () => buildRun(),

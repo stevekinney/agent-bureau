@@ -1,7 +1,7 @@
 /**
  * Type guard: returns true if the value implements the AsyncIterable protocol.
  */
-export function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+export function isAsyncIterable<T>(value: T): value is T & AsyncIterable<unknown> {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) {
     return false;
   }
@@ -16,16 +16,4 @@ export function isPromise<T>(value: unknown): value is PromiseLike<T> {
   if (!('then' in value)) return false;
   const candidate = value as PromiseLike<unknown>;
   return typeof candidate.then === 'function';
-}
-
-/**
- * Returns true when the current process is running inside a test runner.
- */
-export function isTestRuntime(): boolean {
-  // The `typeof` guard keeps browser execution safe while retaining the direct
-  // expression bundlers replace when they inline `process.env.NODE_ENV`.
-  const nodeEnvIsTest = typeof process !== 'undefined' && process.env?.NODE_ENV === 'test';
-  const entry = typeof process !== 'undefined' ? (process.argv?.[1] ?? '') : '';
-  const testEntrypoint = /\.(test|spec)\.[cm]?[jt]sx?$/.test(entry);
-  return nodeEnvIsTest || testEntrypoint;
 }

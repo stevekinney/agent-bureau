@@ -1,120 +1,9 @@
+import type { RunState } from '@lostgradient/operative';
 import { AgentRunError } from '@lostgradient/operative';
-import type { RunState } from '@lostgradient/operative/store';
+import { safeStringify, serializeAgentRunErrorForBureau, toJsonSafe } from './serialization-json';
+import { serializeLivenessSnapshot } from './serialization-liveness';
 
 import type { BureauDiagnostic, DiagnosticSink, RunDetail, RunSummary } from './types';
-
-function safeStringify(value: unknown): string {
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function hasToJson(value: object): value is object & { toJSON(): unknown } {
-  return typeof (value as { toJSON?: unknown }).toJSON === 'function';
-}
-
-function serializeTrackedObject<T extends object>(
-  value: T,
-  seen: WeakSet<object>,
-  serialize: () => unknown,
-): unknown {
-  if (seen.has(value)) {
-    return '[Circular]';
-  }
-
-  seen.add(value);
-
-  try {
-    return serialize();
-  } finally {
-    seen.delete(value);
-  }
-}
-
-function serializeAgentRunErrorForBureau(error: AgentRunError): string {
-  return safeStringify({
-    name: error.name,
-    message: error.message,
-    kind: error.kind,
-    code: error.code,
-    ...(error.cause instanceof Error
-      ? { cause: { name: error.cause.name, message: error.cause.message } }
-      : error.cause !== undefined
-        ? { cause: toJsonSafe(error.cause) }
-        : {}),
-  });
-}
-
-function toJsonSafe(value: unknown, seen = new WeakSet<object>()): unknown {
-  if (
-    value === null ||
-    value === undefined ||
-    typeof value === 'string' ||
-    typeof value === 'number' ||
-    typeof value === 'boolean'
-  ) {
-    return value;
-  }
-
-  if (typeof value === 'bigint') {
-    return value.toString();
-  }
-
-  if (typeof value === 'function') {
-    return `[Function ${value.name || 'anonymous'}]`;
-  }
-
-  if (value instanceof AgentRunError) {
-    return serializeAgentRunErrorForBureau(value);
-  }
-
-  if (value instanceof Error) {
-    return value.message;
-  }
-
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
-  }
-
-  if (value instanceof Map) {
-    return serializeTrackedObject(value, seen, () =>
-      Array.from(value.entries(), ([key, entry]) => [
-        toJsonSafe(key, seen),
-        toJsonSafe(entry, seen),
-      ]),
-    );
-  }
-
-  if (value instanceof Set) {
-    return serializeTrackedObject(value, seen, () =>
-      Array.from(value.values(), (entry) => toJsonSafe(entry, seen)),
-    );
-  }
-
-  if (Array.isArray(value)) {
-    return serializeTrackedObject(value, seen, () => value.map((entry) => toJsonSafe(entry, seen)));
-  }
-
-  if (typeof value === 'object') {
-    return serializeTrackedObject(value, seen, () => {
-      if (hasToJson(value)) {
-        return toJsonSafe(value.toJSON(), seen);
-      }
-
-      const record = value as Record<string, unknown>;
-      const result: Record<string, unknown> = {};
-      for (const [key, entry] of Object.entries(record)) {
-        result[key] = toJsonSafe(entry, seen);
-      }
-      return result;
-    });
-  }
-
-  return safeStringify(value);
-}
 
 export function serializeUnknownError(error: unknown): string {
   if (error instanceof AgentRunError) {
@@ -175,24 +64,29 @@ export function resolveDiagnosticSink(onDiagnostic: DiagnosticSink | undefined):
  * Removes the `conversation` property from a record, returning a shallow copy
  * without it. Returns the original record when no `conversation` key is present.
  */
-function stripConversation(record: Record<string, unknown>): Record<string, unknown> {
+function stripConversation(record: object): object {
   if (!('conversation' in record)) return record;
   const { conversation: _, ...rest } = record;
   return rest;
 }
 
-function projectRunCompletionRecord(record: Record<string, unknown>): Record<string, unknown> {
+function stripStepConversation(step: unknown): object {
+  if (step === null || (typeof step !== 'object' && typeof step !== 'function')) {
+    throw new TypeError('A run completion step must be an object');
+  }
+  return stripConversation(step);
+}
+
+function projectRunCompletionRecord(record: object): Record<string, unknown> {
   const stripped = stripConversation(record);
   const projected: Record<string, unknown> = { ...stripped };
 
   if (Array.isArray(projected['steps'])) {
-    projected['steps'] = (projected['steps'] as Record<string, unknown>[]).map(stripConversation);
+    projected['steps'] = projected['steps'].map(stripStepConversation);
   }
 
   if (projected['result'] && typeof projected['result'] === 'object') {
-    projected['result'] = projectRunCompletionRecord(
-      projected['result'] as Record<string, unknown>,
-    );
+    projected['result'] = projectRunCompletionRecord(projected['result']);
   }
 
   return projected;
@@ -204,7 +98,7 @@ function projectRunCompletionRecord(record: Record<string, unknown>): Record<str
  * values are passed through `safeStringify`. Returns the original record
  * unchanged when no `error` key is present.
  */
-function serializeError(record: Record<string, unknown>): Record<string, unknown> {
+function serializeError(record: object): object {
   if (!('error' in record)) return record;
 
   const { error, ...rest } = record;
@@ -232,7 +126,7 @@ function serializeError(record: Record<string, unknown>): Record<string, unknown
 export function serializeActionDetail(eventType: string, detail: unknown): unknown {
   if (!detail || typeof detail !== 'object') return detail;
 
-  const record = detail as Record<string, unknown>;
+  const record = detail;
 
   if (eventType === 'step.completed' || eventType === 'run.aborted') {
     return toJsonSafe(stripConversation(record));
@@ -275,7 +169,7 @@ export function findRunAgentName(runState: {
       'agentName' in detail &&
       typeof detail.agentName === 'string'
     ) {
-      return (detail as { agentName: string }).agentName;
+      return detail.agentName;
     }
   }
   return undefined;
@@ -333,14 +227,7 @@ export function serializeRunDetail(
 ): RunDetail {
   return {
     ...serializeRunState(runState, sessionId, attribution),
-    // AB-88/AB-214: plain-data liveness snapshot, run through the same
-    // JSON-safety pass as the rest of this DTO — `evidence[].detail` and
-    // `result` are `unknown` and not guaranteed JSON-safe on their own.
-    // `toJsonSafe` necessarily returns `unknown` (it walks arbitrary nested
-    // data); the cast back to `LivenessSnapshot`'s known shape is safe
-    // because the pass only replaces unsafe leaf values (functions,
-    // circular references) and otherwise preserves the input's own shape.
-    liveness: toJsonSafe(runState.activeRun.snapshot()) as RunDetail['liveness'],
+    liveness: serializeLivenessSnapshot(runState.activeRun.snapshot()),
     events: runState.actions.map((action) => ({
       sequence: action.sequence,
       runId: action.runId,

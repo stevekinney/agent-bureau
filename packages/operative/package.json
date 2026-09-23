@@ -1,7 +1,7 @@
 {
   "name": "@lostgradient/operative",
   "version": "0.12.0",
-  "description": "A composable agent loop that wires Armorer and Conversationalist into the standard agentic cycle. Includes provider subpaths for Anthropic, OpenAI, and Gemini (dynamically imported \u2014 zero-SDK-if-unused).",
+  "description": "A composable agent loop that wires Armorer and Conversationalist into the standard agentic cycle. Includes provider subpaths for Anthropic, OpenAI, and Gemini (dynamically imported — zero-SDK-if-unused).",
   "keywords": [
     "ai",
     "llm",
@@ -20,11 +20,6 @@
     "url": "git+https://github.com/stevekinney/agent-bureau.git",
     "directory": "packages/operative"
   },
-  "files": [
-    "dist",
-    "LICENSE",
-    "README.md"
-  ],
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
@@ -35,220 +30,375 @@
   "exports": {
     ".": {
       "bun": "./dist/index.js",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "default": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "default": "./dist/index.js"
     },
     "./conditions": {
       "bun": "./dist/conditions/index.js",
-      "import": "./dist/conditions/index.js",
-      "require": "./dist/conditions/index.cjs",
-      "default": "./dist/conditions/index.js",
-      "types": "./dist/conditions/index.d.ts"
+      "import": {
+        "types": "./dist/conditions/index.d.ts",
+        "default": "./dist/conditions/index.js"
+      },
+      "require": {
+        "types": "./dist/conditions/index.d.cts",
+        "default": "./dist/conditions/index.cjs"
+      },
+      "default": "./dist/conditions/index.js"
     },
     "./durable": {
       "bun": "./dist/durable/index.js",
-      "import": "./dist/durable/index.js",
-      "require": "./dist/durable/index.cjs",
-      "default": "./dist/durable/index.js",
-      "types": "./dist/durable/index.d.ts"
+      "import": {
+        "types": "./dist/durable/index.d.ts",
+        "default": "./dist/durable/index.js"
+      },
+      "require": {
+        "types": "./dist/durable/index.d.cts",
+        "default": "./dist/durable/index.cjs"
+      },
+      "default": "./dist/durable/index.js"
     },
     "./guardrails": {
       "bun": "./dist/guardrails/index.js",
-      "import": "./dist/guardrails/index.js",
-      "require": "./dist/guardrails/index.cjs",
-      "default": "./dist/guardrails/index.js",
-      "types": "./dist/guardrails/index.d.ts"
+      "import": {
+        "types": "./dist/guardrails/index.d.ts",
+        "default": "./dist/guardrails/index.js"
+      },
+      "require": {
+        "types": "./dist/guardrails/index.d.cts",
+        "default": "./dist/guardrails/index.cjs"
+      },
+      "default": "./dist/guardrails/index.js"
     },
     "./instrumentation": {
       "bun": "./dist/instrumentation/index.js",
-      "import": "./dist/instrumentation/index.js",
-      "require": "./dist/instrumentation/index.cjs",
-      "default": "./dist/instrumentation/index.js",
-      "types": "./dist/instrumentation/index.d.ts"
+      "import": {
+        "types": "./dist/instrumentation/index.d.ts",
+        "default": "./dist/instrumentation/index.js"
+      },
+      "require": {
+        "types": "./dist/instrumentation/index.d.cts",
+        "default": "./dist/instrumentation/index.cjs"
+      },
+      "default": "./dist/instrumentation/index.js"
     },
     "./liveness": {
       "bun": "./dist/liveness/index.js",
-      "import": "./dist/liveness/index.js",
-      "require": "./dist/liveness/index.cjs",
-      "default": "./dist/liveness/index.js",
-      "types": "./dist/liveness/index.d.ts"
+      "import": {
+        "types": "./dist/liveness/index.d.ts",
+        "default": "./dist/liveness/index.js"
+      },
+      "require": {
+        "types": "./dist/liveness/index.d.cts",
+        "default": "./dist/liveness/index.cjs"
+      },
+      "default": "./dist/liveness/index.js"
     },
     "./retry": {
       "bun": "./dist/retry/index.js",
-      "import": "./dist/retry/index.js",
-      "require": "./dist/retry/index.cjs",
-      "default": "./dist/retry/index.js",
-      "types": "./dist/retry/index.d.ts"
+      "import": {
+        "types": "./dist/retry/index.d.ts",
+        "default": "./dist/retry/index.js"
+      },
+      "require": {
+        "types": "./dist/retry/index.d.cts",
+        "default": "./dist/retry/index.cjs"
+      },
+      "default": "./dist/retry/index.js"
     },
     "./streaming": {
       "bun": "./dist/streaming/index.js",
-      "import": "./dist/streaming/index.js",
-      "require": "./dist/streaming/index.cjs",
-      "default": "./dist/streaming/index.js",
-      "types": "./dist/streaming/index.d.ts"
+      "import": {
+        "types": "./dist/streaming/index.d.ts",
+        "default": "./dist/streaming/index.js"
+      },
+      "require": {
+        "types": "./dist/streaming/index.d.cts",
+        "default": "./dist/streaming/index.cjs"
+      },
+      "default": "./dist/streaming/index.js"
     },
     "./store": {
       "bun": "./dist/store/index.js",
-      "import": "./dist/store/index.js",
-      "require": "./dist/store/index.cjs",
-      "default": "./dist/store/index.js",
-      "types": "./dist/store/index.d.ts"
+      "import": {
+        "types": "./dist/store/index.d.ts",
+        "default": "./dist/store/index.js"
+      },
+      "require": {
+        "types": "./dist/store/index.d.cts",
+        "default": "./dist/store/index.cjs"
+      },
+      "default": "./dist/store/index.js"
     },
     "./test": {
       "bun": "./dist/test/index.js",
-      "import": "./dist/test/index.js",
-      "require": "./dist/test/index.cjs",
-      "default": "./dist/test/index.js",
-      "types": "./dist/test/index.d.ts"
+      "import": {
+        "types": "./dist/test/index.d.ts",
+        "default": "./dist/test/index.js"
+      },
+      "require": {
+        "types": "./dist/test/index.d.cts",
+        "default": "./dist/test/index.cjs"
+      },
+      "default": "./dist/test/index.js"
     },
     "./anthropic": {
       "bun": "./dist/anthropic.js",
-      "import": "./dist/anthropic.js",
-      "require": "./dist/anthropic.cjs",
-      "default": "./dist/anthropic.js",
-      "types": "./dist/anthropic.d.ts"
+      "import": {
+        "types": "./dist/anthropic.d.ts",
+        "default": "./dist/anthropic.js"
+      },
+      "require": {
+        "types": "./dist/anthropic.d.cts",
+        "default": "./dist/anthropic.cjs"
+      },
+      "default": "./dist/anthropic.js"
     },
     "./openai": {
       "bun": "./dist/openai.js",
-      "import": "./dist/openai.js",
-      "require": "./dist/openai.cjs",
-      "default": "./dist/openai.js",
-      "types": "./dist/openai.d.ts"
+      "import": {
+        "types": "./dist/openai.d.ts",
+        "default": "./dist/openai.js"
+      },
+      "require": {
+        "types": "./dist/openai.d.cts",
+        "default": "./dist/openai.cjs"
+      },
+      "default": "./dist/openai.js"
     },
     "./gemini": {
       "bun": "./dist/gemini.js",
-      "import": "./dist/gemini.js",
-      "require": "./dist/gemini.cjs",
-      "default": "./dist/gemini.js",
-      "types": "./dist/gemini.d.ts"
+      "import": {
+        "types": "./dist/gemini.d.ts",
+        "default": "./dist/gemini.js"
+      },
+      "require": {
+        "types": "./dist/gemini.d.cts",
+        "default": "./dist/gemini.cjs"
+      },
+      "default": "./dist/gemini.js"
     },
     "./providers": {
       "bun": "./dist/providers/index.js",
-      "import": "./dist/providers/index.js",
-      "require": "./dist/providers/index.cjs",
-      "default": "./dist/providers/index.js",
-      "types": "./dist/providers/index.d.ts"
+      "import": {
+        "types": "./dist/providers/index.d.ts",
+        "default": "./dist/providers/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/index.d.cts",
+        "default": "./dist/providers/index.cjs"
+      },
+      "default": "./dist/providers/index.js"
     },
     "./providers/anthropic": {
       "bun": "./dist/providers/anthropic.js",
-      "import": "./dist/providers/anthropic.js",
-      "require": "./dist/providers/anthropic.cjs",
-      "default": "./dist/providers/anthropic.js",
-      "types": "./dist/providers/anthropic.d.ts"
+      "import": {
+        "types": "./dist/providers/anthropic.d.ts",
+        "default": "./dist/providers/anthropic.js"
+      },
+      "require": {
+        "types": "./dist/providers/anthropic.d.cts",
+        "default": "./dist/providers/anthropic.cjs"
+      },
+      "default": "./dist/providers/anthropic.js"
     },
     "./providers/openai": {
       "bun": "./dist/providers/openai.js",
-      "import": "./dist/providers/openai.js",
-      "require": "./dist/providers/openai.cjs",
-      "default": "./dist/providers/openai.js",
-      "types": "./dist/providers/openai.d.ts"
+      "import": {
+        "types": "./dist/providers/openai.d.ts",
+        "default": "./dist/providers/openai.js"
+      },
+      "require": {
+        "types": "./dist/providers/openai.d.cts",
+        "default": "./dist/providers/openai.cjs"
+      },
+      "default": "./dist/providers/openai.js"
     },
     "./providers/gemini": {
       "bun": "./dist/providers/gemini.js",
-      "import": "./dist/providers/gemini.js",
-      "require": "./dist/providers/gemini.cjs",
-      "default": "./dist/providers/gemini.js",
-      "types": "./dist/providers/gemini.d.ts"
+      "import": {
+        "types": "./dist/providers/gemini.d.ts",
+        "default": "./dist/providers/gemini.js"
+      },
+      "require": {
+        "types": "./dist/providers/gemini.d.cts",
+        "default": "./dist/providers/gemini.cjs"
+      },
+      "default": "./dist/providers/gemini.js"
     },
     "./providers/fallover": {
       "bun": "./dist/providers/fallover/index.js",
-      "import": "./dist/providers/fallover/index.js",
-      "require": "./dist/providers/fallover/index.cjs",
-      "default": "./dist/providers/fallover/index.js",
-      "types": "./dist/providers/fallover/index.d.ts"
+      "import": {
+        "types": "./dist/providers/fallover/index.d.ts",
+        "default": "./dist/providers/fallover/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/fallover/index.d.cts",
+        "default": "./dist/providers/fallover/index.cjs"
+      },
+      "default": "./dist/providers/fallover/index.js"
     },
     "./providers/routing": {
       "bun": "./dist/providers/routing/index.js",
-      "import": "./dist/providers/routing/index.js",
-      "require": "./dist/providers/routing/index.cjs",
-      "default": "./dist/providers/routing/index.js",
-      "types": "./dist/providers/routing/index.d.ts"
+      "import": {
+        "types": "./dist/providers/routing/index.d.ts",
+        "default": "./dist/providers/routing/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/routing/index.d.cts",
+        "default": "./dist/providers/routing/index.cjs"
+      },
+      "default": "./dist/providers/routing/index.js"
     },
     "./providers/streaming": {
       "bun": "./dist/providers/streaming/index.js",
-      "import": "./dist/providers/streaming/index.js",
-      "require": "./dist/providers/streaming/index.cjs",
-      "default": "./dist/providers/streaming/index.js",
-      "types": "./dist/providers/streaming/index.d.ts"
+      "import": {
+        "types": "./dist/providers/streaming/index.d.ts",
+        "default": "./dist/providers/streaming/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/streaming/index.d.cts",
+        "default": "./dist/providers/streaming/index.cjs"
+      },
+      "default": "./dist/providers/streaming/index.js"
     },
     "./providers/batches": {
       "bun": "./dist/providers/batches/index.js",
-      "import": "./dist/providers/batches/index.js",
-      "require": "./dist/providers/batches/index.cjs",
-      "default": "./dist/providers/batches/index.js",
-      "types": "./dist/providers/batches/index.d.ts"
+      "import": {
+        "types": "./dist/providers/batches/index.d.ts",
+        "default": "./dist/providers/batches/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/batches/index.d.cts",
+        "default": "./dist/providers/batches/index.cjs"
+      },
+      "default": "./dist/providers/batches/index.js"
     },
     "./providers/batches/anthropic": {
       "bun": "./dist/providers/batches/anthropic.js",
-      "import": "./dist/providers/batches/anthropic.js",
-      "require": "./dist/providers/batches/anthropic.cjs",
-      "default": "./dist/providers/batches/anthropic.js",
-      "types": "./dist/providers/batches/anthropic.d.ts"
+      "import": {
+        "types": "./dist/providers/batches/anthropic.d.ts",
+        "default": "./dist/providers/batches/anthropic.js"
+      },
+      "require": {
+        "types": "./dist/providers/batches/anthropic.d.cts",
+        "default": "./dist/providers/batches/anthropic.cjs"
+      },
+      "default": "./dist/providers/batches/anthropic.js"
     },
     "./providers/batches/openai": {
       "bun": "./dist/providers/batches/openai.js",
-      "import": "./dist/providers/batches/openai.js",
-      "require": "./dist/providers/batches/openai.cjs",
-      "default": "./dist/providers/batches/openai.js",
-      "types": "./dist/providers/batches/openai.d.ts"
+      "import": {
+        "types": "./dist/providers/batches/openai.d.ts",
+        "default": "./dist/providers/batches/openai.js"
+      },
+      "require": {
+        "types": "./dist/providers/batches/openai.d.cts",
+        "default": "./dist/providers/batches/openai.cjs"
+      },
+      "default": "./dist/providers/batches/openai.js"
     },
     "./providers/batches/gemini": {
       "bun": "./dist/providers/batches/gemini.js",
-      "import": "./dist/providers/batches/gemini.js",
-      "require": "./dist/providers/batches/gemini.cjs",
-      "default": "./dist/providers/batches/gemini.js",
-      "types": "./dist/providers/batches/gemini.d.ts"
+      "import": {
+        "types": "./dist/providers/batches/gemini.d.ts",
+        "default": "./dist/providers/batches/gemini.js"
+      },
+      "require": {
+        "types": "./dist/providers/batches/gemini.d.cts",
+        "default": "./dist/providers/batches/gemini.cjs"
+      },
+      "default": "./dist/providers/batches/gemini.js"
     },
     "./providers/embeddings": {
       "bun": "./dist/providers/embeddings/index.js",
-      "import": "./dist/providers/embeddings/index.js",
-      "require": "./dist/providers/embeddings/index.cjs",
-      "default": "./dist/providers/embeddings/index.js",
-      "types": "./dist/providers/embeddings/index.d.ts"
+      "import": {
+        "types": "./dist/providers/embeddings/index.d.ts",
+        "default": "./dist/providers/embeddings/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/embeddings/index.d.cts",
+        "default": "./dist/providers/embeddings/index.cjs"
+      },
+      "default": "./dist/providers/embeddings/index.js"
     },
     "./providers/embeddings/openai": {
       "bun": "./dist/providers/embeddings/openai.js",
-      "import": "./dist/providers/embeddings/openai.js",
-      "require": "./dist/providers/embeddings/openai.cjs",
-      "default": "./dist/providers/embeddings/openai.js",
-      "types": "./dist/providers/embeddings/openai.d.ts"
+      "import": {
+        "types": "./dist/providers/embeddings/openai.d.ts",
+        "default": "./dist/providers/embeddings/openai.js"
+      },
+      "require": {
+        "types": "./dist/providers/embeddings/openai.d.cts",
+        "default": "./dist/providers/embeddings/openai.cjs"
+      },
+      "default": "./dist/providers/embeddings/openai.js"
     },
     "./providers/embeddings/gemini": {
       "bun": "./dist/providers/embeddings/gemini.js",
-      "import": "./dist/providers/embeddings/gemini.js",
-      "require": "./dist/providers/embeddings/gemini.cjs",
-      "default": "./dist/providers/embeddings/gemini.js",
-      "types": "./dist/providers/embeddings/gemini.d.ts"
+      "import": {
+        "types": "./dist/providers/embeddings/gemini.d.ts",
+        "default": "./dist/providers/embeddings/gemini.js"
+      },
+      "require": {
+        "types": "./dist/providers/embeddings/gemini.d.cts",
+        "default": "./dist/providers/embeddings/gemini.cjs"
+      },
+      "default": "./dist/providers/embeddings/gemini.js"
     },
     "./providers/embeddings/voyage": {
       "bun": "./dist/providers/embeddings/voyage.js",
-      "import": "./dist/providers/embeddings/voyage.js",
-      "require": "./dist/providers/embeddings/voyage.cjs",
-      "default": "./dist/providers/embeddings/voyage.js",
-      "types": "./dist/providers/embeddings/voyage.d.ts"
+      "import": {
+        "types": "./dist/providers/embeddings/voyage.d.ts",
+        "default": "./dist/providers/embeddings/voyage.js"
+      },
+      "require": {
+        "types": "./dist/providers/embeddings/voyage.d.cts",
+        "default": "./dist/providers/embeddings/voyage.cjs"
+      },
+      "default": "./dist/providers/embeddings/voyage.js"
     },
     "./providers/embeddings/ollama": {
       "bun": "./dist/providers/embeddings/ollama.js",
-      "import": "./dist/providers/embeddings/ollama.js",
-      "require": "./dist/providers/embeddings/ollama.cjs",
-      "default": "./dist/providers/embeddings/ollama.js",
-      "types": "./dist/providers/embeddings/ollama.d.ts"
+      "import": {
+        "types": "./dist/providers/embeddings/ollama.d.ts",
+        "default": "./dist/providers/embeddings/ollama.js"
+      },
+      "require": {
+        "types": "./dist/providers/embeddings/ollama.d.cts",
+        "default": "./dist/providers/embeddings/ollama.cjs"
+      },
+      "default": "./dist/providers/embeddings/ollama.js"
     },
     "./providers/instrumentation": {
       "bun": "./dist/providers/instrumentation/index.js",
-      "import": "./dist/providers/instrumentation/index.js",
-      "require": "./dist/providers/instrumentation/index.cjs",
-      "default": "./dist/providers/instrumentation/index.js",
-      "types": "./dist/providers/instrumentation/index.d.ts"
+      "import": {
+        "types": "./dist/providers/instrumentation/index.d.ts",
+        "default": "./dist/providers/instrumentation/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/instrumentation/index.d.cts",
+        "default": "./dist/providers/instrumentation/index.cjs"
+      },
+      "default": "./dist/providers/instrumentation/index.js"
     },
     "./providers/test": {
       "bun": "./dist/providers/test/index.js",
-      "import": "./dist/providers/test/index.js",
-      "require": "./dist/providers/test/index.cjs",
-      "default": "./dist/providers/test/index.js",
-      "types": "./dist/providers/test/index.d.ts"
+      "import": {
+        "types": "./dist/providers/test/index.d.ts",
+        "default": "./dist/providers/test/index.js"
+      },
+      "require": {
+        "types": "./dist/providers/test/index.d.cts",
+        "default": "./dist/providers/test/index.cjs"
+      },
+      "default": "./dist/providers/test/index.js"
     }
   },
   "main": "./dist/index.js",
@@ -272,9 +422,14 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
-    "@lostgradient/weft": "^0.24.1",
-    "armorer": "^2.4.0",
-    "conversationalist": "^1.2.0"
+    "@lostgradient/cryptography": "workspace:*",
+    "@lostgradient/embeddings": "workspace:*",
+    "@lostgradient/environmentalist": "0.1.0",
+    "@lostgradient/lifecycle": "workspace:*",
+    "@lostgradient/tool-protocol": "workspace:*",
+    "@lostgradient/weft": "^0.26.0",
+    "armorer": "workspace:*",
+    "conversationalist": "workspace:*"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.122.0",
@@ -296,9 +451,10 @@
     "eslint-plugin-unicorn": "^73.0.0",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.11.0",
-    "lifecycle": "0.0.1",
     "openai": "^7.8.0",
+    "oxlint": "^1.83.0",
     "tsdown": "^0.22.14",
+    "typescript": "6.0.3",
     "typescript-eslint": "^8.67.0",
     "zod": "^4.4.3"
   },
@@ -326,5 +482,10 @@
   "engines": {
     "bun": ">=1.4.0",
     "node": ">=22"
-  }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ]
 }

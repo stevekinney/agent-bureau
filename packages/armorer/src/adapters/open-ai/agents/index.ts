@@ -60,7 +60,7 @@ export type OpenAIToolGateDecision = { behavior: 'allow' | 'deny'; message?: str
  *
  * @example
  * ```ts
- * import { toOpenAIAgentTools } from 'armorer/open-ai/agents';
+ * import { toOpenAIAgentTools } from 'armorer';
  *
  * const tools = await toOpenAIAgentTools(toolbox);
  *

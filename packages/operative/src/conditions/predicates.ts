@@ -91,7 +91,7 @@ export function not(condition: StopCondition): StopCondition {
  */
 export function wallClockTimeout(
   milliseconds: number,
-  options: { now?: () => number } = {},
+  options: { now?: (() => number) | undefined } = {},
 ): StopCondition {
   const now = options.now ?? Date.now;
   const start = now();
@@ -103,15 +103,17 @@ export function wallClockTimeout(
  */
 export interface RepeatingToolCallsOptions {
   /** Consecutive identical steps required to trigger. Default: 3 */
-  windowSize?: number;
+  windowSize?: number | undefined;
   /** Custom fingerprint function. Default: hash of sorted (name, arguments) tuples. */
-  fingerprint?: (toolCalls: readonly ToolCall[], results: readonly ToolExecutionResult[]) => string;
+  fingerprint?:
+    | ((toolCalls: readonly ToolCall[], results: readonly ToolExecutionResult[]) => string)
+    | undefined;
   /**
    * When true, the default fingerprint includes a truncated preview of each
    * tool result (first 100 characters). This catches agents stuck retrying the
    * same call that keeps returning the same error. Default: false.
    */
-  includeResults?: boolean;
+  includeResults?: boolean | undefined;
 }
 
 function defaultFingerprint(
@@ -133,7 +135,7 @@ function defaultFingerprint(
       }
       return fp;
     })
-    .sort();
+    .toSorted();
   return sorted.join('|');
 }
 
@@ -147,7 +149,7 @@ export function repeatingToolCalls(options?: RepeatingToolCallsOptions): StopCon
   const includeResults = options?.includeResults ?? false;
 
   // Fixed-size circular buffer: only the last `windowSize` entries are retained.
-  const buffer: string[] = new Array<string>(windowSize);
+  const buffer: string[] = Array.from({ length: windowSize });
   let writeIndex = 0;
   let filled = 0;
   let sentinel = 0;
@@ -184,7 +186,7 @@ export function repeatingToolCalls(options?: RepeatingToolCallsOptions): StopCon
  */
 export interface TokenBudgetOptions {
   /** Which counter to check. Default: 'total' */
-  counter?: 'prompt' | 'completion' | 'total';
+  counter?: ('prompt' | 'completion' | 'total') | undefined;
 }
 
 /**

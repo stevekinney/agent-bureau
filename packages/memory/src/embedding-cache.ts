@@ -1,4 +1,4 @@
-import type { Embedder, EmbeddingVector } from 'interoperability';
+import type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
 
 import { sha256Hex } from './hash';
 
@@ -81,7 +81,8 @@ export function withEmbeddingCache(
 
   function evictIfNeeded(): void {
     while (cache.size > maximumEntries) {
-      const oldest = cache.keys().next().value as string;
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) return;
       cache.delete(oldest);
       removeFromNamespaceIndex(oldest);
     }
@@ -109,9 +110,7 @@ export function withEmbeddingCache(
       const hashes = await Promise.all(texts.map(async (text) => computeKey(text)));
 
       // Partition into hits and misses, tracking original indices.
-      const results: (EmbeddingVector | undefined)[] = new Array<EmbeddingVector | undefined>(
-        texts.length,
-      );
+      const results: (EmbeddingVector | undefined)[] = Array.from({ length: texts.length });
       const missIndices: number[] = [];
       const missTexts: string[] = [];
 
@@ -141,7 +140,7 @@ export function withEmbeddingCache(
         evictIfNeeded();
       }
 
-      return results as EmbeddingVector[];
+      return results.filter((result): result is EmbeddingVector => result !== undefined);
     },
     {
       cache: cache,

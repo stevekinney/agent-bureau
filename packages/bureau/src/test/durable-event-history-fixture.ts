@@ -32,15 +32,16 @@
  *   rejection `durable-event-history.ts`'s `UnsupportedDurableEventSchemaVersionError`
  *   documents (AB-313, `ab91-04`) — never silently coerced or upgraded.
  */
-import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative/durable';
-import { createFleetEventFeed, type FleetEventFeed } from '@lostgradient/weft/server/handler';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
+import type { DurableEventEnvelope, DurableEventOwner } from '@lostgradient/operative';
 import {
+  createFleetEventFeed,
+  type FleetEventFeed,
   resolveStorage,
   type Storage,
   type StorageConfiguration,
-} from '@lostgradient/weft/storage';
-import type { RuntimeServices } from 'lifecycle';
-import { createManualRuntimeServices } from 'lifecycle';
+} from '@lostgradient/weft';
 
 import { createDurableEventHistory, type DurableEventHistory } from '../durable-event-history';
 import type { BureauStorageFixture } from './storage-fixtures';
@@ -126,7 +127,7 @@ export interface DurableEventHistoryFixtureOptions {
    * (AB-275) needs: seed once, dispose the writing instance, reopen the
    * same path in a fresh process or handle.
    */
-  readonly path?: string;
+  readonly path?: string | undefined;
   /**
    * Overrides {@link DURABLE_EVENT_HISTORY_FIXTURE_SEQUENCE}. Defaults to
    * the module constant — a caller exercising a variant sequence (e.g. one
@@ -184,8 +185,14 @@ export async function createDurableEventHistoryFixture(
 
   const storageFixture =
     options.backend === 'sqlite'
-      ? createSqliteStorageFixture({ runtime, path: options.path })
-      : createLmdbStorageFixture({ runtime, path: options.path });
+      ? createSqliteStorageFixture({
+          runtime,
+          ...(options.path === undefined ? {} : { path: options.path }),
+        })
+      : createLmdbStorageFixture({
+          runtime,
+          ...(options.path === undefined ? {} : { path: options.path }),
+        });
 
   let storage: Storage | undefined;
   try {

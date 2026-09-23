@@ -1,742 +1,195 @@
-import { sha256HexSync } from 'interoperability';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
-import { assertJsonValue, stableStringifyJson } from '../core/serialization/json';
+import { stableStringifyJson } from '../core/serialization/json';
+import type { Tool, ToolExecuteOptions } from '../is-tool';
+import { admitDirectExecution, type DirectAdmissionContext } from './direct-idempotency-admission';
+import { executeClaimed, type DirectExecutionContext } from './direct-idempotency-execution';
 import {
-  approvalConsumeSymbol,
-  approvalResumeSymbol,
-  executionCallbackStartSymbol,
-  policyAuthorizationOnlySymbol,
-} from '../internal/approval-resume';
-import type {
-  Tool,
-  ToolCallWithArguments,
-  ToolExecuteOptions,
-  ToolExecuteWithOptions,
-} from '../is-tool';
-import { claimCacheStarted, getCacheEntry } from './cache-operations';
-import type {
-  CachedToolResult,
-  IdempotencyOptions,
-  IdempotencyResolutionReceipt,
-  LegacyIdempotencyResolutionReceipt,
-  StartedToolExecution,
-} from './types';
+  createInputDigest,
+  inputMatchesToolSchema,
+  isToolCall,
+  serializeOriginalInput,
+  type DirectExecuteOptions,
+} from './direct-idempotency-support';
+import type { IdempotencyOptions } from './types';
 
 const DEFAULT_TTL = 300_000;
 const DEFAULT_LEASE_DURATION = 30_000;
-const maximumTimerDelay = 2_147_483_647;
 
-function scheduleBoundedTimeout(
-  callback: () => void,
-  delay: number,
-  runtime: RuntimeServices,
-  setTimeoutFunction?: ToolExecuteOptions['setTimeoutFunction'],
-  clearTimeoutFunction?: ToolExecuteOptions['clearTimeoutFunction'],
-): () => void {
-  const scheduleTimeout = setTimeoutFunction ?? runtime.timers.setTimeout;
-  const cancelTimeout = clearTimeoutFunction ?? runtime.timers.clearTimeout;
-  let remaining = Math.max(0, delay);
-  let cancelled = false;
-  let timer: unknown;
-  const schedule = () => {
-    if (cancelled) return;
-    const chunk = Math.min(remaining, maximumTimerDelay);
-    timer = scheduleTimeout(() => {
-      if (cancelled) return;
-      remaining -= chunk;
-      if (remaining <= 0) callback();
-      else schedule();
-    }, chunk);
-  };
-  schedule();
-  return () => {
-    cancelled = true;
-    if (timer !== undefined) cancelTimeout(timer);
-  };
-}
-
-export type DirectIdempotencyExecuteOptions = ToolExecuteOptions & {
-  resolutionReceipt?: IdempotencyResolutionReceipt;
-  legacyResolutionReceipt?: LegacyIdempotencyResolutionReceipt;
-};
-
+export type DirectIdempotencyExecuteOptions = DirectExecuteOptions;
 export type IdempotentTool<T extends Tool> = T & {
   execute: (params: unknown, options?: DirectIdempotencyExecuteOptions) => Promise<unknown>;
 };
 
-/**
- * Checks whether a value is a ToolCall rather than raw tool input params.
- * A ToolCall has `id` (string), `name` (string), and `arguments` (the parsed input).
- * Requiring all three fields avoids false positives from tool inputs that happen
- * to have `name` and `id` string fields (e.g., a "create user" tool).
- */
-function isToolCall(value: unknown): value is ToolCallWithArguments {
-  if (value === null || typeof value !== 'object') return false;
-  const record = value as Record<string, unknown>;
-  return (
-    typeof record['name'] === 'string' && typeof record['id'] === 'string' && 'arguments' in record
-  );
-}
+type DirectConfiguration = {
+  cache: IdempotencyOptions['cache'];
+  completeToolRevision: string;
+  idempotencyKey: (input: unknown) => string;
+  leaseDurationMs: number;
+  maximumExecutionDurationMs: number;
+  now: () => number;
+  onCacheHit: IdempotencyOptions['onCacheHit'];
+  onUnknownOutcome: IdempotencyOptions['onUnknownOutcome'];
+  runtime: RuntimeServices;
+  tenantId: string;
+  ttl: number;
+  verifyLegacyResolutionReceipt: IdempotencyOptions['verifyLegacyResolutionReceipt'];
+  verifyResolutionReceipt: IdempotencyOptions['verifyResolutionReceipt'];
+};
 
-async function inputMatchesToolSchema(
-  tool: Tool,
-  params: unknown,
-  runtime: RuntimeServices,
-  options?: ToolExecuteOptions,
-): Promise<boolean> {
-  const input = (
-    tool as unknown as {
-      input?: { safeParseAsync?: (value: unknown) => Promise<{ success: boolean }> };
-    }
-  ).input;
-
-  if (typeof input?.safeParseAsync !== 'function') {
-    return true;
-  }
-  const safeParseAsync = input.safeParseAsync;
-
-  // `safeParseAsync` (not `safeParse`) so schemas with async refinements —
-  // e.g. a non-Zod Standard Schema wrapped via `wrapStandardSchema`, whose
-  // validation runs through an async `transform` — resolve instead of
-  // throwing synchronously ("Encountered Promise during synchronous parse").
-  const result = await raceIdempotencyAwait(() => safeParseAsync(params), runtime, options);
-  return result.success;
-}
-
-function raceIdempotencyAwait<T>(
-  operation: () => Promise<T>,
-  runtime: RuntimeServices,
-  options?: ToolExecuteOptions,
-): Promise<T> {
-  const signal = options?.signal;
-  const deadline = options?.requestContext?.deadline;
-  const now = options?.now ?? runtime.clock.now;
-  if (deadline !== undefined && !Number.isFinite(deadline)) {
-    return Promise.reject(createUnsupportedDeadlineError());
-  }
-  if (deadline !== undefined && deadline <= now()) {
-    return Promise.reject(createPrevalidationDeadlineError());
-  }
-  if (signal?.aborted) {
-    return Promise.reject(createPrevalidationCancellationError(signal.reason));
-  }
-
-  let promise: Promise<T>;
-  try {
-    promise = operation();
-  } catch (error) {
-    return Promise.reject(normalizeIdempotencyError(error));
-  }
-
-  if (!signal && deadline === undefined) {
-    return promise;
-  }
-
-  return new Promise<T>((resolve, reject) => {
-    const setTimeoutFunction = options?.setTimeoutFunction ?? runtime.timers.setTimeout;
-    const clearTimeoutFunction = options?.clearTimeoutFunction ?? runtime.timers.clearTimeout;
-    let deadlineTimer: unknown;
-    let deadlineTimerScheduled = false;
-    let settled = false;
-
-    const cleanup = () => {
-      signal?.removeEventListener('abort', onAbort);
-      clearDeadline();
-    };
-    const clearDeadline = () => {
-      if (!deadlineTimerScheduled) return;
-      deadlineTimerScheduled = false;
-      clearTimeoutFunction(deadlineTimer);
-    };
-    const scheduleDeadline = () => {
-      if (deadline === undefined) return;
-      const remaining = deadline - now();
-      const delay = remaining <= 0 ? 0 : Math.min(remaining, maximumTimerDelay);
-      deadlineTimerScheduled = true;
-      deadlineTimer = setTimeoutFunction(() => {
-        deadlineTimerScheduled = false;
-        if (settled) return;
-        if (deadline <= now()) {
-          rejectOnce(createPrevalidationDeadlineError());
-          return;
-        }
-        scheduleDeadline();
-      }, delay);
-    };
-    const resolveOnce = (value: T) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(value);
-    };
-    const rejectOnce = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-    function onAbort() {
-      rejectOnce(createPrevalidationCancellationError(signal?.reason));
-    }
-
-    signal?.addEventListener('abort', onAbort, { once: true });
-    scheduleDeadline();
-    void promise.then(resolveOnce, (error) => rejectOnce(normalizeIdempotencyError(error)));
-  });
-}
-
-function createPrevalidationCancellationError(reason?: unknown): Error {
-  const message =
-    typeof reason === 'string' && reason.length > 0
-      ? reason
-      : reason instanceof Error && reason.message.length > 0
-        ? reason.message
-        : 'Cancelled';
-  const error = new Error(message) as Error & { category: 'cancelled'; code: 'CANCELLED' };
-  error.category = 'cancelled';
-  error.code = 'CANCELLED';
-  return error;
-}
-
-function createPrevalidationDeadlineError(): Error {
-  const error = new Error('Execution deadline exceeded') as Error & {
-    category: 'timeout';
-    code: 'TIMEOUT';
-  };
-  error.category = 'timeout';
-  error.code = 'TIMEOUT';
-  return error;
-}
-
-function createUnsupportedDeadlineError(): Error {
-  return new Error('Execution deadline must be finite.');
-}
-
-function createStartedExecution(
-  toolName: string,
-  startedAt: number,
-  inputDigest: string,
-  ttl: number,
-  leaseDurationMs: number,
-  maximumExecutionDurationMs: number,
-  runtime: RuntimeServices,
-): StartedToolExecution {
-  return {
-    status: 'started',
-    toolName,
-    startedAt,
-    ttl,
-    attemptId: runtime.identifiers.next('attempt'),
-    leaseExpiresAt: Math.min(startedAt + leaseDurationMs, startedAt + maximumExecutionDurationMs),
-    absoluteDeadline: startedAt + maximumExecutionDurationMs,
-    inputDigest,
-  };
-}
-
-/**
- * Wraps a tool with idempotency behavior. Duplicate executions with the same
- * input (as determined by the tool's `idempotencyKey`) return cached results
- * instead of re-executing. Errors are never cached — only successful results
- * are stored.
- *
- * The tool must have an `idempotencyKey` function defined in its options.
- * If not, this function throws a descriptive error.
- *
- * @param tool - The tool to wrap.
- * @param options - Idempotency configuration including cache, TTL, and callbacks.
- * @returns A new tool with the same interface but idempotent execution.
- */
+/** Wraps a tool with request-scoped, fenced idempotent execution. */
 export function withIdempotency<T extends Tool>(
   tool: T,
   options: IdempotencyOptions,
 ): IdempotentTool<T> {
-  const runtime: RuntimeServices = options.runtime ?? createDefaultRuntimeServices();
-  const {
-    cache,
-    tenantId,
-    toolRevision: configuredToolRevision,
-    ttl = DEFAULT_TTL,
-    now = runtime.clock.now,
-    onCacheHit,
-    onUnknownOutcome,
-    verifyResolutionReceipt,
-    verifyLegacyResolutionReceipt,
-    leaseDurationMs = DEFAULT_LEASE_DURATION,
-    maximumExecutionDurationMs = Math.max(ttl, DEFAULT_TTL),
-  } = options;
-  const toolRevision = configuredToolRevision ?? (tool.identity.version ? tool.id : undefined);
-  if (!tenantId || !toolRevision) {
-    throw new Error('Idempotency requires tenantId and a versioned tool definition revision.');
-  }
-  const completeToolRevision = toolRevision;
-  if (
-    !Number.isFinite(leaseDurationMs) ||
-    !Number.isFinite(maximumExecutionDurationMs) ||
-    leaseDurationMs <= 0 ||
-    maximumExecutionDurationMs <= 0
-  ) {
-    throw new Error('Idempotency lease and execution durations must be finite and positive.');
-  }
-
-  // Access the idempotencyKey from the tool (set via createTool options).
-  // Tools store this as an own property set by createTool when configured.
-  const idempotencyKey =
-    'idempotencyKey' in tool
-      ? (tool.idempotencyKey as ((input: unknown) => string) | undefined)
-      : undefined;
-
-  if (!idempotencyKey) {
-    throw new Error(
-      `Tool "${tool.name}" does not have an idempotencyKey. ` +
-        'Define an idempotencyKey function in the tool options before wrapping with withIdempotency().',
-    );
-  }
-
+  const configuration = createConfiguration(tool, options);
   async function executeWithCache(
     params: unknown,
     executeOptions?: DirectIdempotencyExecuteOptions,
   ): Promise<unknown> {
-    const requestContext = executeOptions?.requestContext;
-    if (!requestContext) {
-      throw new Error('Idempotency requires request-scoped execution authority.');
-    }
-    if (requestContext && requestContext.authority.tenantId !== tenantId) {
-      throw new Error('Idempotency tenantId must match request authority tenantId.');
-    }
-    if (executeOptions?.stream) {
-      throw new Error('Idempotency does not support streaming executions.');
-    }
+    validateExecutionRequest(executeOptions, configuration.tenantId);
     const key = stableStringifyJson([
-      tenantId,
-      completeToolRevision,
+      configuration.tenantId,
+      configuration.completeToolRevision,
       tool.name,
-      idempotencyKey!(params),
+      configuration.idempotencyKey.call(tool, params),
     ]);
-
-    await inputMatchesToolSchema(tool, params, runtime, executeOptions);
-
-    const returnAuthorizedCachedResult = async (cached: CachedToolResult): Promise<unknown> => {
-      if (cached.input === undefined) {
-        throw new Error('Cached result lacks its original input and cannot be reauthorized.');
-      }
-      let originalParams: unknown;
-      try {
-        originalParams = cached.inputWasUndefined ? undefined : JSON.parse(cached.input);
-      } catch {
-        throw new Error('Cached result has invalid original input and cannot be reauthorized.');
-      }
-      if (typeof tool.executeWith === 'function') {
-        const authorizationOptions = createPolicyAuthorizationOnlyOptions(executeOptions);
-        const authorizationResult = await tool.executeWith({
-          params: originalParams,
-          ...(authorizationOptions as ToolExecuteOptions),
-        });
-        if (authorizationResult.outcome !== 'success' || authorizationResult.error) {
-          throw new Error(
-            authorizationResult.error?.message ??
-              authorizationResult.pendingApproval?.reason ??
-              'Tool execution failed.',
-          );
-        }
-      }
-      onCacheHit?.(key, cached);
-      return cached.result;
-    };
-
+    await inputMatchesToolSchema(tool, params, configuration.runtime, executeOptions);
     const originalInput = serializeOriginalInput(params);
-    const inputDigest = createInputDigest(originalInput);
-
-    const cached = await raceIdempotencyAwait(
-      () => getCacheEntry(cache, key),
-      runtime,
+    const admissionContext: DirectAdmissionContext = {
+      cache: configuration.cache,
+      completeToolRevision: configuration.completeToolRevision,
       executeOptions,
-    );
-    if (cached && cached.status !== 'started') {
-      return returnAuthorizedCachedResult(cached);
-    }
-
-    let startedExecution: StartedToolExecution;
-    if (cached?.status === 'started') {
-      if (cached.attemptId === undefined) {
-        const legacyReceipt = executeOptions?.legacyResolutionReceipt;
-        let validLegacyReceipt = false;
-        if (
-          legacyReceipt?.version === 1 &&
-          legacyReceipt.key === key &&
-          legacyReceipt.tenantId === tenantId &&
-          legacyReceipt.toolRevision === completeToolRevision &&
-          legacyReceipt.toolName === cached.toolName &&
-          legacyReceipt.legacyStartedAt === cached.startedAt &&
-          legacyReceipt.decision === 'retry' &&
-          legacyReceipt.evidence &&
-          legacyReceipt.authorizedAt !== undefined &&
-          legacyReceipt.authorizedBy &&
-          legacyReceipt.nonce &&
-          legacyReceipt.authorization &&
-          verifyLegacyResolutionReceipt
-        ) {
-          validLegacyReceipt = Boolean(
-            await raceIdempotencyAwait(
-              () => Promise.resolve(verifyLegacyResolutionReceipt(legacyReceipt)),
-              runtime,
-              executeOptions,
-            ),
-          );
-        }
-        const replacementTime = now();
-        if (
-          !validLegacyReceipt ||
-          (cached.leaseExpiresAt !== undefined && replacementTime < cached.leaseExpiresAt)
-        ) {
-          onUnknownOutcome?.(key, cached);
-          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
-        }
-        startedExecution = createStartedExecution(
-          tool.name,
-          replacementTime,
-          inputDigest,
-          ttl,
-          leaseDurationMs,
-          maximumExecutionDurationMs,
-          runtime,
-        );
-        if (
-          !(await cache.replaceLegacyStarted(
-            key,
-            { toolName: cached.toolName, startedAt: cached.startedAt },
-            startedExecution,
-            replacementTime,
-          ))
-        ) {
-          onUnknownOutcome?.(key, cached);
-          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
-        }
-      } else {
-        const receipt = executeOptions?.resolutionReceipt;
-        const receiptMatchesInput =
-          cached.inputDigest !== undefined &&
-          receipt?.inputDigest === cached.inputDigest &&
-          inputDigest === cached.inputDigest;
-        let validReceipt = false;
-        if (
-          receiptMatchesInput &&
-          receipt?.version === 1 &&
-          receipt.key === key &&
-          receipt.attemptId === cached.attemptId &&
-          receipt.tenantId === tenantId &&
-          receipt.toolRevision === completeToolRevision &&
-          receipt.decision === 'retry' &&
-          receipt.evidence &&
-          receipt.authorizedAt !== undefined &&
-          receipt.authorizedBy &&
-          receipt.nonce &&
-          receipt.authorization &&
-          verifyResolutionReceipt
-        ) {
-          validReceipt = Boolean(
-            await raceIdempotencyAwait(
-              () => Promise.resolve(verifyResolutionReceipt(receipt)),
-              runtime,
-              executeOptions,
-            ),
-          );
-        }
-        const replacementTime = now();
-        if (
-          !validReceipt ||
-          (cached.leaseExpiresAt !== undefined && replacementTime < cached.leaseExpiresAt)
-        ) {
-          onUnknownOutcome?.(key, cached);
-          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
-        }
-        startedExecution = createStartedExecution(
-          tool.name,
-          replacementTime,
-          inputDigest,
-          ttl,
-          leaseDurationMs,
-          maximumExecutionDurationMs,
-          runtime,
-        );
-        const cachedAttemptId = cached.attemptId;
-        if (
-          !(await cache.replaceUnknownStarted(
-            key,
-            cachedAttemptId,
-            startedExecution,
-            replacementTime,
-          ))
-        ) {
-          onUnknownOutcome?.(key, cached);
-          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
-        }
-      }
-    } else {
-      const startedAt = now();
-      startedExecution = {
-        status: 'started',
-        toolName: tool.name,
-        startedAt,
-        ttl,
-        attemptId: runtime.identifiers.next('attempt'),
-        leaseExpiresAt: Math.min(
-          startedAt + leaseDurationMs,
-          startedAt + maximumExecutionDurationMs,
-        ),
-        absoluteDeadline: startedAt + maximumExecutionDurationMs,
-        inputDigest,
-      };
-      // Once the atomic claim begins, observe its result before honoring
-      // cancellation. Otherwise the store can commit a claim after the raced
-      // caller has already returned, leaving a false unknown outcome.
-      const started = await claimCacheStarted(cache, key, startedExecution);
-      if (started.outcome === 'existing') {
-        if (started.entry.status === 'started') {
-          onUnknownOutcome?.(key, started.entry);
-          throw new Error(`Idempotency key "${key}" has an unknown outcome.`);
-        }
-        return returnAuthorizedCachedResult(started.entry);
-      }
-    }
-    try {
-      await raceIdempotencyAwait(() => Promise.resolve(), runtime, executeOptions);
-    } catch (error) {
-      await cache.deleteStarted(key, startedExecution.attemptId!);
-      throw error;
-    }
-    const admissionTime = now();
-    if (
-      startedExecution.absoluteDeadline !== undefined &&
-      admissionTime >= startedExecution.absoluteDeadline
-    ) {
-      await cache.deleteStarted(key, startedExecution.attemptId!);
-      throw new Error(`Idempotency key "${key}" exceeded its maximum execution duration.`);
-    }
-    const initialRenewal = cache.renewStarted(
+      inputDigest: createInputDigest(originalInput),
       key,
-      startedExecution.attemptId!,
-      Math.min(
-        admissionTime + leaseDurationMs,
-        startedExecution.absoluteDeadline ?? admissionTime + leaseDurationMs,
-      ),
-      admissionTime,
+      leaseDurationMs: configuration.leaseDurationMs,
+      maximumExecutionDurationMs: configuration.maximumExecutionDurationMs,
+      now: configuration.now,
+      onCacheHit: configuration.onCacheHit,
+      onUnknownOutcome: configuration.onUnknownOutcome,
+      runtime: configuration.runtime,
+      tenantId: configuration.tenantId,
+      tool,
+      ttl: configuration.ttl,
+      verifyLegacyResolutionReceipt: configuration.verifyLegacyResolutionReceipt,
+      verifyResolutionReceipt: configuration.verifyResolutionReceipt,
+    };
+    const admission = await admitDirectExecution(admissionContext);
+    if (admission.kind === 'cached') return admission.result;
+    const executionContext: DirectExecutionContext = {
+      cache: configuration.cache,
+      leaseDurationMs: configuration.leaseDurationMs,
+      maximumExecutionDurationMs: configuration.maximumExecutionDurationMs,
+      now: configuration.now,
+      runtime: configuration.runtime,
+      tool,
+      ttl: configuration.ttl,
+    };
+    return executeClaimed(
+      params,
+      executeOptions,
+      key,
+      originalInput,
+      admission.startedExecution,
+      executionContext,
     );
-    let leaseOwned: boolean;
-    try {
-      leaseOwned = await raceIdempotencyAwait(() => initialRenewal, runtime, executeOptions);
-    } catch (error) {
-      void initialRenewal
-        .then((owned) =>
-          owned ? cache.deleteStarted(key, startedExecution.attemptId!) : undefined,
-        )
-        .catch(() => undefined);
-      if (
-        executeOptions?.signal?.aborted ||
-        (executeOptions?.requestContext?.deadline !== undefined &&
-          executeOptions.requestContext.deadline <= (executeOptions.now ?? now)())
-      ) {
-        throw error;
-      }
-      throw new Error(`Idempotency key "${key}" lost its execution fence before admission.`, {
-        cause: error,
-      });
-    }
-    if (!leaseOwned) {
-      throw new Error(`Idempotency key "${key}" lost its execution fence before admission.`);
-    }
-    let pendingRenewal = Promise.resolve();
-    let renewalTimer: (() => void) | undefined;
-    let renewalStopped = false;
-    const stopRenewal = () => {
-      renewalStopped = true;
-      renewalTimer?.();
-    };
-    const scheduleRenewal = () => {
-      if (renewalStopped) return;
-      renewalTimer = scheduleBoundedTimeout(
-        () => {
-          pendingRenewal = pendingRenewal
-            .then(async () => {
-              const renewalTime = now();
-              if (
-                startedExecution.absoluteDeadline !== undefined &&
-                renewalTime >= startedExecution.absoluteDeadline
-              ) {
-                stopRenewal();
-                return;
-              }
-              leaseOwned =
-                leaseOwned &&
-                (await cache.renewStarted(
-                  key,
-                  startedExecution.attemptId!,
-                  Math.min(
-                    renewalTime + leaseDurationMs,
-                    startedExecution.absoluteDeadline ?? renewalTime + leaseDurationMs,
-                  ),
-                  renewalTime,
-                ));
-            })
-            .catch(() => {
-              leaseOwned = false;
-            })
-            .finally(scheduleRenewal);
-        },
-        Math.max(1, Math.floor(leaseDurationMs / 2)),
-        runtime,
-        executeOptions?.setTimeoutFunction,
-        executeOptions?.clearTimeoutFunction,
-      );
-    };
-    scheduleRenewal();
-    const cancelDeadlineTimer = scheduleBoundedTimeout(
-      stopRenewal,
-      Math.max(0, (startedExecution.absoluteDeadline ?? now()) - startedExecution.startedAt),
-      runtime,
-      executeOptions?.setTimeoutFunction,
-      executeOptions?.clearTimeoutFunction,
-    );
-
-    let callbackStarted = false;
-    let toolExecution: Awaited<ReturnType<Tool['executeWith']>>;
-    try {
-      toolExecution = await tool.executeWith({
-        params,
-        ...(executeOptions ?? {}),
-        [executionCallbackStartSymbol]: () => {
-          callbackStarted = true;
-        },
-      } as ToolExecuteWithOptions);
-    } catch (error) {
-      if (!callbackStarted) {
-        await cache.deleteStarted(key, startedExecution.attemptId!);
-      }
-      throw error;
-    } finally {
-      stopRenewal();
-      cancelDeadlineTimer();
-      try {
-        await raceIdempotencyAwait(() => pendingRenewal, runtime, executeOptions);
-      } catch {
-        leaseOwned = false;
-      }
-    }
-
-    if (toolExecution.outcome !== 'success') {
-      if (!callbackStarted || isPreExecutionResult(toolExecution)) {
-        await cache.deleteStarted(key, startedExecution.attemptId!);
-      }
-      const message =
-        toolExecution.error?.message ??
-        toolExecution.pendingApproval?.reason ??
-        'Tool execution failed.';
-      throw new Error(message);
-    }
-
-    const result = toolExecution.result;
-    const entry: CachedToolResult = {
-      result,
-      toolName: tool.name,
-      executedAt: now(),
-      ttl,
-      input: originalInput,
-      ...(params === undefined ? { inputWasUndefined: true as const } : {}),
-    };
-
-    let completed = false;
-    if (leaseOwned) {
-      try {
-        completed = await raceIdempotencyAwait(
-          () => cache.completeStarted(key, startedExecution.attemptId!, entry, ttl, now()),
-          runtime,
-          executeOptions,
-        );
-      } catch {
-        completed = false;
-      }
-    }
-    if (!completed) {
-      throw new Error(`Idempotency key "${key}" lost its execution fence before completion.`);
-    }
-
-    return result;
   }
 
-  // Create a proxy that intercepts callable behavior and the execute property
   return new Proxy(tool, {
     apply(_target, _thisArg, argArray: unknown[]) {
-      const input: unknown = argArray[0];
-      // ToolCall-style execution goes through the original tool directly
-      if (isToolCall(input)) {
-        return tool(input);
-      }
-      return executeWithCache(input, argArray[1] as DirectIdempotencyExecuteOptions | undefined);
+      const input = argArray[0];
+      return isToolCall(input)
+        ? tool(input)
+        : executeWithCache(input, asDirectOptions(argArray[1]));
     },
     get(target, prop, receiver) {
-      if (prop === 'execute') {
-        // Return a function that handles both ToolCall and direct params
-        return (input: unknown, execOptions?: unknown) => {
-          if (isToolCall(input)) {
-            return target.execute(input, execOptions as Record<string, unknown>);
-          }
-          return executeWithCache(
-            input,
-            execOptions as DirectIdempotencyExecuteOptions | undefined,
-          );
-        };
-      }
-      return Reflect.get(target, prop, receiver as object) as unknown;
+      if (prop === 'execute')
+        return (input: unknown, execOptions?: unknown) =>
+          isToolCall(input)
+            ? target.execute(input, asToolOptions(execOptions))
+            : executeWithCache(input, asDirectOptions(execOptions));
+      return Reflect.get(target, prop, receiver);
     },
   });
 }
 
-function serializeOriginalInput(input: unknown): string {
-  const jsonInput = input === undefined ? null : input;
-  assertJsonValue(jsonInput, 'idempotency input');
-  return stableStringifyJson(jsonInput);
+function asDirectOptions(value: unknown): DirectIdempotencyExecuteOptions | undefined {
+  return value === undefined ? undefined : isOptionsObject(value) ? value : undefined;
 }
 
-function createInputDigest(serializedOriginalInput: string): string {
-  return sha256HexSync(serializedOriginalInput);
+function asToolOptions(value: unknown): ToolExecuteOptions | undefined {
+  return value === undefined ? undefined : isOptionsObject(value) ? value : undefined;
 }
 
-function normalizeIdempotencyError(error: unknown): Error {
-  if (error instanceof Error) return error;
-  return new Error(typeof error === 'string' ? error : 'Unknown error');
+function isOptionsObject(value: unknown): value is DirectIdempotencyExecuteOptions {
+  return typeof value === 'object' && value !== null;
 }
 
-function createPolicyAuthorizationOnlyOptions(
-  executeOptions: DirectIdempotencyExecuteOptions | undefined,
-): DirectIdempotencyExecuteOptions {
-  const authorizationOnlyOptions: DirectIdempotencyExecuteOptions = {
-    ...(executeOptions ?? {}),
+function createConfiguration(tool: Tool, options: IdempotencyOptions): DirectConfiguration {
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+  const ttl = options.ttl ?? DEFAULT_TTL;
+  const toolRevision = resolveToolRevision(tool, options);
+  const { leaseDurationMs, maximumExecutionDurationMs } = resolveDurations(options, ttl);
+  const idempotencyKey = readIdempotencyKey(tool);
+  return {
+    cache: options.cache,
+    completeToolRevision: toolRevision,
+    idempotencyKey,
+    leaseDurationMs,
+    maximumExecutionDurationMs,
+    now: options.now ?? runtime.clock.now,
+    onCacheHit: options.onCacheHit,
+    onUnknownOutcome: options.onUnknownOutcome,
+    runtime,
+    tenantId: options.tenantId,
+    ttl,
+    verifyLegacyResolutionReceipt: options.verifyLegacyResolutionReceipt,
+    verifyResolutionReceipt: options.verifyResolutionReceipt,
   };
-  const options = authorizationOnlyOptions as DirectIdempotencyExecuteOptions &
-    Record<PropertyKey, unknown>;
-  const hasApprovalResume = approvalResumeSymbol in options;
-  options[policyAuthorizationOnlySymbol] = true;
-  if (!hasApprovalResume) {
-    delete options[approvalConsumeSymbol];
-  }
-  return authorizationOnlyOptions;
 }
 
-function isPreExecutionResult(result: unknown): boolean {
-  if (!result || typeof result !== 'object') return false;
-  const candidate = result as {
-    outcome?: unknown;
-    errorCategory?: unknown;
-    error?: { category?: unknown };
-  };
-  if (candidate.outcome !== 'error' && candidate.outcome !== 'action_required') return false;
-  if (candidate.outcome === 'action_required') return true;
+function resolveToolRevision(tool: Tool, options: IdempotencyOptions): string {
+  const revision = options.toolRevision ?? (tool.identity.version ? tool.id : undefined);
+  if (!options.tenantId || !revision)
+    throw new Error('Idempotency requires tenantId and a versioned tool definition revision.');
+  return revision;
+}
 
-  const category = candidate.error?.category ?? candidate.errorCategory;
-  return (
-    category === 'validation' ||
-    category === 'permission' ||
-    category === 'not_found' ||
-    category === 'unavailable'
+function resolveDurations(
+  options: IdempotencyOptions,
+  ttl: number,
+): { leaseDurationMs: number; maximumExecutionDurationMs: number } {
+  const leaseDurationMs = options.leaseDurationMs ?? DEFAULT_LEASE_DURATION;
+  const maximumExecutionDurationMs =
+    options.maximumExecutionDurationMs ?? Math.max(ttl, DEFAULT_TTL);
+  if (!validDuration(leaseDurationMs) || !validDuration(maximumExecutionDurationMs))
+    throw new Error('Idempotency lease and execution durations must be finite and positive.');
+  return { leaseDurationMs, maximumExecutionDurationMs };
+}
+
+function validDuration(value: number): boolean {
+  return Number.isFinite(value) && value > 0;
+}
+
+function readIdempotencyKey(tool: Tool): (input: unknown) => string {
+  const candidate: unknown = 'idempotencyKey' in tool ? tool.idempotencyKey : undefined;
+  if (isIdempotencyKey(candidate)) return candidate;
+  throw new Error(
+    `Tool "${tool.name}" does not have an idempotencyKey. Define an idempotencyKey function in the tool options before wrapping with withIdempotency().`,
   );
+}
+
+function isIdempotencyKey(value: unknown): value is (input: unknown) => string {
+  return typeof value === 'function';
+}
+
+function validateExecutionRequest(
+  options: DirectIdempotencyExecuteOptions | undefined,
+  tenantId: string,
+): void {
+  if (!options?.requestContext)
+    throw new Error('Idempotency requires request-scoped execution authority.');
+  if (options.requestContext.authority.tenantId !== tenantId)
+    throw new Error('Idempotency tenantId must match request authority tenantId.');
+  if (options.stream) throw new Error('Idempotency does not support streaming executions.');
 }

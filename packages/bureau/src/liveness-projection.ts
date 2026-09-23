@@ -8,9 +8,8 @@ import {
   type LivenessProgressState,
   type LivenessReachability,
   type LivenessSnapshot,
-} from '@lostgradient/operative/liveness';
-import type { EngineLeaseHealth } from '@lostgradient/weft';
-import type { WeftClient } from '@lostgradient/weft/client';
+} from '@lostgradient/operative';
+import type { EngineLeaseHealth, WeftClient } from '@lostgradient/weft';
 
 /**
  * Weft's own `weft.tasks.diagnostics`/`weft.workers.diagnostics` server
@@ -22,18 +21,10 @@ import type { WeftClient } from '@lostgradient/weft/client';
  * mutates lease or heartbeat state — it only reads `Engine.getLeaseHealth()`
  * and the two diagnostics operations.
  *
- * `Engine.getLeaseHealth()` is verified (against
- * `@lostgradient/weft@0.23.1`'s `dist/core/engine/index.d.ts`) as the
- * public, synchronous accessor Bureau's held `Engine` instance already
- * exposes on `RegistryAgnosticEngine` — never the internal
- * `LeaseManager`/`WorkerRegistry` modules. `weft.workers.diagnostics` and
- * `weft.tasks.diagnostics` are NOT re-exported from `@lostgradient/weft`'s
- * `.`/`./server`/`./client` entry points as named functions; they are
- * reachable only through `WeftClient.operations['weft.workers.diagnostics']`
- * / `WeftClient.operations['weft.tasks.diagnostics']` (a `LocalClient`
- * wrapping the same in-process `Engine`, or an `HttpClient`) — see
- * `client/interface.ts`'s own JSDoc: "server operations the ergonomic
- * surface does not curate (workers, task queues, task diagnostics, ...)".
+ * `Engine.getLeaseHealth()` supplies the synchronous lease state through the
+ * public @lostgradient/weft Engine contract. Worker and task diagnostics are operations
+ * on WeftClient, so the projection derives their types from that same public
+ * client contract instead of importing server implementation modules.
  */
 
 // ---------------------------------------------------------------------------
@@ -67,8 +58,7 @@ export type TaskDiagnosticsFilter = Pick<TaskDiagnosticsInput, 'workflowId' | 'q
  * Weft's own defaults for `weft.tasks.diagnostics`'s threshold fields
  * (`DEFAULT_STALE_QUEUED_AFTER_MS`/`DEFAULT_STALE_HEARTBEAT_AFTER_MS`/
  * `DEFAULT_RETRY_STORM_MINIMUM_ATTEMPTS`/`DEFAULT_UNADOPTED_AFTER_MS`/
- * `DEFAULT_LIMIT` in `@lostgradient/weft@0.23.1`'s
- * `dist/server/operations/get-task-diagnostics.js`), mirrored verbatim
+ * `DEFAULT_LIMIT` in Weft's `src/server/operations/get-task-diagnostics.ts`), mirrored verbatim
  * rather than invented: the client-generated `ClientOperationTypes` input
  * type requires every threshold explicitly (there is no way to omit a
  * field over this transport and let Weft's own server-side default apply).
@@ -277,7 +267,7 @@ interface WorkerLivenessFields {
   readonly reachability: LivenessReachability;
   readonly progress: LivenessProgressState;
   readonly assessment: LivenessAssessment;
-  readonly lastHeartbeatAt?: number;
+  readonly lastHeartbeatAt?: number | undefined;
   readonly evidence: readonly LivenessEvidenceEntry[];
 }
 
@@ -385,8 +375,8 @@ interface TaskLivenessFields {
   readonly reachability: LivenessReachability;
   readonly progress: LivenessProgressState;
   readonly assessment: LivenessAssessment;
-  readonly lastHeartbeatAt?: number;
-  readonly deadline?: number;
+  readonly lastHeartbeatAt?: number | undefined;
+  readonly deadline?: number | undefined;
   readonly declaredWait?: DeclaredWait;
   readonly evidence: readonly LivenessEvidenceEntry[];
 }

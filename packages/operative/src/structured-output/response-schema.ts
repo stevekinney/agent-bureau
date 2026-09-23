@@ -1,4 +1,4 @@
-import { isJSONValue } from 'interoperability';
+import { isJSONValue } from '@lostgradient/tool-protocol';
 import { z, ZodType } from 'zod';
 
 import { NonJsonOutputError, OutputSchemaConversionError, OutputValidationError } from '../errors';
@@ -18,7 +18,7 @@ export type ResponseSchemaValidationResult =
  * three times for one unchanging schema. A `WeakMap` lets a schema that's
  * no longer referenced elsewhere be collected along with its cached entry.
  */
-const jsonSchemaCache = new WeakMap<ZodType<unknown>, Record<string, unknown>>();
+const jsonSchemaCache = new WeakMap<ZodType, Record<string, unknown>>();
 
 /**
  * Converts a run's `output` Zod schema to the JSON Schema shape providers
@@ -31,13 +31,22 @@ const jsonSchemaCache = new WeakMap<ZodType<unknown>, Record<string, unknown>>()
  * schema that can't become a JSON Schema is an authoring error to fix, not
  * something to silently degrade.
  */
-export function toOutputJsonSchema(schema: ZodType<unknown>): Record<string, unknown> {
+export function toOutputJsonSchema(schema: ZodType): Record<string, unknown> {
   const cached = jsonSchemaCache.get(schema);
   if (cached) return cached;
 
   try {
     const converted = z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
     const { $schema: _schema, '~standard': _standard, ...rest } = converted;
+    // Zod emits primitive unions as a JSON Schema `type` array. Providers and
+    // callers consume the more explicit `anyOf` form consistently with
+    // unions containing object schemas.
+    if (Array.isArray(rest['type'])) {
+      const { type: types, ...withoutType } = rest;
+      const normalized = { ...withoutType, anyOf: types.map((type) => ({ type })) };
+      jsonSchemaCache.set(schema, normalized);
+      return normalized;
+    }
     jsonSchemaCache.set(schema, rest);
     return rest;
   } catch (error) {
@@ -51,9 +60,7 @@ export function toOutputJsonSchema(schema: ZodType<unknown>): Record<string, unk
  * gets no `ResponseFormat` hint and providers fall back to their default
  * (free-form text).
  */
-export function resolveResponseFormat(
-  schema: ZodType<unknown> | undefined,
-): ResponseFormat | undefined {
+export function resolveResponseFormat(schema: ZodType | undefined): ResponseFormat | undefined {
   if (!schema) return undefined;
   return { type: 'json_schema', schema: toOutputJsonSchema(schema), name: 'response' };
 }
@@ -65,7 +72,7 @@ export function resolveResponseFormat(
  * provider whose native structured-output mode returns a decoded object
  * instead of a JSON string). Enforces the recursive {@link isJSONValue}
  * contract (finite numbers, dense arrays, no cycles, no exotic objects —
- * see `interoperability`'s `assertJSONValue`) BEFORE handing the candidate
+ * see `@lostgradient/tool-protocol`'s `assertJSONValue`) BEFORE handing the candidate
  * to the schema: a candidate that fails it is a {@link NonJsonOutputError},
  * since it did not describe a value JSON can even represent. A candidate
  * that passes but fails the schema is an {@link OutputValidationError}.
@@ -79,7 +86,7 @@ export function resolveResponseFormat(
  * come from `JSON.parse` where the check is load-bearing.
  */
 export async function validateOutputValue(
-  schema: ZodType<unknown>,
+  schema: ZodType,
   candidate: unknown,
 ): Promise<ResponseSchemaValidationResult> {
   if (!isJSONValue(candidate)) {
@@ -121,7 +128,7 @@ function safeDescribe(value: unknown): string {
  * candidate again, never the same one twice.
  */
 export async function validateOutput(
-  schema: ZodType<unknown>,
+  schema: ZodType,
   text: string,
 ): Promise<ResponseSchemaValidationResult> {
   let candidate: unknown;

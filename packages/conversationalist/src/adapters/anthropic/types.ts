@@ -1,3 +1,4 @@
+import type { MessageParam, TextBlockParam } from '@anthropic-ai/sdk/resources/messages';
 /**
  * Anthropic-shaped types with no dependency on `@anthropic-ai/sdk`.
  *
@@ -220,4 +221,19 @@ export interface AnthropicSystemBlock {
 export interface AnthropicConversation {
   system?: string | AnthropicSystemBlock[];
   messages: AnthropicMessage[];
+}
+
+export interface AnthropicSdkConversation {
+  system?: string | TextBlockParam[];
+  messages: MessageParam[];
+}
+
+export interface ToAnthropicMessagesOptions {
+  /**
+   * When `true`, every `cache_control` breakpoint lowered from a
+   * `cacheBoundary` mark opts into Anthropic's extended one-hour cache TTL
+   * (`ttl: '1h'`) instead of the default 5-minute one. No effect on
+   * conversations with no cache boundaries.
+   */
+  extendedCacheTtl?: boolean;
 }

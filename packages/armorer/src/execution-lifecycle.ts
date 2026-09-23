@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import {
   type EffectiveToolExecutionContext,
@@ -259,9 +259,14 @@ export function createExecutionLifecycle(
     record: RecordState,
     patch: Partial<ExecutionSnapshot>,
     now = runtime.clock.now(),
+    omit: readonly (keyof ExecutionSnapshot)[] = [],
   ) => {
+    const next = { ...record.snapshot };
+    for (const key of omit) {
+      delete next[key];
+    }
     record.snapshot = freeze({
-      ...record.snapshot,
+      ...next,
       ...patch,
       revision: record.snapshot.revision + 1,
       lastActivityAt: now,
@@ -335,7 +340,10 @@ export function createExecutionLifecycle(
         }),
       };
       records.set(executionId, record);
-      const transition = (patch: Partial<ExecutionSnapshot>) => publish(record, patch, now());
+      const transition = (
+        patch: Partial<ExecutionSnapshot>,
+        omit: readonly (keyof ExecutionSnapshot)[] = [],
+      ) => publish(record, patch, now(), omit);
       let clearDeadline: (() => void) | undefined;
       const abort = (source: ExecutionAbortSource = 'owner', reason?: unknown) => {
         if (
@@ -354,7 +362,14 @@ export function createExecutionLifecycle(
         removeAbortListeners();
         clearDeadline?.();
         if (patch.state === 'terminal' || patch.state === 'unknown-effect') {
-          record.privilegedContext = retainTerminalPrivilegedContext(record.privilegedContext);
+          const retainedPrivilegedContext = retainTerminalPrivilegedContext(
+            record.privilegedContext,
+          );
+          if (retainedPrivilegedContext === undefined) {
+            delete record.privilegedContext;
+          } else {
+            record.privilegedContext = retainedPrivilegedContext;
+          }
         }
         if (record.snapshot.state === 'unknown-effect') {
           if (Object.prototype.hasOwnProperty.call(patch, 'result')) {
@@ -366,10 +381,13 @@ export function createExecutionLifecycle(
         record.resolveSettled(record.snapshot);
         settleIdle();
       };
-      const transitionWhileOwned = (patch: Partial<ExecutionSnapshot>) => {
+      const transitionWhileOwned = (
+        patch: Partial<ExecutionSnapshot>,
+        omit: readonly (keyof ExecutionSnapshot)[] = [],
+      ) => {
         if (record.snapshot.state === 'terminal' || record.snapshot.state === 'unknown-effect')
           return;
-        transition(patch);
+        transition(patch, omit);
       };
       const handle: ExecutionHandle = {
         id: executionId,
@@ -389,10 +407,13 @@ export function createExecutionLifecycle(
           if (record.snapshot.state !== 'queued') return;
           transition({ queuePosition, ...(capacity === undefined ? {} : { capacity }) });
         },
-        activate: () =>
-          transitionWhileOwned({ state: 'active', startedAt: now(), queuePosition: undefined }),
+        activate: () => {
+          transitionWhileOwned({ state: 'active', startedAt: now() }, ['queuePosition']);
+        },
         waiting: (declaredWait) => transitionWhileOwned({ state: 'waiting', declaredWait }),
-        streaming: () => transitionWhileOwned({ state: 'streaming', declaredWait: undefined }),
+        streaming: () => {
+          transitionWhileOwned({ state: 'streaming' }, ['declaredWait']);
+        },
         activity: () => transitionWhileOwned({}),
         abort,
         cleanupPending: (result) => transitionWhileOwned({ state: 'cleanup-pending', result }),

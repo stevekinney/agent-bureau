@@ -1,9 +1,9 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+import type { TextValueStore } from '@lostgradient/weft';
 
 import type { MemoryLike, StepResultLike } from '../skill-memory';
-import type { SkillProvider } from '../types';
+import type { SkillWriter } from '../types';
 import type { IdentityProviderLike } from './proposals';
 import { isRejectedPattern, saveProposal } from './proposals';
 
@@ -31,7 +31,7 @@ export interface SkillSink {
   /** Weft text-value store for proposal persistence. */
   storage: TextValueStore;
   /** Skill provider — used when the proposal is accepted. */
-  skillProvider: SkillProvider;
+  skillProvider: SkillWriter;
   /** Optional agent the proposal applies to. */
   agentId?: string;
 }
@@ -157,14 +157,22 @@ function summarizeStep(result: StepResultLike): string {
 
 // ── Sink Routing ─────────────────────────────────────────────────────────────
 
+function metadataString(
+  metadata: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
 async function routeToMemory(
   sink: MemorySink,
   content: string,
   result: StepResultLike,
 ): Promise<void> {
   const namespace = sink.namespace ?? 'experiential';
-  const agentId = result.metadata?.['agentId'] as string | undefined;
-  const finishReason = result.metadata?.['finishReason'] as string | undefined;
+  const agentId = metadataString(result.metadata, 'agentId');
+  const finishReason = metadataString(result.metadata, 'finishReason');
 
   await sink.memory.remember(content, {
     source: 'experiential',
@@ -198,7 +206,7 @@ async function routeToProposal(
     type,
     summary: defaultSummary,
     content,
-    agentId,
+    ...(agentId !== undefined ? { agentId } : {}),
     sourceEntryIds: [],
     createdAt: runtime.clock.nowISO(),
     status: 'pending',

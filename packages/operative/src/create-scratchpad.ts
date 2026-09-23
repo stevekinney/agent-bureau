@@ -1,6 +1,6 @@
+import type { EventMap, ObservableLike, Observer, Subscription } from '@lostgradient/lifecycle';
+import { CompletableEventTarget } from '@lostgradient/lifecycle';
 import { createTool } from 'armorer';
-import type { EventMap, ObservableLike, Observer, Subscription } from 'lifecycle';
-import { CompletableEventTarget } from 'lifecycle';
 import type { ZodType } from 'zod';
 import { z } from 'zod';
 
@@ -52,8 +52,8 @@ export type ScratchpadEvents = ScratchpadEventMap;
 export type ScratchpadEventType = keyof ScratchpadEventMap;
 
 export interface CreateScratchpadOptions {
-  schema?: ZodType;
-  initialValues?: Record<string, unknown>;
+  schema?: ZodType | undefined;
+  initialValues?: Record<string, unknown> | undefined;
 }
 
 export interface Scratchpad {

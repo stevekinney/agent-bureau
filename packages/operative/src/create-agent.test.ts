@@ -8,22 +8,25 @@
 import { describe, expect, it } from 'bun:test';
 
 import { createAgent } from './create-agent';
-import type { DefinitionResolvingAgent } from './runnable-agent';
-import { OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
-import type { RunOptions } from './types';
+import { hasDefinitionResolver, OPERATIVE_RESOLVE_RUN_OPTIONS } from './runnable-agent';
 
 function mockGenerate() {
   return async () => ({ content: 'ok', toolCalls: [] });
 }
 
 function resolver(agent: ReturnType<typeof createAgent>) {
-  return (agent as unknown as DefinitionResolvingAgent)[OPERATIVE_RESOLVE_RUN_OPTIONS] as (
-    input: string,
-    context?: { principal?: string },
-  ) => Promise<RunOptions>;
+  if (!hasDefinitionResolver(agent)) throw new Error('expected a createAgent resolver');
+  return agent[OPERATIVE_RESOLVE_RUN_OPTIONS];
 }
 
 describe('createAgent: AgentRunContext.principal forwarding (AB-241)', () => {
+  it('checks the symbol capability without accepting an ordinary agent-like object', () => {
+    const agent = createAgent({ generate: mockGenerate() });
+
+    expect(hasDefinitionResolver(agent)).toBe(true);
+    expect(hasDefinitionResolver({})).toBe(false);
+  });
+
   it('forwards context.principal into RunOptions.principal, matching signal/traceContext forwarding', async () => {
     const agent = createAgent({ generate: mockGenerate() });
 

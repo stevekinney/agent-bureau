@@ -112,8 +112,9 @@ export function createPublicConversationProjection(
   options: PublicConversationProjectionOptions = {},
 ): ConversationHistory {
   const redactByDefault = createPIIRedaction();
-  const redactText = options.redactText
-    ? (text: string) => options.redactText!(redactByDefault(text))
+  const customRedaction = options.redactText;
+  const redactText = customRedaction
+    ? (text: string) => customRedaction(redactByDefault(text))
     : redactByDefault;
   const messages: Record<string, Message> = {};
   const ids: string[] = [];
@@ -149,18 +150,23 @@ export function createPublicConversationProjection(
   });
 }
 
-function createInitialState<State>(initialState: State | (() => State) | undefined): State {
-  if (typeof initialState === 'function') {
-    return (initialState as () => State)();
+function isStateFactory<State>(value: State | (() => State)): value is () => State {
+  return typeof value === 'function';
+}
+
+function createInitialState<State>(initialState: State | (() => State)): State {
+  if (isStateFactory(initialState)) return initialState();
+  if (typeof initialState === 'object' && initialState !== null) {
+    return structuredClone(initialState);
   }
 
-  const state = initialState as State;
+  return initialState;
+}
 
-  if (typeof state === 'object' && state !== null) {
-    return structuredClone(state);
-  }
-
-  return state;
+function isStatelessProjection<Event, State>(
+  options: StatelessProjectionOptions<Event> | StatefulProjectionOptions<Event, State>,
+): options is StatelessProjectionOptions<Event> {
+  return options.initialState === undefined;
 }
 
 function isReducerResultWithState<State>(
@@ -217,17 +223,26 @@ export function createProjection<Event, State>(
 export function createProjection<Event, State>(
   options: StatelessProjectionOptions<Event> | StatefulProjectionOptions<Event, State>,
 ): Projection<Event> {
+  return isStatelessProjection(options)
+    ? createProjectionWithState(options, undefined)
+    : createProjectionWithState(options, options.initialState);
+}
+
+function createProjectionWithState<Event, State>(
+  options: ProjectionBaseOptions<Event, State>,
+  initialState: State | (() => State),
+): Projection<Event> {
   const seed = options.seed ?? createConversationHistory();
-  const reduce = options.reduce as ProjectionReducer<Event, State>;
+  const reduce = options.reduce;
   let conversation = seed;
-  let state = createInitialState(options.initialState);
+  let state = createInitialState(initialState);
   let eventIdentities: ProjectionEventIdentity[] = [];
   let currentLogKey: ProjectionEventIdentity | undefined;
   let processedCount = 0;
 
   const reset = () => {
     conversation = seed;
-    state = createInitialState(options.initialState);
+    state = createInitialState(initialState);
     eventIdentities = [];
     currentLogKey = undefined;
     processedCount = 0;
@@ -240,7 +255,7 @@ export function createProjection<Event, State>(
       const isPrefixExtension =
         sameLogKey && isProjectionPrefixExtension(eventIdentities, nextIdentities);
       let nextConversation = isPrefixExtension ? conversation : seed;
-      let nextState = isPrefixExtension ? state : createInitialState(options.initialState);
+      let nextState = isPrefixExtension ? state : createInitialState(initialState);
       const startIndex = isPrefixExtension ? processedCount : 0;
 
       for (let index = startIndex; index < events.length; index += 1) {

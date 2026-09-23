@@ -53,14 +53,14 @@ export async function scanSkillResource(
   const result = await scanContent(content, context, {
     detectors: options.detectors,
     action: options.action ?? 'block',
-    mode: options.mode,
-    onTriggered: options.onTriggered,
+    ...(options.mode !== undefined ? { mode: options.mode } : {}),
+    ...(options.onTriggered !== undefined ? { onTriggered: options.onTriggered } : {}),
   });
 
   return {
     content: result.content,
     blocked: result.blocked,
     flagged: result.triggered && !result.blocked,
-    event: result.event,
+    ...(result.event !== undefined ? { event: result.event } : {}),
   };
 }

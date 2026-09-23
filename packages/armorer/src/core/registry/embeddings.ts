@@ -1,11 +1,11 @@
-import type { Embedder, EmbeddingVector } from 'interoperability';
+import type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
 
 import { isPromise } from '../../type-guards';
 import type { TextQueryField } from '../query-predicates';
 import { getSchemaKeys } from '../schema-utilities';
 import type { AnyToolDefinition as ToolDefinition } from '../tool-definition';
 
-export type { Embedder, EmbeddingVector } from 'interoperability';
+export type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
 
 export type EmbeddingInfo = {
   vector: EmbeddingVector;
@@ -23,6 +23,18 @@ type EmbeddingInput = {
   field: TextQueryField;
   text: string;
 };
+
+const textQueryFields = new Set<string>([
+  'name',
+  'description',
+  'tags',
+  'schemaKeys',
+  'metadataKeys',
+]);
+
+function isTextQueryField(value: string): value is TextQueryField {
+  return textQueryFields.has(value);
+}
 
 const registryEmbedders = new WeakMap<object, Embedder>();
 const toolEmbeddings = new WeakMap<ToolDefinition, EmbeddingEntry[] | Promise<EmbeddingEntry[]>>();
@@ -231,11 +243,11 @@ export function registerToolEmbeddings(
 ): void {
   const entries: EmbeddingEntry[] = [];
   for (const [field, vector] of Object.entries(embeddings)) {
-    if (!isVector(vector)) {
+    if (!isVector(vector) || !isTextQueryField(field)) {
       continue;
     }
     entries.push({
-      field: field as TextQueryField,
+      field,
       text: '',
       vector,
       magnitude: vectorMagnitude(vector),

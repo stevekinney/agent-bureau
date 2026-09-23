@@ -11,7 +11,7 @@
  * All of the OAuth 2.1 mechanics — PKCE, RFC 9728 protected-resource
  * discovery, RFC 8414 / OpenID Connect authorization-server discovery,
  * dynamic client registration, and token refresh — are implemented by
- * `@modelcontextprotocol/sdk`'s `client/auth.js` module and its
+ * `@modelcontextprotocol/client` and its
  * `StreamableHTTPClientTransport`. This module supplies the missing pieces an
  * integrator would otherwise have to hand-roll:
  *
@@ -28,29 +28,37 @@
  *   {@link fromMcpTools} together into a connect → (maybe authorize) →
  *   list-tools flow.
  */
-import type {
-  AddClientAuthentication,
-  AuthResult,
-  OAuthClientProvider,
-  OAuthDiscoveryState,
-} from '@modelcontextprotocol/sdk/client/auth.js';
-import type {
-  Client as McpClientClass,
-  ClientOptions,
-} from '@modelcontextprotocol/sdk/client/index.js';
-import type { StreamableHTTPClientTransportOptions } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type {
-  AuthorizationServerMetadata,
-  OAuthClientInformationMixed,
-  OAuthClientMetadata,
-  OAuthTokens,
-} from '@modelcontextprotocol/sdk/shared/auth.js';
-import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { CallToolResult, Implementation } from '@modelcontextprotocol/sdk/types.js';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
-
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
+import {
+  auth,
+  Client,
+  StreamableHTTPClientTransport,
+  UnauthorizedError,
+  type AddClientAuthentication,
+  type AuthResult,
+  type ClientOptions,
+  type FetchLike,
+  type Implementation,
+  type OAuthClientInformationMixed,
+  type OAuthClientMetadata,
+  type OAuthClientProvider,
+  type OAuthDiscoveryState,
+  type OAuthTokens,
+  type StreamableHTTPClientTransportOptions,
+} from '@modelcontextprotocol/client';
 import type { Tool } from '../../is-tool';
 import { fromMcpTools } from './index';
+import {
+  parseMcpAuthorizationCallback,
+  validateMcpAuthorizationResponseIssuer,
+} from './oauth-callback';
+
+export {
+  McpAuthorizationIssuerValidationError,
+  parseMcpAuthorizationCallback,
+  validateMcpAuthorizationResponseIssuer,
+} from './oauth-callback';
+export type { McpAuthorizationCallbackParams } from './oauth-callback';
 
 /**
  * The subset of OAuth client state that must survive across the redirect to
@@ -60,11 +68,11 @@ import { fromMcpTools } from './index';
  * that hook.
  */
 export type McpOAuthStorageState = {
-  clientInformation?: OAuthClientInformationMixed;
-  tokens?: OAuthTokens;
-  codeVerifier?: string;
-  state?: string;
-  discovery?: OAuthDiscoveryState;
+  clientInformation?: OAuthClientInformationMixed | undefined;
+  tokens?: OAuthTokens | undefined;
+  codeVerifier?: string | undefined;
+  state?: string | undefined;
+  discovery?: OAuthDiscoveryState | undefined;
 };
 
 /**
@@ -246,134 +254,6 @@ export function createMcpOAuthProvider(options: McpOAuthProviderOptions): OAuthC
   return provider;
 }
 
-/**
- * Thrown when an authorization redirect fails RFC 9207 issuer validation —
- * either the `iss` parameter is missing when the authorization server
- * advertised it would be sent, or it does not match the issuer recorded from
- * the authorization server's metadata document.
- */
-export class McpAuthorizationIssuerValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'McpAuthorizationIssuerValidationError';
-  }
-}
-
-function readAuthorizationServerIssuerInfo(metadata: AuthorizationServerMetadata | undefined): {
-  issuer: string | undefined;
-  issSupported: boolean;
-} {
-  if (!metadata) {
-    return { issuer: undefined, issSupported: false };
-  }
-  const issuer = typeof metadata.issuer === 'string' ? metadata.issuer : undefined;
-  const loose = metadata as unknown as Record<string, unknown>;
-  const flag = loose['authorization_response_iss_parameter_supported'];
-  return { issuer, issSupported: flag === true };
-}
-
-/**
- * Validates an authorization redirect's `iss` parameter per
- * {@link https://datatracker.ietf.org/doc/html/rfc9207#section-2.4 | RFC 9207 §2.4},
- * as required by the MCP authorization spec's
- * {@link https://modelcontextprotocol.io/specification/draft/basic/authorization#authorization-response-validation | Authorization Response Validation}
- * section:
- *
- * | `authorization_response_iss_parameter_supported` | `iss` in response | action  |
- * | ------------------------------------------------- | ------------------ | ------- |
- * | `true`                                             | present            | compare |
- * | `true`                                             | absent             | reject  |
- * | `false` or absent                                  | present            | compare |
- * | `false` or absent                                  | absent             | proceed |
- *
- * `discoveryState` is the value persisted by {@link createMcpOAuthProvider}'s
- * `saveDiscoveryState`/`discoveryState` hooks during the `auth()` call that
- * produced the authorization URL — it carries the authorization server
- * metadata (and therefore its `issuer` claim) that this comparison is
- * anchored to.
- *
- * @throws {McpAuthorizationIssuerValidationError} if validation fails.
- */
-export function validateMcpAuthorizationResponseIssuer(options: {
-  discoveryState: OAuthDiscoveryState | undefined;
-  iss: string | undefined;
-}): void {
-  const { discoveryState, iss } = options;
-  const { issuer, issSupported } = readAuthorizationServerIssuerInfo(
-    discoveryState?.authorizationServerMetadata,
-  );
-
-  if (iss === undefined) {
-    if (issSupported) {
-      throw new McpAuthorizationIssuerValidationError(
-        'Authorization server advertises authorization_response_iss_parameter_supported=true but the authorization response omitted the `iss` parameter (RFC 9207 section 2.4).',
-      );
-    }
-    return;
-  }
-
-  if (!issuer) {
-    throw new McpAuthorizationIssuerValidationError(
-      'Authorization response included an `iss` parameter but no authorization-server issuer was recorded to validate it against. Ensure discovery ran (and its state was persisted) before redirecting for authorization.',
-    );
-  }
-
-  // RFC 3986 section 6.2.1 simple string comparison — no scheme/host case
-  // folding, default-port elision, trailing-slash, or percent-encoding
-  // normalization.
-  if (iss !== issuer) {
-    throw new McpAuthorizationIssuerValidationError(
-      `Authorization response \`iss\` ("${iss}") does not match the recorded authorization server issuer ("${issuer}"); rejecting per RFC 9207 to guard against authorization-server mix-up attacks.`,
-    );
-  }
-}
-
-export type McpAuthorizationCallbackParams = {
-  code?: string;
-  state?: string;
-  iss?: string;
-  error?: string;
-  errorDescription?: string;
-};
-
-/** Parses the query parameters of an MCP OAuth authorization redirect callback. */
-export function parseMcpAuthorizationCallback(
-  callbackUrl: string | URL,
-): McpAuthorizationCallbackParams {
-  const params = extractCallbackSearchParams(callbackUrl);
-  const result: McpAuthorizationCallbackParams = {};
-  const code = params.get('code');
-  const state = params.get('state');
-  const iss = params.get('iss');
-  const error = params.get('error');
-  const errorDescription = params.get('error_description');
-  if (code !== null) result.code = code;
-  if (state !== null) result.state = state;
-  if (iss !== null) result.iss = iss;
-  if (error !== null) result.error = error;
-  if (errorDescription !== null) result.errorDescription = errorDescription;
-  return result;
-}
-
-/**
- * Resolves the search params off a redirect callback, accepting either a
- * full URL (`https://app.example.com/callback?code=...`) or just its query
- * string (`?code=...` or `code=...`) — integrators that only have access to
- * the query string of an incoming request (e.g. behind a router that only
- * hands them `req.query`) shouldn't have to reconstruct a full URL first.
- */
-function extractCallbackSearchParams(callbackUrl: string | URL): URLSearchParams {
-  if (callbackUrl instanceof URL) {
-    return callbackUrl.searchParams;
-  }
-  try {
-    return new URL(callbackUrl).searchParams;
-  } catch {
-    const queryString = callbackUrl.startsWith('?') ? callbackUrl.slice(1) : callbackUrl;
-    return new URLSearchParams(queryString);
-  }
-}
-
 export type CompleteMcpOAuthAuthorizationOptions = {
   /** Canonical URI of the MCP server (used as the RFC 8707 `resource`). */
   serverUrl: string | URL;
@@ -425,10 +305,10 @@ export async function completeMcpOAuthAuthorization(
     throw new Error('Authorization callback is missing the required `code` parameter.');
   }
 
-  const { auth } = await requireMcpClientAuth();
   return auth(provider, {
     serverUrl,
     authorizationCode: code,
+    ...(iss ? { iss } : {}),
     ...(fetchFn ? { fetchFn } : {}),
   });
 }
@@ -461,10 +341,8 @@ const DEFAULT_MCP_CLIENT_INFO: Implementation = {
  */
 export async function connectMcpClientWithOAuth(
   options: ConnectMcpClientWithOAuthOptions,
-): Promise<McpClientClass> {
+): Promise<Client> {
   const { serverUrl, provider, clientInfo, clientOptions, transportOptions } = options;
-  const { StreamableHTTPClientTransport } = await requireMcpClientTransport();
-  const { Client } = await requireMcpClient();
   const url = serverUrl instanceof URL ? serverUrl : new URL(serverUrl);
   const transport = new StreamableHTTPClientTransport(url, {
     ...transportOptions,
@@ -481,15 +359,11 @@ export async function connectMcpClientWithOAuth(
  * `onAuthorizationRequired` has already been called with the URL to send the
  * resource owner to) or when a session has expired mid-connection.
  *
- * This checks `error.constructor.name` rather than `instanceof
- * UnauthorizedError` because `@modelcontextprotocol/sdk` ships both ESM and
- * CJS builds; an integrator that imports the SDK's ESM entry directly while
- * this module lazily `require()`s the CJS entry (to keep the SDK an optional
- * peer dependency) would otherwise be comparing against two distinct classes
- * for the same conceptual error.
+ * MCP v2 brands its public errors across package copies, so the ordinary
+ * `instanceof` check remains reliable across ESM/CJS and client/server bundles.
  */
 export function isMcpUnauthorizedError(error: unknown): boolean {
-  return error instanceof Error && error.constructor.name === 'UnauthorizedError';
+  return error instanceof UnauthorizedError;
 }
 
 /**
@@ -497,92 +371,9 @@ export function isMcpUnauthorizedError(error: unknown): boolean {
  * Toolbox {@link Tool}s via {@link fromMcpTools}, routing calls back through
  * the client's `callTool`.
  */
-export async function fromMcpClientTools(client: McpClientClass): Promise<Tool[]> {
+export async function fromMcpClientTools(client: Client): Promise<Tool[]> {
   const { tools } = await client.listTools();
   return fromMcpTools(tools, {
-    callTool: (request) => client.callTool(request) as Promise<CallToolResult>,
+    callTool: (request) => client.callTool(request),
   });
 }
-
-type McpClientAuthSdk = typeof import('@modelcontextprotocol/sdk/client/auth.js');
-type McpClientTransportSdk = typeof import('@modelcontextprotocol/sdk/client/streamableHttp.js');
-type McpClientSdk = typeof import('@modelcontextprotocol/sdk/client/index.js');
-
-let cachedMcpClientAuthSdk: McpClientAuthSdk | undefined;
-const defaultMcpClientAuthLoader = async (): Promise<McpClientAuthSdk> => {
-  const { createRequire } = await import('node:module');
-  const require = createRequire(import.meta.url);
-  return require('@modelcontextprotocol/sdk/client/auth.js') as McpClientAuthSdk;
-};
-let mcpClientAuthLoader: () => McpClientAuthSdk | Promise<McpClientAuthSdk> =
-  defaultMcpClientAuthLoader;
-
-async function requireMcpClientAuth(): Promise<McpClientAuthSdk> {
-  if (cachedMcpClientAuthSdk) return cachedMcpClientAuthSdk;
-  cachedMcpClientAuthSdk = await loadOptionalMcpModule(
-    mcpClientAuthLoader,
-    'armorer/mcp OAuth support',
-  );
-  return cachedMcpClientAuthSdk;
-}
-
-let cachedMcpClientTransportSdk: McpClientTransportSdk | undefined;
-const defaultMcpClientTransportLoader = async (): Promise<McpClientTransportSdk> => {
-  const { createRequire } = await import('node:module');
-  const require = createRequire(import.meta.url);
-  return require('@modelcontextprotocol/sdk/client/streamableHttp.js') as McpClientTransportSdk;
-};
-let mcpClientTransportLoader: () => McpClientTransportSdk | Promise<McpClientTransportSdk> =
-  defaultMcpClientTransportLoader;
-
-async function requireMcpClientTransport(): Promise<McpClientTransportSdk> {
-  if (cachedMcpClientTransportSdk) return cachedMcpClientTransportSdk;
-  cachedMcpClientTransportSdk = await loadOptionalMcpModule(
-    mcpClientTransportLoader,
-    'armorer/mcp OAuth support',
-  );
-  return cachedMcpClientTransportSdk;
-}
-
-let cachedMcpClientSdk: McpClientSdk | undefined;
-const defaultMcpClientLoader = async (): Promise<McpClientSdk> => {
-  const { createRequire } = await import('node:module');
-  const require = createRequire(import.meta.url);
-  return require('@modelcontextprotocol/sdk/client/index.js') as McpClientSdk;
-};
-let mcpClientLoader: () => McpClientSdk | Promise<McpClientSdk> = defaultMcpClientLoader;
-
-async function requireMcpClient(): Promise<McpClientSdk> {
-  if (cachedMcpClientSdk) return cachedMcpClientSdk;
-  cachedMcpClientSdk = await loadOptionalMcpModule(mcpClientLoader, 'armorer/mcp OAuth support');
-  return cachedMcpClientSdk;
-}
-
-async function loadOptionalMcpModule<T>(
-  loader: () => T | Promise<T>,
-  hintSuffix: string,
-): Promise<T> {
-  try {
-    return await loader();
-  } catch (error) {
-    const hint = `Missing peer dependency "@modelcontextprotocol/sdk". Install it to use ${hintSuffix}.`;
-    const wrapped = error instanceof Error ? error : new Error(String(error));
-    wrapped.message = `${hint}\n${wrapped.message}`;
-    throw wrapped;
-  }
-}
-
-export const internalMcpOAuthTestUtilities = {
-  resetModuleState() {
-    cachedMcpClientAuthSdk = undefined;
-    mcpClientAuthLoader = defaultMcpClientAuthLoader;
-    cachedMcpClientTransportSdk = undefined;
-    mcpClientTransportLoader = defaultMcpClientTransportLoader;
-    cachedMcpClientSdk = undefined;
-    mcpClientLoader = defaultMcpClientLoader;
-  },
-  setClientAuthLoader(loader: (() => McpClientAuthSdk | Promise<McpClientAuthSdk>) | undefined) {
-    cachedMcpClientAuthSdk = undefined;
-    mcpClientAuthLoader = loader ?? defaultMcpClientAuthLoader;
-  },
-};

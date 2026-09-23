@@ -12,9 +12,9 @@ export interface ModelPricing {
   promptCostPerMillionTokens: number;
   completionCostPerMillionTokens: number;
   /** Price for tokens written to the prompt cache. Anthropic only. */
-  cacheWriteCostPerMillionTokens?: number;
+  cacheWriteCostPerMillionTokens?: number | undefined;
   /** Price for tokens served from the prompt cache. */
-  cacheReadCostPerMillionTokens?: number;
+  cacheReadCostPerMillionTokens?: number | undefined;
 }
 
 export interface CostEstimate {
@@ -30,7 +30,7 @@ export interface CostEstimate {
 }
 
 export interface CostEstimationOptions {
-  customPricing?: Record<string, ModelPricing>;
+  customPricing?: Record<string, ModelPricing> | undefined;
 }
 
 /**

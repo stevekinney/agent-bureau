@@ -42,12 +42,12 @@ export interface ScheduleSelfInput {
    * Architecture: "an agent that wakes daily and remembers what it found
    * yesterday" — set `session` to the current session id.
    */
-  session?: string;
+  session?: string | undefined;
   /**
    * How to handle a tick that fires while a previous run is still in progress.
    * Defaults to `'skip'` (drop the new run silently).
    */
-  overlap?: AgentScheduleOverlapPolicy;
+  overlap?: AgentScheduleOverlapPolicy | undefined;
 }
 
 /** Output returned to the LLM when `scheduleSelf` is called. */
@@ -67,15 +67,15 @@ export type ScheduleSelfFn = (
   options: {
     spec: ScheduleSpec;
     input: string;
-    session?: string;
-    overlap?: AgentScheduleOverlapPolicy;
-    id?: string;
-    idempotent?: boolean;
+    session?: string | undefined;
+    overlap?: AgentScheduleOverlapPolicy | undefined;
+    id?: string | undefined;
+    idempotent?: boolean | undefined;
   },
 ) => Promise<AgentScheduleHandle>;
 
 export interface ScheduleSelfExecutionContext {
-  durableOperationKey?: string;
+  durableOperationKey?: string | undefined;
 }
 
 /**
@@ -101,7 +101,7 @@ export interface CreateScheduleSelfToolOptions {
   scheduleId?: (context: {
     agentName: string;
     input: ScheduleSelfInput;
-    durableOperationKey?: string;
+    durableOperationKey?: string | undefined;
   }) => string | undefined;
 }
 

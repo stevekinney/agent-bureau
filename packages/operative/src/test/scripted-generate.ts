@@ -109,9 +109,9 @@ export type ScriptedGenerateStep =
 export interface ScriptedGenerateExpectation {
   readonly conversation: Conversation;
   readonly tools: readonly string[];
-  readonly model?: string;
-  readonly effort?: Effort;
-  readonly signal?: AbortSignal;
+  readonly model?: string | undefined;
+  readonly effort?: Effort | undefined;
+  readonly signal?: AbortSignal | undefined;
   readonly traceContext?: unknown;
 }
 
@@ -240,7 +240,7 @@ export function createScriptedGenerate(script: readonly ScriptedGenerateStep[]):
 
   async function resolveStep(
     step: ScriptedGenerateStep,
-    context: GenerateContext & { streaming?: StreamingHandle },
+    context: GenerateContext & { streaming?: StreamingHandle | undefined },
   ): Promise<GenerateResponse> {
     switch (step.kind) {
       case 'respond':
@@ -287,7 +287,7 @@ export function createScriptedGenerate(script: readonly ScriptedGenerateStep[]):
   }
 
   const generate = async (
-    context: GenerateContext & { streaming?: StreamingHandle },
+    context: GenerateContext & { streaming?: StreamingHandle | undefined },
   ): Promise<GenerateResponse> => {
     // Captured synchronously, before any `await`, so a `withTraceContext`
     // wrapper active at call time is the one attributed to this call even

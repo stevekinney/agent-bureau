@@ -9,7 +9,7 @@ import type { DetectorContext, GuardrailTriggeredEvent, InputGuardrailOptions } 
  */
 function getLastUserMessageText(context: StepContext): string {
   const messages = context.conversation.getMessages();
-  const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+  const lastUser = [...messages].toReversed().find((m) => m.role === 'user');
   if (!lastUser) return '';
   return typeof lastUser.content === 'string' ? lastUser.content : '';
 }
@@ -69,7 +69,7 @@ export function createInputGuardrail(options: InputGuardrailOptions): PrepareSte
       confidence: topResult.result.confidence,
       action,
       input,
-      detail: topResult.result.detail,
+      ...(topResult.result.detail === undefined ? {} : { detail: topResult.result.detail }),
       provenance: detectorContext.provenance,
     };
 

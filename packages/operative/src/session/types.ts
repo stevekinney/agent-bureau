@@ -1,5 +1,5 @@
-import type { JSONValue } from 'interoperability';
-import type { TypedEventTarget } from 'lifecycle';
+import type { TypedEventTarget } from '@lostgradient/lifecycle';
+import type { JSONValue } from '@lostgradient/tool-protocol';
 
 import type { AgentSession } from '../agent-session';
 import type { OperativeEventMap } from '../events';
@@ -8,11 +8,11 @@ import type { OperativeEventMap } from '../events';
  * Options for listing sessions with filtering, pagination, and sorting.
  */
 export interface SessionListOptions {
-  agentName?: string;
-  limit?: number;
-  offset?: number;
-  sortBy?: 'createdAt' | 'updatedAt';
-  sortOrder?: 'asc' | 'desc';
+  agentName?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+  sortBy?: ('createdAt' | 'updatedAt') | undefined;
+  sortOrder?: ('asc' | 'desc') | undefined;
 }
 
 /**
@@ -35,7 +35,7 @@ export interface SessionCleanupOptions {
   /** Delete sessions older than this many milliseconds. */
   olderThan: number;
   /** When provided, only clean up sessions for this agent. */
-  agentName?: string;
+  agentName?: string | undefined;
 }
 
 /**
@@ -96,7 +96,8 @@ export interface SessionOutboxClaim {
  * #599, "Re-read the winning claim before deciding not to retry").
  */
 export type SessionOutboxClaimAttempt =
-  { readonly claimed: true } | { readonly claimed: false; readonly lease?: SessionOutboxClaim };
+  | { readonly claimed: true }
+  | { readonly claimed: false; readonly lease?: SessionOutboxClaim | undefined };
 
 export type SessionOutboxEntry =
   | {
@@ -116,7 +117,7 @@ export type SessionOutboxEntry =
        */
       readonly committedAtMs: number;
       /** See {@link SessionOutboxClaim}. Absent means unclaimed. */
-      readonly claim?: SessionOutboxClaim;
+      readonly claim?: SessionOutboxClaim | undefined;
     }
   | {
       readonly ordinal: number;
@@ -126,7 +127,7 @@ export type SessionOutboxEntry =
       /** See the `'session.created' | 'session.saved'` variant's own doc comment. */
       readonly committedAtMs: number;
       /** See {@link SessionOutboxClaim}. Absent means unclaimed. */
-      readonly claim?: SessionOutboxClaim;
+      readonly claim?: SessionOutboxClaim | undefined;
     }
   | {
       readonly ordinal: number;
@@ -148,7 +149,7 @@ export type SessionOutboxEntry =
       /** See the `'session.created' | 'session.saved'` variant's own doc comment. */
       readonly committedAtMs: number;
       /** See {@link SessionOutboxClaim}. Absent means unclaimed. */
-      readonly claim?: SessionOutboxClaim;
+      readonly claim?: SessionOutboxClaim | undefined;
     };
 
 /**
@@ -195,7 +196,7 @@ export interface SessionStore {
       session: AgentSession | undefined,
     ) => AgentSession | undefined | Promise<AgentSession | undefined>,
     options?: {
-      refreshActivity?: boolean;
+      refreshActivity?: boolean | undefined;
       /**
        * AB-391: extra `SessionOutboxEntry` facts (`kind: 'session.attachment'`)
        * to append in the SAME `conditionalBatch` as this update's own body,
@@ -207,7 +208,7 @@ export interface SessionStore {
        * between the two could lose. Ignored (no entries appended) when the
        * updater returns `undefined` (nothing committed).
        */
-      outbox?: readonly { namespace: string; payload: JSONValue }[];
+      outbox?: readonly { namespace: string; payload: JSONValue }[] | undefined;
     },
   ): Promise<AgentSession | undefined>;
 

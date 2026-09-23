@@ -18,7 +18,7 @@ export function buildState(state: NormalizerState): StreamState {
   const { blocks, hasUsageData, promptTokens, completionTokens } = state;
   return {
     blocks: [...blocks],
-    activeBlock: [...blocks].reverse().find((b) => !b.complete),
+    activeBlock: [...blocks].toReversed().find((b) => !b.complete),
     textContent: blocks
       .filter((b) => b.type === 'text')
       .map((b) => b.content)

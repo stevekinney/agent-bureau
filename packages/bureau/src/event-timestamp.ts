@@ -24,7 +24,7 @@
  * operative's own `AgentScheduleHandle`/`DurableHeartbeat` pause/resume/
  * cancel paths), none of which need to change to benefit.
  */
-import type { RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 
 /** Resolves one shared `emittedAtMs` reading per event instance. */
 export type EventTimestampResolver = (event: object) => number;

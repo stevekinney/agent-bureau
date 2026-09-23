@@ -155,7 +155,11 @@ export function truncateToolResultContent(
     : (options?.maxCharacters ?? DEFAULT_MAX_CHARACTERS);
 
   // 3. Truncate with the marker
-  return truncateText(processed, max, { marker: options?.marker });
+  return truncateText(
+    processed,
+    max,
+    options?.marker === undefined ? undefined : { marker: options.marker },
+  );
 }
 
 function byteLength(text: string): number {

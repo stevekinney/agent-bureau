@@ -1,4 +1,4 @@
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
+import { yieldToPortableEventLoop } from '@lostgradient/weft';
 
 /**
  * Polls `condition` up to `maximumAttempts` times, yielding one macrotask

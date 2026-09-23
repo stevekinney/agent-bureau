@@ -1,5 +1,5 @@
+import { CompletableEventTarget } from '@lostgradient/lifecycle';
 import type { ConversationHistory } from 'conversationalist';
-import { CompletableEventTarget } from 'lifecycle';
 
 import type { AgentRun, RunEvent } from '../agent-run';
 import { createAgentRun } from '../agent-run';
@@ -12,7 +12,6 @@ import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import type { CombinedOperativeEventMap, SessionRecoverFailure } from '../events';
 import { SessionRecoverEvent } from '../events';
 import type { RunOutcome, RunResult } from '../types';
-import type { SessionRunOptions } from './session-handle';
 import {
   appendRecoveredConversation,
   finishReasonToStatus,
@@ -20,6 +19,7 @@ import {
   reconcileTerminalRunRef,
   runOutcomeFromResult,
 } from './session-handle-support';
+import type { SessionRunOptions } from './session-handle-types';
 import type { SessionStore } from './types';
 export interface SessionRecoveryState {
   currentRun: AgentRun | null;
@@ -54,7 +54,7 @@ export function createSessionRecovery(
     if (engine && checkpointStore) {
       const session = await store.load(sessionId);
       const runningRefs = [...(session?.runs ?? [])]
-        .reverse()
+        .toReversed()
         .filter((runRef) => runRef.status === 'running');
       // Every engine.resume() rejection encountered below, keyed by the
       // runId that failed. Reported on the final SessionRecoverEvent so a

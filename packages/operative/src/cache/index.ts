@@ -1,6 +1,6 @@
 export { conversationHashKey, lastMessageKey } from './cache-keys';
-export type { CacheMetricsOptions } from './cache-metrics';
 export { withCacheMetrics } from './cache-metrics';
+export type { CacheMetricsOptions } from './cache-metrics';
 export { clearCache, invalidateCache } from './cache-utilities';
 export type {
   CacheEntry,

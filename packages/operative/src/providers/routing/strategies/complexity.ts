@@ -10,9 +10,9 @@ export type ComplexityStrategyOptions = {
   /** Route name for complex tasks. */
   complex: string;
   /** Route name for frontier-level tasks. Defaults to `complex` when omitted. */
-  frontier?: string;
+  frontier?: string | undefined;
   /** Custom scorer that overrides the default heuristic. */
-  scorer?: (signals: ComplexitySignals) => 'simple' | 'complex' | 'frontier';
+  scorer?: ((signals: ComplexitySignals) => 'simple' | 'complex' | 'frontier') | undefined;
 };
 
 /** Patterns that indicate code content in a message. */

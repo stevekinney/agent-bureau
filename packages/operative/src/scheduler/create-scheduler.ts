@@ -1,5 +1,5 @@
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import { createActiveRun } from '../create-run';
@@ -17,10 +17,10 @@ import {
   SchedulerIdleEvent,
   SchedulerStartedEvent,
   SchedulerStoppedEvent,
+  SchedulerTaskCompletedEvent,
+  SchedulerTaskFailedEvent,
   TaskCancelledEvent,
-  TaskCompletedEvent,
   TaskDispatchedEvent,
-  TaskFailedEvent,
   TaskPreemptedEvent,
   TaskQueuedEvent,
 } from './events';
@@ -42,9 +42,9 @@ export interface CreateSchedulerOptions {
   /** Default toolbox (tasks can override via their RunOptions). */
   toolbox: AnyToolbox;
   /** How long to wait after a run completes before dispatching the next non-immediate task (ms). Default: 1000. */
-  idleDelay?: number;
+  idleDelay?: number | undefined;
   /** AbortSignal to shut down the entire scheduler. */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
   /**
    * The durable run engine. When present, preemptable tasks run as durable
    * workflows and PREEMPTION SUSPENDS the run (preserving its checkpoint) instead
@@ -67,17 +67,17 @@ export interface CreateSchedulerOptions {
    * `executeLoop` fires run-level hooks once: scheduled tasks should observe
    * completion via the task callbacks, not run-level hooks, regardless of backend.
    */
-  durable?: SchedulerDurableContext;
+  durable?: SchedulerDurableContext | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam: wall time,
    * monotonic time, timers, identifiers, randomness, and deferred-work
    * tracking. Resolved exactly once at construction — omitted, this
    * scheduler reads the real globals via `createDefaultRuntimeServices()`;
    * a test composes its own deterministic instance with
-   * `createManualRuntimeServices()` from `@lostgradient/operative/test` so
+   * `createManualRuntimeServices()` from `@lostgradient/operative` so
    * `sleep()`/idle-delay timing and task ids are fully time-controlled.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 /** The durable-engine wiring a scheduler needs to suspend/resume preempted tasks. */
@@ -134,7 +134,7 @@ interface RunningTask {
    * Present ⇒ preemption SUSPENDS this run (`engine.suspend(runId)`) and a requeue
    * RESUMES it; absent ⇒ preemption aborts + re-runs the factory (in-memory path).
    */
-  durableRunId?: string;
+  durableRunId?: string | undefined;
 }
 
 /**
@@ -144,12 +144,19 @@ interface RunningTask {
  * RESUMING its existing durable run, not by calling `createRun()` afresh.
  */
 type QueuedTask = SchedulerTask & {
-  __requeues?: number;
-  __resume?: { runId: string };
+  __requeues?: number | undefined;
+  __resume?: { runId: string } | undefined;
 };
 
 function taskSummary(task: SchedulerTask): SchedulerTaskSummary {
   return { id: task.id, priority: task.priority, metadata: task.metadata };
+}
+
+function shouldRequeueOnPreempt(task: SchedulerTask, requeues: number): boolean {
+  return (
+    (task.requeue ?? (task.priority === 'background' || task.priority === 'ambient')) &&
+    requeues < (task.maxRequeues ?? 3)
+  );
 }
 
 /**
@@ -218,13 +225,13 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   // a fire-and-forget callback would let stop() return while the callback (and
   // any credential-scoped `services` it closes over) is still running. Each
   // tracked promise is pre-caught so a rejection after the owner stopped is
-  // reported into the shutdown report (a TaskFailedEvent) rather than becoming
+  // reported into the shutdown report (a SchedulerTaskFailedEvent) rather than becoming
   // an unhandled rejection.
   const trackedCallbackPromises = new Set<Promise<void>>();
 
   function trackCallback(source: string, outcome: void | Promise<void>): void {
     const settled = Promise.resolve(outcome).catch((error: unknown) => {
-      emitEvent(new TaskFailedEvent(source, error));
+      emitEvent(new SchedulerTaskFailedEvent(source, error));
     });
     trackedCallbackPromises.add(settled);
     void settled.finally(() => trackedCallbackPromises.delete(settled));
@@ -369,7 +376,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         if (runResult.finishReason !== 'aborted') {
           completedCount++;
           lastTaskCompletedAt = runtime.monotonic.now();
-          emitEvent(new TaskCompletedEvent(taskId, runResult));
+          emitEvent(new SchedulerTaskCompletedEvent(taskId, runResult));
         }
         wakeLoop();
         return runResult;
@@ -377,7 +384,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       (error) => {
         running.delete(taskId);
         currentDispatch.delete(taskId);
-        emitEvent(new TaskFailedEvent(taskId, error));
+        emitEvent(new SchedulerTaskFailedEvent(taskId, error));
         wakeLoop();
         throw error;
       },
@@ -393,9 +400,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       // preemption — dropping the queue entry would orphan it as a `suspended`
       // workflow, so cancel it at the engine (committee review: scheduler cancel
       // must cover durable runs, not just abort the in-memory controller).
-      if (durable && queuedTask.__resume) {
-        void durable.engine.cancel(queuedTask.__resume.runId).catch((error: unknown) => {
-          emitEvent(new TaskFailedEvent(taskId, error));
+      if (durable && queuedTask['__resume']) {
+        void durable.engine.cancel(queuedTask['__resume'].runId).catch((error: unknown) => {
+          emitEvent(new SchedulerTaskFailedEvent(taskId, error));
         });
       }
       const resolver = taskResolvers.get(taskId);
@@ -427,7 +434,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       // rejecting the submit() promise — matching the in-memory cancel contract.
       cancelledRunningTasks.add(taskId);
       void durable.engine.cancel(runningTask.durableRunId).catch((error: unknown) => {
-        emitEvent(new TaskFailedEvent(taskId, error));
+        emitEvent(new SchedulerTaskFailedEvent(taskId, error));
       });
     } else {
       runningTask.abortController.abort('cancelled');
@@ -442,7 +449,8 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   async function schedulerLoop(): Promise<void> {
     emitEvent(new SchedulerStartedEvent());
 
-    while (!stopping && !externalSignal?.aborted) {
+    for (;;) {
+      if (stopping || externalSignal?.aborted) break;
       // Nothing in queue — go idle
       if (queue.size === 0) {
         if (running.size === 0) {
@@ -485,13 +493,6 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
    * Whether a requeue should happen for a preempted task: its policy allows it
    * (explicit `requeue`, else default by lane) and it is under the requeue cap.
    */
-  function shouldRequeueOnPreempt(task: SchedulerTask, requeues: number): boolean {
-    return (
-      (task.requeue ?? (task.priority === 'background' || task.priority === 'ambient')) &&
-      requeues < (task.maxRequeues ?? 3)
-    );
-  }
-
   /**
    * Resolve a preempted task's submit() promise with `null` (permanently
    * preempted, not requeued). Clears the current dispatch owner first so the
@@ -547,7 +548,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       // detach: leave ownership with the original dispatch so its result
       // continuation settles the task exactly once. Surface the error and report
       // "not preempted" so the caller falls through to the completion path.
-      emitEvent(new TaskFailedEvent(task.id, error));
+      emitEvent(new SchedulerTaskFailedEvent(task.id, error));
       return false;
     }
 
@@ -601,7 +602,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       try {
         await durable.engine.cancel(runId);
       } catch (error) {
-        emitEvent(new TaskFailedEvent(task.id, error));
+        emitEvent(new SchedulerTaskFailedEvent(task.id, error));
       }
       const resolver = taskResolvers.get(task.id);
       if (resolver) {
@@ -681,8 +682,8 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     //  - in-memory: no engine → the original non-durable executeLoop.
     let result: Promise<RunResult>;
     let durableRunId: string | undefined;
-    if (durable && task.__resume) {
-      durableRunId = task.__resume.runId;
+    if (durable && task['__resume']) {
+      durableRunId = task['__resume'].runId;
       result = resumeDurableRun(durable, durableRunId);
     } else if (durable) {
       durableRunId = `${SCHEDULER_RUN_ID_PREFIX}${task.id}-${++durableRunCounter}`;
@@ -756,7 +757,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         // once per requeue, `undefined`/`0` on the first attempt) so each
         // restart gets its own identity, mirroring the durable branch's
         // own per-attempt counter above.
-        runId: `${SCHEDULER_RUN_ID_PREFIX}${task.id}-${task.__requeues ?? 0}`,
+        runId: `${SCHEDULER_RUN_ID_PREFIX}${task.id}-${task['__requeues'] ?? 0}`,
       });
     }
 
@@ -764,7 +765,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       task,
       abortController,
       result,
-      requeues: task.__requeues ?? 0,
+      requeues: task['__requeues'] ?? 0,
       ...(durableRunId !== undefined ? { durableRunId } : {}),
     };
     running.set(task.id, runningTaskEntry);
@@ -811,7 +812,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // as the current dispatch and deletes the task from `running`. The original
     // durable `result` promise still settles later (the SAME workflow completes
     // via resume), but this continuation no longer owns the task — so it must NOT
-    // resolve the resolver, fire TaskCompletedEvent, or touch the counts. The
+    // resolve the resolver, fire SchedulerTaskCompletedEvent, or touch the counts. The
     // resume dispatch owns those.
     // Defensive ownership guard; public preemption paths return earlier.
     /* v8 ignore next */
@@ -828,7 +829,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       if (runResult.finishReason !== 'aborted') {
         completedCount++;
         lastTaskCompletedAt = runtime.monotonic.now();
-        emitEvent(new TaskCompletedEvent(task.id, runResult));
+        emitEvent(new SchedulerTaskCompletedEvent(task.id, runResult));
         const resolver = taskResolvers.get(task.id);
         if (resolver) {
           taskResolvers.delete(task.id);
@@ -851,7 +852,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       // An explicit cancel() of a running DURABLE task terminalizes it via
       // engine.cancel, which REJECTS result() with "Workflow cancelled". That is a
       // cancellation, not a failure — resolve the submit() promise with `null` to
-      // match the in-memory cancel contract, and fire no TaskFailedEvent (the
+      // match the in-memory cancel contract, and fire no SchedulerTaskFailedEvent (the
       // TaskCancelledEvent already fired in cancel()).
       if (cancelledRunningTasks.delete(task.id)) {
         if (resolver) {
@@ -860,7 +861,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
         }
         return;
       }
-      emitEvent(new TaskFailedEvent(task.id, error));
+      emitEvent(new SchedulerTaskFailedEvent(task.id, error));
       if (resolver) {
         taskResolvers.delete(task.id);
         resolver.reject(error);
@@ -871,7 +872,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   /** Reject a task whose `createRun()` factory threw before any run started. */
   function failDispatch(taskId: string, error: unknown): void {
     currentDispatch.delete(taskId);
-    emitEvent(new TaskFailedEvent(taskId, error));
+    emitEvent(new SchedulerTaskFailedEvent(taskId, error));
     const resolver = taskResolvers.get(taskId);
     if (resolver) {
       taskResolvers.delete(taskId);
@@ -938,8 +939,8 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // outstanding result() waiters"). This closes both the dangling-record and the
     // shutdown-hang on a suspended run in one pass.
     for (const task of queue) {
-      if (durable && task.__resume) {
-        durableCancellations.push(durable.engine.cancel(task.__resume.runId));
+      if (durable && task['__resume']) {
+        durableCancellations.push(durable.engine.cancel(task['__resume'].runId));
       }
       const resolver = taskResolvers.get(task.id);
       if (resolver) {
@@ -978,7 +979,7 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // run is still settling. A cancelled durable task's result REJECTS with
     // "Workflow cancelled" — that is the EXPECTED, deliberate shutdown outcome, NOT
     // a failure, so it is swallowed here (the completion path already classifies it
-    // as a cancel via `cancelledRunningTasks`). Surfacing it as a TaskFailedEvent
+    // as a cancel via `cancelledRunningTasks`). Surfacing it as a SchedulerTaskFailedEvent
     // would be a spurious failure for a normal stop (Bugbot: "stop treats cancel
     // rejections as failures").
     await Promise.allSettled([...running.values()].map((runningTask) => runningTask.result));
@@ -992,14 +993,14 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     // promise (AB-208) — a fire-and-forget callback would let stop() return while
     // it (and any credential-scoped `services` it closes over) is still running.
     // Each tracked promise is pre-caught by `trackCallback`, so it never rejects
-    // here — a rejection was already reported as its own TaskFailedEvent.
+    // here — a rejection was already reported as its own SchedulerTaskFailedEvent.
     const cancelOutcomes = await Promise.allSettled([
       ...durableCancellations,
       ...trackedCallbackPromises,
     ]);
     for (const outcome of cancelOutcomes) {
       if (outcome.status === 'rejected') {
-        emitEvent(new TaskFailedEvent('scheduler-stop-cancel', outcome.reason));
+        emitEvent(new SchedulerTaskFailedEvent('scheduler-stop-cancel', outcome.reason));
       }
     }
 

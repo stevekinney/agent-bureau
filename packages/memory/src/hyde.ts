@@ -55,7 +55,7 @@ const DEFAULT_SYSTEM_PROMPT = [
 export function withHyDE(memory: Memory, options: HyDEOptions): Memory {
   const { generateHypothetical, augmentTextSearch = true } = options;
 
-  const wrapped: Memory = Object.create(memory) as Memory;
+  const wrapped: Memory = Object.create(memory);
 
   wrapped.recall = async (
     query: string,

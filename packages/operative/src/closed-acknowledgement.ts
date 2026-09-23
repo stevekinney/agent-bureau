@@ -55,6 +55,39 @@ export interface CreateClosedAcknowledgementOptions {
 
 export type ClosedFunction = (options?: ClosedOptions) => Promise<CleanupAcknowledgement>;
 
+/**
+ * Folds a composer-owned terminal-cleanup step's acknowledgement into the
+ * run's own (COR-625). The step only ever DOWNGRADES: `completed` and
+ * `not-required` leave `runOutcome` untouched, `unresolved` and `failed`
+ * replace it.
+ *
+ * Returning the step's result outright would flip every durable run under
+ * bureau's default `'keep-all'` checkpoint retention from `completed` to
+ * `not-required` — the run's cleanup genuinely did complete, and a retention
+ * step with nothing to prune is a separate fact belonging in the composer's
+ * audit record rather than in the run's acknowledgement.
+ *
+ * `step` is a caller-supplied function that must not reject; a rejection is
+ * nonetheless classified as the STEP failing (`{ status: 'failed', error }`),
+ * never allowed to escape into the run's own `closed()`, which never rejects.
+ */
+export async function foldTerminalCleanup(
+  runOutcome: CleanupAcknowledgement,
+  step: (() => Promise<CleanupAcknowledgement>) | undefined,
+): Promise<CleanupAcknowledgement> {
+  if (!step) return runOutcome;
+  let stepOutcome: CleanupAcknowledgement;
+  try {
+    stepOutcome = await step();
+  } catch (error) {
+    stepOutcome = { status: 'failed', error };
+  }
+  if (stepOutcome.status === 'completed' || stepOutcome.status === 'not-required') {
+    return runOutcome;
+  }
+  return stepOutcome;
+}
+
 export function createClosedAcknowledgement(
   options: CreateClosedAcknowledgementOptions,
 ): ClosedFunction {
@@ -67,9 +100,11 @@ export function createClosedAcknowledgement(
   void options.result.then(
     () => {
       resultFulfilled = true;
+      return undefined;
     },
     () => {
       resultRejected = true;
+      return undefined;
     },
   );
 
@@ -149,10 +184,11 @@ export function createClosedAcknowledgement(
       };
       signal.addEventListener('abort', onAbort, { once: true });
       void settlement.then((acknowledgement) => {
-        if (callSettled) return;
+        if (callSettled) return undefined;
         callSettled = true;
         signal.removeEventListener('abort', onAbort);
         resolve(acknowledgement);
+        return undefined;
       });
     });
   };

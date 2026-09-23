@@ -17,7 +17,7 @@ export interface PrepareSubagentContextOptions {
    * Number of recent non-system parent messages to include as context.
    * Default: `2`.
    */
-  recentParentMessageCount?: number;
+  recentParentMessageCount?: number | undefined;
 }
 
 /** Options for merging a subagent result back into the parent. */
@@ -25,7 +25,7 @@ export interface MergeSubagentResultOptions {
   /** The text content produced by the subagent. */
   content: string;
   /** Name of the subagent, stored in metadata for provenance tracking. */
-  agentName?: string;
+  agentName?: string | undefined;
 }
 
 /**

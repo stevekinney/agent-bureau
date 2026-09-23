@@ -7,7 +7,7 @@ import type { GenerateFunction, RunOptions, StepContext } from './types';
  */
 export interface EarlyStoppingHandlerOptions {
   /** The message appended as a user prompt before the final tool-less call. */
-  message?: string;
+  message?: string | undefined;
 }
 
 const DEFAULT_MESSAGE =

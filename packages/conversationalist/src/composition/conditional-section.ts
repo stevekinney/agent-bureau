@@ -114,7 +114,7 @@ function buildConditionalComposer(
 function sortedSections(
   sections: readonly (InstructionSection | ConditionalInstructionSection)[],
 ): (InstructionSection | ConditionalInstructionSection)[] {
-  return [...sections].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
+  return [...sections].toSorted((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
 }
 
 // Predicate factories

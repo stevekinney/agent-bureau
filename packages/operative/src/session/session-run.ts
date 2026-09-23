@@ -1,7 +1,7 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { CompletableEventTarget, ForwardedEvent } from '@lostgradient/lifecycle';
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
-import { CompletableEventTarget, ForwardedEvent } from 'lifecycle';
 
 import type { AgentRun, RunEvent } from '../agent-run';
 import { createAgentRun } from '../agent-run';
@@ -22,8 +22,6 @@ import type {
 } from '../liveness';
 import { LIVENESS_POLICY_VERSION } from '../liveness';
 import type { RunResult } from '../types';
-import type { SessionRunOptions } from './session-handle';
-import { deriveRunId } from './session-handle';
 import {
   appendConversationMessages,
   finishReasonToStatus,
@@ -31,13 +29,17 @@ import {
   isTerminalRunEvent,
   runOutcomeFromResult,
 } from './session-handle-support';
-import { MissingRunOptionsError } from './session-handle-types';
+import {
+  deriveRunId,
+  MissingRunOptionsError,
+  type SessionRunOptions,
+} from './session-handle-types';
 import type { SessionStore } from './types';
 export interface SessionRunState {
   currentRun: AgentRun | null;
   currentRunId: string | null;
-  parkedRunId?: string;
-  parkedSignalName?: string;
+  parkedRunId?: string | undefined;
+  parkedSignalName?: string | undefined;
 }
 export interface SessionRunDependencies {
   readonly sessionId: string;
@@ -281,7 +283,9 @@ export function createSessionRun(
                 (currentRef.outcome?.finishReason !== undefined &&
                   currentRef.outcome.finishReason !== 'error')
               ) {
-                throw new Error(`Run "${runId}" has a conflicting terminal classification.`);
+                throw new Error(`Run "${runId}" has a conflicting terminal classification.`, {
+                  cause: err,
+                });
               }
             }
             const errorRef: RunRef =
@@ -369,6 +373,10 @@ export function createSessionRun(
     // can subscribe to events and abort the run.
     const activeRunWrapper: ActiveRun = {
       result: resultPromise,
+      // COR-1270 — forwarded from the inner run once it exists. Before that
+      // there is no plan to describe, and saying so is more honest than
+      // reporting an empty one.
+      describeHookPlan: () => activeInnerRun?.describeHookPlan(),
       // AB-361: this wrapper deliberately leaves `durablyStarted`
       // unset. `SessionHandle` is not `createRunFromRequest`'s durable
       // branch — no caller of this wrapper awaits it — and a forwarding

@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import { createScratchpad, type Scratchpad } from '../create-scratchpad';
@@ -11,12 +11,6 @@ import { COMBINED_OPERATIVE_EVENT_TYPES } from '../events';
 import type { GenerateFunction, GenerateResponse, StepResult } from '../types';
 import { createEventRecorder } from './event-recorder';
 
-export type {
-  BaselineReplayResult,
-  ReproductionArtifact,
-  ReproductionCleanupReport,
-  ScriptedOutcome,
-} from './artifact-io';
 export {
   assembleBaselineArtifact,
   InvalidReproductionArtifactError,
@@ -26,22 +20,33 @@ export {
   runBaselineReplayCase,
   writeReproductionArtifact,
 } from './artifact-io';
-export type { Barrier, BarrierRegistry, BarrierState } from './barriers';
+export type {
+  BaselineReplayResult,
+  ReproductionArtifact,
+  ReproductionCleanupReport,
+  ScriptedOutcome,
+} from './artifact-io';
 export { createBarrierRegistry } from './barriers';
+export type { Barrier, BarrierRegistry, BarrierState } from './barriers';
 export {
   createManualCheckpointStore,
   createManualDurableEngine,
-  type EngineSpy,
   spyEngine,
+  type EngineSpy,
 } from './durable-engine';
+export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
 export type {
   ChildRunHandle,
   CreateDurableMultiAgentHarnessOptions,
   DurableMultiAgentHarness,
 } from './durable-multi-agent-harness';
-export { createDurableMultiAgentHarness } from './durable-multi-agent-harness';
-export type { CausalTraceEntry, EventRecorder, EventRecorderOwnerIdentity } from './event-recorder';
 export { createEventRecorder } from './event-recorder';
+export type { CausalTraceEntry, EventRecorder, EventRecorderOwnerIdentity } from './event-recorder';
+export {
+  createFaultEngine,
+  FAULT_BOUNDARY_EFFECT_KINDS,
+  UnsupportedFaultBoundaryError,
+} from './fault-engine';
 export type {
   FaultBlockEffect,
   FaultCorruptPayloadEffect,
@@ -57,11 +62,6 @@ export type {
   FaultRejectBeforeWorkEffect,
   FaultStaleReadEffect,
 } from './fault-engine';
-export {
-  createFaultEngine,
-  FAULT_BOUNDARY_EFFECT_KINDS,
-  UnsupportedFaultBoundaryError,
-} from './fault-engine';
 export type {
   FaultBoundary,
   FaultOccurrence,
@@ -70,14 +70,15 @@ export type {
   FaultPlanEntry,
   FiredFault,
 } from './fault-plan';
-export type { PromptInjectionFixtureCase } from './prompt-injection-fixtures';
 export { PROMPT_INJECTION_FIXTURES } from './prompt-injection-fixtures';
+export type { PromptInjectionFixtureCase } from './prompt-injection-fixtures';
+export { runReactiveSourceConformanceSuite } from './reactive-source-suite';
 export type {
   ReactiveSourceConformanceOptions,
   ReactiveSourceConformanceTestRunner,
   ReactiveSourceSubject,
 } from './reactive-source-suite';
-export { runReactiveSourceConformanceSuite } from './reactive-source-suite';
+export { createResourceScope, QuiescenceError } from './resource-scope';
 export type {
   ClosableRun,
   DetachedResource,
@@ -88,8 +89,6 @@ export type {
   RegisterableResource,
   ResourceScope,
 } from './resource-scope';
-export { createResourceScope, QuiescenceError } from './resource-scope';
-export type { BoundedScheduleOptions, BoundedScheduleReport, Schedule } from './schedule-runner';
 export {
   DuplicatePartyNameError,
   InvalidMaximumSchedulesError,
@@ -97,13 +96,15 @@ export {
   runBoundedSchedules,
   UnsupportedScenarioError,
 } from './schedule-runner';
+export type { BoundedScheduleOptions, BoundedScheduleReport, Schedule } from './schedule-runner';
+export { createScriptedGenerate } from './scripted-generate';
 export type {
   ScriptedGenerate,
   ScriptedGenerateCall,
   ScriptedGenerateExpectation,
   ScriptedGenerateStep,
 } from './scripted-generate';
-export { createScriptedGenerate } from './scripted-generate';
+export { createScriptedHook, createScriptedTool } from './scripted-tool';
 export type {
   ScriptedHook,
   ScriptedHookCall,
@@ -114,18 +115,13 @@ export type {
   ScriptedToolCall,
   ScriptedToolStep,
 } from './scripted-tool';
-export { createScriptedHook, createScriptedTool } from './scripted-tool';
 export { createStepwiseBlockingGenerate } from './stepwise-generate';
 export { createTestStore } from './store';
-export { type RunLookup, waitForCondition, waitForRunState } from './wait';
-// AB-92/AB-252 — the deterministic `RuntimeServices` implementation lives in
-// `lifecycle` (a private foundation package, inlined at build time) and is
-// re-exported here so `@lostgradient/operative/test` stays the import path
-// a test author uses — a caller composes `runtime: createManualRuntimeServices()`
-// onto `createAgent`/`createActiveRun` instead of touching a real timer or
-// a real clock.
-export type { ManualRuntimeServices } from 'lifecycle';
-export { createManualRuntimeServices } from 'lifecycle';
+export { waitForCondition, waitForRunState, type RunLookup } from './wait';
+// Deterministic runtime services are owned by @lostgradient/lifecycle and exposed
+// with these test fixtures through the package root.
+export { createManualRuntimeServices } from '@lostgradient/lifecycle';
+export type { ManualRuntimeServices } from '@lostgradient/lifecycle';
 
 /**
  * Creates a mock generate function that returns responses in sequence.

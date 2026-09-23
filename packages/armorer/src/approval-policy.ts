@@ -119,7 +119,7 @@ export function evaluateApprovalStatus(
 }
 
 export type CapabilityApprovalContext = {
-  metadata?: ToolMetadata;
+  metadata?: ToolMetadata | undefined;
   tags?: readonly string[];
 };
 
@@ -228,7 +228,7 @@ export type PermissionGate = (toolName: string, input: unknown) => PermissionGat
  * run never parks on a human, so anything the capability tier would `ask`
  * about is denied instead.
  *
- * `allowList` field names match `interoperability`'s `ToolPolicy` shape
+ * `allowList` field names match `@lostgradient/tool-protocol`'s `ToolPolicy` shape
  * (the same one `operative`'s `createPolicyEnforcementHook` filters tool
  * arrays with) for consistency, but `allowList` is REQUIRED here — unlike a
  * filter, where an absent allowlist just means "don't restrict by name,"
@@ -298,8 +298,12 @@ export function evaluateHeadlessPermission(
   const isUnlisted = !allowList.includes(toolName);
   const nameStatus: ApprovalStatus = isDenied || isUnlisted ? 'deny' : 'allow';
 
+  const capabilityContext = {
+    ...(metadata === undefined ? {} : { metadata }),
+    ...(tags === undefined ? {} : { tags }),
+  };
   const capabilityResult = capability
-    ? evaluateCapabilityApproval({ metadata, tags }, capability)
+    ? evaluateCapabilityApproval(capabilityContext, capability)
     : undefined;
   const capabilityStatus: ApprovalStatus = capabilityResult?.status ?? 'allow';
 
@@ -365,15 +369,17 @@ export function createHeadlessPermissionPolicyHooks(
         {
           toolName: context.toolName,
           params: context.params,
-          metadata: context.metadata,
-          tags: context.tags,
+          ...(context.metadata === undefined ? {} : { metadata: context.metadata }),
+          ...(context.tags === undefined ? {} : { tags: context.tags }),
         },
         configuration,
       );
       if (result.status === 'allow') {
         return { allow: true, status: 'allow' };
       }
-      return { allow: false, status: 'deny', reason: result.reason };
+      return result.reason === undefined
+        ? { allow: false, status: 'deny' }
+        : { allow: false, status: 'deny', reason: result.reason };
     },
   };
 }

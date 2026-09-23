@@ -1,8 +1,8 @@
-import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices, TypedEventTarget } from '@lostgradient/lifecycle';
+import type { JSONValue } from '@lostgradient/tool-protocol';
+import type { ConditionalTextValueStore } from '@lostgradient/weft';
 import type { ConversationHistory } from 'conversationalist';
-import type { JSONValue } from 'interoperability';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices, TypedEventTarget } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
 import type { OperativeEventMap } from '../events';
@@ -37,6 +37,10 @@ const OUTBOX_ORDINAL_KEY = 'agent-session-outbox:v1:ordinal';
 // fetch every entry's value before it can sort them. 20 digits comfortably
 // exceeds `Number.MAX_SAFE_INTEGER`'s 16 digits.
 const OUTBOX_ORDINAL_WIDTH = 20;
+
+function failCorruptOutbox(reason: string): never {
+  throw new TypeError(`SessionStore: a stored outbox entry is corrupted — ${reason}.`);
+}
 
 export class SessionConflictError extends Error {
   readonly code = 'SessionConflictError';
@@ -90,8 +94,6 @@ export class StaleSessionIncarnationError extends Error {
         `incarnation "${currentIncarnation}".`,
     );
     this.name = 'StaleSessionIncarnationError';
-    this.candidateIncarnation = candidateIncarnation;
-    this.currentIncarnation = currentIncarnation;
   }
 }
 
@@ -190,16 +192,14 @@ function mergeConversationHistory(
   const currentIds = new Set(current.ids);
   const candidateOnlyIds = candidate.ids.filter((id) => !currentIds.has(id));
   const ids = [...current.ids, ...candidateOnlyIds];
-  const messages = {
-    ...candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
-      (accumulator, id) => {
-        const message = candidate.messages[id];
-        if (message) accumulator[id] = message;
-        return accumulator;
-      },
-      { ...current.messages },
-    ),
-  };
+  const messages = candidateOnlyIds.reduce<Record<string, ConversationHistory['messages'][string]>>(
+    (accumulator, id) => {
+      const message = candidate.messages[id];
+      if (message) accumulator[id] = message;
+      return accumulator;
+    },
+    { ...current.messages },
+  );
 
   for (const [position, id] of ids.entries()) {
     const message = messages[id];
@@ -405,34 +405,37 @@ function parseOutboxClaim(
 
 function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
   if (raw === null) return undefined;
-  const fail = (reason: string): never => {
-    throw new TypeError(`SessionStore: a stored outbox entry is corrupted — ${reason}.`);
-  };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    return fail(`invalid JSON (${String(error)})`);
+    return failCorruptOutbox(`invalid JSON (${String(error)})`);
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return fail('expected a JSON object');
+    return failCorruptOutbox('expected a JSON object');
   }
   const record = parsed as Record<string, unknown>;
   if (typeof record['ordinal'] !== 'number' || !Number.isSafeInteger(record['ordinal'])) {
-    return fail(`expected a safe-integer "ordinal", got ${JSON.stringify(record['ordinal'])}`);
+    return failCorruptOutbox(
+      `expected a safe-integer "ordinal", got ${JSON.stringify(record['ordinal'])}`,
+    );
   }
   if (typeof record['sessionId'] !== 'string') {
-    return fail(`expected a string "sessionId", got ${JSON.stringify(record['sessionId'])}`);
+    return failCorruptOutbox(
+      `expected a string "sessionId", got ${JSON.stringify(record['sessionId'])}`,
+    );
   }
   if (typeof record['incarnation'] !== 'string') {
-    return fail(`expected a string "incarnation", got ${JSON.stringify(record['incarnation'])}`);
+    return failCorruptOutbox(
+      `expected a string "incarnation", got ${JSON.stringify(record['incarnation'])}`,
+    );
   }
   if (!Number.isFinite(record['committedAtMs'])) {
-    return fail(
+    return failCorruptOutbox(
       `expected a finite number "committedAtMs", got ${JSON.stringify(record['committedAtMs'])}`,
     );
   }
-  const claim = parseOutboxClaim(record['claim'], fail);
+  const claim = parseOutboxClaim(record['claim'], failCorruptOutbox);
   const ordinal = record['ordinal'];
   const sessionId = record['sessionId'];
   const incarnation = record['incarnation'];
@@ -441,7 +444,7 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
     case 'session.created':
     case 'session.saved':
       if (typeof record['agentName'] !== 'string') {
-        return fail(
+        return failCorruptOutbox(
           `expected a string "agentName" for kind ${JSON.stringify(record['kind'])}, got ${JSON.stringify(record['agentName'])}`,
         );
       }
@@ -465,12 +468,12 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
       };
     case 'session.attachment':
       if (typeof record['namespace'] !== 'string') {
-        return fail(
+        return failCorruptOutbox(
           `expected a string "namespace" for kind "session.attachment", got ${JSON.stringify(record['namespace'])}`,
         );
       }
       if (!('payload' in record)) {
-        return fail('expected a "payload" for kind "session.attachment"');
+        return failCorruptOutbox('expected a "payload" for kind "session.attachment"');
       }
       return {
         ordinal,
@@ -483,7 +486,7 @@ function parseOutboxEntry(raw: string | null): SessionOutboxEntry | undefined {
         ...(claim ? { claim } : {}),
       };
     default:
-      return fail(`unrecognized "kind" ${JSON.stringify(record['kind'])}`);
+      return failCorruptOutbox(`unrecognized "kind" ${JSON.stringify(record['kind'])}`);
   }
 }
 
@@ -546,7 +549,7 @@ export interface CreateSessionStoreOptions {
    * `updatedAt` refreshes and cleanup's age cutoff are fully
    * time-controlled.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 export function createSessionStore(
@@ -789,7 +792,7 @@ export function createSessionStore(
   ): Promise<{ removed: boolean; incarnation: string | undefined }>;
   function deleteSession(
     id: string,
-    options?: { returnIncarnation?: boolean },
+    deleteOptions?: { returnIncarnation?: boolean },
   ): Promise<boolean | { removed: boolean; incarnation: string | undefined }> {
     return runMutation(async () => {
       await readBody('summary-index');
@@ -873,7 +876,7 @@ export function createSessionStore(
         if (deleted) {
           const removed = willRemove;
           if (removed) events.dispatch(new SessionOutboxAppendedEvent(nextOrdinal));
-          if (!options?.returnIncarnation) return removed;
+          if (!deleteOptions?.returnIncarnation) return removed;
           return { removed, incarnation: removedIncarnation };
         }
         const bodyValues = JSON.stringify([currentRaw, legacyRaw]);
@@ -939,13 +942,13 @@ export function createSessionStore(
       updater: (
         session: AgentSession | undefined,
       ) => AgentSession | undefined | Promise<AgentSession | undefined>,
-      options?: {
+      updateOptions?: {
         refreshActivity?: boolean;
         outbox?: readonly { namespace: string; payload: JSONValue }[];
       },
     ): Promise<AgentSession | undefined> {
-      const refreshActivity = options?.refreshActivity ?? true;
-      const attachments = options?.outbox ?? [];
+      const refreshActivity = updateOptions?.refreshActivity ?? true;
+      const attachments = updateOptions?.outbox ?? [];
       // AB-391 (Codex P2 review finding, PR #601, "Validate attachments
       // before committing malformed outbox entries"): `options.outbox` is
       // this method's own public interface, so — per this monorepo's
@@ -1058,7 +1061,7 @@ export function createSessionStore(
 
     delete: deleteSession,
 
-    async list(options?: SessionListOptions): Promise<SessionSummary[]> {
+    async list(listOptions?: SessionListOptions): Promise<SessionSummary[]> {
       return runMutation(async () => {
         let summaryRaw = await store.get(SUMMARY_INDEX_KEY);
         let summaries = parseSummaryIndex(summaryRaw);
@@ -1119,13 +1122,13 @@ export function createSessionStore(
         }
 
         // Filter by agentName when requested
-        const filtered = options?.agentName
-          ? [...summaries.values()].filter((s) => s.agentName === options.agentName)
+        const filtered = listOptions?.agentName
+          ? [...summaries.values()].filter((s) => s.agentName === listOptions.agentName)
           : [...summaries.values()];
 
         // Sort
-        const sortBy = options?.sortBy ?? 'updatedAt';
-        const sortOrder = options?.sortOrder ?? 'desc';
+        const sortBy = listOptions?.sortBy ?? 'updatedAt';
+        const sortOrder = listOptions?.sortOrder ?? 'desc';
         filtered.sort((a, b) => {
           const aVal = new Date(a[sortBy]).getTime();
           const bVal = new Date(b[sortBy]).getTime();
@@ -1138,8 +1141,8 @@ export function createSessionStore(
         // A valid aggregate index is the complete candidate set. Read only
         // enough body keys to fill the requested page; legacy and malformed
         // indexes above still rebuild from every body key.
-        const offset = options?.offset ?? 0;
-        const limit = options?.limit ?? DEFAULT_SESSION_LIST_LIMIT;
+        const offset = listOptions?.offset ?? 0;
+        const limit = listOptions?.limit ?? DEFAULT_SESSION_LIST_LIMIT;
         if (limit <= 0) return [];
         const page: SessionSummary[] = [];
         const missingIds: string[] = [];
@@ -1212,9 +1215,9 @@ export function createSessionStore(
       );
     },
 
-    async cleanup(options: SessionCleanupOptions): Promise<number> {
+    async cleanup(cleanupOptions: SessionCleanupOptions): Promise<number> {
       return runMutation(async () => {
-        const cutoff = runtime.clock.now() - options.olderThan;
+        const cutoff = runtime.clock.now() - cleanupOptions.olderThan;
         await readBody('summary-index');
         for (let attempt = 0; attempt < MAXIMUM_INDEX_CONTENTION_ATTEMPTS; attempt += 1) {
           const keys = await listDataKeys(store);
@@ -1242,7 +1245,11 @@ export function createSessionStore(
                 : current,
             );
             const canonical = records.find(({ key }) => key === keyFor(id)) ?? newest;
-            if (options.agentName && canonical.session.agentName !== options.agentName) continue;
+            if (
+              cleanupOptions.agentName &&
+              canonical.session.agentName !== cleanupOptions.agentName
+            )
+              continue;
             if (records.some(({ session }) => new Date(session.updatedAt).getTime() >= cutoff)) {
               continue;
             }

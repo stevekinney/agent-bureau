@@ -1,20 +1,17 @@
 import { z } from 'zod';
 
 import { createTool } from '../create-tool';
-import { type AnyToolbox, createToolbox, type ToolboxEntries } from '../create-toolbox';
-import type { ToolboxEventMap } from '../events';
+import { createToolbox } from '../create-toolbox';
+import type { ToolboxEventMap } from '../event-types';
 import type { Tool, ToolCallWithArguments } from '../is-tool';
+import type { ToolboxEntries } from '../toolbox-contracts';
+import type { AnyToolbox } from '../toolbox-interface';
 import type { ToolExecutionResult } from '../types';
 
-// AB-92/AB-254 — the deterministic `RuntimeServices` implementation lives in
-// `lifecycle` (a private foundation package, inlined at build time) and is
-// re-exported here so `armorer/test` stays the import path a
-// test author uses — a caller composes `runtime: createManualRuntimeServices()`
-// onto `createToolbox`/`createTool` instead of touching a real timer or a
-// real clock. This matches the treatment AB-252 already gave
-// `@lostgradient/operative/test`.
-export type { ManualRuntimeServices } from 'lifecycle';
-export { createManualRuntimeServices } from 'lifecycle';
+// Deterministic runtime services are owned by @lostgradient/lifecycle and exposed
+// with these test fixtures through the package root.
+export { createManualRuntimeServices } from '@lostgradient/lifecycle';
+export type { ManualRuntimeServices } from '@lostgradient/lifecycle';
 
 export type MockToolOptions<TInput = any, TOutput = any> = {
   name?: string;

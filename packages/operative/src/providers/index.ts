@@ -1,23 +1,25 @@
 /**
  * Operative providers — LLM provider factories folded from the former herald package.
  *
- * These are re-exported from the three provider subpaths for consumers who want
- * all providers at once. For tree-shaking, prefer the individual subpaths:
- *   import { createAnthropicProvider } from '@lostgradient/operative/anthropic'
- *   import { createOpenAIProvider }    from '@lostgradient/operative/openai'
- *   import { createGeminiProvider }    from '@lostgradient/operative/gemini'
+ * These are re-exported from the `@lostgradient/operative` root entry point. Each
+ * provider loads its SDK dynamically when called, so unused SDKs stay unused.
  */
 
-export type {
-  AnthropicTokenCounterOptions,
-  AnthropicTokenCountingOperations,
-} from './anthropic.ts';
 export {
   createAnthropicProvider,
   createAnthropicProviderStream,
   createAnthropicTokenCounter,
 } from './anthropic.ts';
+export type {
+  AnthropicTokenCounterOptions,
+  AnthropicTokenCountingOperations,
+} from './anthropic.ts';
 export { readBackendDescriptors, withBackendDescriptors } from './backend-descriptor-attachment.ts';
+export {
+  createAnthropicBatchClient,
+  createGeminiBatchClient,
+  createOpenAIBatchClient,
+} from './batches/index.ts';
 export type {
   AnthropicBatchClientOptions,
   AnthropicBatchOperations,
@@ -26,13 +28,14 @@ export type {
   OpenAIBatchClientOptions,
   OpenAIBatchOperations,
 } from './batches/index.ts';
-export {
-  createAnthropicBatchClient,
-  createGeminiBatchClient,
-  createOpenAIBatchClient,
-} from './batches/index.ts';
-export type { ProviderCapabilities } from './capabilities.ts';
 export { getProviderCapabilities } from './capabilities.ts';
+export type { ProviderCapabilities } from './capabilities.ts';
+export {
+  createGeminiEmbedder,
+  createOllamaEmbedder,
+  createOpenAIEmbedder,
+  createVoyageEmbedder,
+} from './embeddings/index.ts';
 export type {
   GeminiEmbedderOptions,
   GeminiEmbeddingClient,
@@ -43,17 +46,17 @@ export type {
   VoyageEmbedderOptions,
 } from './embeddings/index.ts';
 export {
-  createGeminiEmbedder,
-  createOllamaEmbedder,
-  createOpenAIEmbedder,
-  createVoyageEmbedder,
-} from './embeddings/index.ts';
-export {
-  isToolCallParseError,
   ProviderError,
-  shouldRetryProviderError,
   ToolCallParseError,
+  isToolCallParseError,
+  shouldRetryProviderError,
 } from './errors.ts';
+export {
+  FalloverExhaustedError,
+  classifyProviderError,
+  createFalloverGenerate,
+  createProviderHealthTracker,
+} from './fallover/index.ts';
 export type {
   ErrorClassification,
   FalloverEvent,
@@ -62,17 +65,17 @@ export type {
   ProviderHealth,
 } from './fallover/index.ts';
 export {
-  classifyProviderError,
-  createFalloverGenerate,
-  createProviderHealthTracker,
-  FalloverExhaustedError,
-} from './fallover/index.ts';
-export type { GeminiTokenCounterOptions, GeminiTokenCountingOperations } from './gemini.ts';
-export {
   createGeminiProvider,
   createGeminiProviderStream,
   createGeminiTokenCounter,
 } from './gemini.ts';
+export type { GeminiTokenCounterOptions, GeminiTokenCountingOperations } from './gemini.ts';
+export {
+  GENERAL_PROJECTION_REDACTED_KEYS,
+  projectCatalog,
+  projectDescriptor,
+} from './model-catalog-projection.ts';
+export { createModelCatalog } from './model-catalog.ts';
 export type {
   BackendDescriptor,
   BackendLifecycleState,
@@ -83,13 +86,8 @@ export type {
   ModelAlias,
   ModelCatalog,
 } from './model-catalog.ts';
-export { createModelCatalog } from './model-catalog.ts';
-export {
-  GENERAL_PROJECTION_REDACTED_KEYS,
-  projectCatalog,
-  projectDescriptor,
-} from './model-catalog-projection.ts';
 export { createOpenAIProvider, createOpenAIProviderStream } from './openai.ts';
+export { composePolicy } from './policy.ts';
 export type {
   BureauInvariants,
   ComposePolicyInput,
@@ -99,7 +97,15 @@ export type {
   SelectionExclusionCode,
   UserModelConfiguration,
 } from './policy.ts';
-export { composePolicy } from './policy.ts';
+export {
+  composeStrategies,
+  createComplexityStrategy,
+  createCostAwareStrategy,
+  createRoutingGenerate,
+  createStepBasedStrategy,
+  extractComplexitySignals,
+  withRoutingMetrics,
+} from './routing/index.ts';
 export type {
   ComplexitySignals,
   ComplexityStrategyOptions,
@@ -113,28 +119,18 @@ export type {
   RoutingStrategy,
   StepBasedStrategyOptions,
 } from './routing/index.ts';
-export {
-  composeStrategies,
-  createComplexityStrategy,
-  createCostAwareStrategy,
-  createRoutingGenerate,
-  createStepBasedStrategy,
-  extractComplexitySignals,
-  withRoutingMetrics,
-} from './routing/index.ts';
+export { recordEffectiveGeneration, select } from './selection.ts';
 export type {
   EffectiveGenerationResult,
   RevalidationInput,
+  SelectOptions,
   SelectionCandidate,
   SelectionOutcomeFailure,
   SelectionOutcomeKind,
   SelectionPlan,
   SelectionRequest,
-  SelectOptions,
   TaskClassification,
 } from './selection.ts';
-export { recordEffectiveGeneration, select } from './selection.ts';
-export type { GeminiResolvedEffort } from './shared/effort.ts';
 export {
   ANTHROPIC_EFFORT_SUPPORT,
   GEMINI_THINKING_MODELS,
@@ -143,6 +139,7 @@ export {
   resolveGeminiEffort,
   resolveOpenAIEffort,
 } from './shared/effort.ts';
+export type { GeminiResolvedEffort } from './shared/effort.ts';
 export {
   ANTHROPIC_MODEL_ALIASES,
   GEMINI_MODEL_ALIASES,
@@ -152,7 +149,6 @@ export {
   resolveOpenAIModel,
 } from './shared/model-registry.ts';
 export { normalizeAnthropicStream, normalizeOpenAIStream } from './streaming/index.ts';
-export type { ResponseFormat, ToolChoice } from './structured-output/index.ts';
 export {
   toAnthropicToolChoice,
   toGeminiResponseFormat,
@@ -160,6 +156,7 @@ export {
   toOpenAIResponseFormat,
   toOpenAIToolChoice,
 } from './structured-output/index.ts';
+export type { ResponseFormat, ToolChoice } from './structured-output/index.ts';
 export type {
   AnthropicBatchClient,
   AnthropicBatchCreateRequest,

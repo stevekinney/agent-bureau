@@ -1,48 +1,60 @@
 import type {
+  EventIteratorOptions,
+  EventObservableOptions,
+  ObservableLike,
+  Observer,
+  RuntimeServices,
+  Subscription,
+} from '@lostgradient/lifecycle';
+import type { CreateMemoryOptions, Memory } from '@lostgradient/memory';
+import type {
   AgentInput,
+  AgentRunEventRegistry,
   AgentSession,
   CacheOptions,
-  EnhancedStreamingOptions,
-  FlowControlPolicy,
-  GenerateFunction,
-  GuardrailsOptions,
-  RunFrame,
-  RunReport,
-  Scheduler,
-  SchedulerPriority,
-  SchedulerState,
-  SessionListOptions,
-  SessionStore,
-  SessionSummary,
-  StopCondition,
-  TokenUsage,
-} from '@lostgradient/operative';
-import type {
   CreateRunEngineOptions,
   DurableEventEnvelope,
   DurableEventGap,
   DurableEventOwner,
   DurableEventPage,
+  EnhancedStreamingOptions,
+  FlowControlPolicy,
+  GenerateFunction,
+  GuardrailsOptions,
+  LivenessSnapshot,
+  RunFrame,
+  RunReport,
+  Scheduler,
+  SchedulerPriority,
+  SchedulerState,
+  SelectionPlan,
   SessionInputAdmissionOutcome,
   SessionInputAdmissionRequest,
-} from '@lostgradient/operative/durable';
-import type { LivenessSnapshot } from '@lostgradient/operative/liveness';
-import type { SelectionPlan } from '@lostgradient/operative/providers';
-import type { Store } from '@lostgradient/operative/store';
+  SessionListOptions,
+  SessionStore,
+  SessionSummary,
+  StopCondition,
+  Store,
+  TokenUsage,
+} from '@lostgradient/operative';
+import type { SkillActivationRecord, SkillCatalogRevision } from '@lostgradient/skills';
+import type { ToolPolicy } from '@lostgradient/tool-protocol';
 import type {
+  ConditionalTextValueStore,
   HistoryPolicy,
   ListFilter,
   ListOptions,
+  ObservabilityOptions,
   PaginatedResult,
   ScheduleFilter,
   ScheduleSummary,
+  Storage,
+  StorageConfiguration,
+  TextValueStore,
   WorkflowLogRecord,
   WorkflowState,
   WorkflowSummary,
 } from '@lostgradient/weft';
-import type { ObservabilityOptions } from '@lostgradient/weft/observability';
-import type { Storage, StorageConfiguration, TextValueStore } from '@lostgradient/weft/storage';
-import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
 import type {
   AnyToolbox,
   GrantListFilter,
@@ -53,16 +65,6 @@ import type {
   ToolRequestContext,
 } from 'armorer';
 import type { ConversationSnapshot } from 'conversationalist';
-import type { ToolPolicy } from 'interoperability';
-import type {
-  EventIteratorOptions,
-  EventObservableOptions,
-  ObservableLike,
-  Observer,
-  RuntimeServices,
-  Subscription,
-} from 'lifecycle';
-import type { CreateMemoryOptions, Memory } from 'memory';
 
 import type {
   AgentDefinitions,
@@ -70,7 +72,8 @@ import type {
   AgentRunForName,
   BureauAgentCatalog,
 } from './agent-catalog';
-import type { AuditRetentionOption, AuditTrail } from './audit-trail';
+import type { AuditRetentionOption, AuditTrail, CheckpointRetentionOption } from './audit-trail';
+import type { BureauEventFeed } from './bureau-event-feed.ts';
 import type {
   DurableEventHistoryPageOptions,
   DurableEventHistorySubscribeOptions,
@@ -144,17 +147,25 @@ export interface IdentityConfiguration {
 
 export interface SkillRuntimeConfiguration {
   /**
-   * The skill provider backing the catalog. When omitted and the bureau has
-   * a `.persistence()` / `storage` backend configured, the bureau automatically
-   * constructs a storage-backed provider via `createStorageSkillProvider(kv)`.
-   * Supply an explicit provider to use a static catalog or a custom backend.
+   * An already-discovered catalog revision (COR-889).
+   *
+   * Omit it and the bureau discovers the skills its own persistence store holds, through the
+   * `storage` source. That is the only discovery Bureau does on a caller's behalf: the store is
+   * already the bureau's, and what is in it is what this runtime itself persisted. Reading
+   * filesystem roots or remote registries means deciding which of them to trust, which COR-752's
+   * Decision 1 puts on the host — so a caller that wants those discovers them and hands in the
+   * result.
+   *
+   * A *revision*, not a set of sources, because it is an immutable input to a run: a caller that
+   * hands one in has already decided which generation this run sees, and the catalog cannot move
+   * underneath it mid-conversation.
    */
-  provider?: SkillProvider;
+  catalog?: SkillCatalogRevision;
   includeTools?: boolean;
   skillPolicy?: ToolPolicy;
 }
 
-export type { FlowControlPolicy, ToolPolicy };
+export type { FlowControlPolicy, SkillActivationRecord, SkillCatalogRevision, ToolPolicy };
 
 export interface SkillCatalogEntry {
   name: string;
@@ -176,7 +187,14 @@ export interface SkillProvider {
   saveSkill?(name: string, skill: LoadedSkill): Promise<void>;
   deleteSkill?(name: string): Promise<void>;
   listResources(name: string): Promise<string[]>;
-  loadResource(name: string, path: string): Promise<string | undefined>;
+  /**
+   * Loads a resource as raw bytes.
+   *
+   * Bytes, not text, because a skill bundle carries images, fonts and other binary assets, and
+   * decoding one as UTF-8 corrupts it irreversibly. Decoding happens at the model-facing tool,
+   * which is the only place text is actually required.
+   */
+  loadResource(name: string, path: string): Promise<Uint8Array | undefined>;
   isEnabled(name: string): Promise<boolean>;
 }
 
@@ -270,6 +288,15 @@ export interface PersistenceOptions {
 // ── Bureau (headless, no HTTP) ──────────────────────────────────────
 
 export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
+  /**
+   * This bureau's identity, as {@link Bureau.id} and as the `bureauId` a
+   * `bureau.events` subscription names.
+   *
+   * Defaults to a runtime-generated identifier, which is fine for a single
+   * in-process bureau. A host serving several needs ids it can hand a client,
+   * so it supplies them.
+   */
+  id?: string;
   /**
    * The typed agent catalog (AB-15, AB-22) — a plain literal map of agent
    * name to `RunnableAgent`, exposed read-only as {@link Bureau.agents} and
@@ -411,6 +438,31 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * record already used.
    */
   auditRetention?: AuditRetentionOption;
+  /**
+   * COR-625: checkpoint-retention policy applied by the terminal-run cleanup
+   * step. Defaults to `'keep-all'` — unbounded, exactly today's behavior —
+   * so a long-lived deployment must opt in before any checkpoint history is
+   * ever pruned.
+   *
+   * `{ keepLast }` must be a positive integer, and `timeoutMilliseconds`, when
+   * supplied, a finite non-negative number; otherwise `createBureau` throws
+   * `BureauError(..., 'BAD_REQUEST')`.
+   *
+   * On every terminal transition of a durable run — completion, error, abort,
+   * or {@link Bureau.cancelDurableRun} — bureau runs exactly ONE cleanup step
+   * for that run, however many of those triggers fire. The step re-reads the
+   * run's durable record first and prunes only once the engine reports a
+   * terminal status, so a checkpoint can never be pruned ahead of the
+   * transition it belongs to.
+   *
+   * The step's own acknowledgement is written to the audit trail as one
+   * `run.cleanup-settled` record. It also folds into the run's `closed()`,
+   * but only ever DOWNGRADES it: a step that prunes cleanly (or has nothing
+   * to prune) leaves a `completed` run `completed`, while a step that fails
+   * or cannot be resolved surfaces in its place. Has effect only when a
+   * durable engine is composed.
+   */
+  checkpointRetention?: CheckpointRetentionOption;
   memory?: CreateMemoryOptions | Memory;
   cache?: CacheConfiguration;
   /**
@@ -559,7 +611,7 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * weft 0.23.1 defect makes `'workflow-lease'` incompatible with same-engine
    * `engine.suspend()`/`engine.resume()`, which Bureau's own scheduler uses
    * internally. See `CreateRunEngineOptions.ownership`'s JSDoc in
-   * `@lostgradient/operative/durable` for the full repro and root cause.
+   * `@lostgradient/operative` for the full repro and root cause.
    */
   durableOwnership?: Pick<
     CreateRunEngineOptions,
@@ -639,7 +691,7 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
   /**
    * AB-246 — the model-catalog refresh service exposed as
    * {@link Bureau.modelCatalog}. Omit to let `createBureau` construct a
-   * default `ModelCatalogService` over `@lostgradient/operative/providers`'s
+   * default `ModelCatalogService` over `@lostgradient/operative`'s
    * static `createModelCatalog()` seed; pass one explicitly to share a
    * catalog across bureaus or to supply a non-default `descriptorSource`
    * (see `model-catalog-refresh.ts`'s `CatalogDescriptorSource` — the seam a
@@ -657,7 +709,7 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * runtimes never share a clock, an identifier sequence, or a deferred
    * ledger. Omit to use the real globals (`createDefaultRuntimeServices()`),
    * exactly as before this option existed. A test composes its own via
-   * `createManualRuntimeServices` from `@lostgradient/operative/test` (or
+   * `createManualRuntimeServices` from `@lostgradient/operative` (or
    * `lifecycle`, which `@lostgradient/operative` re-exports it from).
    */
   runtime?: RuntimeServices;
@@ -963,6 +1015,42 @@ export interface BureauRunOptions {
 }
 
 export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
+  /** This bureau's identity — {@link BureauOptions.id}, or a generated one. */
+  readonly id: string;
+  /**
+   * This bureau's own events, as a replay-plus-live feed.
+   *
+   * The same events `addEventListener`/`subscribe` deliver, but recorded with
+   * cursors, so a client that reconnects resumes where it stopped instead of
+   * missing whatever happened while it was away. Serve it as `bureau.events`
+   * by registering this bureau's id against it — see
+   * `createBureauEventRegistry`.
+   *
+   * Shutdown ends every subscriber rather than leaving it hanging, but does
+   * not promise a final `bureau.disposed` envelope — see Weft's
+   * `bindFeedLifetime` for why. A client treats the stream ending as the
+   * signal.
+   *
+   * Named `eventFeed` because `events` is already this interface's
+   * async-iterator method.
+   */
+  readonly eventFeed: BureauEventFeed;
+  /**
+   * The event feeds of the runs this bureau owns, keyed by run id.
+   *
+   * A bureau owns its operatives' events as well as their lifecycles: it
+   * creates each run's feed before registering the run, pumps the run into
+   * it, and reaps it when the run is removed. Pass this as the
+   * `operative.runs.events` engine's `runFeeds` and a client can watch any
+   * run this bureau started.
+   *
+   * A feed outlives its run's completion and is reaped by `deleteRun`, so a
+   * client that subscribes on hearing `run.completed` still gets the whole
+   * history. A host that never deletes runs retains them.
+   *
+   * Read-only: entries are bureau's to create and remove.
+   */
+  readonly runEventFeeds: AgentRunEventRegistry;
   readonly store: Store;
   readonly memory: Memory | undefined;
   readonly scheduler: Scheduler | undefined;
@@ -1235,7 +1323,7 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * `accepted`/`applied` (no second increment). A `resume` against a session
    * that is not currently paused is accepted as a no-op, matching the
    * idempotent-abort precedent at
-   * `documentation/operative-type-safe-api.md:765`. An `accepted`
+   * `documentation/operative-type-safe-api.md#required-capabilities`. An `accepted`
    * pause/resume transitions to `failed` with `SteeringCommandFailure.reason
    * = 'run-terminal'` if the targeted run aborts or completes before its
    * `runStep` boundary is reached. An exact retry of the same
@@ -1717,7 +1805,7 @@ export interface RunStepDetail {
   step: number;
   content: string;
   final: boolean;
-  usage?: TokenUsage;
+  usage?: TokenUsage | undefined;
   toolCalls: readonly {
     id?: string;
     name: string;
@@ -1726,7 +1814,7 @@ export interface RunStepDetail {
   results: readonly {
     toolName: string;
     result: unknown;
-    error?: string;
+    error?: string | undefined;
   }[];
 }
 
@@ -1754,8 +1842,8 @@ export interface RunDetail extends RunSummary {
 export interface CreateRunRequest {
   message: string;
   sessionId?: string;
-  systemPrompt?: string;
-  maximumSteps?: number;
+  systemPrompt?: string | undefined;
+  maximumSteps?: number | undefined;
   /**
    * Per-request output token cap; overrides the provider's construction-time
    * maximumTokens for this run. Maps to the provider's max_tokens parameter.
@@ -1780,7 +1868,7 @@ export interface CreateRunRequest {
    */
   principal?: string;
   /** Authenticated, request-scoped authority forwarded to Armorer tool execution. */
-  requestContext?: ToolRequestContext;
+  requestContext?: ToolRequestContext | undefined;
 }
 
 export interface SubmitSchedulerTaskRequest {

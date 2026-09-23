@@ -1,15 +1,23 @@
+import { cosineSimilarity, type EmbeddingVectorLike } from '@lostgradient/embeddings';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 import {
-  encodeStorageKeyComponent,
   type Storage,
   storageConditionalBatch,
   storageDeletePrefix,
   storageKeys,
-  WEFT_RESERVED_KEY_PREFIXES,
-} from '@lostgradient/weft/storage/interface';
-import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+} from '@lostgradient/weft';
 import { z } from 'zod';
 
+import {
+  backfillDedupeIndexes,
+  dedupeIndexKey,
+  dedupeScopePrefix,
+  recordDedupeKey,
+  recordKey,
+  requireRecordDedupeKey,
+  scopePrefix,
+  validateMemoryKeyPrefix,
+} from './create-weft-memory-record-storage-helpers';
 import type {
   MemoryRecord,
   MemoryRecordScope,
@@ -130,61 +138,7 @@ export function createWeftMemoryRecordStorage(
   const disposeUnderlyingStorage = options?.disposeUnderlyingStorage ?? false;
   const runtime = options?.runtime ?? createDefaultRuntimeServices();
 
-  // The key prefix is public and documented "must not collide with Weft's
-  // reserved prefixes" — but the backend is explicitly meant to share one
-  // underlying Storage with a Weft engine, so a colliding custom prefix would
-  // let memory records overwrite engine keys. Enforce it here rather than trust
-  // the caller.
-  if (keyPrefix.length === 0) {
-    throw new Error('keyPrefix must be a non-empty string.');
-  }
-  for (const reserved of WEFT_RESERVED_KEY_PREFIXES) {
-    if (keyPrefix.startsWith(reserved) || reserved.startsWith(keyPrefix)) {
-      throw new Error(
-        `keyPrefix "${keyPrefix}" collides with the reserved Weft prefix "${reserved}".`,
-      );
-    }
-  }
-
-  function scopePrefix(scope: MemoryRecordScope): string {
-    // The public contract requires a non-empty namespace. Direct storage callers
-    // (not just createMemory) reach this boundary, so validate here so every
-    // scoped operation shares the check.
-    if (scope.namespace.length === 0) {
-      throw new Error('namespace must be a non-empty string.');
-    }
-    const tenant = encodeStorageKeyComponent(scope.tenantId ?? '');
-    const namespace = encodeStorageKeyComponent(scope.namespace);
-    return `${keyPrefix}t:${tenant}:n:${namespace}:`;
-  }
-
-  function recordKey(scope: MemoryRecordScope, id: string): string {
-    return `${scopePrefix(scope)}${encodeStorageKeyComponent(id)}`;
-  }
-
-  function dedupeScopePrefix(scope: MemoryRecordScope): string {
-    scopePrefix(scope);
-    const tenant = encodeStorageKeyComponent(scope.tenantId ?? '');
-    const namespace = encodeStorageKeyComponent(scope.namespace);
-    return `${keyPrefix}dedupe:t:${tenant}:n:${namespace}:`;
-  }
-
-  function dedupeIndexKey(scope: MemoryRecordScope, dedupeKey: string): string {
-    return `${dedupeScopePrefix(scope)}${encodeStorageKeyComponent(dedupeKey)}`;
-  }
-
-  function requireRecordDedupeKey(record: MemoryRecord): string {
-    const dedupeKey = record.metadata['dedupeKey'];
-    if (typeof dedupeKey !== 'string' || dedupeKey.length === 0) {
-      throw new Error('record.metadata.dedupeKey must be a non-empty string.');
-    }
-    return dedupeKey;
-  }
-
-  function recordDedupeKey(record: MemoryRecord): string | undefined {
-    const dedupeKey = record.metadata['dedupeKey'];
-    return typeof dedupeKey === 'string' ? dedupeKey : undefined;
-  }
+  validateMemoryKeyPrefix(keyPrefix);
 
   async function readActive(key: string): Promise<MemoryRecord | undefined> {
     const bytes = await storage.get(key);
@@ -199,7 +153,7 @@ export function createWeftMemoryRecordStorage(
   }
 
   async function listAllInScope(scope: MemoryRecordScope): Promise<MemoryRecord[]> {
-    const prefix = scopePrefix(scope);
+    const prefix = scopePrefix(keyPrefix, scope);
     const out: MemoryRecord[] = [];
     for await (const key of storageKeys(storage, prefix)) {
       const record = await readActive(key);
@@ -212,8 +166,10 @@ export function createWeftMemoryRecordStorage(
     scope: MemoryRecordScope,
     dedupeKey: string,
   ): Promise<MemoryRecord | undefined> {
-    const existingId = await readRecordId(dedupeIndexKey(scope, dedupeKey));
-    return existingId === undefined ? undefined : readActive(recordKey(scope, existingId));
+    const existingId = await readRecordId(dedupeIndexKey(keyPrefix, scope, dedupeKey));
+    return existingId === undefined
+      ? undefined
+      : readActive(recordKey(keyPrefix, scope, existingId));
   }
 
   async function assertDedupeKeyAvailable(
@@ -229,63 +185,9 @@ export function createWeftMemoryRecordStorage(
     }
   }
 
-  async function backfillDedupeIndexes(): Promise<void> {
-    await storageDeletePrefix(storage, `${keyPrefix}dedupe:`);
-    const candidates: Array<{
-      dedupeKey: string;
-      key: string;
-      record: MemoryRecord;
-      scope: MemoryRecordScope;
-    }> = [];
-    for await (const key of storageKeys(storage, `${keyPrefix}t:`)) {
-      const record = await readActive(key);
-      if (record === undefined) continue;
-      const dedupeKey = recordDedupeKey(record);
-      if (dedupeKey === undefined || dedupeKey.length === 0) continue;
-      candidates.push({
-        dedupeKey,
-        key,
-        record,
-        scope: {
-          ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
-          namespace: record.namespace,
-        },
-      });
-    }
-    candidates.sort((a, b) => {
-      const tenantOrder = (a.record.tenantId ?? '').localeCompare(b.record.tenantId ?? '');
-      if (tenantOrder !== 0) return tenantOrder;
-      const namespaceOrder = a.record.namespace.localeCompare(b.record.namespace);
-      if (namespaceOrder !== 0) return namespaceOrder;
-      const keyOrder = a.dedupeKey.localeCompare(b.dedupeKey);
-      if (keyOrder !== 0) return keyOrder;
-      const createdOrder = a.record.createdAt - b.record.createdAt;
-      if (createdOrder !== 0) return createdOrder;
-      return a.record.id.localeCompare(b.record.id);
-    });
-    const seen = new Set<string>();
-    const mutations: Parameters<typeof storageConditionalBatch>[2] = [];
-    for (const candidate of candidates) {
-      const groupKey = `${candidate.record.tenantId ?? ''}\0${candidate.record.namespace}\0${candidate.dedupeKey}`;
-      if (seen.has(groupKey)) {
-        mutations.push({ type: 'delete', key: candidate.key });
-        continue;
-      }
-      seen.add(groupKey);
-      mutations.push({
-        type: 'put',
-        key: dedupeIndexKey(candidate.scope, candidate.dedupeKey),
-        value: textEncoder.encode(candidate.record.id),
-      });
-    }
-    if (mutations.length > 0) {
-      await storageConditionalBatch(storage, [], mutations);
-    }
-  }
-
   return {
     async init(): Promise<void> {
-      await backfillDedupeIndexes();
+      await backfillDedupeIndexes(storage, keyPrefix, readActive, recordDedupeKey);
     },
 
     close(): Promise<void> {
@@ -300,7 +202,7 @@ export function createWeftMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       };
-      const key = recordKey(scope, record.id);
+      const key = recordKey(keyPrefix, scope, record.id);
       const existing = await readActive(key);
       const oldDedupeKey = existing === undefined ? undefined : recordDedupeKey(existing);
       const newDedupeKey = record.status === 'active' ? recordDedupeKey(record) : undefined;
@@ -311,12 +213,12 @@ export function createWeftMemoryRecordStorage(
         { type: 'put', key, value: encodeRecord(record) },
       ];
       if (oldDedupeKey !== undefined && oldDedupeKey !== newDedupeKey) {
-        mutations.push({ type: 'delete', key: dedupeIndexKey(scope, oldDedupeKey) });
+        mutations.push({ type: 'delete', key: dedupeIndexKey(keyPrefix, scope, oldDedupeKey) });
       }
       if (newDedupeKey !== undefined) {
         mutations.push({
           type: 'put',
-          key: dedupeIndexKey(scope, newDedupeKey),
+          key: dedupeIndexKey(keyPrefix, scope, newDedupeKey),
           value: textEncoder.encode(record.id),
         });
       }
@@ -339,8 +241,8 @@ export function createWeftMemoryRecordStorage(
         ...(record.tenantId !== undefined ? { tenantId: record.tenantId } : {}),
         namespace: record.namespace,
       };
-      const key = recordKey(scope, record.id);
-      const indexKey = dedupeIndexKey(scope, dedupeKey);
+      const key = recordKey(keyPrefix, scope, record.id);
+      const indexKey = dedupeIndexKey(keyPrefix, scope, dedupeKey);
       const applied = await storageConditionalBatch(
         storage,
         [
@@ -364,13 +266,13 @@ export function createWeftMemoryRecordStorage(
     },
 
     async get(id: string, scope: MemoryRecordScope): Promise<MemoryRecord | undefined> {
-      return readActive(recordKey(scope, id));
+      return readActive(recordKey(keyPrefix, scope, id));
     },
 
     async getMany(ids: string[], scope: MemoryRecordScope): Promise<MemoryRecord[]> {
       const out: MemoryRecord[] = [];
       for (const id of ids) {
-        const record = await readActive(recordKey(scope, id));
+        const record = await readActive(recordKey(keyPrefix, scope, id));
         if (record) out.push(record);
       }
       return out;
@@ -381,7 +283,7 @@ export function createWeftMemoryRecordStorage(
       listOptions?: { limit?: number; offset?: number },
     ): Promise<MemoryRecord[]> {
       const records = await listAllInScope(scope);
-      const sorted = records.sort((a, b) => b.createdAt - a.createdAt);
+      const sorted = records.toSorted((a, b) => b.createdAt - a.createdAt);
       const offset = listOptions?.offset ?? 0;
       const limit = listOptions?.limit ?? sorted.length;
       return sorted.slice(offset, offset + limit);
@@ -420,8 +322,7 @@ export function createWeftMemoryRecordStorage(
         searchOptions.threshold === undefined
           ? scored
           : scored.filter((hit) => hit.score >= searchOptions.threshold!);
-      filtered.sort((a, b) => b.score - a.score);
-      return filtered.slice(0, searchOptions.limit);
+      return filtered.toSorted((a, b) => b.score - a.score).slice(0, searchOptions.limit);
     },
 
     async update(
@@ -434,7 +335,7 @@ export function createWeftMemoryRecordStorage(
       // same id can both read version N and write N+1, losing one write. That is
       // acceptable for the single-process local backend; a multi-writer backend
       // would need conditional writes keyed on the prior version.
-      const key = recordKey(scope, id);
+      const key = recordKey(keyPrefix, scope, id);
       const existing = await readActive(key);
       if (!existing) return undefined;
 
@@ -455,12 +356,12 @@ export function createWeftMemoryRecordStorage(
         { type: 'put', key, value: encodeRecord(updated) },
       ];
       if (oldDedupeKey !== undefined && oldDedupeKey !== newDedupeKey) {
-        mutations.push({ type: 'delete', key: dedupeIndexKey(scope, oldDedupeKey) });
+        mutations.push({ type: 'delete', key: dedupeIndexKey(keyPrefix, scope, oldDedupeKey) });
       }
       if (newDedupeKey !== undefined) {
         mutations.push({
           type: 'put',
-          key: dedupeIndexKey(scope, newDedupeKey),
+          key: dedupeIndexKey(keyPrefix, scope, newDedupeKey),
           value: textEncoder.encode(updated.id),
         });
       }
@@ -469,7 +370,7 @@ export function createWeftMemoryRecordStorage(
     },
 
     async delete(id: string, scope: MemoryRecordScope): Promise<boolean> {
-      const key = recordKey(scope, id);
+      const key = recordKey(keyPrefix, scope, id);
       const existing = await readActive(key);
       if (existing === undefined) return false;
       const dedupeKey = existing.metadata['dedupeKey'];
@@ -479,7 +380,7 @@ export function createWeftMemoryRecordStorage(
           [],
           [
             { type: 'delete', key },
-            { type: 'delete', key: dedupeIndexKey(scope, dedupeKey) },
+            { type: 'delete', key: dedupeIndexKey(keyPrefix, scope, dedupeKey) },
           ],
         );
       } else {
@@ -489,8 +390,8 @@ export function createWeftMemoryRecordStorage(
     },
 
     async deleteNamespace(scope: MemoryRecordScope): Promise<number> {
-      const removed = await storageDeletePrefix(storage, scopePrefix(scope));
-      await storageDeletePrefix(storage, dedupeScopePrefix(scope));
+      const removed = await storageDeletePrefix(storage, scopePrefix(keyPrefix, scope));
+      await storageDeletePrefix(storage, dedupeScopePrefix(keyPrefix, scope));
       return removed;
     },
   };

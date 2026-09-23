@@ -1,7 +1,16 @@
+import type {
+  HookPlanDescription,
+  ObservableLike,
+  Observer,
+  Subscription,
+} from '@lostgradient/lifecycle';
+import {
+  CompletableEventTarget,
+  createDefaultRuntimeServices,
+  forwardEvents,
+} from '@lostgradient/lifecycle';
 import type { AnyToolbox, ToolboxEventMap } from 'armorer';
 import { Conversation, isConversation } from 'conversationalist';
-import type { ObservableLike, Observer, Subscription } from 'lifecycle';
-import { CompletableEventTarget, createDefaultRuntimeServices, forwardEvents } from 'lifecycle';
 
 import { createClosedAcknowledgement } from './closed-acknowledgement';
 import type { DurableActiveRunContext } from './durable/active-run-adapter';
@@ -45,6 +54,24 @@ export interface ActiveRun {
   result: Promise<RunResult>;
   abort: (reason?: string) => void;
   /**
+   * A redacted description of this run's effective hook plan (COR-1270):
+   * which hook sources applied, and in what order.
+   *
+   * Reads the SNAPSHOT this run is executing against, not any tier's source
+   * registry, so what it reports is what actually ran — a registration added
+   * to a source registry after dispatch does not appear here, because it
+   * does not affect this run either.
+   *
+   * `undefined` when the run has no hook plan at all, which distinguishes
+   * "no hooks configured" from "a plan that happens to be empty".
+   *
+   * There is no authorization gate in front of this, by decision (COR-567):
+   * any holder of the run handle may call it, and redaction is the entire
+   * security boundary. Nothing executable and nothing protected is reachable
+   * from what it returns.
+   */
+  describeHookPlan: () => HookPlanDescription | undefined;
+  /**
    * AB-361 — settles once this run's initial durable workflow record is
    * committed (the write `driveDurableRun`'s `await context.engine.start(...)`
    * performs in `durable/active-run-adapter.ts`). `undefined` on the
@@ -62,7 +89,7 @@ export interface ActiveRun {
    * await it — settlement failure (a rejecting `engine.start`) is only
    * observed by a caller that explicitly awaits this field.
    */
-  durablyStarted?: Promise<void>;
+  durablyStarted?: Promise<void> | undefined;
   /**
    * A truthful cleanup acknowledgement (AB-37 / AB-204), backed by the same
    * settlement `abort()` already uses. Never rejects; idempotent after
@@ -126,15 +153,15 @@ export interface ActiveRun {
  * process-wide defaults.
  */
 export interface CreateActiveRunDependencies {
-  identifiers?: RunIdentifierSeam;
-  clock?: StallWatchdogClock;
+  identifiers?: RunIdentifierSeam | undefined;
+  clock?: StallWatchdogClock | undefined;
   /**
    * The authenticated principal or Bureau identifier that owns this run
    * (`LivenessSnapshot.owner`, AC4). Absent for a standalone run (AB-88's
    * standalone-run resolution) — Bureau supplies its own `request.principal`
    * here when starting a run.
    */
-  owner?: string;
+  owner?: string | undefined;
 }
 
 /**
@@ -193,7 +220,13 @@ export function createActiveRun(
 
   if (durable) {
     return createDurableActiveRun(
-      { engine: durable.engine, checkpointStore: durable.checkpointStore },
+      {
+        engine: durable.engine,
+        checkpointStore: durable.checkpointStore,
+        // COR-625: forwarded from the routing options so a composer's
+        // terminal-cleanup step reaches `closed()` on this path too.
+        ...(durable.terminalCleanup ? { terminalCleanup: durable.terminalCleanup } : {}),
+      },
       {
         runId: durable.runId,
         sessionId: durable.sessionId ?? durable.runId,
@@ -301,7 +334,7 @@ export function createActiveRun(
   // this run's own id as `ownerId` on every `Toolbox.execute()` call it
   // makes, and armorer echoes it back verbatim on `execute-start`,
   // `progress`, and `settled`.
-  const isOwnEvent = (event: { ownerId?: string }): boolean => event.ownerId === runId;
+  const isOwnEvent = (event: { ownerId?: string | undefined }): boolean => event.ownerId === runId;
   // AB-204 (PRRT_kwDORvupsc6ekmeT / PRRT_kwDORvupsc6elvRf): every run-owned
   // hook (`onRunComplete`/`onRunAbort`/`onRunError`/`onLLMInput`/
   // `onLLMOutput`) fires via `runHookSilently`'s fire-and-forget
@@ -524,11 +557,13 @@ export function createActiveRun(
     // function instead.
     const attachToolboxCuratedListeners = (toolboxInstance: AnyToolbox): (() => void) => {
       const toolboxWithListener = toolboxInstance as unknown as {
-        addEventListener?: <K extends keyof ToolboxEventMap>(
-          type: K,
-          listener: (e: ToolboxEventMap[K]) => void,
-          options?: AddEventListenerOptions,
-        ) => () => void;
+        addEventListener?:
+          | (<K extends keyof ToolboxEventMap>(
+              type: K,
+              listener: (e: ToolboxEventMap[K]) => void,
+              options?: AddEventListenerOptions,
+            ) => () => void)
+          | undefined;
       };
       if (!toolboxWithListener.addEventListener) return () => {};
       const addListener = toolboxWithListener.addEventListener.bind(toolboxWithListener);
@@ -687,6 +722,7 @@ export function createActiveRun(
   return {
     result,
     abort,
+    describeHookPlan: () => options.hooks?.describePlan(),
     closed,
     addEventListener: emitter.addEventListener.bind(emitter),
     removeEventListener: emitter.removeEventListener.bind(emitter),
@@ -697,7 +733,8 @@ export function createActiveRun(
     toObservable: emitter.toObservable.bind(emitter),
     complete,
     snapshot: () => liveness.snapshot(),
-    subscribeSnapshot: (observer, options) => liveness.subscribeSnapshot(observer, options),
+    subscribeSnapshot: (observer, subscriptionOptions) =>
+      liveness.subscribeSnapshot(observer, subscriptionOptions),
     [Symbol.dispose](): void {
       abort();
       complete();
@@ -716,9 +753,9 @@ export interface DurableRunRouting extends DurableActiveRunContext {
    * can correlate a recovered handle to its session. Defaults to `runId` for a
    * headless run with no distinct session.
    */
-  sessionId?: string;
+  sessionId?: string | undefined;
   /** First user message to seed a brand-new run. */
-  prompt?: string;
+  prompt?: string | undefined;
   /**
    * A pre-built emitter for this run's event surface. Threaded through to
    * {@link createDurableActiveRun} — see `DurableActiveRunOptions.emitter` for
@@ -726,11 +763,11 @@ export interface DurableRunRouting extends DurableActiveRunContext {
    * `requestHumanInput`'s `HumanWaitParkedEvent`, to the exact emitter this
    * `ActiveRun` exposes).
    */
-  emitter?: OperativeEventEmitter;
+  emitter?: OperativeEventEmitter | undefined;
   /**
    * Synchronous hook invoked with the freshly-built per-run `DurableRunDeps`
    * (`ctx.services`) right before `engine.start`. See
    * `DurableActiveRunOptions.onServices`.
    */
-  onServices?: (services: DurableRunDeps) => void;
+  onServices?: ((services: DurableRunDeps) => void) | undefined;
 }

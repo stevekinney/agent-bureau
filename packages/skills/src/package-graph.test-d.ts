@@ -1,41 +1,22 @@
 // E3 — Confirm skills stays a package (type-level assertions)
 //
 // This file proves at the type level that:
-//   1. SkillProvider (from this package) is a SUPERSET of the SkillProviderLike
-//      seam the bureau builder accepts via `.skills(provider)`. Bureau can
-//      consume a SkillProvider without importing from the skills package.
-//   2. ToolPolicy (from this package) is structurally identical to the
-//      ToolPolicyLike interface operative uses — confirming E4's extraction
-//      (moving ToolPolicy to a shared package) will work cleanly.
+//   ToolPolicy (from this package) is structurally identical to the
+//   ToolPolicyLike interface operative uses — confirming E4's extraction
+//   (moving ToolPolicy to a shared package) will work cleanly.
 //
-// These checks are compile-time only. If SkillProvider drops a method the
-// bureau seam requires, or if ToolPolicy diverges from ToolPolicyLike, this
-// file will produce a type error during `bun run check-types`.
+// The `SkillProvider`/`SkillProviderLike` proof that used to sit here went with
+// the seam it described: Bureau no longer consumes a provider, so there is no
+// structural contract left for it to satisfy. COR-892 replaced that seam with a
+// catalog revision, which Bureau imports as a type rather than duck-types.
+//
+// These checks are compile-time only. If ToolPolicy diverges from ToolPolicyLike,
+// this file will produce a type error during typechecking.
 //
 // The seam interfaces are inlined here (not imported from operative) to
 // preserve the dependency direction: skills must NOT import from operative.
 
-import type { SkillProvider, ToolPolicy } from './types';
-
-// ── SkillProviderLike — the seam interface bureau uses ────────────────────────
-//
-// Copied from operative's SkillProviderLike shape.
-// Skills must NOT import from operative. This inline copy proves structural
-// compatibility without creating a forbidden dependency.
-//
-// If operative's SkillProviderLike changes, both files must update — this is
-// intentional: the seam is the contract, and both sides own it.
-
-type SkillProviderLike = {
-  listSkills(): Promise<Array<{ name: string; description: string }>>;
-  isEnabled(name: string): Promise<boolean>;
-};
-
-// Structural proof: every SkillProvider is a valid SkillProviderLike.
-// This assertion fails if SkillProvider removes listSkills() or isEnabled().
-type SkillProviderSatisfiesLike = SkillProvider extends SkillProviderLike ? true : false;
-declare const _providerCheck: SkillProviderSatisfiesLike;
-void (_providerCheck satisfies true);
+import type { ToolPolicy } from './types';
 
 // ── ToolPolicyLike — the seam interface operative uses ────────────────────────
 //
@@ -54,8 +35,8 @@ type ToolPolicyLike = {
 type ToolPolicyExtendsLike = ToolPolicy extends ToolPolicyLike ? true : false;
 type ToolPolicyLikeExtendsPolicy = ToolPolicyLike extends ToolPolicy ? true : false;
 
-declare const _toolPolicyForward: ToolPolicyExtendsLike;
-void (_toolPolicyForward satisfies true);
+declare const toolPolicyForward: ToolPolicyExtendsLike;
+void (toolPolicyForward satisfies true);
 
-declare const _toolPolicyReverse: ToolPolicyLikeExtendsPolicy;
-void (_toolPolicyReverse satisfies true);
+declare const toolPolicyReverse: ToolPolicyLikeExtendsPolicy;
+void (toolPolicyReverse satisfies true);

@@ -1,4 +1,4 @@
-import type { RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { RunEvent } from '../agent-run';
 import type { CombinedOperativeEventType } from '../events';
@@ -26,15 +26,15 @@ export type { FiredFault };
  */
 export interface CausalTraceEntry {
   readonly resource: string;
-  readonly owner?: string;
+  readonly owner?: string | undefined;
   readonly revision: number;
   readonly event: string;
-  readonly command?: string;
+  readonly command?: string | undefined;
   readonly result?: unknown;
-  readonly effect?: string;
-  readonly cleanup?: CleanupAcknowledgement;
-  readonly faultEvidence?: FiredFault;
-  readonly causedBy?: readonly string[];
+  readonly effect?: string | undefined;
+  readonly cleanup?: CleanupAcknowledgement | undefined;
+  readonly faultEvidence?: FiredFault | undefined;
+  readonly causedBy?: readonly string[] | undefined;
 }
 
 /** Identifies the resource an attached source represents — `resource = \`${kind}:${id}\`` on every entry it produces. */

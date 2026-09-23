@@ -22,19 +22,19 @@ export interface CreateContextCompactorOptions {
    * therefore a message-count setting, not a user/assistant turn-pair count.
    * Default: `4`.
    */
-  retainRecentMessages?: number;
+  retainRecentMessages?: number | undefined;
   /**
    * Text prepended to the summary when injected as a system message.
    * Default: `'Previous conversation summary:'`.
    */
-  summaryPrefix?: string;
+  summaryPrefix?: string | undefined;
   /**
    * Structured preserve policy forwarded to `Conversation.compact()`:
    * pinned messages, decision/error annotations. See
    * `CompactionPreservePolicy` in conversationalist. All flags default to
    * `true` when omitted.
    */
-  preservePolicy?: CompactionPreservePolicy;
+  preservePolicy?: CompactionPreservePolicy | undefined;
 }
 
 /**

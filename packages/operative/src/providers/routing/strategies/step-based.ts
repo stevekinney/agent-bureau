@@ -10,9 +10,9 @@ export type StepBasedStrategyOptions = {
   /** Route name for intermediate steps. */
   middle: string;
   /** Route name for the final step (when no tool calls are pending). Optional. */
-  last?: string;
+  last?: string | undefined;
   /** Step number at which to switch from first to middle. Defaults to 1. */
-  middleAfterStep?: number;
+  middleAfterStep?: number | undefined;
 };
 
 /**

@@ -1,4 +1,4 @@
-import type { Embedder, EmbeddingVector } from 'interoperability';
+import type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
 
 import { ProviderError } from '../errors.ts';
 
@@ -17,9 +17,9 @@ export interface OpenAIEmbeddingClient {
  * Options for createOpenAIEmbedder.
  */
 export interface OpenAIEmbedderOptions {
-  client?: OpenAIEmbeddingClient;
-  apiKey?: string;
-  model?: string;
+  client?: OpenAIEmbeddingClient | undefined;
+  apiKey?: string | undefined;
+  model?: string | undefined;
 }
 
 /**

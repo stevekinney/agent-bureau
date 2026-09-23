@@ -1,8 +1,8 @@
-import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+import type { JSONValue } from '@lostgradient/tool-protocol';
+import type { ConditionalTextValueStore } from '@lostgradient/weft';
 import type { ConversationHistory } from 'conversationalist';
-import type { JSONValue } from 'interoperability';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { createSessionStore } from './session/create-session-store';
 import type { RunOutcome } from './types';
@@ -28,14 +28,14 @@ export interface RunRef {
   /** Terminal or in-progress status, persisted so recovery can check it. */
   status: 'running' | 'completed' | 'error' | 'aborted';
   /** Exact user message that started this run, when known; older records may omit it. */
-  userMessageId?: string;
+  userMessageId?: string | undefined;
   /**
    * Metadata at reservation time for durable recovery's three-way merge.
    * Absent on older records; those recover with current-session precedence.
    */
-  readonly baseConversationMetadata?: Readonly<Record<string, JSONValue>>;
+  readonly baseConversationMetadata?: Readonly<Record<string, JSONValue>> | undefined;
   /** Safe terminal classification; absence means in-progress or legacy, never success. */
-  outcome?: RunOutcome;
+  outcome?: RunOutcome | undefined;
   /** ISO timestamp when this run was started. */
   startedAt: string;
   /**
@@ -94,10 +94,10 @@ export interface AgentSession {
 export function createAgentSession(options: {
   agentName: string;
   conversationHistory: ConversationHistory;
-  metadata?: Record<string, JSONValue>;
-  id?: string;
-  runs?: RunRef[];
-  runtime?: RuntimeServices;
+  metadata?: Record<string, JSONValue> | undefined;
+  id?: string | undefined;
+  runs?: RunRef[] | undefined;
+  runtime?: RuntimeServices | undefined;
 }): AgentSession {
   const runtime = options.runtime ?? createDefaultRuntimeServices();
   const now = runtime.clock.nowISO();
@@ -132,7 +132,7 @@ export function createAgentSession(options: {
 export async function saveAgentSession(
   store: ConditionalTextValueStore,
   session: AgentSession,
-  options: { runtime?: RuntimeServices } = {},
+  options: { runtime?: RuntimeServices | undefined } = {},
 ): Promise<void> {
   await createSessionStore(store, { runtime: options.runtime }).save(session);
 }

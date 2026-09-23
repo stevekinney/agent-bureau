@@ -6,7 +6,7 @@
  * generate function. On miss, the response is computed, stored, and returned.
  */
 
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { TextValueStore } from '@lostgradient/weft';
 
 import {
   readBackendDescriptors,

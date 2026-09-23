@@ -10,10 +10,6 @@ export type EventMap = Record<string, Event>;
  * Does not wrap or abstract EventTarget — it IS an EventTarget.
  */
 export class TypedEventTarget<M extends EventMap> extends EventTarget {
-  constructor() {
-    super();
-  }
-
   override addEventListener<K extends keyof M & string>(
     type: K,
     listener: ((event: M[K]) => void) | null,
@@ -29,7 +25,8 @@ export class TypedEventTarget<M extends EventMap> extends EventTarget {
     listener: EventListenerOrEventListenerObject | ((event: never) => void) | null,
     options?: boolean | AddEventListenerOptions,
   ): void {
-    super.addEventListener(type, listener as EventListener, options);
+    if (listener === null) return;
+    Reflect.apply(EventTarget.prototype['addEventListener'], this, [type, listener, options]);
   }
 
   override removeEventListener<K extends keyof M & string>(
@@ -47,7 +44,8 @@ export class TypedEventTarget<M extends EventMap> extends EventTarget {
     listener: EventListenerOrEventListenerObject | ((event: never) => void) | null,
     options?: boolean | EventListenerOptions,
   ): void {
-    super.removeEventListener(type, listener as EventListener, options);
+    if (listener === null) return;
+    Reflect.apply(EventTarget.prototype['removeEventListener'], this, [type, listener, options]);
   }
 
   /**

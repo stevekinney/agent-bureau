@@ -11,6 +11,11 @@ import type {
   GeminiListBatchJobsRequest,
 } from '../types.ts';
 
+function wrapGeminiError(error: unknown): ProviderError {
+  if (error instanceof ProviderError) return error;
+  return new ProviderError({ provider: 'gemini', cause: error });
+}
+
 /**
  * `@google/genai` 1.7.0 introduced `client.batches`. The declared peer floor
  * (`>=2.19.0`) is already well above it, so this guard exists for symmetry with
@@ -34,9 +39,9 @@ export interface GeminiBatchClientOptions {
    * {@link GeminiBatchClient} with no cast — see
    * `providers/batch-client-assignability.test-d.ts`.
    */
-  client?: GeminiBatchClient;
+  client?: GeminiBatchClient | undefined;
   /** Falls back to the `GOOGLE_API_KEY` environment variable when omitted. */
-  apiKey?: string;
+  apiKey?: string | undefined;
   /**
    * Overrides the Gemini SDK's default base URL (`HttpOptions.baseUrl`).
    * Accepts any string — including a credential-injecting proxy origin — with
@@ -45,7 +50,7 @@ export interface GeminiBatchClientOptions {
    * `getProviderCapabilities('gemini')` keeps reporting `batchInference: true`
    * regardless of this value.
    */
-  baseURL?: string;
+  baseURL?: string | undefined;
 }
 
 /**
@@ -123,18 +128,13 @@ export function createGeminiBatchClient(
     return clientPromise;
   }
 
-  function wrap(error: unknown): ProviderError {
-    if (error instanceof ProviderError) return error;
-    return new ProviderError({ provider: 'gemini', cause: error });
-  }
-
   return {
     async create(request: GeminiCreateBatchJobRequest): Promise<GeminiBatchJob> {
       try {
         const client = await getClient();
         return await client.batches.create(request);
       } catch (error) {
-        throw wrap(error);
+        throw wrapGeminiError(error);
       }
     },
 
@@ -143,7 +143,7 @@ export function createGeminiBatchClient(
         const client = await getClient();
         return await client.batches.get(reference);
       } catch (error) {
-        throw wrap(error);
+        throw wrapGeminiError(error);
       }
     },
 
@@ -152,7 +152,7 @@ export function createGeminiBatchClient(
         const client = await getClient();
         yield* await client.batches.list(request);
       } catch (error) {
-        throw wrap(error);
+        throw wrapGeminiError(error);
       }
     },
 
@@ -161,7 +161,7 @@ export function createGeminiBatchClient(
         const client = await getClient();
         await client.batches.cancel(reference);
       } catch (error) {
-        throw wrap(error);
+        throw wrapGeminiError(error);
       }
     },
 
@@ -170,7 +170,7 @@ export function createGeminiBatchClient(
         const client = await getClient();
         return await client.batches.delete(reference);
       } catch (error) {
-        throw wrap(error);
+        throw wrapGeminiError(error);
       }
     },
   };

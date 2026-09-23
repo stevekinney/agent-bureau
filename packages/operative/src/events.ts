@@ -1,13 +1,22 @@
+import type {
+  EventMap,
+  ForwardedEvent,
+  HookReplayPolicy,
+  ObservableLike,
+  Observer,
+  Subscription,
+} from '@lostgradient/lifecycle';
+import type { ToolCall } from '@lostgradient/tool-protocol';
 import type { ToolboxEvents, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationActionType } from 'conversationalist';
-import type { ToolCall } from 'interoperability';
-import type { EventMap, ForwardedEvent, ObservableLike, Observer, Subscription } from 'lifecycle';
 
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
 import type { SteeringCommandFailure, SteeringEffectiveState } from './durable/types';
 import { type AgentRunError, type AgentRunErrorKind, toAgentRunError } from './errors';
 import type { SemanticProgress } from './liveness';
+import type { SelectionOutcomeKind } from './providers/selection';
+import type { Effort } from './providers/types';
 import type { GenerateResponse, RunResult, StepResult, TokenUsage } from './types';
 
 // ---------------------------------------------------------------------------
@@ -39,12 +48,12 @@ export class StepGeneratedEvent extends Event {
   readonly step: number;
   readonly content: string;
   readonly toolCalls: readonly ToolCall[];
-  readonly usage?: TokenUsage;
+  readonly usage?: TokenUsage | undefined;
   constructor(data: {
     step: number;
     content: string;
     toolCalls: readonly ToolCall[];
-    usage?: TokenUsage;
+    usage?: TokenUsage | undefined;
   }) {
     super(StepGeneratedEvent.type);
     this.step = data.step;
@@ -89,8 +98,8 @@ export class StepCompletedEvent extends Event {
   readonly content: string;
   readonly toolCalls: readonly ToolCall[];
   readonly results: readonly ToolExecutionResult[];
-  readonly usage?: TokenUsage;
-  readonly metadata?: Record<string, unknown>;
+  readonly usage?: TokenUsage | undefined;
+  readonly metadata?: Record<string, unknown> | undefined;
   readonly final: boolean;
   constructor(data: StepResult) {
     super(StepCompletedEvent.type);
@@ -114,9 +123,9 @@ export class RunCompletedEvent<O = unknown, H extends boolean = true> extends Ev
   readonly usage: TokenUsage;
   readonly finishReason: RunResult['finishReason'];
   readonly error?: unknown;
-  readonly schemaValidation?: RunResult['schemaValidation'];
+  readonly schemaValidation?: RunResult['schemaValidation'] | undefined;
   /** See {@link RunResult.costEstimate}. */
-  readonly costEstimate?: RunResult['costEstimate'];
+  readonly costEstimate?: RunResult['costEstimate'] | undefined;
   /** See {@link RunResult.output}. */
   readonly output?: unknown;
   constructor(data: RunResult<O, H>) {
@@ -149,7 +158,7 @@ export class RunAbortedEvent extends Event {
   static readonly type = 'run.aborted' as const;
   readonly step: number;
   readonly error: AgentRunError;
-  readonly reason?: string;
+  readonly reason?: string | undefined;
   // The conversation as it stood when the run aborted. On the durable path the
   // workflow mutates per-step checkpoint snapshots, never the launch-time input
   // instance, so listeners MUST persist this conversation (the reconstructed /
@@ -162,9 +171,9 @@ export class RunAbortedEvent extends Event {
    * build an accurate terminal report (AB-96) without a race against the
    * result promise's microtask resolution.
    */
-  readonly usage?: TokenUsage;
+  readonly usage?: TokenUsage | undefined;
   /** See {@link RunResult.costEstimate}. Computed from `usage` when available. */
-  readonly costEstimate?: RunResult['costEstimate'];
+  readonly costEstimate?: RunResult['costEstimate'] | undefined;
   constructor(
     step: number,
     conversation: Conversation,
@@ -197,7 +206,7 @@ export class RunTripwireEvent extends Event {
   readonly category: string;
   readonly phase: 'input' | 'output';
   readonly confidence: number;
-  readonly detail?: string;
+  readonly detail?: string | undefined;
   constructor(
     step: number,
     data: {
@@ -205,7 +214,7 @@ export class RunTripwireEvent extends Event {
       category: string;
       phase: 'input' | 'output';
       confidence: number;
-      detail?: string;
+      detail?: string | undefined;
     },
   ) {
     super(RunTripwireEvent.type);
@@ -221,7 +230,7 @@ export class RunTripwireEvent extends Event {
 export class StepAbortedEvent extends Event {
   static readonly type = 'step.aborted' as const;
   readonly step: number;
-  readonly reason?: string;
+  readonly reason?: string | undefined;
   constructor(step: number, reason?: string) {
     super(StepAbortedEvent.type);
     this.step = step;
@@ -229,12 +238,97 @@ export class StepAbortedEvent extends Event {
   }
 }
 
+/**
+ * One backend's four addressable coordinates, as `generate.started` records
+ * them. Every field is optional because a run with no selection gate and no
+ * steering gate genuinely knows none of them — the generate function owns
+ * its own defaults, and reporting a guess would be worse than reporting
+ * nothing.
+ */
+export interface GenerationBackendRecord {
+  readonly provider?: string | undefined;
+  readonly model?: string | undefined;
+  readonly route?: string | undefined;
+  readonly effort?: Effort | undefined;
+}
+
+/**
+ * One field where the configuration a generation is issued under differs
+ * from the one the selector planned (AB-68). `planned` and `effective` are
+ * the two values themselves, so a consumer never has to re-derive the
+ * difference from the two records to explain it.
+ */
+export interface GenerationDivergence {
+  readonly field: 'provider' | 'model' | 'route' | 'effort';
+  readonly reason: 'steering-override';
+  readonly planned?: string | undefined;
+  readonly effective?: string | undefined;
+}
+
+/**
+ * AB-68 — what `generate.started` records about the configuration one
+ * generation is issued under.
+ *
+ * `selected` is what AB-64's selector chose; `effective` is what this call
+ * is actually issued under, which is `selected` with the session's
+ * boundary-read `SteeringDesiredState` layered over it.
+ *
+ * `effective` is deliberately NOT the provider's post-call actual state.
+ * Operative's `generate` is caller-supplied and opaque: at the moment this
+ * event fires the request has not been issued, so the only honest claim is
+ * "this is the configuration the call is being made with". The provider's
+ * terminal state — and whether it honored any of this — is
+ * {@link import('./providers/selection').EffectiveGenerationResult}'s job,
+ * checked after the response returns. Reporting a pre-call value as the
+ * provider's effective state is exactly the divergence this record exists
+ * to make visible, so it must not itself commit that error.
+ */
+export interface GenerationSelectionRecord {
+  /** `SelectionPlan.planId`. Absent when the run has no selection gate. */
+  readonly planId?: string | undefined;
+  /** The plan's own outcome. Absent when the run has no selection gate. */
+  readonly planOutcome?: SelectionOutcomeKind | undefined;
+  /** What the selector chose. Absent when no plan reached `'selected'`. */
+  readonly selected?: GenerationBackendRecord | undefined;
+  /** The configuration this call is issued under. See the note above. */
+  readonly effective: GenerationBackendRecord;
+  /** AB-67's `SteeringDesiredState.configVersion`. Absent without a
+   *  steering gate. */
+  readonly configVersion?: number | undefined;
+  /** Every field where `effective` differs from `selected`. Empty when they
+   *  agree, or when there is no plan to diverge from. */
+  readonly divergence: readonly GenerationDivergence[];
+  /** The plan's ordered fallback backends, as recorded by the selector.
+   *  Empty when no `fallbackOrder` is configured. This is the fallback
+   *  the plan *authorizes*, not a fallback that has occurred — a route
+   *  failover happens inside the provider call, after this event. */
+  readonly fallbackPlan: readonly GenerationBackendRecord[];
+}
+
 export class GenerateStartedEvent extends Event {
   static readonly type = 'generate.started' as const;
   readonly step: number;
-  constructor(step: number) {
+  /**
+   * AB-68. Absent when the run has neither a selection gate nor a steering
+   * gate — an unconfigured run has nothing truthful to report, and an empty
+   * record would be indistinguishable from one whose every field resolved
+   * to `undefined`.
+   */
+  readonly selection?: GenerationSelectionRecord | undefined;
+  /**
+   * COR-581 — the effective-context epoch this generation was issued
+   * under, referenced by identity. The epoch itself is the authoritative
+   * record; carrying only its id here keeps the event small and keeps one
+   * epoch shared by every attempt that genuinely reused it.
+   *
+   * Absent when the run composes no context-epoch sealer.
+   */
+  readonly contextEpochId?: string | undefined;
+  constructor(step: number, selection?: GenerationSelectionRecord, contextEpochId?: string) {
     super(GenerateStartedEvent.type);
     this.step = step;
+    this.selection = selection;
+    this.contextEpochId = contextEpochId;
   }
 }
 
@@ -272,13 +366,28 @@ export class GenerateRetryEvent extends Event {
   /** Whether the retry context was mutated by a RetryMutator. */
   readonly mutated: boolean;
   /** Human-readable description of the mutation, if any. */
-  readonly mutationDescription?: string;
+  readonly mutationDescription?: string | undefined;
+  /**
+   * COR-581 — the successor effective-context epoch this retry will be
+   * issued under, present exactly when `mutated` is true.
+   *
+   * A provider-level retry re-issues the request built before
+   * `generate.started` fired, so it normally consumes that same epoch and
+   * carries nothing here. A `RetryMutator` genuinely changes the request,
+   * though, and the epoch contract requires a change to what the model
+   * sees to produce a successor rather than being absorbed silently. That
+   * successor is referenced here rather than on a second
+   * `generate.started`, which would change that event's cardinality for
+   * every existing consumer.
+   */
+  readonly contextEpochId?: string | undefined;
   constructor(
     step: number,
     attempt: number,
     error: unknown,
     mutated = false,
     mutationDescription?: string,
+    contextEpochId?: string,
   ) {
     super(GenerateRetryEvent.type);
     this.step = step;
@@ -286,6 +395,7 @@ export class GenerateRetryEvent extends Event {
     this.error = error;
     this.mutated = mutated;
     this.mutationDescription = mutationDescription;
+    this.contextEpochId = contextEpochId;
   }
 }
 
@@ -348,7 +458,7 @@ export class ElicitationRequestedEvent extends Event {
   readonly step: number;
   readonly message: string;
   readonly requestId: string;
-  readonly toolCallId?: string;
+  readonly toolCallId?: string | undefined;
   constructor(step: number, message: string, requestId: string, toolCallId?: string) {
     super(ElicitationRequestedEvent.type);
     this.step = step;
@@ -363,7 +473,7 @@ export class ElicitationResolvedEvent extends Event {
   readonly step: number;
   readonly accepted: boolean;
   readonly requestId: string;
-  readonly toolCallId?: string;
+  readonly toolCallId?: string | undefined;
   constructor(step: number, accepted: boolean, requestId: string, toolCallId?: string) {
     super(ElicitationResolvedEvent.type);
     this.step = step;
@@ -396,7 +506,7 @@ export class BackpressureReleasedEvent extends Event {
 export class UsageAccumulatedEvent extends Event {
   static readonly type = 'usage.accumulated' as const;
   readonly step: number;
-  readonly stepUsage?: TokenUsage;
+  readonly stepUsage?: TokenUsage | undefined;
   readonly totalUsage: TokenUsage;
   /**
    * Prompt-cache hit rate for this step, from {@link estimateCacheHitRate}
@@ -404,9 +514,9 @@ export class UsageAccumulatedEvent extends Event {
    * cache signal (provider didn't report `cacheReadTokens`/`cacheCreationTokens`,
    * or there was no usage at all).
    */
-  readonly stepCacheHitRate?: number;
+  readonly stepCacheHitRate?: number | undefined;
   /** Prompt-cache hit rate across the run so far, from `totalUsage`. */
-  readonly totalCacheHitRate?: number;
+  readonly totalCacheHitRate?: number | undefined;
   constructor(step: number, totalUsage: TokenUsage, stepUsage?: TokenUsage) {
     super(UsageAccumulatedEvent.type);
     this.step = step;
@@ -674,11 +784,16 @@ export class ToolProgressBubbleEvent extends Event {
   readonly step: number;
   readonly toolName: string;
   readonly toolCallId: string;
-  readonly percent?: number;
-  readonly message?: string;
+  readonly percent?: number | undefined;
+  readonly message?: string | undefined;
   constructor(
     stamp: ToolEventStamp,
-    detail: { toolName: string; toolCallId: string; percent?: number; message?: string },
+    detail: {
+      toolName: string;
+      toolCallId: string;
+      percent?: number | undefined;
+      message?: string | undefined;
+    },
   ) {
     super(ToolProgressBubbleEvent.type);
     this.agentName = stamp.agentName;
@@ -699,7 +814,7 @@ export class ToolSettledBubbleEvent extends Event {
   readonly toolName: string;
   readonly toolCallId: string;
   readonly status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
-  readonly durationMs?: number;
+  readonly durationMs?: number | undefined;
   readonly result?: unknown;
   readonly error?: unknown;
   constructor(
@@ -708,7 +823,7 @@ export class ToolSettledBubbleEvent extends Event {
       toolName: string;
       toolCallId: string;
       status: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
-      durationMs?: number;
+      durationMs?: number | undefined;
       result?: unknown;
       error?: unknown;
     },
@@ -755,10 +870,10 @@ export class ToolPolicyDeniedBubbleEvent extends Event {
   readonly step: number;
   readonly toolName: string;
   readonly toolCallId: string;
-  readonly reason?: string;
+  readonly reason?: string | undefined;
   constructor(
     stamp: ToolEventStamp,
-    detail: { toolName: string; toolCallId: string; reason?: string },
+    detail: { toolName: string; toolCallId: string; reason?: string | undefined },
   ) {
     super(ToolPolicyDeniedBubbleEvent.type);
     this.agentName = stamp.agentName;
@@ -841,7 +956,7 @@ export class SessionForkEvent extends Event {
   static readonly type = 'session.fork' as const;
   readonly sourceSessionId: string;
   readonly forkedSessionId: string;
-  readonly throughRun?: number;
+  readonly throughRun?: number | undefined;
   constructor(sourceSessionId: string, forkedSessionId: string, throughRun?: number) {
     super(SessionForkEvent.type);
     this.sourceSessionId = sourceSessionId;
@@ -984,7 +1099,7 @@ export class ChildWorkflowStartedEvent extends Event {
     parentAgentName: string;
     parentRunId: string;
     childAgentName: string;
-    childRunId?: string;
+    childRunId?: string | undefined;
     input: string;
     durable: boolean;
   }) {
@@ -1071,7 +1186,7 @@ export class ChildWorkflowAbortedEvent extends Event implements ChildWorkflowCor
   readonly childRunId: string;
   /** The abort reason, when the aborting signal carried a string one. */
   readonly reason: string | undefined;
-  constructor(data: ChildWorkflowCorrelation & { reason?: string }) {
+  constructor(data: ChildWorkflowCorrelation & { reason?: string | undefined }) {
     super(ChildWorkflowAbortedEvent.type);
     this.parentAgentName = data.parentAgentName;
     this.parentRunId = data.parentRunId;
@@ -1168,9 +1283,13 @@ export class HandoffOccurredEvent extends Event {
   /** The agent receiving the handoff. */
   readonly targetAgentName: string;
   /** The session id (if the handoff is session-scoped). */
-  readonly sessionId?: string;
+  readonly sessionId?: string | undefined;
 
-  constructor(data: { sourceAgentName: string; targetAgentName: string; sessionId?: string }) {
+  constructor(data: {
+    sourceAgentName: string;
+    targetAgentName: string;
+    sessionId?: string | undefined;
+  }) {
     super(HandoffOccurredEvent.type);
     this.sourceAgentName = data.sourceAgentName;
     this.targetAgentName = data.targetAgentName;
@@ -1226,13 +1345,13 @@ export class AgentScheduledEvent extends Event {
   static readonly type = 'schedule.created' as const;
   readonly agentName: string;
   readonly scheduleId: string;
-  readonly spec: { cron?: string; every?: string | number };
-  readonly sessionId?: string;
+  readonly spec: { cron?: string | undefined; every?: (string | number) | undefined };
+  readonly sessionId?: string | undefined;
   constructor(data: {
     agentName: string;
     scheduleId: string;
-    spec: { cron?: string; every?: string | number };
-    sessionId?: string;
+    spec: { cron?: string | undefined; every?: (string | number) | undefined };
+    sessionId?: string | undefined;
   }) {
     super(AgentScheduledEvent.type);
     this.agentName = data.agentName;
@@ -1249,7 +1368,7 @@ export class AgentScheduledEvent extends Event {
 export class WakeupScheduledEvent extends Event {
   static readonly type = 'schedule.wakeup' as const;
   readonly duration: number | string;
-  readonly note?: string;
+  readonly note?: string | undefined;
   constructor(duration: number | string, note?: string) {
     super(WakeupScheduledEvent.type);
     this.duration = duration;
@@ -1361,6 +1480,73 @@ export class ScheduleCompletedEvent extends Event {
     super(ScheduleCompletedEvent.type);
     this.scheduleId = scheduleId;
     this.runId = runId;
+  }
+}
+
+/**
+ * Emitted once per scheduled occurrence, before the schedule's overlap policy
+ * decides whether to start, queue, replace, or drop the tick. Sourced from
+ * Weft's engine-level `schedule:attempted` (COR-105) and forwarded onto the
+ * bureau emitter by `create-bureau.ts`, the same sink the definition-level and
+ * fire-terminal schedule events use.
+ *
+ * This is the signal that separates "the schedule is ticking and choosing not
+ * to run" from "the schedule stopped ticking": `schedule.completed`/
+ * `schedule.failed` only ever describe fires that actually launched, so a
+ * schedule whose every occurrence collides is silent without this.
+ *
+ * Ephemeral, not durable. One per tick per schedule is a liveness pulse in
+ * AB-87's matrix terms, not a durable transition, so it is deliberately absent
+ * from the audit trail and the durable event history — a durable cursor must
+ * not be advanced by a pulse.
+ */
+export class ScheduleAttemptedEvent extends Event {
+  static readonly type = 'schedule.attempted' as const;
+  readonly scheduleId: string;
+  /**
+   * The scheduled grid timestamp the occurrence was due, as Weft reports it.
+   * Undefined only when an occurrence was applied without one.
+   */
+  readonly occurrence: number | undefined;
+  constructor(scheduleId: string, occurrence?: number) {
+    super(ScheduleAttemptedEvent.type);
+    this.scheduleId = scheduleId;
+    this.occurrence = occurrence;
+  }
+}
+
+/**
+ * Emitted when a scheduled occurrence is dropped because the schedule's
+ * overlap policy blocks it while a prior fire is still running — in practice
+ * `overlap: 'skip'`, the only policy that discards an occurrence outright
+ * (`'queue'` buffers it, `'cancel-running'` replaces the active run). Sourced
+ * from Weft's engine-level `schedule:skipped` (COR-105).
+ *
+ * Exactly one `schedule.attempted` precedes each of these. Distinct from a
+ * missed fire, which is a window the engine's timer never evaluated at all.
+ *
+ * Ephemeral for the same reason as {@link ScheduleAttemptedEvent}: it reports
+ * that nothing durable happened.
+ */
+export class ScheduleSkippedEvent extends Event {
+  static readonly type = 'schedule.skipped' as const;
+  readonly scheduleId: string;
+  /** The scheduled grid timestamp the dropped occurrence was due. */
+  readonly occurrence: number | undefined;
+  /**
+   * The still-running scheduled fire that occupied the slot. A scheduled
+   * fire's Weft workflow id is its AgentRun id, the same correlation
+   * {@link ScheduleFailedEvent.runId} carries.
+   */
+  readonly blockingRunId: string | undefined;
+  /** The overlap policy that produced the decision, as Weft reports it. */
+  readonly policy: string;
+  constructor(scheduleId: string, policy: string, occurrence?: number, blockingRunId?: string) {
+    super(ScheduleSkippedEvent.type);
+    this.scheduleId = scheduleId;
+    this.policy = policy;
+    this.occurrence = occurrence;
+    this.blockingRunId = blockingRunId;
   }
 }
 
@@ -1587,6 +1773,127 @@ export class SteeringFailedEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// Hook plan (COR-766)
+//
+// A run's hook plan is the set of registrations in the `HookRegistry` it was
+// dispatched with. Bureau composes one per run (COR-567); a direct
+// `createActiveRun` caller may supply its own, and these events do not care
+// which — they observe the registry the run actually holds, so they report the
+// plan production ran rather than the plan some composition path intended.
+//
+// There is deliberately no `hook-plan.replayed`. The original acceptance
+// criterion asked for one "only for a durable replay of a previously invoked
+// hook-plan entry, distinct from a fresh invocation", and that distinction is
+// not available to make: nothing in a hook's invocation context says the step
+// is a re-execution, and the runtime would have to keep durable per-entry
+// invocation history to know an entry ran before. Keeping that history in
+// order to suppress or relabel a second invocation is precisely what
+// `HookReplayPolicy` rejects — its contract is that an effectful hook be made
+// idempotent, because a replayed step genuinely re-ran its generate call and
+// its tools, so its hooks genuinely must run again. A durable re-execution
+// therefore emits an ordinary `hook-plan.invoked`; a consumer that needs to
+// tell the two apart reads the recovery marker already carried on its own run
+// correlation, which is the only place that fact actually exists.
+// ---------------------------------------------------------------------------
+
+/**
+ * One hook registration is part of this run's plan.
+ *
+ * Fires once per entry, for the entries present when the run started as well
+ * as for any registered while it is live — a consumer replaying this stream
+ * from the run's beginning reconstructs the plan without reading the registry.
+ */
+export class HookPlanRegisteredEvent extends Event {
+  static readonly type = 'hook-plan.registered' as const;
+  /** The hook POINT, e.g. `prepareStep`. */
+  readonly hookName: string;
+  /** Stable registration identity (COR-567). Names one registration on that point. */
+  readonly hookId: string;
+  readonly priority: number;
+  readonly replay: HookReplayPolicy;
+  readonly runId: string | undefined;
+  constructor(
+    hookName: string,
+    hookId: string,
+    priority: number,
+    replay: HookReplayPolicy,
+    runId?: string,
+  ) {
+    super(HookPlanRegisteredEvent.type);
+    this.hookName = hookName;
+    this.hookId = hookId;
+    this.priority = priority;
+    this.replay = replay;
+    this.runId = runId;
+  }
+}
+
+/**
+ * A hook-plan entry was invoked and returned.
+ *
+ * Mutually exclusive with {@link HookPlanFailedEvent} for one invocation:
+ * exactly one of the two fires per handler call.
+ */
+export class HookPlanInvokedEvent extends Event {
+  static readonly type = 'hook-plan.invoked' as const;
+  readonly hookName: string;
+  readonly hookId: string;
+  readonly durationMilliseconds: number;
+  readonly runId: string | undefined;
+  constructor(hookName: string, hookId: string, durationMilliseconds: number, runId?: string) {
+    super(HookPlanInvokedEvent.type);
+    this.hookName = hookName;
+    this.hookId = hookId;
+    this.durationMilliseconds = durationMilliseconds;
+    this.runId = runId;
+  }
+}
+
+/**
+ * A hook-plan entry threw.
+ *
+ * Fires for the throw itself, before the registry's error policy decides
+ * whether to continue or abort — so a handler whose `onError` returns
+ * `'continue'` is still reported here rather than being silently absorbed.
+ */
+export class HookPlanFailedEvent extends Event {
+  static readonly type = 'hook-plan.failed' as const;
+  readonly hookName: string;
+  readonly hookId: string;
+  readonly durationMilliseconds: number;
+  readonly error: unknown;
+  readonly runId: string | undefined;
+  constructor(
+    hookName: string,
+    hookId: string,
+    durationMilliseconds: number,
+    error: unknown,
+    runId?: string,
+  ) {
+    super(HookPlanFailedEvent.type);
+    this.hookName = hookName;
+    this.hookId = hookId;
+    this.durationMilliseconds = durationMilliseconds;
+    this.error = error;
+    this.runId = runId;
+  }
+}
+
+/** A hook-plan entry was unregistered while this run held the plan. */
+export class HookPlanRemovedEvent extends Event {
+  static readonly type = 'hook-plan.removed' as const;
+  readonly hookName: string;
+  readonly hookId: string;
+  readonly runId: string | undefined;
+  constructor(hookName: string, hookId: string, runId?: string) {
+    super(HookPlanRemovedEvent.type);
+    this.hookName = hookName;
+    this.hookId = hookId;
+    this.runId = runId;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 //
 // `OperativeEventClassMap` deliberately does NOT `extends EventMap`
@@ -1665,6 +1972,9 @@ export interface OperativeEventClassMap {
   [ScheduleCancelledEvent.type]: ScheduleCancelledEvent;
   [ScheduleFailedEvent.type]: ScheduleFailedEvent;
   [ScheduleCompletedEvent.type]: ScheduleCompletedEvent;
+  // Schedule tick observation (COR-660, sourced from Weft's COR-105 signals)
+  [ScheduleAttemptedEvent.type]: ScheduleAttemptedEvent;
+  [ScheduleSkippedEvent.type]: ScheduleSkippedEvent;
   // session.monitor loop events (D7)
   [SessionMonitorTickEvent.type]: SessionMonitorTickEvent;
   [SessionMonitorDoneEvent.type]: SessionMonitorDoneEvent;
@@ -1689,6 +1999,12 @@ export interface OperativeEventClassMap {
   // progress (the SemanticProgress-carrying, non-cursor-advancing pulse).
   [ChildWorkflowReattachedEvent.type]: ChildWorkflowReattachedEvent;
   [ChildWorkflowProgressEvent.type]: ChildWorkflowProgressEvent;
+  // Hook plan (COR-766). No `replayed` member — see the block comment above
+  // these classes for why that criterion cannot be met.
+  [HookPlanRegisteredEvent.type]: HookPlanRegisteredEvent;
+  [HookPlanInvokedEvent.type]: HookPlanInvokedEvent;
+  [HookPlanFailedEvent.type]: HookPlanFailedEvent;
+  [HookPlanRemovedEvent.type]: HookPlanRemovedEvent;
 }
 
 /** The runtime-usable event map. See the block comment above the class map for why this exists separately. */
@@ -1753,6 +2069,8 @@ export const OPERATIVE_EVENT_TYPES = [
   ScheduleCancelledEvent.type,
   ScheduleFailedEvent.type,
   ScheduleCompletedEvent.type,
+  ScheduleAttemptedEvent.type,
+  ScheduleSkippedEvent.type,
   SessionMonitorTickEvent.type,
   SessionMonitorDoneEvent.type,
   ChildWorkflowStartedEvent.type,
@@ -1768,6 +2086,10 @@ export const OPERATIVE_EVENT_TYPES = [
   SteeringFailedEvent.type,
   ChildWorkflowReattachedEvent.type,
   ChildWorkflowProgressEvent.type,
+  HookPlanRegisteredEvent.type,
+  HookPlanInvokedEvent.type,
+  HookPlanFailedEvent.type,
+  HookPlanRemovedEvent.type,
 ] as const satisfies readonly OperativeEventType[];
 
 /**
@@ -1781,13 +2103,13 @@ type MissingOperativeEventTypes = Exclude<
   OperativeEventType,
   (typeof OPERATIVE_EVENT_TYPES)[number]
 >;
-const _assertOperativeEventTypesExhaustive: MissingOperativeEventTypes extends never
+const assertOperativeEventTypesExhaustive: MissingOperativeEventTypes extends never
   ? true
   : [
       'OPERATIVE_EVENT_TYPES is missing a member added to OperativeEventClassMap:',
       MissingOperativeEventTypes,
     ] = true;
-void _assertOperativeEventTypesExhaustive;
+void assertOperativeEventTypesExhaustive;
 
 type ToolboxEventKey = Extract<keyof ToolboxEvents, string>;
 
@@ -1910,13 +2232,13 @@ type MissingCombinedOperativeEventTypes = Exclude<
   CombinedOperativeEventType,
   (typeof COMBINED_OPERATIVE_EVENT_TYPES)[number]
 >;
-const _assertCombinedOperativeEventTypesExhaustive: MissingCombinedOperativeEventTypes extends never
+const assertCombinedOperativeEventTypesExhaustive: MissingCombinedOperativeEventTypes extends never
   ? true
   : [
       'COMBINED_OPERATIVE_EVENT_TYPES is missing a member added to CombinedOperativeEventClassMap:',
       MissingCombinedOperativeEventTypes,
     ] = true;
-void _assertCombinedOperativeEventTypesExhaustive;
+void assertCombinedOperativeEventTypesExhaustive;
 
 /**
  * The full public event-target surface accepted by durable routing. Listing

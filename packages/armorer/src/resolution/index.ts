@@ -63,6 +63,10 @@ export function resolveFuzzyToolName(name: string, toolNames: string[]): Resolut
     return { resolved: null, ambiguous: normalizedMatches };
   }
 
+  return resolveSuffixMatch(name, toolNames);
+}
+
+function resolveSuffixMatch(name: string, toolNames: string[]): ResolutionResult {
   // Tier 4: Suffix matching (last segment)
   const segments = name.split(/[./_-]/);
   if (segments.length > 1) {

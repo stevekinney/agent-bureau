@@ -48,10 +48,10 @@ export function assertKebabCaseTag(tag: string, context: string): string {
   return trimmed;
 }
 
-export function uniqTags<T extends readonly string[]>(tags: T): string[] {
+export function uniqTags(tags: readonly string[]): string[] {
   return Array.from(new Set(tags));
 }
 
 export function normalizeTags(tags: readonly string[]): string[] {
-  return tags.filter(Boolean).map((tag) => String(tag).toLowerCase());
+  return tags.filter(Boolean).map((tag) => tag.toLowerCase());
 }

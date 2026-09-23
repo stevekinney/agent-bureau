@@ -6,8 +6,8 @@
  * is derived from — never a hand-copied model list — so a later addition to
  * any of those tables without a matching descriptor row fails here.
  */
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import { defaultPricingTable } from '../cost-estimation.ts';
 import { getProviderCapabilities, type ProviderCapabilities } from './capabilities.ts';

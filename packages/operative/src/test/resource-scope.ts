@@ -51,7 +51,7 @@ import type {
   RuntimeServices,
   RuntimeTimeoutHandle,
   Subscription,
-} from 'lifecycle';
+} from '@lostgradient/lifecycle';
 
 import type { ChildRunRegistry } from '../child-run';
 import type { CleanupAcknowledgement, ClosedOptions } from '../types';
@@ -72,8 +72,8 @@ export type LeakedResourceDiscoveredVia =
 export interface LeakedResource {
   readonly kind: LeakedResourceKind;
   readonly identifier: string;
-  readonly owner?: string;
-  readonly parentId?: string;
+  readonly owner?: string | undefined;
+  readonly parentId?: string | undefined;
   readonly discoveredVia: LeakedResourceDiscoveredVia;
 }
 
@@ -103,47 +103,47 @@ export interface ClosableRun {
 interface RegisterRunResource {
   readonly kind: 'run';
   readonly identifier: string;
-  readonly owner?: string;
-  readonly parentId?: string;
+  readonly owner?: string | undefined;
+  readonly parentId?: string | undefined;
   readonly run: ClosableRun;
-  readonly detached?: boolean;
+  readonly detached?: boolean | undefined;
 }
 
 interface RegisterTimerResource {
   readonly kind: 'timer';
   readonly identifier: string;
-  readonly owner?: string;
-  readonly parentId?: string;
+  readonly owner?: string | undefined;
+  readonly parentId?: string | undefined;
   readonly handle: RuntimeTimeoutHandle;
-  readonly detached?: boolean;
+  readonly detached?: boolean | undefined;
 }
 
 interface RegisterListenerResource {
   readonly kind: 'listener';
   readonly identifier: string;
-  readonly owner?: string;
-  readonly parentId?: string;
+  readonly owner?: string | undefined;
+  readonly parentId?: string | undefined;
   readonly subscription: Subscription;
-  readonly detached?: boolean;
+  readonly detached?: boolean | undefined;
 }
 
 interface RegisterQueueItemResource {
   readonly kind: 'queue-item';
   readonly identifier: string;
-  readonly owner?: string;
-  readonly parentId?: string;
+  readonly owner?: string | undefined;
+  readonly parentId?: string | undefined;
   /** The exact `label` this item was tracked under via `RuntimeServices.deferred.track()`. */
   readonly label: string;
-  readonly detached?: boolean;
+  readonly detached?: boolean | undefined;
 }
 
 interface RegisterChildResource {
   readonly kind: 'child';
   readonly identifier: string;
-  readonly owner?: string;
-  readonly parentId?: string;
+  readonly owner?: string | undefined;
+  readonly parentId?: string | undefined;
   readonly registry: ChildRunRegistry;
-  readonly detached?: boolean;
+  readonly detached?: boolean | undefined;
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { EmbeddingVectorLike } from 'interoperability';
+import type { EmbeddingVectorLike } from '@lostgradient/embeddings';
 
 /**
  * Scope that isolates a set of memory records. Every storage operation is

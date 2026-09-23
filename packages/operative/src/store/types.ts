@@ -1,5 +1,5 @@
+import type { ObservableLike, RuntimeServices, Subscription } from '@lostgradient/lifecycle';
 import type { ConversationSnapshot } from 'conversationalist';
-import type { ObservableLike, RuntimeServices, Subscription } from 'lifecycle';
 
 import type { ActiveRun } from '../create-run';
 import type { FinishReason, StepResult, TokenUsage } from '../types';
@@ -42,8 +42,8 @@ export interface StoreState {
 }
 
 export interface StoreOptions {
-  maxActions?: number;
-  maxSnapshots?: number;
+  maxActions?: number | undefined;
+  maxSnapshots?: number | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
    * exactly once at construction — omitted, this store reads the real
@@ -51,7 +51,7 @@ export interface StoreOptions {
    * deterministic instance with `createManualRuntimeServices()` so action
    * timestamps and synthetic run ids are fully time-controlled.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 export type StoreListener = (state: StoreState, action: Action) => void;

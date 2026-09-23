@@ -1,7 +1,7 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import type { ToolCall } from '@lostgradient/tool-protocol';
 import type { ToolExecutionResult } from 'armorer';
 import { Conversation } from 'conversationalist';
-import type { ToolCall } from 'interoperability';
-import type { RuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import { AgentRunError } from './errors';
@@ -44,7 +44,7 @@ export function createElicitationRequester(
       if (signal?.aborted) return null;
       throw error;
     });
-    let removeAbortListener = (): void => {};
+    let removeAbortListener: (() => void) | undefined;
     const aborted = signal
       ? new Promise<null>((resolve) => {
           const onAbort = () => resolve(null);
@@ -57,7 +57,7 @@ export function createElicitationRequester(
     try {
       response = await (aborted ? Promise.race([elicitation, aborted]) : elicitation);
     } finally {
-      removeAbortListener();
+      removeAbortListener?.();
     }
     if (signal?.aborted) {
       emitter?.dispatch(new ElicitationResolvedEvent(step, false, requestId, toolCallId));

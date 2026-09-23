@@ -1,5 +1,5 @@
+import { forwardEvents } from '@lostgradient/lifecycle';
 import type { AnyToolbox } from 'armorer';
-import { forwardEvents } from 'lifecycle';
 
 /**
  * Attach whatever run-owned listeners a caller wants on one toolbox instance

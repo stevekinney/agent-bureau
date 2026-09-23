@@ -226,10 +226,10 @@ describe('replayReproductionArtifact', () => {
     // comparison would treat these as different strings even though they
     // are semantically identical.
     const reorderedTrace = artifact.causalTrace.map(
-      (entry) => Object.fromEntries(Object.entries(entry).reverse()) as typeof entry,
+      (entry) => Object.fromEntries(Object.entries(entry).toReversed()) as typeof entry,
     );
     const reorderedFaults = artifact.firedFaults.map(
-      (fault) => Object.fromEntries(Object.entries(fault).reverse()) as typeof fault,
+      (fault) => Object.fromEntries(Object.entries(fault).toReversed()) as typeof fault,
     );
     const reordered = {
       ...artifact,

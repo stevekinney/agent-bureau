@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { ClearScheduledTimeout, ScheduleTimeout, ToolConfiguration } from '../is-tool';
 import {
@@ -130,7 +130,7 @@ export function createCacheMiddleware(
   const defaultKeyGenerator = (params: unknown): string => {
     try {
       // Simple stable stringify for JSON-compatible params
-      return JSON.stringify(params, Object.keys(params as object).sort());
+      return JSON.stringify(params, Object.keys(params as object).toSorted());
     } catch {
       return String(params);
     }
@@ -223,6 +223,7 @@ export function createTimeoutMiddleware(
           .then((result) => {
             clearTimeoutFunction(timer);
             resolve(result);
+            return undefined;
           })
           .catch((error) => {
             clearTimeoutFunction(timer);
@@ -277,13 +278,13 @@ export function createTruncationMiddleware(options?: ToolResultTruncationOptions
           if (isAsyncIterable(obj['stream'])) {
             obj['stream'] = createTruncatingAsyncIterable(obj['stream'], {
               maxCharacters,
-              marker,
+              ...(marker !== undefined ? { marker } : {}),
             });
           }
           if (isAsyncIterable(obj['result'])) {
             obj['result'] = createTruncatingAsyncIterable(obj['result'], {
               maxCharacters,
-              marker,
+              ...(marker !== undefined ? { marker } : {}),
             });
           }
           return result;

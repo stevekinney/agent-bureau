@@ -1,4 +1,4 @@
-import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft/storage';
+import { MemoryStorage, type TextValueStore, textValueStore } from '@lostgradient/weft';
 import { beforeEach, describe, expect, it } from 'bun:test';
 
 import { clearCache, invalidateCache } from './cache-utilities';

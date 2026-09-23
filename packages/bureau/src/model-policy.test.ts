@@ -12,13 +12,13 @@
  * No sleeps, no timers, no network — every timestamp and plan id is
  * injected, and `descriptorSource` is a spy that must never fire.
  */
-import { createAgent } from '@lostgradient/operative';
 import {
+  createAgent,
+  createMockGenerate,
   createModelCatalog,
   type ProviderName,
   withBackendDescriptors,
-} from '@lostgradient/operative/providers';
-import { createMockGenerate } from '@lostgradient/operative/test';
+} from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
 
 import type { AgentDefinitions } from './agent-catalog';

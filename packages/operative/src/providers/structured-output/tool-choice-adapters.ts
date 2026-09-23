@@ -1,4 +1,4 @@
-import type { ToolChoice } from './types.ts';
+import type { ToolChoice } from '../../structured-output/types.ts';
 
 /**
  * Anthropic tool_choice parameter shape.
@@ -18,7 +18,7 @@ type OpenAIToolChoice =
 type GeminiToolConfig = {
   functionCallingConfig: {
     mode: 'AUTO' | 'ANY' | 'NONE';
-    allowedFunctionNames?: string[];
+    allowedFunctionNames?: string[] | undefined;
   };
 };
 

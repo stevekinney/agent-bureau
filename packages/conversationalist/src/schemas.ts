@@ -204,13 +204,107 @@ export const toolErrorSchema = z
   })
   .strict() satisfies z.ZodType<ToolError>;
 
-export const toolActionSchema = z
-  .object({
-    type: z.enum(['approval', 'input']),
-    message: z.string().optional(),
-    schema: jsonValueSchema.optional(),
-  })
-  .strict() satisfies z.ZodType<ToolAction>;
+const explicitTimezoneIsoDateTimeSchema = z.string().refine(isExplicitTimezoneIsoDateTime, {
+  message: 'expected an ISO8601 date-time with explicit timezone',
+});
+
+const toolApprovalOperationBaseSchema = z.object({
+  filesTouched: z.array(z.string()).exactOptional(),
+  argsPreview: jsonValueSchema.optional(),
+});
+
+const toolApprovalOperationSchema = z.discriminatedUnion('kind', [
+  toolApprovalOperationBaseSchema
+    .extend({
+      kind: z.literal('command'),
+      command: z.string().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('file-write'),
+      filesTouched: z.array(z.string()).min(1),
+      argsPreview: jsonValueSchema.optional(),
+    })
+    .strict(),
+  toolApprovalOperationBaseSchema
+    .extend({
+      kind: z.literal('patch'),
+      diff: z.string().min(1),
+    })
+    .strict(),
+  toolApprovalOperationBaseSchema
+    .extend({
+      kind: z.literal('other'),
+    })
+    .strict(),
+]);
+
+export const toolActionSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('input'),
+      message: z.string().optional(),
+      schema: jsonValueSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('approval'),
+      message: z.string().optional(),
+      risk: z.enum(['low', 'medium', 'high']),
+      operation: toolApprovalOperationSchema,
+      sandbox: z
+        .object({
+          provider: z.string().min(1),
+          name: z.string().min(1),
+          workingDir: z.string().min(1),
+        })
+        .strict()
+        .optional(),
+      env: z.array(z.string()).optional(),
+      snapshotId: z.string().min(1).optional(),
+      expiresAt: explicitTimezoneIsoDateTimeSchema.optional(),
+      editableArgs: z.boolean().optional(),
+      policyVersion: z.string().min(1),
+      idempotencyKey: z.string().min(1),
+    })
+    .strict(),
+]) satisfies z.ZodType<ToolAction>;
+
+function isExplicitTimezoneIsoDateTime(value: string): boolean {
+  const match =
+    /^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})T(?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(?<fraction>\.\d+)?(?<timezone>Z|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  if (!match?.groups) return false;
+  const year = Number(match.groups['year']);
+  const month = Number(match.groups['month']);
+  const day = Number(match.groups['day']);
+  const hour = Number(match.groups['hour']);
+  const minute = Number(match.groups['minute']);
+  const second = Number(match.groups['second']);
+  const timezone = match.groups['timezone']!;
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+    return false;
+  }
+  if (timezone !== 'Z') {
+    const timezoneHour = Number(timezone.slice(1, 3));
+    const timezoneMinute = Number(timezone.slice(4, 6));
+    if (timezoneHour > 23 || timezoneMinute > 59) return false;
+  }
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  calendar.setUTCHours(hour, minute, second, 0);
+  return (
+    calendar.getUTCFullYear() === year &&
+    calendar.getUTCMonth() === month - 1 &&
+    calendar.getUTCDate() === day &&
+    (timezone !== 'Z' || calendar.getUTCHours() === hour) &&
+    (timezone !== 'Z' || calendar.getUTCMinutes() === minute) &&
+    (timezone !== 'Z' || calendar.getUTCSeconds() === second)
+  );
+}
 
 /**
  * Zod schema for tool result metadata.

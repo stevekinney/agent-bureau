@@ -1,22 +1,19 @@
-import type {
-  AnyWorkflowDefinition,
-  CheckpointSizeWarningEvent,
-  HistoryPolicy,
-  PayloadSizePolicy,
-  RegistryAgnosticEngine,
-  WorkflowLogRecord,
-  WorkflowServicesResolution,
-  WorkflowServicesResolverInfo,
+import {
+  createObservabilityInterceptors,
+  Engine,
+  textValueStore,
+  type AnyWorkflowDefinition,
+  type CheckpointSizeWarningEvent,
+  type HistoryPolicy,
+  type MetricsCollector,
+  type ObservabilityOptions,
+  type PayloadSizePolicy,
+  type RegistryAgnosticEngine,
+  type Storage,
+  type WorkflowLogRecord,
+  type WorkflowServicesResolution,
+  type WorkflowServicesResolverInfo,
 } from '@lostgradient/weft';
-import { Engine } from '@lostgradient/weft';
-// `MetricsCollector` is NOT re-exported from the `@lostgradient/weft` root barrel
-// (only the metrics factories are) — the class lives on the `/observability`
-// subpath, so the type must be imported from there.
-import type { MetricsCollector, ObservabilityOptions } from '@lostgradient/weft/observability';
-import { createObservabilityInterceptors } from '@lostgradient/weft/observability';
-import type { Storage } from '@lostgradient/weft/storage';
-import { textValueStore } from '@lostgradient/weft/storage';
-
 import { WorkflowVersionMismatchEvent } from '../events';
 import type { CheckpointStore } from './checkpoint-store';
 import { createCheckpointStore } from './checkpoint-store';
@@ -56,7 +53,7 @@ export interface CreateRunEngineOptions {
    * a fresh engine resumes any `agentRun` workflows a previous process left
    * mid-flight. Pass `false` for isolated tests.
    */
-  recover?: boolean;
+  recover?: boolean | undefined;
 
   /**
    * Single-writer ownership posture over the shared durable store (AB-178).
@@ -73,25 +70,9 @@ export interface CreateRunEngineOptions {
    * Two things to weigh before opting in:
    * - **Storage requirement.** The backend must support the `conditionalBatch`
    *   capability. `MemoryStorage` and `SQLiteStorage` both do; verify any
-   *   other backend before enabling this.
-   * - **Known weft 0.23.1 defect — incompatible with the scheduler's
-   *   suspend/resume preemption path.** `engine.suspend(workflowId)` releases
-   *   the workflow's ownership claim as a side effect of reusing the
-   *   terminal-commit code path (`commitExternalTerminalWorkflowStateOperations`
-   *   → `buildExternalTerminalRotationFragment`), even though suspend is
-   *   documented as non-terminal and later resumable. A same-engine
-   *   `engine.resume(workflowId)` right after then throws
-   *   `WorkflowClaimUnavailableError` (`holder-absent`) instead of silently
-   *   re-acquiring, because `acquireStandaloneClaimBeforeResume` trusts its
-   *   stale cached epoch and never falls through to a fresh `registry.acquire()`.
-   *   Reproduced directly against `@lostgradient/weft@0.23.1` with no
-   *   agent-bureau code involved. This breaks `createScheduler`'s
-   *   `suspendAndDetach` → `resumeDurableRunResult` preemption flow
-   *   (`packages/operative/src/scheduler/create-scheduler.ts`), so do not set
-   *   `ownership: 'workflow-lease'` on an engine a scheduler with preemption
-   *   attaches to until weft fixes this. `'none'` is unaffected — this is why
-   *   `'none'` stays the default rather than `'workflow-lease'` becoming
-   *   unconditional.
+   *   other backend before enabling this. The same-engine suspend/resume
+   *   preemption path is supported under `'workflow-lease'`; the ownership
+   *   claim is reacquired after a suspend and remains exclusive to that engine.
    *
    * `'lease'` (Weft's single store-wide lock) is intentionally not exposed
    * here: it solves a different problem (clean handoff during a rolling
@@ -99,7 +80,7 @@ export interface CreateRunEngineOptions {
    * store), and per Weft's own docs is incompatible with
    * `backgroundTasks: 'manual'`, unlike `'workflow-lease'`.
    */
-  ownership?: 'none' | 'workflow-lease';
+  ownership?: ('none' | 'workflow-lease') | undefined;
 
   /**
    * Per-workflow claim time-to-live under `ownership: 'workflow-lease'`
@@ -109,14 +90,14 @@ export interface CreateRunEngineOptions {
    * mainly useful for tests exercising crash-and-adopt without a real 30s
    * wait.
    */
-  workflowClaimTtlMs?: number;
+  workflowClaimTtlMs?: number | undefined;
 
   /**
    * Per-workflow claim renewal interval under `ownership: 'workflow-lease'`
    * (default 5s, Weft's own default). Ignored when `ownership` is not
    * `'workflow-lease'`.
    */
-  workflowClaimRenewIntervalMs?: number;
+  workflowClaimRenewIntervalMs?: number | undefined;
 
   /**
    * Select how Weft's periodic maintenance is driven. The default
@@ -124,7 +105,7 @@ export interface CreateRunEngineOptions {
    * serverless hosts such as Cloudflare Durable Objects, then call
    * `engine.runMaintenance()` from each alarm or Cron wake-up.
    */
-  backgroundTasks?: 'automatic' | 'manual';
+  backgroundTasks?: ('automatic' | 'manual') | undefined;
 
   /**
    * Arm Weft's durable-timer polling loop, independent of {@link recover}
@@ -134,7 +115,7 @@ export interface CreateRunEngineOptions {
    * follows `recover !== false`, so the common in-process host keeps prior
    * behavior. An explicit value always wins.
    */
-  startScheduler?: boolean;
+  startScheduler?: boolean | undefined;
 
   /**
    * Re-provide a recovered run's non-serializable {@link DurableRunDeps} on a
@@ -145,16 +126,18 @@ export interface CreateRunEngineOptions {
    * (terminal `failed`) without aborting recovery or the engine. Omit for an
    * engine that never resumes cross-process (e.g. isolated tests).
    */
-  resolveWorkflowServices?: (
-    info: WorkflowServicesResolverInfo,
-  ) => WorkflowServicesResolution | Promise<WorkflowServicesResolution>;
+  resolveWorkflowServices?:
+    | ((
+        info: WorkflowServicesResolverInfo,
+      ) => WorkflowServicesResolution | Promise<WorkflowServicesResolution>)
+    | undefined;
 
   /**
    * A pre-built {@link CheckpointStore}. When omitted, one is created over a
    * `textValueStore` view of `storage`. Inject one to share the exact store the
    * rest of composition already built.
    */
-  checkpointStore?: CheckpointStore;
+  checkpointStore?: CheckpointStore | undefined;
 
   /**
    * Opt into OpenTelemetry spans + metrics for durable workflows and activities.
@@ -167,7 +150,7 @@ export interface CreateRunEngineOptions {
    * enabling this is safe even before a telemetry backend exists. The metrics
    * handle and the cleanup `dispose` are returned on {@link RunEngine.observability}.
    */
-  observability?: boolean | Omit<ObservabilityOptions, 'eventTarget'>;
+  observability?: (boolean | Omit<ObservabilityOptions, 'eventTarget'>) | undefined;
 
   /**
    * Host sink for `ctx.log` records emitted by durable workflows (Weft 0.4.0
@@ -175,7 +158,7 @@ export interface CreateRunEngineOptions {
    * worker execution. A throwing sink falls back to console without failing the
    * workflow. Omit to leave logs going to the host console.
    */
-  onLog?: (record: WorkflowLogRecord) => void;
+  onLog?: ((record: WorkflowLogRecord) => void) | undefined;
 
   /**
    * History circuit breaker. An agent run checkpoints its full transcript per
@@ -186,7 +169,7 @@ export interface CreateRunEngineOptions {
    * `terminationReason === 'history-circuit-breaker'` — which the adapter
    * classifies distinctly from a genuine deadline timeout. Omit to disable.
    */
-  history?: HistoryPolicy;
+  history?: HistoryPolicy | undefined;
 
   /**
    * Early-warning threshold (bytes) for checkpoint payload size. When a
@@ -194,13 +177,13 @@ export interface CreateRunEngineOptions {
    * `CheckpointSizeWarningEvent`; pass {@link onCheckpointSizeWarning} to observe
    * it (a silent warning event is no warning). Does not terminate the run.
    */
-  checkpointSizeWarningThreshold?: number;
+  checkpointSizeWarningThreshold?: number | undefined;
 
   /** How many past checkpoints to retain per run (storage-growth control). */
-  checkpointHistory?: number;
+  checkpointHistory?: number | undefined;
 
   /** Admission cap on a single checkpoint payload (`PayloadSizeExceededError`). */
-  payloadSize?: PayloadSizePolicy;
+  payloadSize?: PayloadSizePolicy | undefined;
 
   /**
    * Subscriber for `CheckpointSizeWarningEvent` (`checkpoint:size-warning`). Wired
@@ -208,7 +191,7 @@ export interface CreateRunEngineOptions {
    * surfaced rather than silently dispatched. Pairs with
    * {@link checkpointSizeWarningThreshold}.
    */
-  onCheckpointSizeWarning?: (event: CheckpointSizeWarningEvent) => void;
+  onCheckpointSizeWarning?: ((event: CheckpointSizeWarningEvent) => void) | undefined;
 
   /**
    * Override the durable-timer scheduler's poll interval in milliseconds.
@@ -216,7 +199,7 @@ export interface CreateRunEngineOptions {
    * detect whether the scheduler is inadvertently armed: a short interval ensures
    * a real-time poller fires an expired timer within a tight observation window.
    */
-  schedulerPollIntervalMs?: number;
+  schedulerPollIntervalMs?: number | undefined;
 
   /**
    * Caller-supplied version identifier for the currently-deployed `agentRun`
@@ -242,7 +225,7 @@ export interface CreateRunEngineOptions {
    * `resolveWorkflowServices` returning `'unavailable'` already does) and/or
    * exporting a public pre-flight version-check surface.
    */
-  runWorkflowVersion?: string;
+  runWorkflowVersion?: string | undefined;
 
   /**
    * Fired once per recovered run whose checkpointed `workflowVersion` differs
@@ -251,7 +234,7 @@ export interface CreateRunEngineOptions {
    * `runWorkflowVersion`, is never flagged. See {@link runWorkflowVersion} for
    * the pin-and-warn semantics.
    */
-  onWorkflowVersionMismatch?: (event: WorkflowVersionMismatchEvent) => void;
+  onWorkflowVersionMismatch?: ((event: WorkflowVersionMismatchEvent) => void) | undefined;
 }
 
 /**
@@ -290,7 +273,7 @@ export interface RunEngine {
    * Carries the metrics collector and a `dispose` the owner must call BEFORE
    * disposing the engine.
    */
-  observability?: RunEngineObservability;
+  observability?: RunEngineObservability | undefined;
 }
 
 /**
@@ -319,13 +302,13 @@ export interface RunEngine {
  * the active-run adapter classifies as `error` (not a deadline timeout).
  *
  * **Multi-process safety (AB-178).** {@link CreateRunEngineOptions.ownership}
- * is host-configurable, defaulting to `'none'` (today's behavior, unchanged).
+ * is host-configurable and defaults to `'none'` to preserve the existing
+ * single-engine-by-convention contract for arbitrary storage adapters.
  * Passing `'workflow-lease'` claims every workflow for exactly one engine
  * before its generator runs, so a second engine pointed at the same store
- * fails closed on that workflow instead of double-executing it — see the
- * `ownership` field in the `Engine.create` call below for why this is
- * opt-in rather than the new default, and for the storage capability it
- * requires.
+ * fails closed on that workflow instead of double-executing it. Hosts that
+ * require multi-engine safety should opt in and provide a
+ * `conditionalBatch`-capable storage adapter.
  */
 export async function createRunEngine(options: CreateRunEngineOptions): Promise<RunEngine> {
   const checkpointStore =
@@ -376,13 +359,9 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const engine = await Engine.create({
     storage: options.storage,
     recover: options.recover ?? true,
-    // AB-178 — fenced per-workflow ownership, host-configurable rather than
-    // unconditional. Defaults to `'none'` (today's behavior) because
-    // `'workflow-lease'` has a reproduced weft 0.23.1 defect that breaks the
-    // scheduler's same-engine suspend/resume preemption path — see
-    // `CreateRunEngineOptions.ownership`'s JSDoc for the full defect and the
-    // storage-capability requirement. A host that does not rely on that
-    // preemption path, or that has verified it is unaffected, can opt in.
+    // AB-178 — fenced per-workflow ownership remains host-configurable. Keep
+    // `'none'` as the default because the public Storage contract does not
+    // guarantee `conditionalBatch`; hosts requiring multi-engine safety opt in.
     ownership: options.ownership ?? 'none',
     ...(options.workflowClaimTtlMs !== undefined
       ? { workflowClaimTtl: options.workflowClaimTtlMs }

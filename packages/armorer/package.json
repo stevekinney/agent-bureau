@@ -32,169 +32,264 @@
     ".": {
       "bun": "./dist/index.js",
       "browser": "./dist/index.js",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "default": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "default": "./dist/index.js"
     },
     "./core": {
       "bun": "./dist/core/index.js",
       "browser": "./dist/core/index.js",
-      "import": "./dist/core/index.js",
-      "require": "./dist/core/index.cjs",
-      "default": "./dist/core/index.js",
-      "types": "./dist/core/index.d.ts"
+      "import": {
+        "types": "./dist/core/index.d.ts",
+        "default": "./dist/core/index.js"
+      },
+      "require": {
+        "types": "./dist/core/index.d.cts",
+        "default": "./dist/core/index.cjs"
+      },
+      "default": "./dist/core/index.js"
     },
     "./query": {
       "bun": "./dist/query/index.js",
       "browser": "./dist/query/index.js",
-      "import": "./dist/query/index.js",
-      "require": "./dist/query/index.cjs",
-      "default": "./dist/query/index.js",
-      "types": "./dist/query/index.d.ts"
+      "import": {
+        "types": "./dist/query/index.d.ts",
+        "default": "./dist/query/index.js"
+      },
+      "require": {
+        "types": "./dist/query/index.d.cts",
+        "default": "./dist/query/index.cjs"
+      },
+      "default": "./dist/query/index.js"
     },
     "./inspect": {
       "bun": "./dist/inspect/index.js",
       "browser": "./dist/inspect/index.js",
-      "import": "./dist/inspect/index.js",
-      "require": "./dist/inspect/index.cjs",
-      "default": "./dist/inspect/index.js",
-      "types": "./dist/inspect/index.d.ts"
+      "import": {
+        "types": "./dist/inspect/index.d.ts",
+        "default": "./dist/inspect/index.js"
+      },
+      "require": {
+        "types": "./dist/inspect/index.d.cts",
+        "default": "./dist/inspect/index.cjs"
+      },
+      "default": "./dist/inspect/index.js"
     },
     "./adapters/openai": {
       "bun": "./dist/adapters/openai/index.js",
       "browser": "./dist/adapters/openai/index.js",
-      "import": "./dist/adapters/openai/index.js",
-      "require": "./dist/adapters/openai/index.cjs",
-      "default": "./dist/adapters/openai/index.js",
-      "types": "./dist/adapters/openai/index.d.ts"
+      "import": {
+        "types": "./dist/adapters/openai/index.d.ts",
+        "default": "./dist/adapters/openai/index.js"
+      },
+      "require": {
+        "types": "./dist/adapters/openai/index.d.cts",
+        "default": "./dist/adapters/openai/index.cjs"
+      },
+      "default": "./dist/adapters/openai/index.js"
     },
     "./adapters/anthropic": {
       "bun": "./dist/adapters/anthropic/index.js",
       "browser": "./dist/adapters/anthropic/index.js",
-      "import": "./dist/adapters/anthropic/index.js",
-      "require": "./dist/adapters/anthropic/index.cjs",
-      "default": "./dist/adapters/anthropic/index.js",
-      "types": "./dist/adapters/anthropic/index.d.ts"
+      "import": {
+        "types": "./dist/adapters/anthropic/index.d.ts",
+        "default": "./dist/adapters/anthropic/index.js"
+      },
+      "require": {
+        "types": "./dist/adapters/anthropic/index.d.cts",
+        "default": "./dist/adapters/anthropic/index.cjs"
+      },
+      "default": "./dist/adapters/anthropic/index.js"
     },
     "./adapters/gemini": {
       "bun": "./dist/adapters/gemini/index.js",
       "browser": "./dist/adapters/gemini/index.js",
-      "import": "./dist/adapters/gemini/index.js",
-      "require": "./dist/adapters/gemini/index.cjs",
-      "default": "./dist/adapters/gemini/index.js",
-      "types": "./dist/adapters/gemini/index.d.ts"
+      "import": {
+        "types": "./dist/adapters/gemini/index.d.ts",
+        "default": "./dist/adapters/gemini/index.js"
+      },
+      "require": {
+        "types": "./dist/adapters/gemini/index.d.cts",
+        "default": "./dist/adapters/gemini/index.cjs"
+      },
+      "default": "./dist/adapters/gemini/index.js"
     },
     "./utilities": {
       "bun": "./dist/utilities/index.js",
       "browser": "./dist/utilities/index.js",
-      "import": "./dist/utilities/index.js",
-      "require": "./dist/utilities/index.cjs",
-      "default": "./dist/utilities/index.js",
-      "types": "./dist/utilities/index.d.ts"
+      "import": {
+        "types": "./dist/utilities/index.d.ts",
+        "default": "./dist/utilities/index.js"
+      },
+      "require": {
+        "types": "./dist/utilities/index.d.cts",
+        "default": "./dist/utilities/index.cjs"
+      },
+      "default": "./dist/utilities/index.js"
     },
     "./lazy": {
       "bun": "./dist/create-tool.js",
       "browser": "./dist/create-tool.js",
-      "import": "./dist/create-tool.js",
-      "require": "./dist/create-tool.cjs",
-      "default": "./dist/create-tool.js",
-      "types": "./dist/create-tool.d.ts"
+      "import": {
+        "types": "./dist/create-tool.d.ts",
+        "default": "./dist/create-tool.js"
+      },
+      "require": {
+        "types": "./dist/create-tool.d.cts",
+        "default": "./dist/create-tool.cjs"
+      },
+      "default": "./dist/create-tool.js"
     },
     "./registry": {
       "bun": "./dist/core/registry/index.js",
       "browser": "./dist/core/registry/index.js",
-      "import": "./dist/core/registry/index.js",
-      "require": "./dist/core/registry/index.cjs",
-      "default": "./dist/core/registry/index.js",
-      "types": "./dist/core/registry/index.d.ts"
+      "import": {
+        "types": "./dist/core/registry/index.d.ts",
+        "default": "./dist/core/registry/index.js"
+      },
+      "require": {
+        "types": "./dist/core/registry/index.d.cts",
+        "default": "./dist/core/registry/index.cjs"
+      },
+      "default": "./dist/core/registry/index.js"
     },
     "./mcp": {
       "bun": "./dist/integrations/mcp/index.js",
-      "import": "./dist/integrations/mcp/index.js",
-      "require": "./dist/integrations/mcp/index.cjs",
-      "default": "./dist/integrations/mcp/index.js",
-      "types": "./dist/integrations/mcp/index.d.ts"
+      "import": {
+        "types": "./dist/integrations/mcp/index.d.ts",
+        "default": "./dist/integrations/mcp/index.js"
+      },
+      "require": {
+        "types": "./dist/integrations/mcp/index.d.cts",
+        "default": "./dist/integrations/mcp/index.cjs"
+      },
+      "default": "./dist/integrations/mcp/index.js"
     },
     "./adapters/open-ai/agents": {
       "bun": "./dist/adapters/open-ai/agents/index.js",
-      "import": "./dist/adapters/open-ai/agents/index.js",
-      "require": "./dist/adapters/open-ai/agents/index.cjs",
-      "default": "./dist/adapters/open-ai/agents/index.js",
-      "types": "./dist/adapters/open-ai/agents/index.d.ts"
+      "import": {
+        "types": "./dist/adapters/open-ai/agents/index.d.ts",
+        "default": "./dist/adapters/open-ai/agents/index.js"
+      },
+      "require": {
+        "types": "./dist/adapters/open-ai/agents/index.d.cts",
+        "default": "./dist/adapters/open-ai/agents/index.cjs"
+      },
+      "default": "./dist/adapters/open-ai/agents/index.js"
     },
     "./tools": {
       "bun": "./dist/tools/index.js",
       "browser": "./dist/tools/index.js",
-      "import": "./dist/tools/index.js",
-      "require": "./dist/tools/index.cjs",
-      "default": "./dist/tools/index.js",
-      "types": "./dist/tools/index.d.ts"
+      "import": {
+        "types": "./dist/tools/index.d.ts",
+        "default": "./dist/tools/index.js"
+      },
+      "require": {
+        "types": "./dist/tools/index.d.cts",
+        "default": "./dist/tools/index.cjs"
+      },
+      "default": "./dist/tools/index.js"
     },
     "./instrumentation": {
       "bun": "./dist/instrumentation/index.js",
       "browser": "./dist/instrumentation/index.js",
-      "import": "./dist/instrumentation/index.js",
-      "require": "./dist/instrumentation/index.cjs",
-      "default": "./dist/instrumentation/index.js",
-      "types": "./dist/instrumentation/index.d.ts"
+      "import": {
+        "types": "./dist/instrumentation/index.d.ts",
+        "default": "./dist/instrumentation/index.js"
+      },
+      "require": {
+        "types": "./dist/instrumentation/index.d.cts",
+        "default": "./dist/instrumentation/index.cjs"
+      },
+      "default": "./dist/instrumentation/index.js"
     },
     "./middleware": {
       "bun": "./dist/middleware/index.js",
       "browser": "./dist/middleware/index.js",
-      "import": "./dist/middleware/index.js",
-      "require": "./dist/middleware/index.cjs",
-      "default": "./dist/middleware/index.js",
-      "types": "./dist/middleware/index.d.ts"
+      "import": {
+        "types": "./dist/middleware/index.d.ts",
+        "default": "./dist/middleware/index.js"
+      },
+      "require": {
+        "types": "./dist/middleware/index.d.cts",
+        "default": "./dist/middleware/index.cjs"
+      },
+      "default": "./dist/middleware/index.js"
     },
     "./test": {
       "bun": "./dist/test/index.js",
       "browser": "./dist/test/index.js",
-      "import": "./dist/test/index.js",
-      "require": "./dist/test/index.cjs",
-      "default": "./dist/test/index.js",
-      "types": "./dist/test/index.d.ts"
+      "import": {
+        "types": "./dist/test/index.d.ts",
+        "default": "./dist/test/index.js"
+      },
+      "require": {
+        "types": "./dist/test/index.d.cts",
+        "default": "./dist/test/index.cjs"
+      },
+      "default": "./dist/test/index.js"
     },
     "./truncation": {
       "bun": "./dist/truncation/index.js",
       "browser": "./dist/truncation/index.js",
-      "import": "./dist/truncation/index.js",
-      "require": "./dist/truncation/index.cjs",
-      "default": "./dist/truncation/index.js",
-      "types": "./dist/truncation/index.d.ts"
+      "import": {
+        "types": "./dist/truncation/index.d.ts",
+        "default": "./dist/truncation/index.js"
+      },
+      "require": {
+        "types": "./dist/truncation/index.d.cts",
+        "default": "./dist/truncation/index.cjs"
+      },
+      "default": "./dist/truncation/index.js"
     },
     "./idempotency": {
       "bun": "./dist/idempotency/index.js",
       "browser": "./dist/idempotency/index.js",
-      "import": "./dist/idempotency/index.js",
-      "require": "./dist/idempotency/index.cjs",
-      "default": "./dist/idempotency/index.js",
-      "types": "./dist/idempotency/index.d.ts"
+      "import": {
+        "types": "./dist/idempotency/index.d.ts",
+        "default": "./dist/idempotency/index.js"
+      },
+      "require": {
+        "types": "./dist/idempotency/index.d.cts",
+        "default": "./dist/idempotency/index.cjs"
+      },
+      "default": "./dist/idempotency/index.js"
     },
     "./coding": {
       "bun": "./dist/coding/index.js",
-      "import": "./dist/coding/index.js",
-      "require": "./dist/coding/index.cjs",
-      "default": "./dist/coding/index.js",
-      "types": "./dist/coding/index.d.ts"
+      "import": {
+        "types": "./dist/coding/index.d.ts",
+        "default": "./dist/coding/index.js"
+      },
+      "require": {
+        "types": "./dist/coding/index.d.cts",
+        "default": "./dist/coding/index.cjs"
+      },
+      "default": "./dist/coding/index.js"
     },
     "./openapi": {
       "bun": "./dist/integrations/openapi/index.js",
       "browser": "./dist/integrations/openapi/index.js",
-      "import": "./dist/integrations/openapi/index.js",
-      "require": "./dist/integrations/openapi/index.cjs",
-      "default": "./dist/integrations/openapi/index.js",
-      "types": "./dist/integrations/openapi/index.d.ts"
+      "import": {
+        "types": "./dist/integrations/openapi/index.d.ts",
+        "default": "./dist/integrations/openapi/index.js"
+      },
+      "require": {
+        "types": "./dist/integrations/openapi/index.d.cts",
+        "default": "./dist/integrations/openapi/index.cjs"
+      },
+      "default": "./dist/integrations/openapi/index.js"
     }
   },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "LICENSE",
-    "README.md"
-  ],
   "scripts": {
     "bench": "bun run scripts/bench.ts",
     "build": "tsdown",
@@ -240,10 +335,12 @@
     "eslint-plugin-unicorn": "^73.0.0",
     "eslint-plugin-unused-imports": "^4.4.1",
     "globals": "^17.11.0",
-    "lifecycle": "0.0.1",
+    "oxlint": "^1.83.0",
     "remark": "^15.0.1",
     "remark-parse": "^11.0.0",
     "remark-stringify": "^11.0.0",
+    "tsdown": "^0.22.14",
+    "typescript": "6.0.3",
     "typescript-eslint": "^8.67.0",
     "unified": "^11.0.5",
     "unist-util-remove": "^4.0.0",
@@ -270,5 +367,20 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
-  }
+  },
+  "dependencies": {
+    "@lostgradient/cryptography": "workspace:*",
+    "@lostgradient/embeddings": "workspace:*",
+    "@lostgradient/lifecycle": "workspace:*",
+    "@lostgradient/tool-protocol": "workspace:*",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/core": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@standard-schema/spec": "^1.1.0"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ]
 }

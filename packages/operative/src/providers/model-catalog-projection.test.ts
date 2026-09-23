@@ -5,12 +5,12 @@
  */
 import { describe, expect, it } from 'bun:test';
 
-import { type BackendDescriptor, createModelCatalog } from './model-catalog.ts';
 import {
   GENERAL_PROJECTION_REDACTED_KEYS,
   projectCatalog,
   projectDescriptor,
 } from './model-catalog-projection.ts';
+import { type BackendDescriptor, createModelCatalog } from './model-catalog.ts';
 
 const FIXED_NOW = '2026-09-02T12:00:00.000Z';
 const fixedNow = () => FIXED_NOW;
@@ -165,7 +165,7 @@ describe('projectDescriptor: privileged projection', () => {
   it('returns a value structurally equal to its input, dropping no field', () => {
     const privileged = projectDescriptor(FULL_DESCRIPTOR, 'privileged');
     expect(privileged).toEqual(FULL_DESCRIPTOR);
-    expect(Object.keys(privileged).sort()).toEqual(Object.keys(FULL_DESCRIPTOR).sort());
+    expect(Object.keys(privileged).toSorted()).toEqual(Object.keys(FULL_DESCRIPTOR).toSorted());
   });
 });
 

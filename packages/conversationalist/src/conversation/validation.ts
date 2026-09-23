@@ -6,10 +6,17 @@ import { assertConversationHistoryIntegrity } from './integrity';
 
 function detachMutableValue<T>(value: T): T {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
-  if (Array.isArray(value)) return value.map(detachMutableValue) as T;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, nested]) => [key, detachMutableValue(nested)]),
-  ) as T;
+  if (Array.isArray(value)) return structuredClone(value);
+  const detached = { ...value };
+  for (const [key, nested] of Object.entries(value)) {
+    Object.defineProperty(detached, key, {
+      value: detachMutableValue(nested),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return detached;
 }
 
 /**

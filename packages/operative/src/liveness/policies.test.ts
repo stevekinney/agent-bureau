@@ -103,7 +103,7 @@ describe('every monotonic-observer row uses pause-on-suspected-suspension', () =
     BACKGROUND_EVALUATION_POLICY,
     WEBHOOK_DELIVERY_POLICY,
   ]) {
-    it(`${row.operation}`, () => {
+    it(row.operation, () => {
       expect(row.clockSource).toBe('monotonic-observer');
       expect(row.suspensionBehavior).toBe('pause-on-suspected-suspension');
     });

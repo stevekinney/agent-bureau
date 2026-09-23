@@ -1,6 +1,6 @@
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { WorkflowContext, WorkflowOperation } from '@lostgradient/weft';
 import { Conversation } from 'conversationalist';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { toAgentRunError } from '../errors';
 import { buildStepDeps, createRunState } from '../loop';
@@ -16,14 +16,14 @@ import type { PendingHumanWait, PendingWakeup, RunCursor, StepRecord } from './t
 
 export interface DurableStepMemoResult {
   outcome: Pick<Awaited<ReturnType<typeof runStep>>, 'kind'>;
-  errorMessage?: string;
-  errorFinishReason?: FinishReason;
-  errorKind?: ReturnType<typeof toAgentRunError>['kind'];
-  errorCode?: ReturnType<typeof toAgentRunError>['code'];
-  tripwire?: ReturnType<typeof tripwireDetailFrom>;
-  abortReason?: string;
-  stopFinishReason?: FinishReason;
-  schemaValidation?: { success: boolean; error?: string };
+  errorMessage?: string | undefined;
+  errorFinishReason?: FinishReason | undefined;
+  errorKind?: ReturnType<typeof toAgentRunError>['kind'] | undefined;
+  errorCode?: ReturnType<typeof toAgentRunError>['code'] | undefined;
+  tripwire?: ReturnType<typeof tripwireDetailFrom> | undefined;
+  abortReason?: string | undefined;
+  stopFinishReason?: FinishReason | undefined;
+  schemaValidation?: { success: boolean; error?: string } | undefined;
   output?: unknown;
   record: StepRecord | null;
   conversationSnapshot: ReturnType<Conversation['snapshot']>;
@@ -31,8 +31,8 @@ export interface DurableStepMemoResult {
     RunCursor,
     'totalUsage' | 'lastContent' | 'schemaAttempts' | 'lastAppliedConfigVersion'
   >;
-  pendingWakeup?: PendingWakeup;
-  pendingHumanWait?: PendingHumanWait;
+  pendingWakeup?: PendingWakeup | undefined;
+  pendingHumanWait?: PendingHumanWait | undefined;
 }
 
 export function runStepMemo(
@@ -64,9 +64,7 @@ export function runStepMemo(
     const outcome = await runStep(stepDeps, runState, conversation, stepIndex, deps.emitter);
     deps.onStepToolbox?.(deps.toolbox);
     const pushed: StepResult | undefined = runState.steps.at(-1);
-    const stepMetadata = pushed
-      ? { ...(pushed.metadata ?? {}), ...(deps.getStepMetadata?.() ?? {}) }
-      : undefined;
+    const stepMetadata = pushed ? { ...pushed.metadata, ...deps.getStepMetadata?.() } : undefined;
     const record: StepRecord | null = pushed
       ? {
           step: pushed.step,

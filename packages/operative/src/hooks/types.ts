@@ -20,10 +20,10 @@ export interface BeforeGenerateContext {
   conversation: Conversation;
   step: number;
   toolbox: AnyToolbox;
-  toolChoice?: ToolChoice;
-  responseFormat?: ResponseFormat;
-  signal?: AbortSignal;
-  steering?: SteeringDesiredState;
+  toolChoice?: ToolChoice | undefined;
+  responseFormat?: ResponseFormat | undefined;
+  signal?: AbortSignal | undefined;
+  steering?: SteeringDesiredState | undefined;
 }
 
 /** Context passed to afterGenerate hooks. */
@@ -39,7 +39,7 @@ export interface LLMInputContext {
   conversation: Conversation;
   step: number;
   messageCount: number;
-  estimatedTokens?: number;
+  estimatedTokens?: number | undefined;
 }
 
 /** Context passed to onLLMOutput hooks. */
@@ -48,7 +48,7 @@ export interface LLMOutputContext {
   step: number;
   response: Readonly<GenerateResponse>;
   duration: number;
-  usage?: TokenUsage;
+  usage?: TokenUsage | undefined;
 }
 
 /** Context passed to onRunStart hooks. */
@@ -73,7 +73,7 @@ export interface RunErrorContext {
 
 /** Context passed to onRunAbort hooks. */
 export interface RunAbortContext {
-  reason?: string;
+  reason?: string | undefined;
   error: AgentRunError;
   partialSteps: ReadonlyArray<StepResult>;
   conversation: Conversation;

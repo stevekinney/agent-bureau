@@ -1,10 +1,10 @@
 // Re-export environment type
-export type { ConversationEnvironment } from '../environment';
 export { withEnvironment } from '../environment';
+export type { ConversationEnvironment } from '../environment';
 
 // Create
-export type { BuildMessageOptions } from './create';
 export { buildMessage, createConversationHistory, createConversationHistoryUnsafe } from './create';
+export type { BuildMessageOptions } from './create';
 
 // Append
 export {
@@ -37,24 +37,19 @@ export {
 } from './system-messages';
 
 // Modify
-export type { MessageUpdate, RedactMessageOptions } from './modify';
-export {
-  redactMessageAtPosition,
-  removeMessage,
-  replaceToolResult,
-  setMessageHidden,
-  updateMessage,
-} from './modify';
+export { removeMessage, replaceToolResult, setMessageHidden, updateMessage } from './modify';
+export type { MessageUpdate } from './mutation-plugins';
+export { redactMessageAtPosition, type RedactMessageOptions } from './redaction';
 
 // Serialization
 export { deserializeConversationHistory } from './serialization';
 
 // Integrity
-export type { IntegrityIssue, IntegrityIssueCode } from './integrity';
 export {
   assertConversationHistoryIntegrity,
   validateConversationHistoryIntegrity,
 } from './integrity';
+export type { IntegrityIssue, IntegrityIssueCode } from './integrity';
 
 // Transform
 export { toChatMessages } from './transform';
@@ -67,12 +62,6 @@ export type {
   AppendableToolResult,
   ToolCallInput,
 } from '../types';
-export type {
-  AppendToolCallOptions,
-  AppendToolResultOptions,
-  MaterializeToolCallOptions,
-  ToolInteraction,
-} from './tool-interactions';
 export {
   appendToolCall,
   appendToolCalls,
@@ -88,6 +77,12 @@ export {
   materializeToolResultAsync,
   materializeToolResults,
   materializeToolResultsAsync,
-  resolveToolResult,
-  resolveToolResultAsync,
 } from './tool-interactions';
+export type {
+  AppendToolCallOptions,
+  AppendToolResultOptions,
+  MaterializeToolCallOptions,
+  ToolInteraction,
+} from './tool-interactions';
+
+export { resolveToolResult, resolveToolResultAsync } from './tool-resolution';

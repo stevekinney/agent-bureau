@@ -6,9 +6,8 @@
  * engine. `fetch`, `sleep`, and `now` are all injected so retry/backoff
  * behavior never touches a real timer or the network.
  */
-import type { StallWatchdogClock } from '@lostgradient/operative/liveness';
-import type { Action } from '@lostgradient/operative/store';
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import type { Action, StallWatchdogClock } from '@lostgradient/operative';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import type { AuditTrail } from './audit-trail';
@@ -1034,7 +1033,7 @@ describe('createWebhookNotifier', () => {
       await notifier.flush();
 
       expect(revisions.length).toBeGreaterThanOrEqual(3);
-      expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+      expect(revisions).toEqual([...revisions].toSorted((a, b) => a - b));
 
       subscription.unsubscribe();
       await notifier.dispose();

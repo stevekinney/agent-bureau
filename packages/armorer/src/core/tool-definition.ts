@@ -1,10 +1,10 @@
-import { isStandardSchema, type StandardSchemaV1 } from 'interoperability';
+import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { z } from 'zod';
 
 import { normalizeSchema } from '../utilities/schema-normalization';
 import { formatToolId, normalizeIdentity, type ToolId, type ToolIdentity } from './identity';
 import { buildTagsFromRisk, type ToolRisk } from './risk';
-import { isZodSchema } from './schema-utilities';
+import { isStandardSchema, isZodSchema } from './schema-utilities';
 import { assertJsonValue, type JsonObject } from './serialization/json';
 import { assertKebabCaseTag, type NormalizeTagsOption, uniqTags } from './tag-utilities';
 
@@ -26,7 +26,7 @@ export type ToolAvailabilityHook<
   TContext extends ToolAvailabilityContext = ToolAvailabilityContext,
 > = (context: TContext) => boolean | Promise<boolean>;
 
-export type ToolDefinition<TInput extends object = Record<string, unknown>, TOutput = unknown> = {
+export type ToolDefinition<TInput = Record<string, unknown>, TOutput = unknown> = {
   identity: ToolIdentity;
   id: ToolId;
   display: ToolDisplay;
@@ -49,10 +49,10 @@ export type ToolDefinition<TInput extends object = Record<string, unknown>, TOut
   __types?: { input: TInput; output: TOutput } | undefined;
 };
 
-export type AnyToolDefinition = ToolDefinition<Record<string, unknown>, unknown>;
+export type AnyToolDefinition = ToolDefinition;
 
 export type DefineToolOptions<
-  TInput extends object = Record<string, unknown>,
+  TInput = Record<string, unknown>,
   Tags extends readonly string[] = readonly string[],
 > = {
   name: string;
@@ -71,75 +71,92 @@ export type DefineToolOptions<
 };
 
 export function defineTool<
-  TInput extends object = Record<string, unknown>,
+  TInput = Record<string, unknown>,
   TOutput = unknown,
   Tags extends readonly string[] = readonly string[],
 >(options: DefineToolOptions<TInput, Tags>): ToolDefinition<TInput, TOutput> {
-  const {
-    name,
-    description,
-    namespace,
-    version,
-    title,
-    examples,
-    tags,
-    metadata,
-    risk,
-    lifecycle,
-    availability,
-    input,
-    inputJsonSchema,
-  } = options;
+  validateInputJsonSchemaRequirement(options);
 
-  // A non-Zod Standard Schema validator (Valibot, ArkType, ...) has no general
-  // JSON Schema export, so the definition cannot be serialized for a provider
-  // without a caller-supplied `inputJsonSchema`. Fail fast here too — this is
-  // the same guard `createTool` applies, but `defineTool` is itself part of
-  // the public `armorer/core` surface and can be called directly, bypassing
-  // that higher-level check. Without it, `z.toJSONSchema` (called with
-  // `io: 'input'` in `serializeToolDefinition`) silently degrades to `{}` —
-  // an empty schema that accepts anything — instead of failing loudly.
-  if (input !== undefined && !isZodSchema(input) && isStandardSchema(input)) {
-    if (inputJsonSchema === undefined) {
-      throw new Error(
-        `Tool "${name}": a non-Zod Standard Schema \`input\` requires an explicit \`inputJsonSchema\` ` +
-          '(JSON Schema) so the tool can be serialized for providers.',
-      );
-    }
-  }
-  if (inputJsonSchema !== undefined) {
-    assertJsonValue(inputJsonSchema, `Tool "${name}": inputJsonSchema`);
-  }
-
-  const normalizedIdentity = normalizeIdentity({
-    name,
-    ...(namespace !== undefined ? { namespace } : {}),
-    ...(version !== undefined ? { version } : {}),
-  });
-  const normalizedInput = normalizeSchema(input);
-  const resolvedTags = buildTagsFromRisk(normalizeTags(tags, name), risk);
-  const display: ToolDisplay = {
-    title: title ?? name,
-    description,
-    ...(examples?.length ? { examples: [...examples] } : {}),
-  };
-
+  const normalizedIdentity = normalizeIdentity(createIdentityInput(options));
+  const resolvedTags = buildTagsFromRisk(normalizeTags(options.tags, options.name), options.risk);
   const id = formatToolId(normalizedIdentity);
 
   return {
     identity: normalizedIdentity,
     id,
-    display,
+    display: createDisplay(options),
     name: normalizedIdentity.name,
-    description,
-    ...(resolvedTags.length ? { tags: resolvedTags } : {}),
-    ...(metadata !== undefined ? { metadata } : {}),
-    ...(risk !== undefined ? { risk } : {}),
-    ...(lifecycle !== undefined ? { lifecycle } : {}),
-    ...(availability !== undefined ? { availability } : {}),
-    input: normalizedInput,
-    ...(inputJsonSchema !== undefined ? { inputJsonSchema } : {}),
+    description: options.description,
+    ...optionalTags(resolvedTags),
+    ...optionalMetadata(options.metadata),
+    ...optionalRisk(options.risk),
+    ...optionalLifecycle(options.lifecycle),
+    ...optionalAvailability(options.availability),
+    input: normalizeSchema(options.input),
+    ...optionalInputJsonSchema(options.inputJsonSchema),
   };
+}
+
+function validateInputJsonSchemaRequirement(options: DefineToolOptions): void {
+  const { input, inputJsonSchema, name } = options;
+  if (requiresInputJsonSchema(input) && inputJsonSchema === undefined) {
+    throw new Error(
+      `Tool "${name}": a non-Zod Standard Schema \`input\` requires an explicit \`inputJsonSchema\` ` +
+        '(JSON Schema) so the tool can be serialized for providers.',
+    );
+  }
+  if (inputJsonSchema !== undefined)
+    assertJsonValue(inputJsonSchema, `Tool "${name}": inputJsonSchema`);
+}
+
+function requiresInputJsonSchema(input: DefineToolOptions['input']): boolean {
+  return input !== undefined && !isZodSchema(input) && isStandardSchema(input);
+}
+
+function createIdentityInput(options: DefineToolOptions): Parameters<typeof normalizeIdentity>[0] {
+  return {
+    name: options.name,
+    ...(options.namespace !== undefined ? { namespace: options.namespace } : {}),
+    ...(options.version !== undefined ? { version: options.version } : {}),
+  };
+}
+
+function createDisplay(options: DefineToolOptions): ToolDisplay {
+  return {
+    title: options.title ?? options.name,
+    description: options.description,
+    ...(options.examples?.length ? { examples: [...options.examples] } : {}),
+  };
+}
+
+function optionalTags(tags: string[]): Pick<ToolDefinition, 'tags'> | {} {
+  return tags.length ? { tags } : {};
+}
+
+function optionalMetadata(metadata: JsonObject | undefined): Pick<ToolDefinition, 'metadata'> | {} {
+  return metadata !== undefined ? { metadata } : {};
+}
+
+function optionalRisk(risk: ToolRisk | undefined): Pick<ToolDefinition, 'risk'> | {} {
+  return risk !== undefined ? { risk } : {};
+}
+
+function optionalLifecycle(
+  lifecycle: ToolLifecycle | undefined,
+): Pick<ToolDefinition, 'lifecycle'> | {} {
+  return lifecycle !== undefined ? { lifecycle } : {};
+}
+
+function optionalAvailability(
+  availability: ToolAvailabilityHook | undefined,
+): Pick<ToolDefinition, 'availability'> | {} {
+  return availability !== undefined ? { availability } : {};
+}
+
+function optionalInputJsonSchema(
+  inputJsonSchema: JsonObject | undefined,
+): Pick<ToolDefinition, 'inputJsonSchema'> | {} {
+  return inputJsonSchema !== undefined ? { inputJsonSchema } : {};
 }
 
 function normalizeTags(

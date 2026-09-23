@@ -6,11 +6,11 @@ import type {
   ToolWithInput,
 } from '../compose-types';
 import { createTool } from '../create-tool';
-import type { DefaultToolEvents, ToolContext } from '../is-tool';
+import type { ToolContext } from '../is-tool';
 
 type WhenPredicate<TInput = unknown> = (
   input: TInput,
-  context: ToolContext<DefaultToolEvents>,
+  context: ToolContext,
 ) => boolean | Promise<boolean>;
 
 /**
@@ -27,7 +27,7 @@ type WhenPredicate<TInput = unknown> = (
  * @example Basic conditional
  * ```typescript
  * import { createTool } from 'armorer';
- * import { when } from 'armorer/utilities';
+ * import { when } from 'armorer';
  * import { z } from 'zod';
  *
  * const expensiveProcess = createTool({
@@ -69,7 +69,7 @@ export function when<
     ? `Conditional tool: ${whenTrue.name} or ${whenFalse.name}`
     : `Conditional tool: ${whenTrue.name}`;
 
-  const runWhen = async (params: unknown, context: ToolContext<DefaultToolEvents>) => {
+  const runWhen = async (params: unknown, context: ToolContext) => {
     const input = params as InferToolInput<TTool>;
     const executeOptions =
       context.signal || context.timeout !== undefined || context.stream !== undefined
@@ -96,7 +96,7 @@ export function when<
     async execute(params, context) {
       return runWhen(params, context);
     },
-  }) as ComposedTool<
+  }) as unknown as ComposedTool<
     InferToolInput<TTool>,
     | InferToolOutput<TTool>
     | (TElse extends AnyTool ? InferToolOutput<TElse> : InferToolInput<TTool>)

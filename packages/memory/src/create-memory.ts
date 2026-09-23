@@ -1,45 +1,26 @@
-import { cosineSimilarity, type EmbeddingVectorLike } from 'interoperability';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
-import type { HybridSearchCandidate, VectorSearchResult } from './hybrid-search';
-import { mergeHybridResults } from './hybrid-search';
-import { SOURCE_DOCUMENT_KEY } from './ingest';
-import { applyMaximalMarginalRelevance } from './maximal-marginal-relevance';
-import type {
-  MemoryRecord,
-  MemoryRecordScope,
-  MemoryVectorSearchResult,
-} from './memory-record-storage';
-import { extractKeywords } from './query-expansion';
-import { applyTemporalDecay } from './temporal-decay';
-import { filterByValidity, stampSupersession } from './temporal-validity';
-import { computeBM25Scores } from './text-search';
-import type {
-  CreateMemoryOptions,
-  Memory,
-  MemoryEntry,
-  MemoryListOptions,
-  MemoryMetadata,
-  MemorySearchOptions,
-  MemorySearchResult,
-} from './types';
+import { createMemoryLifecycleMethods } from './memory-lifecycle';
+import { createRecall } from './memory-recall';
+import type { MemoryRecord, MemoryRecordScope } from './memory-record-storage';
+import { stampSupersession } from './temporal-validity';
+import type { CreateMemoryOptions, Memory, MemoryEntry, MemoryMetadata } from './types';
 
 const DEFAULT_DEDUPLICATION_THRESHOLD = 0.95;
 const DEFAULT_NAMESPACE = 'default';
 
-function rankRecordsByVector(
-  records: readonly MemoryRecord[],
-  queryVector: EmbeddingVectorLike,
-  threshold?: number,
-): MemoryVectorSearchResult[] {
-  return records
-    .map((record) => ({
-      id: record.id,
-      score: cosineSimilarity(queryVector, record.vector),
-      record,
-    }))
-    .filter((hit) => threshold === undefined || hit.score >= threshold)
-    .sort((left, right) => right.score - left.score);
+function createScope(namespace: string): MemoryRecordScope {
+  if (namespace.length === 0) throw new Error('namespace must be a non-empty string.');
+  return { namespace };
+}
+
+function memorySource(value: unknown): MemoryMetadata['source'] {
+  return value === 'manual' ||
+    value === 'tool' ||
+    value === 'experiential' ||
+    value === 'auto-capture'
+    ? value
+    : 'manual';
 }
 
 function generateId(runtime: RuntimeServices): string {
@@ -53,16 +34,24 @@ function generateId(runtime: RuntimeServices): string {
  */
 function toMemoryMetadata(record: MemoryRecord): MemoryMetadata {
   const raw = record.metadata;
-  return {
+  const metadata: MemoryMetadata = {
     ...raw,
     namespace: record.namespace,
-    source: (raw['source'] as MemoryMetadata['source']) ?? 'manual',
-    conversationId: raw['conversationId'] as string | undefined,
-    agentId: raw['agentId'] as string | undefined,
-    importance: raw['importance'] as number | undefined,
-    evergreen: raw['evergreen'] as boolean | undefined,
-    tags: raw['tags'] as string[] | undefined,
+    source: memorySource(raw['source']),
   };
+  const conversationId = raw['conversationId'];
+  const agentId = raw['agentId'];
+  const importance = raw['importance'];
+  const evergreen = raw['evergreen'];
+  const tags = raw['tags'];
+  if (typeof conversationId === 'string') metadata.conversationId = conversationId;
+  if (typeof agentId === 'string') metadata.agentId = agentId;
+  if (typeof importance === 'number') metadata.importance = importance;
+  if (typeof evergreen === 'boolean') metadata.evergreen = evergreen;
+  if (Array.isArray(tags) && tags.every((tag): tag is string => typeof tag === 'string')) {
+    metadata.tags = tags;
+  }
+  return metadata;
 }
 
 /**
@@ -118,14 +107,7 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     );
   }
 
-  function scopeFor(namespace: string): MemoryRecordScope {
-    // The public contract requires a non-empty namespace; an empty string would
-    // otherwise be encoded as a real (but unreachable-by-default) scope key.
-    if (namespace.length === 0) {
-      throw new Error('namespace must be a non-empty string.');
-    }
-    return { namespace };
-  }
+  const scopeFor = createScope;
 
   async function embed(text: string): Promise<number[]> {
     const vectors = await embedder([text]);
@@ -165,116 +147,163 @@ export function createMemory(options: CreateMemoryOptions): Memory {
     return { duplicate: undefined, conflict: { record: top.record, similarity: top.score } };
   }
 
+  function validateRememberMetadata(metadata: Partial<MemoryMetadata> | undefined): void {
+    if (requireNamespace && !metadata?.namespace && defaultNamespace === DEFAULT_NAMESPACE) {
+      throw new Error(
+        'Namespace is required: provide a namespace in metadata or configure a default namespace.',
+      );
+    }
+    if (metadata?.supersedes !== undefined && !temporalValidity) {
+      throw new Error('metadata.supersedes requires temporalValidity to be enabled.');
+    }
+  }
+
+  async function replaceExisting(
+    existing: MemoryRecord,
+    content: string,
+    metadata: Partial<MemoryMetadata> | undefined,
+    namespace: string,
+    scope: MemoryRecordScope,
+    vector: number[],
+  ): Promise<MemoryEntry> {
+    const updated = await storage.update(existing.id, scope, {
+      content,
+      vector: new Float32Array(vector),
+      metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
+    });
+    const record = updated ?? existing;
+    if (textSearchProvider) await textSearchProvider.index(record.id, content, namespace);
+    return toMemoryEntry(record, vector);
+  }
+
+  async function resolveConflict(
+    conflict: NonNullable<DuplicateCheckResult['conflict']>,
+    content: string,
+    metadata: Partial<MemoryMetadata> | undefined,
+    namespace: string,
+    scope: MemoryRecordScope,
+    vector: number[],
+  ): Promise<MemoryEntry | undefined> {
+    const existingMeta = toMemoryMetadata(conflict.record);
+    const resolution = onConflict
+      ? await onConflict(
+          { content, metadata: metadata ?? {} },
+          {
+            id: conflict.record.id,
+            content: conflict.record.content,
+            metadata: existingMeta,
+            similarity: conflict.similarity,
+          },
+        )
+      : 'keep-both';
+    if (resolution === 'replace')
+      return replaceExisting(conflict.record, content, metadata, namespace, scope, vector);
+    if (resolution !== 'skip') return undefined;
+    return {
+      id: conflict.record.id,
+      content: conflict.record.content,
+      vector: Array.from(conflict.record.vector),
+      metadata: existingMeta,
+      createdAt: conflict.record.createdAt,
+      updatedAt: conflict.record.updatedAt,
+    };
+  }
+
+  async function insertRecord(
+    content: string,
+    metadata: Partial<MemoryMetadata> | undefined,
+    namespace: string,
+    scope: MemoryRecordScope,
+    vector: number[],
+  ): Promise<MemoryEntry> {
+    const id = generateId(runtime);
+    const now = runtime.clock.now();
+    const record: MemoryRecord = {
+      id,
+      namespace,
+      content,
+      vector: new Float32Array(vector),
+      metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
+      createdAt: now,
+      updatedAt: now,
+      version: 1,
+      status: 'active',
+    };
+    await storage.put(record);
+    if (textSearchProvider) await textSearchProvider.index(id, content, namespace);
+    if (temporalValidity && metadata?.supersedes !== undefined) {
+      const superseded = await storage.get(metadata.supersedes, scope);
+      if (!superseded)
+        throw new Error(
+          `Cannot supersede unknown record "${metadata.supersedes}" in namespace "${namespace}".`,
+        );
+      await storage.update(superseded.id, scope, {
+        metadata: stampSupersession(superseded.metadata, id, now),
+      });
+    }
+    return toMemoryEntry(record, vector);
+  }
+
+  async function rememberOnceEntry(
+    content: string,
+    metadata: Partial<MemoryMetadata> & { dedupeKey: string },
+  ): Promise<MemoryEntry> {
+    const namespace = metadata.namespace ?? defaultNamespace;
+    const scope = scopeFor(namespace);
+    const existing = await storage.getByDedupeKey?.(scope, metadata.dedupeKey);
+    if (existing !== undefined) {
+      if (textSearchProvider)
+        await textSearchProvider.index(existing.id, existing.content, namespace);
+      return toMemoryEntry(existing);
+    }
+    if (storage.putOnce === undefined)
+      throw new Error('rememberOnce requires storage.putOnce support.');
+    const vector = await embed(content);
+    const now = runtime.clock.now();
+    const record: MemoryRecord = {
+      id: generateId(runtime),
+      namespace,
+      content,
+      vector: new Float32Array(vector),
+      metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
+      createdAt: now,
+      updatedAt: now,
+      version: 1,
+      status: 'active',
+    };
+    const result = await storage.putOnce(record);
+    if (textSearchProvider)
+      await textSearchProvider.index(result.record.id, result.record.content, namespace);
+    return toMemoryEntry(result.record, result.inserted ? vector : undefined);
+  }
+
   const memory: Memory = {
     async remember(content: string, metadata?: Partial<MemoryMetadata>): Promise<MemoryEntry> {
-      if (requireNamespace && !metadata?.namespace && defaultNamespace === DEFAULT_NAMESPACE) {
-        throw new Error(
-          'Namespace is required: provide a namespace in metadata or configure a default namespace.',
-        );
-      }
-
-      if (metadata?.supersedes !== undefined && !temporalValidity) {
-        throw new Error('metadata.supersedes requires temporalValidity to be enabled.');
-      }
+      validateRememberMetadata(metadata);
 
       const namespace = metadata?.namespace ?? defaultNamespace;
       const scope = scopeFor(namespace);
       const vector = await embed(content);
-      const float32Vector = new Float32Array(vector);
-
       const { duplicate, conflict } = await checkDuplicatesAndConflicts(vector, namespace);
-
-      // Update an existing record in place (used for dedup and 'replace' conflict).
-      async function replaceExisting(existing: MemoryRecord): Promise<MemoryEntry> {
-        const updated = await storage.update(existing.id, scope, {
-          content,
-          vector: float32Vector,
-          metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
-        });
-        const record = updated ?? existing;
-
-        if (textSearchProvider) {
-          await textSearchProvider.index(record.id, content, namespace);
-        }
-
-        return toMemoryEntry(record, vector);
-      }
 
       // Deduplication: near-identical entries are updated in place.
       if (duplicate) {
-        return replaceExisting(duplicate);
+        return replaceExisting(duplicate, content, metadata, namespace, scope, vector);
       }
 
       // Conflict detection: topically similar but potentially contradictory.
       if (conflict) {
-        const existingMeta = toMemoryMetadata(conflict.record);
-
-        const resolution = onConflict
-          ? await onConflict(
-              { content, metadata: metadata ?? {} },
-              {
-                id: conflict.record.id,
-                content: conflict.record.content,
-                metadata: existingMeta,
-                similarity: conflict.similarity,
-              },
-            )
-          : 'keep-both';
-
-        if (resolution === 'replace') {
-          return replaceExisting(conflict.record);
-        }
-
-        if (resolution === 'skip') {
-          return {
-            id: conflict.record.id,
-            content: conflict.record.content,
-            vector: Array.from(conflict.record.vector),
-            metadata: existingMeta,
-            createdAt: conflict.record.createdAt,
-            updatedAt: conflict.record.updatedAt,
-          };
-        }
-
-        // 'keep-both' — fall through to normal insert.
+        const resolved = await resolveConflict(
+          conflict,
+          content,
+          metadata,
+          namespace,
+          scope,
+          vector,
+        );
+        if (resolved) return resolved;
       }
-
-      const id = generateId(runtime);
-      const now = runtime.clock.now();
-      const record: MemoryRecord = {
-        id,
-        namespace,
-        content,
-        vector: float32Vector,
-        metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
-        createdAt: now,
-        updatedAt: now,
-        version: 1,
-        status: 'active',
-      };
-
-      await storage.put(record);
-
-      if (textSearchProvider) {
-        await textSearchProvider.index(id, content, namespace);
-      }
-
-      // Stamp the superseded record as invalidated, pointing at the new record.
-      // Runs after the new record is durably stored so a failed stamp never
-      // leaves an orphaned fact with no successor.
-      if (temporalValidity && metadata?.supersedes !== undefined) {
-        const superseded = await storage.get(metadata.supersedes, scope);
-        if (!superseded) {
-          throw new Error(
-            `Cannot supersede unknown record "${metadata.supersedes}" in namespace "${namespace}".`,
-          );
-        }
-        await storage.update(superseded.id, scope, {
-          metadata: stampSupersession(superseded.metadata, id, now),
-        });
-      }
-
-      return toMemoryEntry(record, vector);
+      return insertRecord(content, metadata, namespace, scope, vector);
     },
 
     async rememberOnce(
@@ -291,292 +320,28 @@ export function createMemory(options: CreateMemoryOptions): Memory {
         );
       }
 
-      const namespace = metadata.namespace ?? defaultNamespace;
-      const scope = scopeFor(namespace);
-      const existing = await storage.getByDedupeKey?.(scope, metadata.dedupeKey);
-      if (existing !== undefined) {
-        if (textSearchProvider) {
-          await textSearchProvider.index(existing.id, existing.content, namespace);
-        }
-        return toMemoryEntry(existing);
-      }
-
-      if (storage.putOnce === undefined) {
-        throw new Error('rememberOnce requires storage.putOnce support.');
-      }
-
-      const vector = await embed(content);
-      const now = runtime.clock.now();
-      const record: MemoryRecord = {
-        id: generateId(runtime),
-        namespace,
-        content,
-        vector: new Float32Array(vector),
-        metadata: buildStoredMetadata({ source: 'manual', ...metadata }),
-        createdAt: now,
-        updatedAt: now,
-        version: 1,
-        status: 'active',
-      };
-
-      const result = await storage.putOnce(record);
-      if (textSearchProvider) {
-        await textSearchProvider.index(result.record.id, result.record.content, namespace);
-      }
-
-      return toMemoryEntry(result.record, result.inserted ? vector : undefined);
+      return rememberOnceEntry(content, metadata);
     },
 
-    async recall(
-      query: string,
-      searchOptions?: MemorySearchOptions,
-    ): Promise<MemorySearchResult[]> {
-      const mergedOptions = { ...defaultSearchOptions, ...searchOptions };
-      const namespace = mergedOptions.namespace ?? defaultNamespace;
-      const scope = scopeFor(namespace);
-      const limit = mergedOptions.limit ?? 10;
-      const threshold = mergedOptions.threshold ?? 0;
-      const vectorWeight = mergedOptions.vectorWeight ?? 0.7;
-      const textWeight = mergedOptions.textWeight ?? 0.3;
-
-      const queryVector = await embed(query);
-      const candidateMultiplier = 3;
-
-      // Resolve once so both search branches filter to the same instant. Only
-      // active when the flag is set — otherwise `asOf` is inert.
-      const asOf = temporalValidity ? (mergedOptions.asOf ?? runtime.clock.now()) : undefined;
-
-      // When vectorOnly is set, skip BM25 and return pure cosine similarity
-      // scores filtered by the (cosine-semantics) threshold.
-      if (mergedOptions.vectorOnly) {
-        // Indexed backends may cap one-shot search limits (Cloudflare caps at
-        // 200). Temporal validity needs the whole candidate set so invalid top
-        // hits cannot shrink K, so rank the paginatable canonical corpus
-        // locally instead of requesting an unbounded ANN top-K.
-        const hits =
-          asOf === undefined
-            ? await storage.searchByVector(queryVector, scope, {
-                limit: limit * candidateMultiplier,
-                threshold,
-              })
-            : rankRecordsByVector(await storage.list(scope), queryVector, threshold);
-
-        let results: (MemorySearchResult & { vector?: number[] })[] = hits.map((hit) => ({
-          id: hit.id,
-          content: hit.record.content,
-          score: hit.score,
-          metadata: toMemoryMetadata(hit.record),
-          createdAt: hit.record.createdAt,
-          vector: Array.from(hit.record.vector),
-        }));
-
-        if (asOf !== undefined) {
-          results = filterByValidity(results, asOf);
-        }
-
-        if (mergedOptions.temporalDecay) {
-          results = applyTemporalDecay(results, {
-            halfLifeMilliseconds: mergedOptions.temporalDecay.halfLifeMilliseconds,
-            evergreenExempt: mergedOptions.temporalDecay.evergreenExempt ?? true,
-            runtime,
-          });
-        }
-
-        if (mergedOptions.diversify) {
-          results = applyMaximalMarginalRelevance(results, limit, {
-            lambda: mergedOptions.diversify.lambda,
-          });
-        }
-
-        return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
-      }
-
-      // Hybrid path: enumerate the scoped corpus for BM25, run vector search
-      // through storage, then merge.
-      const corpus = await storage.list(scope);
-      if (corpus.length === 0) return [];
-      // Validity filtering happens after hybrid ranking. Rank the canonical
-      // corpus locally when enabled so backend ANN limits cannot shrink K.
-      const vectorResultLimit = asOf === undefined ? limit * candidateMultiplier : corpus.length;
-
-      const recordsById = new Map(corpus.map((record) => [record.id, record]));
-      const candidates: HybridSearchCandidate[] = corpus.map((record) => ({
-        id: record.id,
-        content: record.content,
-        metadata: record.metadata,
-        createdAt: record.createdAt,
-      }));
-
-      // Vector similarity search — no threshold here: the recall threshold is
-      // applied to the COMBINED score by mergeHybridResults. Pre-filtering the
-      // vector half would discard valid hybrid matches.
-      const vectorHits =
-        asOf === undefined
-          ? await storage.searchByVector(queryVector, scope, { limit: vectorResultLimit })
-          : rankRecordsByVector(corpus, queryVector);
-      const vectorResults: VectorSearchResult[] = vectorHits.map((hit) => ({
-        id: hit.id,
-        score: hit.score,
-      }));
-
-      // Text search — use provider if available, otherwise in-memory BM25.
-      let textScores: Map<number, number>;
-      if (textSearchProvider) {
-        const idScores = await textSearchProvider.search(query, namespace);
-        textScores = new Map<number, number>();
-        for (let i = 0; i < candidates.length; i++) {
-          const score = idScores.get(candidates[i]!.id);
-          if (score !== undefined) {
-            textScores.set(i, score);
-          }
-        }
-      } else {
-        const keywords = extractKeywords(query);
-        const documents = candidates.map((candidate) => candidate.content);
-        // Pass pre-extracted keywords as queryTerms to avoid double CJK
-        // expansion (extractKeywords already produces unigrams + bigrams).
-        const rawScores =
-          keywords.length > 0
-            ? computeBM25Scores(query, documents, { queryTerms: keywords })
-            : computeBM25Scores(query, documents);
-
-        // Normalize raw BM25 scores to [0, 1) so they are on the same scale
-        // as vector similarity scores.
-        textScores = new Map<number, number>();
-        for (const [index, score] of rawScores) {
-          textScores.set(index, score / (1 + score));
-        }
-      }
-
-      // Merge hybrid results.
-      const hybridResults = mergeHybridResults(vectorResults, textScores, candidates, {
-        vectorWeight,
-        textWeight,
-        limit: vectorResultLimit,
-        threshold,
-      });
-
-      // Convert to MemorySearchResult with vectors for MMR.
-      let results: (MemorySearchResult & { vector?: number[] })[] = hybridResults.map((result) => {
-        const matched = recordsById.get(result.id);
-        return {
-          id: result.id,
-          content: result.content,
-          score: result.combinedScore,
-          metadata: matched
-            ? toMemoryMetadata(matched)
-            : ({ ...result.metadata, namespace } as MemoryMetadata),
-          createdAt: result.createdAt,
-          vector: matched ? Array.from(matched.vector) : undefined,
-        };
-      });
-
-      if (asOf !== undefined) {
-        results = filterByValidity(results, asOf);
-      }
-
-      // Apply temporal decay if configured.
-      if (mergedOptions.temporalDecay) {
-        results = applyTemporalDecay(results, {
-          halfLifeMilliseconds: mergedOptions.temporalDecay.halfLifeMilliseconds,
-          evergreenExempt: mergedOptions.temporalDecay.evergreenExempt ?? true,
-          runtime,
-        });
-      }
-
-      // Apply MMR for diversity if configured.
-      if (mergedOptions.diversify) {
-        results = applyMaximalMarginalRelevance(results, limit, {
-          lambda: mergedOptions.diversify.lambda,
-        });
-      }
-
-      // Deduplicate chunks from the same source document, keeping the highest
-      // score. After temporal decay and MMR, results may not be sorted by
-      // score, so we compare scores explicitly rather than assuming first-seen
-      // is best.
-      const seenSources = new Map<string, { index: number; score: number }>();
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i]!;
-        const sourceDocument = result.metadata[SOURCE_DOCUMENT_KEY] as string | undefined;
-        if (!sourceDocument) continue;
-
-        const existing = seenSources.get(sourceDocument);
-        if (existing === undefined || result.score > existing.score) {
-          seenSources.set(sourceDocument, { index: i, score: result.score });
-        }
-      }
-      const keptIndices = new Set(Array.from(seenSources.values()).map((entry) => entry.index));
-      results = results.filter((result, index) => {
-        const sourceDocument = result.metadata[SOURCE_DOCUMENT_KEY] as string | undefined;
-        if (!sourceDocument) return true;
-        return keptIndices.has(index);
-      });
-
-      // Final limit and strip vectors from output.
-      return results.slice(0, limit).map(({ vector: _vector, ...rest }) => rest);
-    },
-
-    async list(listOptions?: MemoryListOptions): Promise<MemorySearchResult[]> {
-      const namespace = listOptions?.namespace ?? defaultNamespace;
-      const limit = listOptions?.limit ?? 100;
-      const offset = listOptions?.offset ?? 0;
-
-      // Storage returns records newest-first; pagination is pushed down.
-      const records = await storage.list(scopeFor(namespace), { limit, offset });
-
-      return records.map((record) => ({
-        id: record.id,
-        content: record.content,
-        score: 1, // No semantic scoring for list.
-        metadata: toMemoryMetadata(record),
-        createdAt: record.createdAt,
-      }));
-    },
-
-    async forget(id: string, namespace?: string): Promise<void> {
-      const removed = await storage.delete(id, scopeFor(namespace ?? defaultNamespace));
-      // Only strip the text-index entry if the scoped delete actually removed the
-      // record. `textSearchProvider.remove(id)` is keyed by bare id while
-      // `storage.delete` is scope-keyed, so an unmatched-namespace forget must NOT
-      // evict the index entry of the record still living under its real scope.
-      if (removed && textSearchProvider) {
-        await textSearchProvider.remove(id);
-      }
-    },
-
-    async forgetAll(namespace?: string): Promise<void> {
-      const targetNamespace = namespace ?? defaultNamespace;
-      await storage.deleteNamespace(scopeFor(targetNamespace));
-      if (textSearchProvider) {
-        await textSearchProvider.clear(targetNamespace);
-      }
-      // Cascade: clear embedding cache entries for this namespace if the
-      // embedder supports namespace-scoped eviction.
-      if ('clearNamespace' in embedder && typeof embedder.clearNamespace === 'function') {
-        await (embedder as { clearNamespace: (ns: string) => void | Promise<void> }).clearNamespace(
-          targetNamespace,
-        );
-      }
-    },
-
-    async count(namespace?: string): Promise<number> {
-      return storage.count(scopeFor(namespace ?? defaultNamespace));
-    },
-
-    async init(): Promise<void> {
-      await storage.init();
-      if (textSearchProvider) {
-        await textSearchProvider.init();
-      }
-    },
-
-    async close(): Promise<void> {
-      await storage.close();
-      if (textSearchProvider) {
-        await textSearchProvider.close();
-      }
-    },
+    recall: createRecall({
+      storage,
+      defaultNamespace,
+      defaultSearchOptions,
+      textSearchProvider,
+      temporalValidity,
+      runtime,
+      embed,
+      scopeFor,
+      toMemoryMetadata,
+    }),
+    ...createMemoryLifecycleMethods({
+      storage,
+      defaultNamespace,
+      textSearchProvider,
+      embedder,
+      scopeFor,
+      toMemoryMetadata,
+    }),
   };
 
   return memory;

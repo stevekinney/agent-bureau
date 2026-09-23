@@ -29,7 +29,7 @@
  * detection once a per-evaluation deadline exists, without reopening this
  * module later to add it.
  */
-import type { RunResult } from '@lostgradient/operative';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 import {
   BACKGROUND_EVALUATION_POLICY,
   createStallWatchdog,
@@ -40,12 +40,12 @@ import {
   type LivenessProgressState,
   type LivenessReachability,
   type LivenessSnapshot,
+  type RunResult,
   type StallWatchdog,
   type StallWatchdogClock,
   type Subscription,
-} from '@lostgradient/operative/liveness';
+} from '@lostgradient/operative';
 import { Conversation } from 'conversationalist';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
@@ -566,7 +566,8 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
 
   function notifyAggregate(): void {
     const current = readAggregateSnapshot();
-    for (const record of [...aggregateSubscribers]) {
+    const currentSubscribers = [...aggregateSubscribers];
+    for (const record of currentSubscribers) {
       if (record.closed) continue;
       try {
         record.observer(current);
@@ -696,12 +697,12 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
       return sampled;
     },
     async flush(): Promise<void> {
-      await Promise.allSettled([...activeEvaluations]);
+      await Promise.allSettled(activeEvaluations);
     },
     async dispose(): Promise<void> {
       disposed = true;
       bureau.removeEventListener('action', listener);
-      await Promise.allSettled([...activeEvaluations]);
+      await Promise.allSettled(activeEvaluations);
     },
     activeEvaluationSnapshots(): EvaluationLivenessSnapshot[] {
       return [...trackedEvaluations.values()].map(computeEvaluationSnapshot);

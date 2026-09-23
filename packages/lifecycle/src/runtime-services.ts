@@ -5,9 +5,8 @@
  * `readonly`; a consumer swaps an entire service (`clock`, `timers`, ...),
  * never mutates one in place.
  *
- * `createDefaultRuntimeServices()` is the only function in this package (or
- * in `@lostgradient/operative`, once the operative run-path migrates onto
- * it) that reaches the real globals (`Date.now`, `performance.now`,
+ * `createDefaultRuntimeServices()` owns this package's access to real globals
+ * (`Date.now`, `performance.now`,
  * `globalThis.setTimeout`/`clearTimeout`/`setInterval`/`clearInterval`,
  * `crypto.randomUUID`, `Math.random`). Everything else composes against the
  * `RuntimeServices` interface, so a test swaps in
@@ -78,7 +77,7 @@ export interface RuntimeDeferred {
  * The injectable runtime-service contract (AB-92 AC4). A production caller
  * that never supplies one gets {@link createDefaultRuntimeServices}'s real-
  * globals implementation; a test composes its own deterministic instance
- * from `@lostgradient/operative/test`'s `createManualRuntimeServices`.
+ * from `@lostgradient/lifecycle`'s `createManualRuntimeServices`.
  */
 export interface RuntimeServices {
   readonly clock: RuntimeClock;
@@ -133,9 +132,13 @@ export function createDefaultRuntimeServices(): RuntimeServices {
 
   const timers: RuntimeTimers = {
     setTimeout: (callback, milliseconds) => globalThis.setTimeout(callback, milliseconds),
-    clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+    clearTimeout: (handle) => {
+      Reflect.apply(globalThis.clearTimeout, undefined, [handle]);
+    },
     setInterval: (callback, milliseconds) => globalThis.setInterval(callback, milliseconds),
-    clearInterval: (handle) => globalThis.clearInterval(handle as ReturnType<typeof setInterval>),
+    clearInterval: (handle) => {
+      Reflect.apply(globalThis.clearInterval, undefined, [handle]);
+    },
   };
 
   const identifiers: RuntimeIdentifiers = {
@@ -163,9 +166,11 @@ export function createDefaultRuntimeServices(): RuntimeServices {
       void promise.then(
         () => {
           entry.outcome = 'resolved';
+          return undefined;
         },
         () => {
           entry.outcome = 'rejected';
+          return undefined;
         },
       );
     },

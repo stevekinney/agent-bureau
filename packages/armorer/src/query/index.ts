@@ -1,11 +1,11 @@
 export {
-  type NormalizedTextQuery,
   schemaHasKeys,
   schemaMatches,
   tagsMatchAll,
   tagsMatchAny,
   tagsMatchNone,
   textMatches,
+  type NormalizedTextQuery,
   type TextMatchScore,
   type TextQuery,
   type TextQueryField,
@@ -16,6 +16,9 @@ export {
 } from '../core/query-predicates';
 export {
   awaitToolEmbeddings,
+  queryTools,
+  registerToolEmbeddings,
+  reindexSearchIndex,
   type Embedder,
   type EmbeddingEntry,
   type EmbeddingVector,
@@ -25,9 +28,6 @@ export {
   type QueryEvent,
   type QueryResult,
   type QuerySelectionResult,
-  queryTools,
-  registerToolEmbeddings,
-  reindexSearchIndex,
   type RiskFilter,
   type SchemaFilter,
   type TagFilter,

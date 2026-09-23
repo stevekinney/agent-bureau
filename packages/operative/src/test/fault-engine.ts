@@ -1,6 +1,6 @@
+import type { HookRegistrationOptions, RuntimeServices } from '@lostgradient/lifecycle';
+import { HookRegistry } from '@lostgradient/lifecycle';
 import type { AnyToolbox, ToolboxExecuteOptions, ToolError } from 'armorer';
-import type { HookRegistrationOptions, RuntimeServices } from 'lifecycle';
-import { HookRegistry } from 'lifecycle';
 
 import type { OperativeHookMap } from '../hooks';
 import type {
@@ -41,7 +41,7 @@ export interface FaultBlockEffect {
   /** Resolves to unblock the call. The engine never resolves this itself. */
   readonly release: Promise<void>;
   /** Invoked synchronously the instant the call arrives at the barrier, before `release` is awaited. */
-  readonly onReached?: () => void;
+  readonly onReached?: (() => void) | undefined;
 }
 
 /** Suspends the call until `runtime.timers` fires the delay — never a real timer. */
@@ -463,6 +463,8 @@ export function createFaultEngine(plan: FaultPlan, runtime: RuntimeServices): Fa
         recordFired(entry, ordinal);
         return callThrough(new AbortController().signal);
       }
+      default:
+        return Promise.reject(new Error('Unhandled fault effect'));
     }
   }
 
@@ -499,14 +501,6 @@ export function createFaultEngine(plan: FaultPlan, runtime: RuntimeServices): Fa
   }
 
   class FaultAwareHookRegistry extends HookRegistry<OperativeHookMap> {
-    // Explicit (even though it only calls `super()`) — Bun's coverage
-    // instrumenter counts a class's implicit default constructor as an
-    // unhittable function otherwise; see `BarrierCoordinator`'s identical
-    // comment in `scripted-generate.ts`.
-    constructor() {
-      super();
-    }
-
     override on<K extends keyof OperativeHookMap & string>(
       hookName: K,
       handler: OperativeHookMap[K],

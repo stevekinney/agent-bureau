@@ -1,4 +1,4 @@
-import type { RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { GenerateContext, GenerateFunction } from '../types.ts';
 
@@ -11,7 +11,7 @@ export type RoutingOptions = {
   /** Strategy for selecting a model. */
   strategy: RoutingStrategy;
   /** Called when a model is selected. */
-  onRoute?: (event: RoutingEvent) => void;
+  onRoute?: ((event: RoutingEvent) => void) | undefined;
   /** Fallback route name when no strategy matches. Required. */
   fallback: string;
   /**
@@ -21,7 +21,7 @@ export type RoutingOptions = {
    * own deterministic instance with `createManualRuntimeServices()` so
    * recorded latencies are fully time-controlled.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 };
 
 /**
@@ -33,7 +33,7 @@ export type ModelRoute = {
   /** The generate function for this model. */
   generate: GenerateFunction;
   /** Cost per million tokens for budget-aware routing. */
-  costPerMillionTokens?: number;
+  costPerMillionTokens?: number | undefined;
 };
 
 /**

@@ -3,7 +3,7 @@
  * These utilities intentionally work with untyped Zod internals (_def, shape, etc.)
  * which requires permissive type handling.
  */
-import type { StandardSchemaV1 } from 'interoperability';
+import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { z } from 'zod';
 
 export type ToolSchema = z.ZodType;
@@ -21,6 +21,22 @@ export type ToolSchema = z.ZodType;
  */
 const WRAPPED_STANDARD_SCHEMA = Symbol('armorer.wrappedStandardSchema');
 
+/** Returns whether a value exposes a valid Standard Schema V1 contract. */
+export function isStandardSchema(value: unknown): value is StandardSchemaV1 {
+  if (typeof value !== 'object' || value === null || !('~standard' in value)) return false;
+  const properties: unknown = value['~standard'];
+  return (
+    typeof properties === 'object' &&
+    properties !== null &&
+    'version' in properties &&
+    properties.version === 1 &&
+    'vendor' in properties &&
+    typeof properties.vendor === 'string' &&
+    'validate' in properties &&
+    typeof properties.validate === 'function'
+  );
+}
+
 /**
  * Wraps a non-Zod Standard Schema validator (Valibot, ArkType, ...) as a
  * `z.ZodType` so it flows through the rest of the tool pipeline —
@@ -37,8 +53,10 @@ const WRAPPED_STANDARD_SCHEMA = Symbol('armorer.wrappedStandardSchema');
  * represent an arbitrary external validator, so callers must supply a JSON
  * Schema alongside (see `CreateToolOptions.inputSchema`).
  */
-export function wrapStandardSchema(schema: StandardSchemaV1): z.ZodType {
-  const wrapped = z.any().transform(async (value, ctx) => {
+export function wrapStandardSchema<Output>(
+  schema: StandardSchemaV1<unknown, Output>,
+): z.ZodType<Output> {
+  const wrapped = z.unknown().transform(async (value, ctx) => {
     const result = await schema['~standard'].validate(value);
     if (result.issues) {
       for (const issue of result.issues) {
@@ -63,26 +81,13 @@ export function wrapStandardSchema(schema: StandardSchemaV1): z.ZodType {
  */
 export function isWrappedStandardSchema(value: unknown): boolean {
   return Boolean(
-    value &&
-    typeof value === 'object' &&
-    (value as Record<PropertyKey, unknown>)[WRAPPED_STANDARD_SCHEMA] === true,
+    value && typeof value === 'object' && Reflect.get(value, WRAPPED_STANDARD_SCHEMA) === true,
   );
 }
 
 type ZodShape = Record<string, unknown>;
 
-type ZodSchemaLike = {
-  shape?: ZodShape | (() => ZodShape);
-  _def?: {
-    shape?: ZodShape | (() => ZodShape);
-    innerType?: unknown;
-    schema?: unknown;
-  };
-  def?: {
-    out?: unknown;
-  };
-  safeParse?: (input: unknown) => unknown;
-};
+type ZodSchemaLike = object;
 
 export function getSchemaKeys(schema: ToolSchema): string[] {
   const shape = getSchemaShape(schema);
@@ -92,9 +97,7 @@ export function getSchemaKeys(schema: ToolSchema): string[] {
 export function getSchemaShape(schema: ToolSchema): Record<string, unknown> | undefined {
   const candidate = unwrapSchema(schema);
   if (!candidate) return undefined;
-  const directShape = resolveShape(candidate.shape);
-  if (directShape) return directShape;
-  return resolveShape(candidate._def?.shape);
+  return resolveShape(getShapeProperty(candidate)) ?? resolveShape(getDefinitionShape(candidate));
 }
 
 export function unwrapSchema(schema: ToolSchema): ZodSchemaLike | undefined {
@@ -104,24 +107,53 @@ export function unwrapSchema(schema: ToolSchema): ZodSchemaLike | undefined {
     seen.add(current);
     const candidate = asSchemaLike(current);
     if (!candidate) return undefined;
-    if (candidate._def?.shape || candidate.shape) {
-      return candidate;
-    }
-    if (candidate._def?.innerType) {
-      current = candidate._def.innerType;
-      continue;
-    }
-    if (candidate._def?.schema) {
-      current = candidate._def.schema;
-      continue;
-    }
-    if (candidate.def?.out) {
-      current = candidate.def.out;
-      continue;
-    }
-    return candidate;
+    if (hasShape(candidate)) return candidate;
+    const next = getWrappedSchema(candidate);
+    if (next === undefined) return candidate;
+    current = next;
   }
   return asSchemaLike(current);
+}
+
+function hasShape(candidate: ZodSchemaLike): boolean {
+  return getDefinitionShape(candidate) !== undefined || getShapeProperty(candidate) !== undefined;
+}
+
+function getWrappedSchema(candidate: ZodSchemaLike): unknown {
+  return (
+    getDefinitionProperty(candidate, 'innerType') ??
+    getDefinitionProperty(candidate, 'schema') ??
+    getNestedProperty(getProperty(candidate, 'def'), 'out')
+  );
+}
+
+function getShapeProperty(candidate: ZodSchemaLike): ZodShape | (() => ZodShape) | undefined {
+  return shapeValue(getProperty(candidate, 'shape'));
+}
+
+function getDefinitionShape(candidate: ZodSchemaLike): ZodShape | (() => ZodShape) | undefined {
+  return shapeValue(getDefinitionProperty(candidate, 'shape'));
+}
+
+function getDefinitionProperty(candidate: ZodSchemaLike, key: string): unknown {
+  return getNestedProperty(getProperty(candidate, '_def'), key);
+}
+
+function getNestedProperty(value: unknown, key: string): unknown {
+  return value && typeof value === 'object' ? Reflect.get(value, key) : undefined;
+}
+
+function getProperty(value: object, key: string | symbol): unknown {
+  return Reflect.get(value, key);
+}
+
+function shapeValue(value: unknown): ZodShape | (() => ZodShape) | undefined {
+  if (isRecord(value)) return value;
+  return isShapeFunction(value) ? value : undefined;
+}
+
+function isShapeFunction(value: unknown): value is () => ZodShape {
+  return typeof value === 'function';
 }
 
 export function schemasLooselyMatch(target: ToolSchema, incoming: ToolSchema): boolean {
@@ -135,7 +167,7 @@ export function schemasLooselyMatch(target: ToolSchema, incoming: ToolSchema): b
 
 export function isZodSchema(value: unknown): value is ToolSchema {
   const candidate = asSchemaLike(value);
-  return Boolean(candidate && typeof candidate.safeParse === 'function');
+  return Boolean(candidate && typeof getProperty(candidate, 'safeParse') === 'function');
 }
 
 export function isZodObjectSchema(value: unknown): value is ToolSchema {

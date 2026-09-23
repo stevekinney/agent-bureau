@@ -38,10 +38,10 @@ function extractToolName(error: unknown): string | undefined {
 export function createToolRemovalMutator(): RetryMutator {
   return (context: GenerateContext, error: unknown, _attempt: number) => {
     const toolName = extractToolName(error);
-    if (!toolName) return;
+    if (!toolName) return undefined;
 
     const existingTool = context.toolbox.getTool(toolName);
-    if (!existingTool) return;
+    if (!existingTool) return undefined;
 
     const remainingTools = context.toolbox.tools().filter((t) => t.name !== toolName);
     const newToolbox = createToolbox(remainingTools);

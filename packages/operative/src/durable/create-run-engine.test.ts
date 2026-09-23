@@ -1,14 +1,15 @@
 import {
   activity,
   Engine,
+  MemoryStorage,
   Scheduler,
+  textValueStore,
   workflow,
   WorkflowClaimUnavailableError,
+  yieldToPortableEventLoop,
   type WorkflowLogRecord,
   type WorkflowStatus,
 } from '@lostgradient/weft';
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
-import { yieldToPortableEventLoop } from '@lostgradient/weft/testing';
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { WorkflowVersionMismatchEvent } from '../events';
@@ -185,7 +186,6 @@ describe('createRunEngine', () => {
 
   it('uses an injected checkpoint store when provided', async () => {
     const storage = new MemoryStorage();
-    const { textValueStore } = await import('@lostgradient/weft/storage');
     const injected = createCheckpointStore(
       textValueStore(storage, { disposeUnderlyingStorage: false }),
     );
@@ -725,9 +725,7 @@ describe('createRunEngine', () => {
  * A workflow that commits one step (folding in its claim under
  * `ownership: 'workflow-lease'`) and then durably parks on
  * `ctx.waitForSignal('proceed')` until signaled. Used by the AB-178 ownership
- * tests below to hold a workflow open across two engines without relying on
- * `engine.suspend()`/`engine.resume()` on the SAME engine — see
- * 'known weft defect' below for why that specific combination is avoided.
+ * tests below to hold a workflow open across two engines.
  */
 function makeParkingWorkflow() {
   return workflow({ name: 'agentRun' }).execute(async function* (ctx, input: { value: number }) {
@@ -823,41 +821,42 @@ describe('createRunEngine ownership (AB-178)', () => {
   // isolating the real-runtime exemption from this otherwise-deterministic
   // file.
 
-  /**
-   * Tripwire for a weft 0.23.1 defect (see `CreateRunEngineOptions.ownership`'s
-   * JSDoc for the full write-up): `engine.suspend()` releases a workflow's
-   * `workflow-lease` claim as a side effect of reusing the terminal-commit
-   * code path, even though suspend is documented as non-terminal and later
-   * resumable. A same-engine `engine.resume()` right after then throws
-   * `WorkflowClaimUnavailableError` instead of silently re-acquiring.
-   *
-   * This test PINS that current (broken) behavior rather than asserting the
-   * desired one, specifically so it starts FAILING the moment weft ships a
-   * fix — the signal to flip `ownership`'s default and remove the JSDoc
-   * warning against combining it with the scheduler's suspend/resume
-   * preemption path.
-   */
-  it('[tripwire] suspend-then-resume on the SAME engine currently throws under workflow-lease (weft 0.23.1 defect)', async () => {
-    const { engine } = await createRunEngine({
-      storage: new MemoryStorage(),
-      runWorkflow: makeSleepingWorkflow(DURABLE_SLEEP_MILLISECONDS),
+  it('resumes on the same workflow-lease engine and retains exclusivity', async () => {
+    const storage = new MemoryStorage();
+    const a = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(),
+      recover: false,
+      ownership: 'workflow-lease',
+    });
+    const b = await createRunEngine({
+      storage,
+      runWorkflow: makeParkingWorkflow(),
       recover: false,
       ownership: 'workflow-lease',
     });
 
     try {
-      const handle = await engine.start('agentRun', { value: 3 });
+      const handle = await a.engine.start('agentRun', { value: 3 });
       await pollUntil(() => isParkedRunning(handle));
 
-      await engine.suspend(handle.id);
+      await a.engine.suspend(handle.id);
+      await a.engine.resume(handle.id);
+
+      // Resuming after suspend keeps A's workflow claim. B must still fail
+      // closed rather than concurrently advancing the same workflow.
       try {
-        await engine.resume(handle.id);
-        throw new Error('expected engine.resume to reject');
+        await b.engine.resume(handle.id);
+        throw new Error('expected b.engine.resume to reject');
       } catch (error) {
         expect(error).toBeInstanceOf(WorkflowClaimUnavailableError);
       }
+
+      await a.engine.signal(handle.id, 'proceed');
+      expect(await handle.result()).toEqual({ doubled: 6 });
     } finally {
-      engine[Symbol.dispose]();
+      a.engine[Symbol.dispose]();
+      b.engine[Symbol.dispose]();
     }
   });
 });

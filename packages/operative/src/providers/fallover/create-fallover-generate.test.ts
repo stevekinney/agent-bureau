@@ -1,5 +1,5 @@
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import { createAgent } from '../../create-agent.ts';
 import { readGenerationProfile } from '../../generation-profile.ts';
@@ -91,7 +91,8 @@ describe('createFalloverGenerate', () => {
     // `retryDelay * 2^(attempt-1)`. Poll the microtask queue (never a real
     // timer) until each backoff timer is armed before advancing past it —
     // matching `run-step.test.ts`'s identical pattern.
-    while (attempts < 3) {
+    for (;;) {
+      if (attempts >= 3) break;
       while (runtime.pendingTimers().length === 0) {
         await Promise.resolve();
       }
@@ -453,8 +454,8 @@ describe('createFalloverGenerate — backend-descriptor propagation (AB-64 AC2, 
 
     const attached = readBackendDescriptors(generate);
     expect(attached).toHaveLength(2);
-    expect([...attached].sort((x, y) => (x.provider < y.provider ? -1 : 1))).toEqual(
-      [anthropic, openai].sort((x, y) => (x.provider < y.provider ? -1 : 1)),
+    expect([...attached].toSorted((x, y) => (x.provider < y.provider ? -1 : 1))).toEqual(
+      [anthropic, openai].toSorted((x, y) => (x.provider < y.provider ? -1 : 1)),
     );
   });
 

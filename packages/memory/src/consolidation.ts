@@ -1,4 +1,10 @@
-import type { Memory, MemoryMetadata, MemorySearchResult } from './types';
+import {
+  deduplicateEntries,
+  distillEntries,
+  pruneEntries,
+  resolveConflicts,
+} from './consolidation-stages';
+import type { Memory, MemoryMetadata } from './types';
 
 /**
  * Options for creating a memory consolidation task.
@@ -153,156 +159,57 @@ export function createConsolidationTask(
 
       let { distilled, deduplicated, conflictsResolved, pruned, scanned } = state;
 
-      // ── Stage 1: Distill ────────────────────────────────────────
-      const mergedIds = new Set<string>();
-
-      for (let i = 0; i < entriesToProcess.length && !signal.aborted; i++) {
-        for (let j = i + 1; j < entriesToProcess.length && !signal.aborted; j++) {
-          const entryA = entriesToProcess[i]!;
-          const entryB = entriesToProcess[j]!;
-
-          if (mergedIds.has(entryA.id) || mergedIds.has(entryB.id)) continue;
-
-          // Check pairwise similarity
-          const similarity = await computeSimilarity(
-            memory,
-            entryA.content,
-            entryB.content,
-            entryCount,
-            namespace,
-          );
-
-          if (similarity >= mergeThreshold && similarity < deduplicationThreshold) {
-            const mergedContent = await merge(entryA.content, entryB.content);
-
-            // Determine confidence boosting for experiential entries
-            const metadata: Partial<MemoryMetadata> = {
-              ...(namespace && { namespace }),
-            };
-
-            if (boostConfidenceOnMerge && isExperiential(entryA) && isExperiential(entryB)) {
-              const confA = getConfidence(entryA);
-              const confB = getConfidence(entryB);
-              metadata['confidence'] = Math.min(1.0, Math.max(confA, confB) + 0.1);
-            }
-
-            await memory.remember(mergedContent, metadata);
-            await memory.forget(entryA.id, namespace);
-            await memory.forget(entryB.id, namespace);
-
-            mergedIds.add(entryA.id);
-            mergedIds.add(entryB.id);
-            distilled++;
-          }
-        }
-      }
+      const mergedIds = await distillEntries(
+        entriesToProcess,
+        memory,
+        signal,
+        entryCount,
+        namespace,
+        mergeThreshold,
+        deduplicationThreshold,
+        merge,
+        boostConfidenceOnMerge,
+      );
+      distilled += mergedIds.count;
 
       // ── Stage 2: Deduplicate ────────────────────────────────────
-      const deduplicatedIds = new Set<string>();
-
-      for (let i = 0; i < entriesToProcess.length && !signal.aborted; i++) {
-        for (let j = i + 1; j < entriesToProcess.length && !signal.aborted; j++) {
-          const entryA = entriesToProcess[i]!;
-          const entryB = entriesToProcess[j]!;
-
-          if (
-            mergedIds.has(entryA.id) ||
-            mergedIds.has(entryB.id) ||
-            deduplicatedIds.has(entryA.id) ||
-            deduplicatedIds.has(entryB.id)
-          ) {
-            continue;
-          }
-
-          const similarity = await computeSimilarity(
-            memory,
-            entryA.content,
-            entryB.content,
-            entryCount,
-            namespace,
-          );
-
-          if (similarity >= deduplicationThreshold) {
-            // Keep the most recent, remove the older one
-            const older = entryA.createdAt <= entryB.createdAt ? entryA : entryB;
-            await memory.forget(older.id, namespace);
-            deduplicatedIds.add(older.id);
-            deduplicated++;
-          }
-        }
-      }
+      const deduplicatedIds = await deduplicateEntries(
+        entriesToProcess,
+        memory,
+        signal,
+        entryCount,
+        namespace,
+        deduplicationThreshold,
+        mergedIds.ids,
+      );
+      deduplicated += deduplicatedIds.count;
 
       // ── Stage 3: Update ─────────────────────────────────────────
-      const resolvedIds = new Set<string>();
-
-      if (resolveConflict) {
-        const [conflictMin, conflictMax] = conflictRange;
-
-        for (let i = 0; i < entriesToProcess.length && !signal.aborted; i++) {
-          for (let j = i + 1; j < entriesToProcess.length && !signal.aborted; j++) {
-            const entryA = entriesToProcess[i]!;
-            const entryB = entriesToProcess[j]!;
-
-            if (
-              mergedIds.has(entryA.id) ||
-              mergedIds.has(entryB.id) ||
-              deduplicatedIds.has(entryA.id) ||
-              deduplicatedIds.has(entryB.id) ||
-              resolvedIds.has(entryA.id) ||
-              resolvedIds.has(entryB.id)
-            ) {
-              continue;
-            }
-
-            const similarity = await computeSimilarity(
-              memory,
-              entryA.content,
-              entryB.content,
-              entryCount,
-            );
-
-            if (similarity >= conflictMin && similarity < conflictMax) {
-              const reconciled = await resolveConflict(entryA.content, entryB.content);
-
-              if (reconciled !== null) {
-                await memory.remember(reconciled, { ...(namespace && { namespace }) });
-                await memory.forget(entryA.id, namespace);
-                await memory.forget(entryB.id, namespace);
-                resolvedIds.add(entryA.id);
-                resolvedIds.add(entryB.id);
-                conflictsResolved++;
-              }
-            }
-          }
-        }
-      }
+      const resolvedIds = await resolveConflicts(
+        entriesToProcess,
+        memory,
+        signal,
+        entryCount,
+        namespace,
+        conflictRange,
+        resolveConflict,
+        mergedIds.ids,
+        deduplicatedIds.ids,
+      );
+      conflictsResolved += resolvedIds.count;
 
       // ── Stage 4: Filter ─────────────────────────────────────────
-      if (evaluateImportance) {
-        for (const entry of entriesToProcess) {
-          if (signal.aborted) break;
-          if (
-            mergedIds.has(entry.id) ||
-            deduplicatedIds.has(entry.id) ||
-            resolvedIds.has(entry.id)
-          ) {
-            continue;
-          }
-
-          const importance = await evaluateImportance(entry.content, entry.metadata);
-          const confidence = getConfidence(entry);
-          const isExp = isExperiential(entry);
-
-          // Experiential entries with low confidence are pruned more aggressively
-          const effectiveThreshold =
-            isExp && confidence < 0.5 ? pruneThreshold * 1.5 : pruneThreshold;
-
-          if (importance < effectiveThreshold) {
-            await memory.forget(entry.id, namespace);
-            pruned++;
-          }
-        }
-      }
+      pruned += await pruneEntries(
+        entriesToProcess,
+        memory,
+        signal,
+        namespace,
+        evaluateImportance,
+        pruneThreshold,
+        mergedIds.ids,
+        deduplicatedIds.ids,
+        resolvedIds.ids,
+      );
 
       // If aborted mid-stage, preserve the updated stats counters (because
       // memory mutations like forget/remember are already committed) but do
@@ -341,42 +248,4 @@ export function createConsolidationTask(
       return { state: nextState, done };
     },
   };
-}
-
-// ── Helpers ───────────────────────────────────────────────────────
-
-function isExperiential(entry: MemorySearchResult): boolean {
-  return entry.metadata.source === 'experiential';
-}
-
-function getConfidence(entry: MemorySearchResult): number {
-  const conf = entry.metadata['confidence'];
-  return typeof conf === 'number' ? conf : 0.5;
-}
-
-/**
- * Compute pure cosine similarity between two content strings.
- *
- * Uses `vectorOnly: true` to get cosine similarity scores without BM25 blending,
- * ensuring thresholds (e.g., deduplicationThreshold: 0.95) behave as expected.
- *
- * @param entryCount - Total number of entries in memory, used as the recall
- *   limit to ensure the target entry is always found regardless of memory size.
- * @param namespace - Namespace to search within, matching the consolidation scope.
- */
-async function computeSimilarity(
-  memory: Memory,
-  contentA: string,
-  contentB: string,
-  entryCount: number,
-  namespace?: string,
-): Promise<number> {
-  const results = await memory.recall(contentA, {
-    limit: entryCount,
-    threshold: 0.0,
-    vectorOnly: true,
-    ...(namespace && { namespace }),
-  });
-  const match = results.find((r) => r.content === contentB);
-  return match?.score ?? 0;
 }

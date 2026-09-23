@@ -1,15 +1,17 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
+import { z } from 'zod';
 
-import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
-import { createTool, type CreateToolOptions } from '../create-tool';
-import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
+import type { ComposedTool } from '../compose-types';
+import { createTool, type InferSchemaInput } from '../create-tool';
+import type { DefaultToolEvents, Tool, ToolContext, ToolEventsMap, ToolMetadata } from '../is-tool';
+import type { ToolCallReturn } from '../types';
 
 type RetryBackoff = 'fixed' | 'exponential';
 
 type RetryHookDetail = {
   attempt: number;
   error: unknown;
-  context: ToolContext<DefaultToolEvents>;
+  context: ToolContext;
 };
 
 type RetryOptions = {
@@ -19,14 +21,11 @@ type RetryOptions = {
   maxDelayMs?: number;
   shouldRetry?: (detail: RetryHookDetail) => boolean | Promise<boolean>;
   onRetry?: (detail: RetryHookDetail) => void | Promise<void>;
-  sleep?: (
-    milliseconds: number,
-    signal?: ToolContext<DefaultToolEvents>['signal'],
-  ) => Promise<void>;
+  sleep?: (milliseconds: number, signal?: ToolContext['signal']) => Promise<void>;
   /**
    * The injectable runtime-service seam (AB-92's `RuntimeServices`, AB-254)
    * backing this wrap's default `sleep` timer. Resolved once, at wrap time.
-   * A test composes its own from `armorer/test`'s
+   * A test composes its own from `@lostgradient/lifecycle`'s
    * `createManualRuntimeServices()` and drives the backoff delay entirely
    * through `advance()`, with no real timer, instead of supplying `sleep`.
    */
@@ -44,7 +43,7 @@ type RetryOptions = {
  * @param options - Retry configuration
  * @param options.attempts - Maximum number of attempts (default: 3)
  * @param options.delayMs - Initial delay between retries in milliseconds (default: 0)
- * @param options.backoff - Backoff strategy: 'fixed', 'linear', or 'exponential' (default: 'fixed')
+ * @param options.backoff - Backoff strategy: 'fixed' or 'exponential' (default: 'fixed')
  * @param options.maxDelayMs - Maximum delay cap for backoff strategies
  * @param options.shouldRetry - Custom function to determine if error should trigger retry
  * @param options.onRetry - Callback invoked before each retry attempt
@@ -53,7 +52,7 @@ type RetryOptions = {
  * @example Basic retry with exponential backoff
  * ```typescript
  * import { createTool } from 'armorer';
- * import { retry } from 'armorer/utilities';
+ * import { retry } from 'armorer';
  * import { z } from 'zod';
  *
  * const fetchData = createTool({
@@ -91,63 +90,35 @@ type RetryOptions = {
  * });
  * ```
  */
-export function retry<TTool extends AnyTool>(
-  tool: TTool,
+export function retry<
+  TSchema extends z.ZodType,
+  TEvents extends ToolEventsMap,
+  TOutput,
+  TMetadata extends ToolMetadata | undefined,
+>(
+  tool: Tool<TSchema, TEvents, TOutput, TMetadata>,
   options: RetryOptions = {},
-): ComposedTool<InferToolInput<TTool>, InferToolOutput<TTool>> {
-  const attempts = options.attempts ?? 3;
-  if (!Number.isInteger(attempts) || attempts < 1) {
-    throw new RangeError('retry() expects attempts to be a positive integer');
-  }
-
-  const delayMs = options.delayMs ?? 0;
-  if (delayMs < 0) {
-    throw new RangeError('retry() expects delayMs to be at least 0');
-  }
-
-  const maxDelayMs = options.maxDelayMs;
-  if (maxDelayMs !== undefined && maxDelayMs < 0) {
-    throw new RangeError('retry() expects maxDelayMs to be at least 0');
-  }
-
-  const backoff = options.backoff ?? 'fixed';
+): ComposedTool<InferSchemaInput<TSchema>, ToolCallReturn<TOutput>, TMetadata> {
+  const { attempts, delayMs, maxDelayMs, backoff } = validateRetryOptions(options);
   const runtime = options.runtime ?? createDefaultRuntimeServices();
   const {
     shouldRetry,
     onRetry,
-    sleep = (ms: number, signal?: ToolContext<DefaultToolEvents>['signal']) =>
-      wait(ms, signal, runtime),
+    sleep = (ms: number, signal?: ToolContext['signal']) => wait(ms, signal, runtime),
   } = options;
   const name = `retry(${tool.name})`;
   const description = `Retry tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
+  const input = tool.input;
+  const metadata = tool.metadata;
 
   const runWithRetry = async (
-    params: unknown,
-    context: ToolContext<DefaultToolEvents>,
-  ): Promise<InferToolOutput<TTool>> => {
-    const input = params as InferToolInput<TTool>;
-    const executeOptions =
-      context.signal || context.timeout !== undefined || context.stream !== undefined
-        ? {
-            ...(context.signal ? { signal: context.signal } : {}),
-            ...(context.timeout !== undefined ? { timeout: context.timeout } : {}),
-            ...(context.stream !== undefined ? { stream: context.stream } : {}),
-          }
-        : undefined;
+    params: InferSchemaInput<TSchema>,
+    context: ToolContext,
+  ): Promise<ToolCallReturn<TOutput>> => {
+    const executeOptions = buildRetryExecuteOptions(context);
 
-    const runTool =
-      typeof (tool as { execute?: unknown }).execute === 'function'
-        ? (value: InferToolInput<TTool>) =>
-            (
-              tool as {
-                execute: (
-                  value: InferToolInput<TTool>,
-                  options?: typeof executeOptions,
-                ) => Promise<InferToolOutput<TTool>>;
-              }
-            ).execute(value, executeOptions)
-        : (value: InferToolInput<TTool>) => tool(value) as Promise<InferToolOutput<TTool>>;
+    const runTool = (value: InferSchemaInput<TSchema>) => tool.execute(value, executeOptions);
     let attempt = 0;
     let lastError: unknown;
 
@@ -157,65 +128,103 @@ export function retry<TTool extends AnyTool>(
         throw toError(context.signal.reason ?? new Error('Cancelled'));
       }
       try {
-        return await runTool(input);
+        return await runTool(params);
       } catch (error) {
-        if (context.signal?.aborted) {
-          throw toError(context.signal.reason ?? error);
-        }
         lastError = error;
-        if (attempt >= attempts) break;
-
-        if (shouldRetry) {
-          const allowed = await shouldRetry({ attempt, error, context });
-          if (!allowed) throw toError(error);
-        }
-
-        if (onRetry) {
-          await onRetry({ attempt, error, context });
-        }
-
-        const waitMs = resolveRetryDelay(attempt, delayMs, backoff, maxDelayMs);
-        if (waitMs > 0) {
-          await sleep(waitMs, context.signal);
-        }
+        if (
+          !(await prepareNextRetry({
+            attempt,
+            attempts,
+            error,
+            context,
+            shouldRetry,
+            onRetry,
+            sleep,
+            delayMs,
+            backoff,
+            maxDelayMs,
+          }))
+        )
+          break;
       }
     }
 
     throw toError(lastError ?? new Error('retry() failed without an error'));
   };
 
-  const toolOptions: Omit<
-    CreateToolOptions<
-      InferToolInput<TTool>,
-      InferToolOutput<TTool>,
-      DefaultToolEvents,
-      readonly string[],
-      ToolMetadata | undefined,
-      ToolContext<DefaultToolEvents>,
-      InferToolOutput<TTool>
-    >,
-    'metadata'
-  > & {
-    metadata?: ToolMetadata | undefined;
-  } = {
+  return createTool<
+    TSchema,
+    TOutput,
+    DefaultToolEvents,
+    readonly string[],
+    TMetadata,
+    ToolCallReturn<TOutput>
+  >({
     name,
     description,
-    input: tool.input,
-    async execute(params, context) {
+    input,
+    async execute(params: InferSchemaInput<TSchema>, context: ToolContext) {
       return runWithRetry(params, context);
     },
     ...(tags ? { tags } : {}),
-    ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
+    metadata,
+  });
+}
+
+function validateRetryOptions(options: RetryOptions) {
+  const attempts = options.attempts ?? 3;
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new RangeError('retry() expects attempts to be a positive integer');
+  }
+  const delayMs = options.delayMs ?? 0;
+  if (delayMs < 0) throw new RangeError('retry() expects delayMs to be at least 0');
+  const maxDelayMs = options.maxDelayMs;
+  if (maxDelayMs !== undefined && maxDelayMs < 0) {
+    throw new RangeError('retry() expects maxDelayMs to be at least 0');
+  }
+  return { attempts, delayMs, maxDelayMs, backoff: options.backoff ?? 'fixed' };
+}
+
+function buildRetryExecuteOptions(context: ToolContext) {
+  if (!context.signal && context.timeout === undefined && context.stream === undefined)
+    return undefined;
+  return {
+    ...(context.signal ? { signal: context.signal } : {}),
+    ...(context.timeout !== undefined ? { timeout: context.timeout } : {}),
+    ...(context.stream !== undefined ? { stream: context.stream } : {}),
   };
-  return createTool<
-    InferToolInput<TTool>,
-    InferToolOutput<TTool>,
-    DefaultToolEvents,
-    readonly string[],
-    ToolMetadata | undefined,
-    ToolContext<DefaultToolEvents>,
-    InferToolOutput<TTool>
-  >(toolOptions);
+}
+
+async function prepareNextRetry({
+  attempt,
+  attempts,
+  error,
+  context,
+  shouldRetry,
+  onRetry,
+  sleep,
+  delayMs,
+  backoff,
+  maxDelayMs,
+}: {
+  attempt: number;
+  attempts: number;
+  error: unknown;
+  context: ToolContext;
+  shouldRetry?: RetryOptions['shouldRetry'];
+  onRetry?: RetryOptions['onRetry'];
+  sleep: NonNullable<RetryOptions['sleep']>;
+  delayMs: number;
+  backoff: RetryBackoff;
+  maxDelayMs: number | undefined;
+}): Promise<boolean> {
+  if (context.signal?.aborted) throw toError(context.signal.reason ?? error);
+  if (attempt >= attempts) return false;
+  if (shouldRetry && !(await shouldRetry({ attempt, error, context }))) throw toError(error);
+  if (onRetry) await onRetry({ attempt, error, context });
+  const waitMs = resolveRetryDelay(attempt, delayMs, backoff, maxDelayMs);
+  if (waitMs > 0) await sleep(waitMs, context.signal);
+  return true;
 }
 
 function resolveRetryDelay(
@@ -249,7 +258,7 @@ const defaultWaitRuntime = createDefaultRuntimeServices();
 
 function wait(
   ms: number,
-  signal?: ToolContext<DefaultToolEvents>['signal'],
+  signal?: ToolContext['signal'],
   runtime: RuntimeServices = defaultWaitRuntime,
 ): Promise<void> {
   const scheduleTimeout = runtime.timers.setTimeout;

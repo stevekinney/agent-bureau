@@ -3,11 +3,11 @@ import type { StreamEvent } from './types';
 /** Options for creating a backpressure buffer. */
 export type BackpressureBufferOptions = {
   /** Maximum number of events to buffer before coalescing or dropping. Default: 100. */
-  maxBufferSize?: number;
+  maxBufferSize?: number | undefined;
   /** Whether to coalesce consecutive text deltas when the buffer overflows. Default: true. */
-  coalesceDeltas?: boolean;
+  coalesceDeltas?: boolean | undefined;
   /** Called when events are dropped or coalesced due to buffer overflow. */
-  onOverflow?: (droppedCount: number) => void;
+  onOverflow?: ((droppedCount: number) => void) | undefined;
   /** Called to emit an event to the consumer. */
   onEmit: (event: StreamEvent) => void;
 };
@@ -24,6 +24,22 @@ export type BackpressureBuffer = {
   dispose(): void;
 };
 
+function isTextDelta(
+  event: StreamEvent,
+): event is Extract<StreamEvent, { type: 'stream:text-delta' }> {
+  return event.type === 'stream:text-delta';
+}
+
+function isDroppable(event: StreamEvent): boolean {
+  return event.type === 'stream:text-delta' || event.type === 'stream:block-delta';
+}
+
+function isBlockDelta(
+  event: StreamEvent,
+): event is Extract<StreamEvent, { type: 'stream:block-delta' }> {
+  return event.type === 'stream:block-delta';
+}
+
 /**
  * Creates a backpressure buffer for stream events.
  *
@@ -39,22 +55,6 @@ export function createBackpressureBuffer(options: BackpressureBufferOptions): Ba
   let buffer: StreamEvent[] = [];
   let paused = false;
   let disposed = false;
-
-  function isTextDelta(
-    event: StreamEvent,
-  ): event is Extract<StreamEvent, { type: 'stream:text-delta' }> {
-    return event.type === 'stream:text-delta';
-  }
-
-  function isDroppable(event: StreamEvent): boolean {
-    return event.type === 'stream:text-delta' || event.type === 'stream:block-delta';
-  }
-
-  function isBlockDelta(
-    event: StreamEvent,
-  ): event is Extract<StreamEvent, { type: 'stream:block-delta' }> {
-    return event.type === 'stream:block-delta';
-  }
 
   /**
    * Coalesce runs of text-delta and block-delta events in the buffer.

@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import type { Memory, MemorySearchResult } from '../types';
 import type { IdentityProvider, SoulBudget, SoulItem } from './types';
@@ -102,6 +102,103 @@ function getTopic(entry: MemorySearchResult): string | undefined {
   return typeof topic === 'string' ? topic : undefined;
 }
 
+type SoulCandidate = SoulDistillationState['candidates'][number];
+
+function collectGraduationCandidates(
+  entries: MemorySearchResult[],
+  scannedIds: Set<string>,
+  signal: AbortSignal,
+  minimumConfidence: number,
+  minimumReinforcement: number,
+): SoulCandidate[] {
+  const candidates: SoulCandidate[] = [];
+  for (const entry of entries) {
+    if (signal.aborted || scannedIds.has(entry.id)) continue;
+    const confidence = getConfidence(entry);
+    const reinforcementCount = getReinforcementCount(entry);
+    if (confidence < minimumConfidence || reinforcementCount < minimumReinforcement) continue;
+    const topic = getTopic(entry);
+    candidates.push({
+      content: entry.content,
+      confidence,
+      reinforcementCount,
+      ...(topic !== undefined ? { topic } : {}),
+      entryId: entry.id,
+    });
+  }
+  return candidates;
+}
+
+async function filterSoulCandidates(
+  candidates: SoulCandidate[],
+  currentSoul: SoulItem[],
+  maximumPerTopic: number,
+  safetyFilter: CreateSoulDistillationOptions['safetyFilter'],
+): Promise<SoulCandidate[]> {
+  const topicCounts = new Map<string, number>();
+  for (const item of currentSoul) {
+    if (item.topic) topicCounts.set(item.topic, (topicCounts.get(item.topic) ?? 0) + 1);
+  }
+  const diverse = [...candidates]
+    .toSorted((a, b) => b.confidence - a.confidence)
+    .filter((candidate) => {
+      if (!candidate.topic) return true;
+      const count = topicCounts.get(candidate.topic) ?? 0;
+      if (count >= maximumPerTopic) return false;
+      topicCounts.set(candidate.topic, count + 1);
+      return true;
+    });
+  if (!safetyFilter) return diverse;
+  const results = await Promise.all(
+    diverse.map(async (candidate) => ({
+      candidate,
+      safe: await safetyFilter(candidate.content),
+    })),
+  );
+  return results.filter((result) => result.safe).map((result) => result.candidate);
+}
+
+async function demoteSoulItems(
+  currentSoul: SoulItem[],
+  totalTokens: number,
+  budget: SoulBudget,
+  currentSoulText: string,
+  candidateText: string,
+  memory: Memory,
+  namespace: string | undefined,
+): Promise<string[]> {
+  if (totalTokens <= budget.maxTokens) return [];
+  const demotionCandidates = currentSoul
+    .filter((item) => !item.pinned)
+    .toSorted((a, b) => {
+      if (a.reinforcementCount !== b.reinforcementCount) {
+        return a.reinforcementCount - b.reinforcementCount;
+      }
+      return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
+    });
+  let currentTokens = budget.estimateTokens(currentSoulText);
+  const targetBudget = budget.maxTokens - budget.estimateTokens(candidateText);
+  const demotions: string[] = [];
+  for (const candidate of demotionCandidates) {
+    if (currentTokens <= targetBudget) break;
+    currentTokens -= budget.estimateTokens(candidate.content);
+    demotions.push(candidate.id);
+  }
+  for (const demotedId of demotions) {
+    const demotedItem = currentSoul.find((item) => item.id === demotedId);
+    if (demotedItem) {
+      await memory.remember(demotedItem.content, {
+        ...(namespace && { namespace }),
+        source: 'manual',
+        tags: ['demoted-soul-item'],
+        _demotedFromSoul: true,
+        _originalSoulItemId: demotedItem.id,
+      });
+    }
+  }
+  return demotions;
+}
+
 /**
  * Creates a background task that reviews accumulated memories and proposes
  * updates to the soul document. This is the graduation/demotion lifecycle.
@@ -168,25 +265,15 @@ export function createSoulDistillationTask(
 
       const newCandidates = [...state.candidates];
 
-      for (const entry of entriesToProcess) {
-        if (signal.aborted) break;
-
-        // Skip entries already identified as candidates in a previous chunk
-        if (scannedIds.has(entry.id)) continue;
-
-        const confidence = getConfidence(entry);
-        const reinforcement = getReinforcementCount(entry);
-
-        if (confidence >= graduationConfidence && reinforcement >= graduationReinforcement) {
-          newCandidates.push({
-            content: entry.content,
-            confidence,
-            reinforcementCount: reinforcement,
-            topic: getTopic(entry),
-            entryId: entry.id,
-          });
-        }
-      }
+      newCandidates.push(
+        ...collectGraduationCandidates(
+          entriesToProcess,
+          scannedIds,
+          signal,
+          graduationConfidence,
+          graduationReinforcement,
+        ),
+      );
 
       const newScanned = state.scanned + entriesToProcess.length;
       const moreEntries = entriesToProcess.length >= chunkSize;
@@ -215,41 +302,13 @@ export function createSoulDistillationTask(
         };
       }
 
-      // Sort candidates by confidence descending, then recency
-      const sortedCandidates = [...newCandidates].sort((a, b) => b.confidence - a.confidence);
-
-      // ── Stage 2: Diversity check ─────────────────────────────────
       const currentSoul = await provider.loadSoul(agentId);
-      const topicCounts = new Map<string, number>();
-
-      for (const item of currentSoul) {
-        if (item.topic) {
-          topicCounts.set(item.topic, (topicCounts.get(item.topic) ?? 0) + 1);
-        }
-      }
-
-      const diverseFilteredCandidates = sortedCandidates.filter((candidate) => {
-        if (!candidate.topic) return true;
-        const currentCount = topicCounts.get(candidate.topic) ?? 0;
-        if (currentCount >= budget.maxItemsPerTopic) return false;
-        // Speculatively increment so subsequent candidates in the same topic are constrained
-        topicCounts.set(candidate.topic, currentCount + 1);
-        return true;
-      });
-
-      // ── Stage 3: Safety filter ───────────────────────────────────
-      let safeCandidates = diverseFilteredCandidates;
-      if (safetyFilter) {
-        const safetyResults = await Promise.all(
-          diverseFilteredCandidates.map(async (candidate) => ({
-            candidate,
-            safe: await safetyFilter(candidate.content),
-          })),
-        );
-        safeCandidates = safetyResults
-          .filter((result) => result.safe)
-          .map((result) => result.candidate);
-      }
+      const safeCandidates = await filterSoulCandidates(
+        newCandidates,
+        currentSoul,
+        budget.maxItemsPerTopic,
+        safetyFilter,
+      );
 
       if (safeCandidates.length === 0) {
         return {
@@ -269,42 +328,15 @@ export function createSoulDistillationTask(
       const totalTokens =
         budget.estimateTokens(currentSoulText) + budget.estimateTokens(candidateText);
 
-      const demotions: string[] = [];
-
-      if (totalTokens > budget.maxTokens) {
-        // Identify demotion candidates: non-pinned, lowest reinforcement, oldest
-        const demotionCandidates = currentSoul
-          .filter((item) => !item.pinned)
-          .sort((a, b) => {
-            if (a.reinforcementCount !== b.reinforcementCount) {
-              return a.reinforcementCount - b.reinforcementCount;
-            }
-            return new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime();
-          });
-
-        let currentTokens = budget.estimateTokens(currentSoulText);
-        const targetBudget = budget.maxTokens - budget.estimateTokens(candidateText);
-
-        for (const candidate of demotionCandidates) {
-          if (currentTokens <= targetBudget) break;
-          currentTokens -= budget.estimateTokens(candidate.content);
-          demotions.push(candidate.id);
-        }
-
-        // Store demoted items back in memory (not deleted)
-        for (const demotedId of demotions) {
-          const demotedItem = currentSoul.find((item) => item.id === demotedId);
-          if (demotedItem) {
-            await memory.remember(demotedItem.content, {
-              ...(namespace && { namespace }),
-              source: 'manual' as const,
-              tags: ['demoted-soul-item'],
-              _demotedFromSoul: true,
-              _originalSoulItemId: demotedItem.id,
-            });
-          }
-        }
-      }
+      const demotions = await demoteSoulItems(
+        currentSoul,
+        totalTokens,
+        budget,
+        currentSoulText,
+        candidateText,
+        memory,
+        namespace,
+      );
 
       // ── Stage 5: Generate proposal ───────────────────────────────
       const proposalText = await distill(currentSoulText, safeCandidates);

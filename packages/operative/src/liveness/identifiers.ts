@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 /**
  * The standalone-run identifier seam (AB-88's Amendment 1, corrected by
@@ -15,7 +15,7 @@ import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
  * straight from its resolved `RuntimeServices.identifiers` and no longer
  * reaches this module by default — this seam remains only as the
  * `CreateActiveRunDependencies.identifiers` explicit-override escape hatch,
- * and as public API on the `@lostgradient/operative/liveness` subpath.
+ * and as public API from the `@lostgradient/operative` root entry point.
  */
 export interface RunIdentifierSeam {
   /** Mints the next process-local run id. */

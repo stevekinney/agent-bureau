@@ -26,7 +26,8 @@ function createManualClock(): StallWatchdogClock & { advance(ms: number): void }
     },
     advance(ms: number) {
       now += ms;
-      for (const [handle, timer] of [...timers.entries()]) {
+      const timerSnapshot = [...timers.entries()];
+      for (const [handle, timer] of timerSnapshot) {
         if (timer.at <= now) {
           timers.delete(handle);
           timer.callback();
@@ -38,9 +39,10 @@ function createManualClock(): StallWatchdogClock & { advance(ms: number): void }
 
 function createFakeActivityContext(
   overrides: Partial<ActivityContext> = {},
+  withoutActivityAttemptToken = false,
 ): ActivityContext & { heartbeatCalls: unknown[] } {
   const heartbeatCalls: unknown[] = [];
-  return {
+  const context = {
     signal: new AbortController().signal,
     activityAttemptToken: 'attempt-token-1',
     heartbeat(details?: unknown) {
@@ -52,6 +54,10 @@ function createFakeActivityContext(
     heartbeatCalls,
     ...overrides,
   };
+  if (withoutActivityAttemptToken) {
+    Object.defineProperty(context, 'activityAttemptToken', { value: undefined });
+  }
+  return context;
 }
 
 describe('selectToolCallClockSource', () => {
@@ -65,7 +71,7 @@ describe('selectToolCallClockSource', () => {
   });
 
   it("returns 'monotonic-observer' when the ActivityContext's activityAttemptToken is undefined", () => {
-    const context = createFakeActivityContext({ activityAttemptToken: undefined });
+    const context = createFakeActivityContext({}, true);
     expect(selectToolCallClockSource(context)).toBe('monotonic-observer');
   });
 
@@ -189,7 +195,7 @@ describe('recordToolCallProgress', () => {
 
   it("never forwards to Weft when the ActivityContext's token is undefined (not truly activity-backed)", () => {
     const clock = createManualClock();
-    const context = createFakeActivityContext({ activityAttemptToken: undefined });
+    const context = createFakeActivityContext({}, true);
     const { watchdog } = createToolCallLivenessWatchdog(context, clock);
 
     recordToolCallProgress(context, watchdog, 1, { percent: 10 });

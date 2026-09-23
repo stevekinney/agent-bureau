@@ -1,5 +1,5 @@
-import type { RuntimeTimers } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
+import type { RuntimeTimers } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import {
   readBackendDescriptors,

@@ -195,46 +195,39 @@ export function chunkText(document: ExtractedDocument, options?: ChunkingOptions
     return chunkLines(lines, resolved).map((chunk, index) => ({ ...chunk, index }));
   }
 
-  // Sort and clamp hint boundaries into range, always including line 0 so the
-  // first section is covered even when no hint targets it.
+  return chunkStructuredSections(lines, structure, resolved);
+}
+
+function chunkStructuredSections(
+  lines: string[],
+  structure: StructureHint[],
+  options: ResolvedChunkingOptions,
+): ContentChunk[] {
   const boundaries = Array.from(
     new Set([
       0,
       ...structure.map((hint) => Math.max(0, Math.min(hint.startLine, lines.length - 1))),
     ]),
-  ).sort((a, b) => a - b);
-
-  const labelByStartLine = new Map<number, string>();
+  ).toSorted((a, b) => a - b);
+  const labels = new Map<number, string>();
   for (const hint of structure) {
-    if (hint.label !== undefined) {
-      const clamped = Math.max(0, Math.min(hint.startLine, lines.length - 1));
-      labelByStartLine.set(clamped, hint.label);
-    }
+    if (hint.label !== undefined)
+      labels.set(Math.max(0, Math.min(hint.startLine, lines.length - 1)), hint.label);
   }
-
   const chunks: ContentChunk[] = [];
-  let currentLabel: string | undefined;
-
-  for (let sectionIndex = 0; sectionIndex < boundaries.length; sectionIndex++) {
-    const sectionStart = boundaries[sectionIndex]!;
-    const sectionEnd = boundaries[sectionIndex + 1] ?? lines.length;
-    if (labelByStartLine.has(sectionStart)) {
-      currentLabel = labelByStartLine.get(sectionStart);
-    }
-
-    const sectionLines = lines.slice(sectionStart, sectionEnd);
-    const sectionChunks = chunkLines(sectionLines, resolved);
-
-    for (const chunk of sectionChunks) {
+  for (let index = 0; index < boundaries.length; index++) {
+    const start = boundaries[index]!;
+    const end = boundaries[index + 1] ?? lines.length;
+    const heading = labels.get(start);
+    for (const chunk of chunkLines(lines.slice(start, end), options)) {
       chunks.push({
         text: chunk.text,
-        startLine: chunk.startLine + sectionStart,
-        endLine: chunk.endLine + sectionStart,
+        startLine: chunk.startLine + start,
+        endLine: chunk.endLine + start,
         index: chunks.length,
-        ...(currentLabel !== undefined ? { heading: currentLabel } : {}),
+        ...(heading !== undefined ? { heading } : {}),
       });
     }
   }
-
   return chunks;
 }

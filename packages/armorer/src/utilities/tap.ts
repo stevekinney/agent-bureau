@@ -1,11 +1,11 @@
-import type { AnyTool, ComposedTool, InferToolInput, InferToolOutput } from '../compose-types';
-import { createTool, type CreateToolOptions } from '../create-tool';
-import type { DefaultToolEvents, ToolContext, ToolMetadata } from '../is-tool';
+import { z } from 'zod';
 
-type TapEffect<TOutput> = (
-  output: TOutput,
-  context: ToolContext<DefaultToolEvents>,
-) => void | Promise<void>;
+import type { ComposedTool } from '../compose-types';
+import { createTool, type InferSchemaInput } from '../create-tool';
+import type { DefaultToolEvents, Tool, ToolContext, ToolEventsMap, ToolMetadata } from '../is-tool';
+import type { ToolCallReturn } from '../types';
+
+type TapEffect<TOutput> = (output: TOutput, context: ToolContext) => void | Promise<void>;
 
 /**
  * Wraps a tool to run a side effect after execution without modifying the output.
@@ -21,7 +21,7 @@ type TapEffect<TOutput> = (
  * @example Logging tool output
  * ```typescript
  * import { createTool } from 'armorer';
- * import { tap } from 'armorer/utilities';
+ * import { tap } from 'armorer';
  * import { z } from 'zod';
  *
  * const fetchUser = createTool({
@@ -52,18 +52,25 @@ type TapEffect<TOutput> = (
  * });
  * ```
  */
-export function tap<TTool extends AnyTool>(
-  tool: TTool,
-  effect: TapEffect<InferToolOutput<TTool>>,
-): ComposedTool<InferToolInput<TTool>, InferToolOutput<TTool>> {
+export function tap<
+  TSchema extends z.ZodType,
+  TEvents extends ToolEventsMap,
+  TOutput,
+  TMetadata extends ToolMetadata | undefined,
+>(
+  tool: Tool<TSchema, TEvents, TOutput, TMetadata>,
+  effect: TapEffect<ToolCallReturn<TOutput>>,
+): ComposedTool<InferSchemaInput<TSchema>, ToolCallReturn<TOutput>, TMetadata> {
   const name = `tap(${tool.name})`;
   const description = `Tap tool: ${tool.description}`;
   const tags = tool.tags && tool.tags.length ? tool.tags : undefined;
+  const input = tool.input;
+  const metadata = tool.metadata;
 
   const runTap = async (
-    params: unknown,
-    context: ToolContext<DefaultToolEvents>,
-  ): Promise<InferToolOutput<TTool>> => {
+    params: InferSchemaInput<TSchema>,
+    context: ToolContext,
+  ): Promise<ToolCallReturn<TOutput>> => {
     const executeOptions =
       context.signal || context.timeout !== undefined || context.stream !== undefined
         ? {
@@ -72,44 +79,26 @@ export function tap<TTool extends AnyTool>(
             ...(context.stream !== undefined ? { stream: context.stream } : {}),
           }
         : undefined;
-    const result = (await tool.execute(
-      params as InferToolInput<TTool>,
-      executeOptions,
-    )) as InferToolOutput<TTool>;
+    const result = await tool.execute(params, executeOptions);
     await effect(result, context);
     return result;
   };
 
-  const toolOptions: Omit<
-    CreateToolOptions<
-      InferToolInput<TTool>,
-      InferToolOutput<TTool>,
-      DefaultToolEvents,
-      readonly string[],
-      ToolMetadata | undefined,
-      ToolContext<DefaultToolEvents>,
-      InferToolOutput<TTool>
-    >,
-    'metadata'
-  > & {
-    metadata?: ToolMetadata | undefined;
-  } = {
+  return createTool<
+    TSchema,
+    TOutput,
+    DefaultToolEvents,
+    readonly string[],
+    TMetadata,
+    ToolCallReturn<TOutput>
+  >({
     name,
     description,
-    input: tool.input,
-    async execute(params, context) {
+    input,
+    async execute(params: InferSchemaInput<TSchema>, context: ToolContext) {
       return runTap(params, context);
     },
     ...(tags ? { tags } : {}),
-    ...(tool.metadata !== undefined ? { metadata: tool.metadata } : {}),
-  };
-  return createTool<
-    InferToolInput<TTool>,
-    InferToolOutput<TTool>,
-    DefaultToolEvents,
-    readonly string[],
-    ToolMetadata | undefined,
-    ToolContext<DefaultToolEvents>,
-    InferToolOutput<TTool>
-  >(toolOptions);
+    metadata,
+  });
 }

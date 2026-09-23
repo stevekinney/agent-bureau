@@ -1,3 +1,5 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type {
   PaginatedResult,
   ScheduleFilter,
@@ -7,8 +9,6 @@ import type {
   ScheduleSummary,
 } from '@lostgradient/weft';
 import { parseDuration, ScheduleHandle } from '@lostgradient/weft';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { ClosedFunction } from '../closed-acknowledgement';
 import { createClosedAcknowledgement } from '../closed-acknowledgement';
@@ -56,14 +56,14 @@ export interface ScheduledAgentRunInput {
    * across fires ("daily digest that remembers yesterday"). When absent, each
    * fire starts a FRESH standalone session.
    */
-  sessionId?: string;
+  sessionId?: string | undefined;
   /**
    * Stable schedule id that launched this fire. Persisted in the input because
    * Weft does not include `info.schedule` when a scheduled fire is recovered
    * through `recoverAll()`, but stateless fires need the schedule id to rebuild
    * the same per-fire session id after a crash.
    */
-  scheduleId?: string;
+  scheduleId?: string | undefined;
 }
 
 /**
@@ -110,7 +110,7 @@ export interface CreateAgentScheduleOptions {
    * the current architecture, but injectable for testing).
    * @default 'agentRun'
    */
-  workflowType?: string;
+  workflowType?: string | undefined;
   /** The agent name to schedule (maps to `ScheduledAgentRunInput.agentName`). */
   agentName: string;
   /**
@@ -127,30 +127,30 @@ export interface CreateAgentScheduleOptions {
    */
   input: string;
   /** Human-readable operator description stored with the schedule. */
-  description?: string;
+  description?: string | undefined;
   /**
    * Optional session id. When supplied, each fire APPENDS a run to this session
    * → the agent accumulates context across fires (the "recurring conversation"
    * pattern). When absent, each fire starts a standalone session with no shared
    * history.
    */
-  session?: string;
+  session?: string | undefined;
   /**
    * How to handle a tick that fires while the previous run is still in
    * progress. Defaults to `'skip'` (drop the new run silently). Agent Bureau
    * exposes only `'skip' | 'allow'` — see {@link AgentScheduleOverlapPolicy}.
    */
-  overlap?: AgentScheduleOverlapPolicy;
+  overlap?: AgentScheduleOverlapPolicy | undefined;
   /**
    * Optional stable id for this schedule (used by `getSchedule`/`pauseSchedule`
    * etc.). Defaults to an id minted through `options.runtime` (AB-92/AB-253).
    */
-  id?: string;
+  id?: string | undefined;
   /**
    * When true with a stable `id`, an existing compatible schedule is treated as
    * success. This is for durable replay of effectful schedule registration.
    */
-  idempotent?: boolean;
+  idempotent?: boolean | undefined;
   /**
    * Optional event dispatcher. When supplied, this call dispatches
    * `AgentScheduledEvent` (`schedule.created`, AB-298) exactly once for a
@@ -162,7 +162,7 @@ export interface CreateAgentScheduleOptions {
    * entirely for a caller with no event surface — this module never
    * manufactures one.
    */
-  emitter?: EventDispatcher;
+  emitter?: EventDispatcher | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam. Resolved
    * exactly once — omitted, a schedule id (when `id` is not supplied) is
@@ -170,7 +170,7 @@ export interface CreateAgentScheduleOptions {
    * a test composes its own deterministic instance with
    * `createManualRuntimeServices()` for a fully deterministic id.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 /**
@@ -278,25 +278,25 @@ export interface AgentScheduleOptions {
   /** Prompt injected into each scheduled run. */
   input: string;
   /** Human-readable operator description stored with the schedule. */
-  description?: string;
+  description?: string | undefined;
   /**
    * Optional session id. Present → recurring conversation; absent → fresh session
    * per fire. See architecture.md § External schedule (caller-chosen session
    * relationship).
    */
-  session?: string;
+  session?: string | undefined;
   /**
    * Overlap policy. Defaults to `'skip'`. Agent Bureau exposes only
    * `'skip' | 'allow'` — see {@link AgentScheduleOverlapPolicy}.
    */
-  overlap?: AgentScheduleOverlapPolicy;
+  overlap?: AgentScheduleOverlapPolicy | undefined;
   /** Optional stable schedule id (defaults to Weft-assigned uuid). */
-  id?: string;
+  id?: string | undefined;
   /**
    * When true with a stable `id`, an existing compatible schedule is treated as
    * success. Used by `scheduleSelf` during durable step replay.
    */
-  idempotent?: boolean;
+  idempotent?: boolean | undefined;
 }
 
 /**
@@ -614,14 +614,14 @@ export async function createAgentSchedule(
  */
 export function createAgentScheduler(options: {
   engine: SchedulingEngine;
-  workflowType?: string;
+  workflowType?: string | undefined;
   /**
    * Optional event dispatcher bound at construction. Threaded into every
    * `createAgentSchedule` call this scheduler makes, so every handle it
    * returns dispatches `SchedulePausedEvent`/`ScheduleResumedEvent`/
    * `ScheduleCancelledEvent` (AB-223) from `pause`/`resume`/`cancel`.
    */
-  emitter?: EventDispatcher;
+  emitter?: EventDispatcher | undefined;
 }): AgentScheduler {
   const { engine, emitter } = options;
   const workflowType = options.workflowType ?? 'agentRun';

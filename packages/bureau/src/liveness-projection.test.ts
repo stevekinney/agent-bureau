@@ -154,6 +154,8 @@ describe('projectWorkerLivenessSnapshot', () => {
         startedAt: 0,
         lastHeartbeatAt: 900,
         heartbeatAgeMs: 100,
+        inFlight: 1,
+        sessionGeneration: 1,
       },
       deploymentVersion: {
         deploymentName: 'd',
@@ -191,6 +193,8 @@ describe('projectWorkerLivenessSnapshot', () => {
         startedAt: 0,
         lastHeartbeatAt: 900,
         heartbeatAgeMs: 100,
+        inFlight: 1,
+        sessionGeneration: 1,
       },
       deploymentVersion: {
         deploymentName: 'd',
@@ -222,6 +226,8 @@ describe('projectWorkerLivenessSnapshot', () => {
         startedAt: 0,
         lastHeartbeatAt: 500,
         heartbeatAgeMs: 500,
+        inFlight: 0,
+        sessionGeneration: 1,
       },
       deploymentVersion: {
         deploymentName: 'd',
@@ -266,6 +272,8 @@ describe('projectStreamLivenessSnapshot', () => {
         startedAt: 0,
         lastHeartbeatAt: 900,
         heartbeatAgeMs: 100,
+        inFlight: 1,
+        sessionGeneration: 1,
       },
       deploymentVersion: {
         deploymentName: 'd',
@@ -300,7 +308,6 @@ describe('projectTaskLivenessSnapshot', () => {
             kind: 'stale-inflight',
             state: 'inflight',
             operationId: 'op-1',
-            workflowId: undefined,
             activityName: 'sendEmail',
             queue: 'default',
             workerId: 'worker-1',

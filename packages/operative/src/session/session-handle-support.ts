@@ -1,7 +1,7 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 import type { WorkflowState } from '@lostgradient/weft';
 import type { ConversationHistory } from 'conversationalist';
 import { Conversation, createConversationHistory } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
 
 import type { RunEvent } from '../agent-run';
 import type { AgentSession, RunRef } from '../agent-session';
@@ -132,7 +132,7 @@ export function appendRecoveredConversation(
 }
 
 export function newestRunningRunRef(session: AgentSession | undefined): RunRef | undefined {
-  return [...(session?.runs ?? [])].reverse().find((runRef) => runRef.status === 'running');
+  return [...(session?.runs ?? [])].toReversed().find((runRef) => runRef.status === 'running');
 }
 
 /**
@@ -228,8 +228,8 @@ async function readTerminalRunOutcome(
   runId: string,
 ): Promise<{
   status: RunRef['status'];
-  conversation?: ConversationHistory;
-  outcome?: RunOutcome;
+  conversation?: ConversationHistory | undefined;
+  outcome?: RunOutcome | undefined;
 } | null> {
   let state: WorkflowState | null;
   try {

@@ -1,3 +1,4 @@
+import { createCompletedEntry, decodeEntry, encodeEntry, isExpired } from './cache-entry-codec';
 import type {
   CachedToolResult,
   StartedToolExecution,
@@ -16,7 +17,6 @@ type KeyValueStoreLike = {
   list(prefix: string): Promise<string[]>;
 };
 
-const RESULT_UNDEFINED_SENTINEL = '__armorerResultUndefined';
 const sharedLocks = new WeakMap<object, Map<string, Promise<unknown>>>();
 
 /**
@@ -54,75 +54,6 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
     return `${prefix}${key}`;
   }
 
-  /** TTL of 0 means "never expire." */
-  function getEntryTime(entry: ToolResultCacheEntry): number {
-    return entry.status === 'started' ? entry.startedAt : entry.executedAt;
-  }
-
-  function isRecord(value: unknown): value is Record<string, unknown> {
-    return value !== null && typeof value === 'object' && !Array.isArray(value);
-  }
-
-  function decodeEntry(value: unknown): ToolResultCacheEntry | undefined {
-    if (!isRecord(value)) {
-      return undefined;
-    }
-
-    if (
-      value['status'] === 'started' &&
-      typeof value['toolName'] === 'string' &&
-      typeof value['startedAt'] === 'number'
-    ) {
-      return {
-        status: 'started',
-        toolName: value['toolName'],
-        startedAt: value['startedAt'],
-        ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
-        ...(typeof value['attemptId'] === 'string' ? { attemptId: value['attemptId'] } : {}),
-        ...(typeof value['leaseExpiresAt'] === 'number'
-          ? { leaseExpiresAt: value['leaseExpiresAt'] }
-          : {}),
-        ...(typeof value['absoluteDeadline'] === 'number'
-          ? { absoluteDeadline: value['absoluteDeadline'] }
-          : {}),
-        ...(typeof value['inputDigest'] === 'string' ? { inputDigest: value['inputDigest'] } : {}),
-      };
-    }
-
-    const hasResult = 'result' in value || value[RESULT_UNDEFINED_SENTINEL] === true;
-    if (
-      (value['status'] === undefined || value['status'] === 'completed') &&
-      hasResult &&
-      typeof value['toolName'] === 'string' &&
-      typeof value['executedAt'] === 'number'
-    ) {
-      return {
-        status: 'completed',
-        result: value[RESULT_UNDEFINED_SENTINEL] === true ? undefined : value['result'],
-        toolName: value['toolName'],
-        executedAt: value['executedAt'],
-        ttl: typeof value['ttl'] === 'number' ? value['ttl'] : (defaultTTL ?? 0),
-        ...(typeof value['expiresAt'] === 'number' ? { expiresAt: value['expiresAt'] } : {}),
-        ...(typeof value['policyRevision'] === 'string'
-          ? { policyRevision: value['policyRevision'] }
-          : {}),
-        ...(typeof value['input'] === 'string' ? { input: value['input'] } : {}),
-        ...(value['inputWasUndefined'] === true ? { inputWasUndefined: true as const } : {}),
-      };
-    }
-
-    return undefined;
-  }
-
-  function isExpired(entry: ToolResultCacheEntry): boolean {
-    // A started marker becoming old never proves that its side effect did not
-    // happen. It remains an unknown outcome until an authorized receipt
-    // atomically replaces it.
-    if (entry.status === 'started') return false;
-    if (entry.ttl === 0) return false;
-    return now() > (entry.expiresAt ?? getEntryTime(entry) + entry.ttl);
-  }
-
   async function getEntry(key: string): Promise<ToolResultCacheEntry | undefined> {
     const raw = await store.get(resolveKey(key));
     if (raw === null) {
@@ -131,7 +62,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
 
     let entry: ToolResultCacheEntry | undefined;
     try {
-      entry = decodeEntry(JSON.parse(raw));
+      entry = decodeEntry(JSON.parse(raw), defaultTTL);
     } catch {
       entry = undefined;
     }
@@ -141,7 +72,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
       return undefined;
     }
 
-    if (isExpired(entry)) {
+    if (isExpired(entry, now)) {
       // Lazily clean up expired entries
       await store.delete(resolveKey(key));
       return undefined;
@@ -161,18 +92,6 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         locksByStore.delete(key);
       }
     }
-  }
-
-  function encodeEntry(entry: ToolResultCacheEntry): Record<string, unknown> {
-    if (entry.status === 'started' || entry.result !== undefined) {
-      return entry;
-    }
-
-    const { result: _result, ...encoded } = entry;
-    return {
-      ...encoded,
-      [RESULT_UNDEFINED_SENTINEL]: true,
-    };
   }
 
   return {
@@ -256,15 +175,7 @@ export function createToolResultCache(options: CreateToolResultCacheOptions): To
         if (existing.absoluteDeadline !== undefined && observedAt >= existing.absoluteDeadline) {
           return false;
         }
-        const effectiveTTL = ttl ?? result.ttl ?? defaultTTL;
-        const entry = {
-          ...result,
-          status: 'completed' as const,
-          ...(effectiveTTL !== undefined ? { ttl: effectiveTTL } : {}),
-          ...(effectiveTTL !== undefined && effectiveTTL !== 0
-            ? { expiresAt: now() + effectiveTTL }
-            : {}),
-        };
+        const entry = createCompletedEntry(result, ttl, defaultTTL, now);
         await store.set(resolveKey(key), JSON.stringify(encodeEntry(entry)));
         return true;
       });

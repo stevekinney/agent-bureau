@@ -1,6 +1,6 @@
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { NormalizeActivities, WorkflowContext, WorkflowOperation } from '@lostgradient/weft';
 import { Conversation } from 'conversationalist';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { FinishReason } from '../types';
 import {
@@ -22,22 +22,24 @@ export interface WorkflowParkState {
   snapshot: ReturnType<Conversation['snapshot']>;
   cursor: RunCursor;
   finishReason: FinishReason;
-  errorMessage?: string;
-  abortReason?: string;
-  schemaValidation?: { success: boolean; error?: string };
+  errorMessage?: string | undefined;
+  abortReason?: string | undefined;
+  schemaValidation?: { success: boolean; error?: string | undefined } | undefined;
   output?: unknown;
-  tripwire?: {
-    guardrailName: string;
-    category: string;
-    phase: 'input' | 'output';
-    confidence: number;
-    detail?: string;
-  };
+  tripwire?:
+    | {
+        guardrailName: string;
+        category: string;
+        phase: 'input' | 'output';
+        confidence: number;
+        detail?: string;
+      }
+    | undefined;
   stoppedEarly: boolean;
-  pendingWakeup?: PendingWakeup;
-  pendingHumanWait?: PendingHumanWait;
-  lastWakeupNote?: string;
-  lastHumanWaitSignal?: string;
+  pendingWakeup?: PendingWakeup | undefined;
+  pendingHumanWait?: PendingHumanWait | undefined;
+  lastWakeupNote?: string | undefined;
+  lastHumanWaitSignal?: string | undefined;
   runId: string;
 }
 

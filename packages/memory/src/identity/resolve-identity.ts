@@ -4,7 +4,7 @@ import type { AgentIdentity, PersonaDescriptor, SoulBudget, SoulItem } from './t
  * Sort soul items by priority: pinned first, then by reinforcementCount descending.
  */
 function sortSoulItems(items: SoulItem[]): SoulItem[] {
-  return [...items].sort((a, b) => {
+  return [...items].toSorted((a, b) => {
     // Pinned items first
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     // Then by reinforcement count descending

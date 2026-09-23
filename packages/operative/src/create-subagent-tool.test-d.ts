@@ -3,6 +3,7 @@
 // `tsc --noEmit` only; it is not a runtime Bun test (see the convention
 // note in create-agent.test-d.ts).
 
+import type { ToolCallReturn } from 'armorer';
 import { z } from 'zod';
 
 import type { SuccessfulRunResult } from './agent-run';
@@ -87,18 +88,17 @@ void createSubagentTool({
   input: inputSchema,
 });
 
-// `createSubagentTool`'s fourth generic (`TToolOutput`) DECLARES a default
-// of `string` — the type-level counterpart to "a schema-less child with no
-// `toToolOutput` returns a string" (proven at runtime in
-// create-subagent-tool.test.ts). Only `TInput` is pinned below; leaving
-// `TOutput`/`THasOutput`/`TToolOutput` unspecified resolves each to its
-// declared default. The tool object is itself callable
-// (`(params: unknown): Promise<TReturn>` on armorer's `Tool`), so its
-// call-signature return type reflects `TToolOutput` directly.
+// `createSubagentTool`'s fourth generic (`TToolOutput`) defaults to `string` —
+// the type-level counterpart to the schema-less child's default projection.
+// The callable tool surface also admits collected/live stream and authorization
+// results, so its awaited return is `ToolCallReturn<TToolOutput>` rather than
+// the callback's string alone.
 declare const _defaultOutputTool: ReturnType<typeof createSubagentTool<{ topic: string }>>;
 type DefaultToolOutput = Awaited<ReturnType<typeof _defaultOutputTool>>;
-const defaultToolOutputIsString: DefaultToolOutput extends string ? true : false = true;
-void defaultToolOutputIsString;
+const defaultToolOutputMatchesDefaultCallback: DefaultToolOutput extends ToolCallReturn<string>
+  ? true
+  : false = true;
+void defaultToolOutputMatchesDefaultCallback;
 
 // ---------------------------------------------------------------------------
 // 6. A synchronous `toToolOutput`.
@@ -136,7 +136,7 @@ void createSubagentTool({
 //    that type as-is rather than a locally narrower copy.
 // ---------------------------------------------------------------------------
 
-declare const handRolledAgent: RunnableAgent<never, false>;
+declare const handRolledAgent: RunnableAgent;
 void createSubagentTool({
   name: 'hand-rolled-agent',
   description: 'A hand-written RunnableAgent, not a createAgent(...) result',

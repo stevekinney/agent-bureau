@@ -1,4 +1,4 @@
-import type { Subscription } from 'lifecycle';
+import type { Subscription } from '@lostgradient/lifecycle';
 
 export type { Subscription };
 
@@ -85,14 +85,14 @@ export interface DeclaredWait {
   readonly reason: DeclaredWaitReason;
   readonly startedAt: number;
   /** id of the awaited thing (childRunId, review id). */
-  readonly owner?: string;
+  readonly owner?: string | undefined;
   /** provider name, tool callId, rate-limit window. */
-  readonly dependency?: string;
+  readonly dependency?: string | undefined;
   /**
    * Absent means unbounded; legal only for `'signal'` and `'review'`.
    * `'sleep'`, `'retry'`, and `'rate-limit'` must carry a deadline.
    */
-  readonly deadline?: number;
+  readonly deadline?: number | undefined;
   readonly wakeCondition: string;
 }
 
@@ -108,7 +108,7 @@ export type LivenessRecoveryRule =
 export interface StallPolicy {
   /** Never a single global key. */
   readonly operation: string;
-  readonly cadenceMs?: number;
+  readonly cadenceMs?: number | undefined;
   readonly graceMs: number;
   readonly jitterMs: number;
   readonly missedPulseThreshold: number;
@@ -122,7 +122,7 @@ export interface StallPolicy {
    * the bot review at PRRT_kwDORvupsc6etXKc, which read this as a
    * clock-coordinate deadline needing no rebasing — it is not.
    */
-  readonly absoluteDeadlineMs?: number;
+  readonly absoluteDeadlineMs?: number | undefined;
   readonly clockSource: LivenessClockSource;
   readonly suspensionBehavior: LivenessSuspensionBehavior;
   readonly recovery: LivenessRecoveryRule;
@@ -154,19 +154,19 @@ export interface LivenessEvidenceEntry {
 // ---------------------------------------------------------------------------
 
 export interface SemanticProgress<TDetail = unknown> {
-  readonly phase?: string;
-  readonly current?: number;
-  readonly total?: number;
-  readonly unit?: string;
-  readonly message?: string;
-  readonly checkpoint?: TDetail;
+  readonly phase?: string | undefined;
+  readonly current?: number | undefined;
+  readonly total?: number | undefined;
+  readonly unit?: string | undefined;
+  readonly message?: string | undefined;
+  readonly checkpoint?: TDetail | undefined;
 }
 
 export interface LivenessLeaseEvidence {
   readonly holderId: string;
   readonly expiresAt: number;
   /** Weft's `LeaseManager` epoch, never fabricated by Bureau. */
-  readonly epoch?: number;
+  readonly epoch?: number | undefined;
   readonly source: 'weft-workflow-lease' | 'weft-activity-lease' | 'weft-worker-registry';
 }
 
@@ -175,9 +175,9 @@ export interface LivenessSnapshot<TResult = unknown, TCheckpoint = unknown> {
   readonly id: string;
   readonly kind: LivenessSubjectKind;
   /** Principal or bureau identifier per the floor; absent for a standalone run. */
-  readonly owner?: string;
+  readonly owner?: string | undefined;
   /** AC3's aggregating parent. */
-  readonly parentId?: string;
+  readonly parentId?: string | undefined;
   readonly startedAt: string;
   readonly revision: number;
   readonly status: LivenessLifecycleStatus;
@@ -187,27 +187,27 @@ export interface LivenessSnapshot<TResult = unknown, TCheckpoint = unknown> {
   readonly detached: boolean;
   readonly durability: 'process-local' | 'durable';
   readonly cancellable: boolean;
-  readonly result?: TResult;
+  readonly result?: TResult | undefined;
   /** Attempt fencing token (AC8); monotonic per id. Older-attempt evidence is discarded on ingestion. */
   readonly attempt: number;
   readonly reachability: LivenessReachability;
   readonly progress: LivenessProgressState;
   readonly assessment: LivenessAssessment;
   /** Source wall clock; absent for watchdog-derived states. */
-  readonly emittedAt?: number;
+  readonly emittedAt?: number | undefined;
   /** Observer monotonic clock; the clock all cadence math uses. */
   readonly observedAt: number;
-  readonly lastActivityAt?: number;
-  readonly lastHeartbeatAt?: number;
-  readonly lastProgressAt?: number;
-  readonly expectedNextObservationAt?: number;
+  readonly lastActivityAt?: number | undefined;
+  readonly lastHeartbeatAt?: number | undefined;
+  readonly lastProgressAt?: number | undefined;
+  readonly expectedNextObservationAt?: number | undefined;
   readonly missedPulseCount: number;
-  readonly semanticProgress?: SemanticProgress<TCheckpoint>;
+  readonly semanticProgress?: SemanticProgress<TCheckpoint> | undefined;
   /** Present iff `status` is `'waiting'`. */
-  readonly declaredWait?: DeclaredWait;
-  readonly lease?: LivenessLeaseEvidence;
+  readonly declaredWait?: DeclaredWait | undefined;
+  readonly lease?: LivenessLeaseEvidence | undefined;
   /** Absolute execution deadline; never moved by a stale pulse. */
-  readonly deadline?: number;
+  readonly deadline?: number | undefined;
   readonly policyVersion: string;
   /** Ordered, most recent last. */
   readonly evidence: readonly LivenessEvidenceEntry[];
@@ -231,7 +231,7 @@ export interface LivenessSnapshot<TResult = unknown, TCheckpoint = unknown> {
    * obligation), and a stalled child never changes this run's own
    * `reachability`/`progress`/`status` — only this field reflects it.
    */
-  readonly worstChildAssessment?: LivenessAssessment;
+  readonly worstChildAssessment?: LivenessAssessment | undefined;
 }
 
 // ---------------------------------------------------------------------------

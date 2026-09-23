@@ -1,4 +1,4 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 
 import type {
   ConversationHistory,
@@ -8,7 +8,7 @@ import type {
   MessagePluginIdentity,
   TokenEstimator,
 } from './types';
-import { messageParts } from './utilities';
+import { messageParts } from './utilities/message';
 
 export interface SessionInfo {
   id: string;
@@ -26,11 +26,19 @@ export function toSessionInfo(conversation: ConversationHistory): SessionInfo {
   return {
     id: conversation.id,
     ...(conversation.title !== undefined ? { title: conversation.title } : {}),
-    tags: (conversation.metadata['_tags'] as string[] | undefined) ?? [],
+    tags: readSessionTags(conversation.metadata['_tags']),
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     messageCount: conversation.ids.length,
   };
+}
+
+function readSessionTags(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((tag): tag is string => typeof tag === 'string')) {
+    throw new TypeError('Session tags must be an array of strings');
+  }
+  return value;
 }
 
 /**
@@ -98,36 +106,41 @@ export function defineMessagePlugin(
  * and can still be truncated. This is a rough size proxy, not an exact tokenizer.
  */
 function partCharLength(part: ReturnType<typeof messageParts>[number]): number {
+  if ('tool_use_id' in part) return JSON.stringify(part.content).length;
   switch (part.type) {
     case 'text':
-      return (
-        part.text.length +
-        (part.citations !== undefined ? JSON.stringify(part.citations).length : 0)
-      );
+      return part.text.length + optionalJSONLength(part.citations);
     case 'image':
-      return (part.text ?? '').length + (part.url?.length ?? 0);
+      return optionalStringLength(part.text) + optionalStringLength(part.url);
     case 'document':
-      return (
-        part.name.length +
-        part.mimeType.length +
-        (part.source.kind === 'base64' ? part.source.data.length : part.source.uri.length)
-      );
+      return part.name.length + part.mimeType.length + documentSourceLength(part.source);
     case 'thinking':
       return part.thinking.length + part.signature.length;
     case 'redacted_thinking':
       return part.data.length;
     case 'server_tool_use':
       return part.name.length + JSON.stringify(part.input).length;
-    case 'web_search_tool_result':
-      return JSON.stringify(part.content).length;
-    case 'code_execution_tool_result':
-    case 'bash_code_execution_tool_result':
-    case 'text_editor_code_execution_tool_result':
-    case 'web_fetch_tool_result':
-      return JSON.stringify(part.content).length;
     case 'container_upload':
       return part.file_id.length;
+    default:
+      return assertNeverContent(part);
   }
+}
+
+function assertNeverContent(part: never): never {
+  throw new TypeError(`Unsupported content part: ${JSON.stringify(part)}`);
+}
+
+function optionalJSONLength(value: unknown): number {
+  return value === undefined ? 0 : JSON.stringify(value).length;
+}
+
+function optionalStringLength(value: string | undefined): number {
+  return value?.length ?? 0;
+}
+
+function documentSourceLength(source: import('./multi-modal').DocumentSource): number {
+  return source.kind === 'base64' ? source.data.length : source.uri.length;
 }
 
 /**
@@ -175,22 +188,22 @@ export const defaultConversationEnvironment: ConversationEnvironment = {
  * through; otherwise the real-globals default runtime is read through.
  */
 export function resolveConversationEnvironment(
-  environment?: Partial<ConversationEnvironment>,
+  environment: Partial<ConversationEnvironment> = {},
 ): ConversationEnvironment {
-  const runtime = environment?.runtime;
+  const runtime = environment.runtime;
+  const defaults = runtime
+    ? {
+        now: () => runtime.clock.nowISO(),
+        randomId: () => runtime.identifiers.next('conversation'),
+      }
+    : defaultConversationEnvironment;
   return {
-    now:
-      environment?.now ??
-      (runtime ? () => runtime.clock.nowISO() : defaultConversationEnvironment.now),
-    randomId:
-      environment?.randomId ??
-      (runtime
-        ? () => runtime.identifiers.next('conversation')
-        : defaultConversationEnvironment.randomId),
-    estimateTokens: environment?.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
-    plugins: [...(environment?.plugins ?? defaultConversationEnvironment.plugins)],
+    now: environment.now ?? defaults.now,
+    randomId: environment.randomId ?? defaults.randomId,
+    estimateTokens: environment.estimateTokens ?? defaultConversationEnvironment.estimateTokens,
+    plugins: [...(environment.plugins ?? defaultConversationEnvironment.plugins)],
     runtime: runtime ?? defaultConversationRuntime,
-    ...(environment?.maxHistoryDepth !== undefined
+    ...(environment.maxHistoryDepth !== undefined
       ? { maxHistoryDepth: environment.maxHistoryDepth }
       : {}),
   };
@@ -203,23 +216,26 @@ export function resolveConversationEnvironment(
 export function isConversationEnvironmentParameter(
   value: unknown,
 ): value is Partial<ConversationEnvironment> {
-  if (!value || typeof value !== 'object' || value === null) return false;
-  if ('role' in (value as Record<string, unknown>)) return false;
-
-  const candidate = value as Record<string, unknown>;
-  const runtime = candidate['runtime'];
-  const hasRuntime =
-    !!runtime &&
-    typeof runtime === 'object' &&
-    typeof (runtime as Record<string, unknown>)['clock'] === 'object' &&
-    typeof (runtime as Record<string, unknown>)['identifiers'] === 'object';
+  if (!isObjectRecord(value) || 'role' in value) return false;
   return (
-    typeof candidate['now'] === 'function' ||
-    typeof candidate['randomId'] === 'function' ||
-    typeof candidate['estimateTokens'] === 'function' ||
-    (Array.isArray(candidate['plugins']) && candidate['plugins'].length > 0) ||
-    typeof candidate['maxHistoryDepth'] === 'number' ||
-    hasRuntime
+    typeof value['now'] === 'function' ||
+    typeof value['randomId'] === 'function' ||
+    typeof value['estimateTokens'] === 'function' ||
+    (Array.isArray(value['plugins']) && value['plugins'].length > 0) ||
+    typeof value['maxHistoryDepth'] === 'number' ||
+    hasRuntimeMembers(value['runtime'])
+  );
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
+}
+
+function hasRuntimeMembers(runtime: unknown): boolean {
+  return (
+    isObjectRecord(runtime) &&
+    typeof runtime['clock'] === 'object' &&
+    typeof runtime['identifiers'] === 'object'
   );
 }
 

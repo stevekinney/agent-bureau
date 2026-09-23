@@ -18,9 +18,9 @@
  *     at most once.
  */
 
+import type { RuntimeServices, Subscription } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import { Conversation } from 'conversationalist';
-import type { RuntimeServices, Subscription } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import type { AgentRun, RunEvent, UnwrappedValue } from './agent-run';
 import { CompletedRunIterationError } from './agent-run';
@@ -64,7 +64,7 @@ export type LazyAgentLoader<O, H extends boolean> = () =>
 
 export interface CreateLazyAgentOptions<H extends boolean = false> {
   /** Human-readable label included in lazy loading and contract error messages. */
-  label?: string;
+  label?: string | undefined;
   /**
    * A provisional runtime witness for this lazy agent's `H` (AB-234), used
    * ONLY before the loader has ever resolved. `createLazyAgent` returns a
@@ -86,7 +86,7 @@ export interface CreateLazyAgentOptions<H extends boolean = false> {
    * `RunnableAgent.hasOutput`'s doc comment (`runnable-agent.ts`) for why
    * this witness exists at all.
    */
-  hasOutput?: H;
+  hasOutput?: H | undefined;
 
   /**
    * The generation-capability snapshot exposed on the returned agent (AB-64,
@@ -95,7 +95,7 @@ export interface CreateLazyAgentOptions<H extends boolean = false> {
    * load. Omitted means the lazy agent reports `mode: 'opaque'`
    * (`readGenerationProfile`'s default fallback).
    */
-  generationProfile?: AgentGenerationProfile;
+  generationProfile?: AgentGenerationProfile | undefined;
 
   /**
    * AB-92/AB-252 (AB-325): the clock the synthetic liveness snapshot reads
@@ -103,7 +103,7 @@ export interface CreateLazyAgentOptions<H extends boolean = false> {
    * {@link createDeferredAgentRun}). Defaults to the real implementation
    * (`createDefaultRuntimeServices` from `lifecycle`).
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 // A fresh object per call — never a shared module-level singleton. `RunResult.usage`
@@ -413,7 +413,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
   interface PendingSnapshotRecord {
     readonly observer: (snapshot: AgentRunLivenessSnapshot) => void;
     closed: boolean;
-    realSubscription?: Subscription;
+    realSubscription?: Subscription | undefined;
   }
   const pendingSnapshotObservers = new Set<PendingSnapshotRecord>();
 
@@ -451,7 +451,8 @@ export function createDeferredAgentRun<O, H extends boolean>(
 
   function notifySyntheticTerminal(): void {
     const terminalSnapshot = syntheticSnapshot();
-    for (const record of [...pendingSnapshotObservers]) {
+    const subscriberSnapshot = [...pendingSnapshotObservers];
+    for (const record of subscriberSnapshot) {
       if (record.closed) continue;
       record.closed = true;
       try {
@@ -475,7 +476,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
     if (resultSettled) return;
     resultSettled = true;
     settleResultPromise(result);
-    detachSignalListener();
+    detachSignalListener?.();
   }
 
   function finalizeSynthetic(
@@ -538,7 +539,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
     }
   }
 
-  let detachSignalListener: () => void = () => {};
+  let detachSignalListener: (() => void) | undefined;
   const signal = context?.signal;
   if (signal) {
     if (signal.aborted) {
@@ -586,7 +587,8 @@ export function createDeferredAgentRun<O, H extends boolean>(
     });
     void (async () => {
       try {
-        while (!stoppedByConsumer) {
+        for (;;) {
+          if (stoppedByConsumer) break;
           const result = await iterator.next();
           if (stoppedByConsumer) break;
           if (result.done) {
@@ -606,6 +608,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
       (result) => {
         state = 'terminal';
         settleResult(result);
+        return undefined;
       },
       (error: unknown) => {
         // `AgentRun.result()` is documented to always resolve, even on
@@ -766,7 +769,7 @@ export function createDeferredAgentRun<O, H extends boolean>(
     // underlying run existed at all. Detaching now avoids a second,
     // wrapper-driven `abort()` call racing a compliant agent's own
     // signal-triggered one for the same reason.
-    detachSignalListener();
+    detachSignalListener?.();
 
     watchResult(handle);
     startPumpingEvents();
@@ -790,7 +793,9 @@ export function createDeferredAgentRun<O, H extends boolean>(
     output(): Promise<O> {
       return resultPromise.then((result) => {
         if (underlying) {
-          const underlyingOutput = (underlying as unknown as { output?: () => Promise<O> }).output;
+          const underlyingOutput = (
+            underlying as unknown as { output?: (() => Promise<O>) | undefined }
+          ).output;
           if (typeof underlyingOutput === 'function') {
             return underlyingOutput.call(underlying);
           }
@@ -1048,11 +1053,13 @@ export function createLazyAgent<O = never, H extends boolean = false>(
         if (state.kind === 'loading' && state.pending === pending) {
           state = { kind: 'loaded', agent };
         }
+        return undefined;
       },
       () => {
         if (state.kind === 'loading' && state.pending === pending) {
           state = { kind: 'unloaded' };
         }
+        return undefined;
       },
     );
     return pending;

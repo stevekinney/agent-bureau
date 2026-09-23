@@ -1,6 +1,6 @@
-import { parseOpenAIToolCalls } from 'armorer/adapters/openai';
-import { toOpenAIMessagesGrouped } from 'conversationalist/adapters/openai';
-import type { ToolCallInput } from 'interoperability';
+import type { ToolCallInput } from '@lostgradient/tool-protocol';
+import { parseOpenAIToolCalls } from 'armorer';
+import { toOpenAIMessagesGrouped } from 'conversationalist';
 
 import { withBackendDescriptors } from './backend-descriptor-attachment.ts';
 import { ProviderError, ToolCallParseError } from './errors.ts';
@@ -176,7 +176,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
  * The optional `baseURL` enables LM Studio, Ollama, Groq, etc.
  */
 export function createOpenAIProviderStream(
-  options: Omit<OpenAIProviderOptions, 'client'> & { client?: OpenAIStreamingClient },
+  options: Omit<OpenAIProviderOptions, 'client'> & { client?: OpenAIStreamingClient | undefined },
 ): StreamingGenerateFunction {
   const { baseURL } = options;
   const resolvedModel = resolveOpenAIModel(options.model);
@@ -253,7 +253,7 @@ export function createOpenAIProviderStream(
       // correlate a start with its deltas before the response closes.
       const pendingToolCalls: Map<
         number,
-        { id?: string; name: string; arguments: string; blockId: string | undefined }
+        { id?: string | undefined; name: string; arguments: string; blockId: string | undefined }
       > = new Map();
 
       for await (const chunk of stream) {

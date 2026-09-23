@@ -1,4 +1,4 @@
-import { sha256HexSync } from 'interoperability';
+import { sha256HexSync } from '@lostgradient/cryptography';
 
 /**
  * Recursively sorts object keys to produce deterministic JSON serialization.
@@ -15,7 +15,7 @@ function stableSortKeys(value: unknown): unknown {
 
   if (typeof value === 'object') {
     const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
+    for (const key of Object.keys(value).toSorted()) {
       sorted[key] = stableSortKeys((value as Record<string, unknown>)[key]);
     }
     return sorted;

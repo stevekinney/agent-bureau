@@ -29,7 +29,7 @@ function buildRun<O, H extends boolean>(hasOutput: H): AgentRun<O, H> {
   return createAgentRun<O, H>(activeRun, { hasOutput });
 }
 
-const untypedAgent: RunnableAgent<never, false> = {
+const untypedAgent: RunnableAgent = {
   name: 'untyped',
   hasOutput: false,
   run: () => buildRun(false),
@@ -46,7 +46,7 @@ const typedAgent: RunnableAgent<TypedOutput, true> = {
 
 // -- Direct agent ------------------------------------------------------------
 
-const directLazy: RunnableAgent<never, false> = createLazyAgent(() => untypedAgent);
+const directLazy: RunnableAgent = createLazyAgent(() => untypedAgent);
 void directLazy;
 
 const directTypedLazy: RunnableAgent<TypedOutput, true> = createLazyAgent(() => typedAgent);
@@ -54,22 +54,22 @@ void directTypedLazy;
 
 // -- Named, default, barrel, and literal dynamic imports ---------------------
 
-const namedLazy: RunnableAgent<never, false> = createLazyAgent(() =>
+const namedLazy: RunnableAgent = createLazyAgent(() =>
   import('./create-lazy-agent-type-fixtures').then((module) => module.namedAgent),
 );
 void namedLazy;
 
-const defaultLazy: RunnableAgent<never, false> = createLazyAgent(() =>
+const defaultLazy: RunnableAgent = createLazyAgent(() =>
   import('./create-lazy-agent-type-fixtures').then((module) => module.default),
 );
 void defaultLazy;
 
-const barrelLazy: RunnableAgent<never, false> = createLazyAgent(() =>
+const barrelLazy: RunnableAgent = createLazyAgent(() =>
   import('./create-lazy-agent-type-barrel').then((module) => module.namedAgent),
 );
 void barrelLazy;
 
-const literalImportLazy: RunnableAgent<never, false> = createLazyAgent(() =>
+const literalImportLazy: RunnableAgent = createLazyAgent(() =>
   import('./create-lazy-agent-type-fixtures').then(({ namedAgent: selected }) => selected),
 );
 void literalImportLazy;
@@ -137,7 +137,7 @@ void disagreeingHasOutputLazy;
 // A raw `import(path)` module namespace object — its `default` export is
 // unwrapped automatically (AB-15's `AgentModule<O, H>`); no selector needed.
 const moduleObjectLoader = () => import('./create-lazy-agent-type-fixtures');
-const moduleObjectLazy: RunnableAgent<never, false> = createLazyAgent(moduleObjectLoader);
+const moduleObjectLazy: RunnableAgent = createLazyAgent(moduleObjectLoader);
 void moduleObjectLazy;
 
 // A named (non-default) export is still not unwrapped automatically — the
@@ -151,7 +151,7 @@ void namedExportOnlyLazy;
 
 // `createLazyAgent`'s return value is an ordinary `RunnableAgent`, with no
 // stateful helper API and no thenable surface.
-type RunnableAgentWithPreload = RunnableAgent<never, false> & { preload: () => void };
+type RunnableAgentWithPreload = RunnableAgent & { preload: () => void };
 
 // @ts-expect-error — the lazy wrapper has no stateful helper API beyond RunnableAgent.
 const lazyWithPreload: RunnableAgentWithPreload = directLazy;

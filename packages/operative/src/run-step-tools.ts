@@ -1,6 +1,6 @@
+import type { ToolCall } from '@lostgradient/tool-protocol';
 import type { AnyToolbox, ToolExecutionResult } from 'armorer';
 import { Conversation, materializeToolCalls } from 'conversationalist';
-import type { ToolCall } from 'interoperability';
 
 import { reclassifyToolError } from './errors';
 import {
@@ -64,45 +64,28 @@ export async function executeTools(
     let callsToExecute = materializedToolCalls;
     let filteredResults: ToolExecutionResult[] = [];
 
-    if (deps.beforeToolExecutionHooks.length > 0) {
+    if (hooks?.has('beforeToolExecution')) {
       try {
-        for (const hook of deps.beforeToolExecutionHooks) {
-          callsToExecute = await hook({
+        // Iterated by hand rather than dispatched: `beforeToolExecution`
+        // waterfalls a FIELD of its context (`toolCalls`) while the rest of
+        // the context stays fixed, so the context is rebuilt around each
+        // handler's result. `run()` would instead replace the whole context
+        // with a bare
+        // `ToolCall[]` for the second handler. Invocations still go through
+        // `runHandler` so an observer sees them like any dispatched hook.
+        for (const entry of hooks.getHandlers('beforeToolExecution')) {
+          const beforeContext = {
             conversation,
             step,
             toolCalls: [...callsToExecute],
             elicit,
-          });
-        }
-      } catch (error) {
-        const sealedResults = await sealDanglingToolCalls(
-          conversation,
-          deps.collectAsync,
-          'Tool execution aborted before a result could be produced (beforeToolExecution hook failed)',
-        );
-        dispatchSettledResults(
-          emitter,
-          deps,
-          step,
-          materializedToolCalls,
-          sealedResults,
-          emittedSettledCallIds,
-        );
-        emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
-        return { kind: 'error', error, errorKind: 'tool' };
-      }
-    }
-    if (hooks?.has('beforeToolExecution')) {
-      try {
-        const beforeContext = {
-          conversation,
-          step,
-          toolCalls: [...callsToExecute],
-          elicit,
-        };
-        const registryResult = await hooks.run('beforeToolExecution', beforeContext);
-        if (registryResult !== undefined) {
-          callsToExecute = registryResult;
+          };
+          const registryResult = await hooks.runHandler('beforeToolExecution', entry, [
+            beforeContext,
+          ]);
+          if (registryResult !== undefined) {
+            callsToExecute = registryResult as ToolCall[];
+          }
         }
       } catch (error) {
         const sealedResults = await sealDanglingToolCalls(
@@ -160,8 +143,12 @@ export async function executeTools(
         // `deps.executeOptions.executionContext` (if any) under the
         // run-derived fields, so a caller-supplied key survives unless it
         // collides with `childRegistry`/`parentRunId`/`delegatedAuthority`.
+        const { concurrency, mode, errorMode, ...baseExecuteOptions } = deps.executeOptions ?? {};
         const toolboxExecuteOptions = {
-          ...deps.executeOptions,
+          ...baseExecuteOptions,
+          ...(concurrency === undefined ? {} : { concurrency }),
+          ...(mode === undefined ? {} : { mode }),
+          ...(errorMode === undefined ? {} : { errorMode }),
           signal: stepSignal,
           // AB-290: stamp this run's own id as `ownerId` on every armorer
           // execution this call dispatches — after the caller's own
@@ -316,26 +303,12 @@ export async function executeTools(
       }
 
       // Validate tool results guardrail
-      if (deps.validateToolResultHooks.length > 0 || hooks?.has('validateToolResult')) {
+      if (hooks?.has('validateToolResult')) {
         try {
           const validatedResults: ToolExecutionResult[] = [];
           for (const originalResult of results) {
             let currentResult = originalResult;
-            for (const hook of deps.validateToolResultHooks) {
-              const snapshot = { ...currentResult };
-              const validated = await hook(currentResult, {
-                conversation,
-                step,
-                toolCalls: callsToExecute,
-                results,
-                elicit,
-              });
-              if (validated) {
-                emitter?.dispatch(new ToolResultValidatedEvent(step, snapshot, validated));
-                currentResult = validated;
-              }
-            }
-            if (hooks?.has('validateToolResult')) {
+            {
               const snapshot = { ...currentResult };
               const validated = await hooks.run('validateToolResult', currentResult, {
                 conversation,
@@ -381,22 +354,6 @@ export async function executeTools(
         return { kind: 'continue' };
       }
 
-      if (deps.afterToolExecutionHooks.length > 0) {
-        try {
-          for (const hook of deps.afterToolExecutionHooks) {
-            await hook({
-              conversation,
-              step,
-              toolCalls: callsToExecute,
-              results,
-              elicit,
-            });
-          }
-        } catch (error) {
-          emitter?.dispatch(new RunErrorEvent(step, error, 'tool'));
-          return { kind: 'error', error, errorKind: 'tool' };
-        }
-      }
       if (hooks?.has('afterToolExecution')) {
         try {
           await hooks.run('afterToolExecution', {

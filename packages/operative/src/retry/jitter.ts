@@ -1,11 +1,11 @@
-import { createDefaultRuntimeServices } from 'lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 /** Options for controlling jitter behavior. */
 export interface JitterOptions {
   /** Whether jitter is enabled. When false, returns the exact delay. */
-  enabled?: boolean;
+  enabled?: boolean | undefined;
   /** Maximum jitter offset in milliseconds. Defaults to half the delay. */
-  maxJitter?: number;
+  maxJitter?: number | undefined;
   /**
    * AB-92/AB-252 — the pseudo-random source, matching `Math.random()`'s
    * `[0, 1)` contract. Defaults to a fresh `createDefaultRuntimeServices()`
@@ -14,7 +14,7 @@ export interface JitterOptions {
    * instance's) from a caller that already has a resolved `RuntimeServices`,
    * so this never reaches `Math.random()` directly on that path.
    */
-  random?: () => number;
+  random?: (() => number) | undefined;
 }
 
 /**

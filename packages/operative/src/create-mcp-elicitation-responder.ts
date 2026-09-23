@@ -1,11 +1,11 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type {
   ToolElicitationRequest,
   ToolElicitationRequester,
   ToolElicitationResult,
 } from 'armorer';
 import { jsonSchemaToZod } from 'armorer';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import type { EventDispatcher } from './loop';
@@ -30,8 +30,8 @@ export interface CreateMcpElicitationResponderOptions {
    * `ElicitationResolvedEvent` are dispatched around the call, matching the
    * events the in-loop `elicit()` helper already emits (see `run-step.ts`).
    */
-  emitter?: EventDispatcher;
-  runtime?: RuntimeServices;
+  emitter?: EventDispatcher | undefined;
+  runtime?: RuntimeServices | undefined;
 }
 
 /**
@@ -44,14 +44,13 @@ export interface CreateMcpElicitationResponderOptions {
  *
  * @example
  * ```ts
- * import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
- * import { createMcpElicitationHandler } from 'armorer/mcp';
+ * import { createMcpElicitationHandler } from 'armorer';
  * import { createMcpElicitationResponder } from '@lostgradient/operative';
  *
  * let currentContext: StepContext = { conversation, step: 0 };
  *
  * client.setRequestHandler(
- *   ElicitRequestSchema,
+ *   'elicitation/create',
  *   createMcpElicitationHandler(
  *     createMcpElicitationResponder({
  *       onElicitation,
@@ -81,9 +80,9 @@ export function createMcpElicitationResponder(
       emitter,
     );
     const response = await elicit(message, schema);
-    return response === null
-      ? { action: 'decline' }
-      : { action: 'accept', content: toContentRecord(response.data) };
+    if (response === null) return { action: 'decline' };
+    const content = toContentRecord(response.data);
+    return content === undefined ? { action: 'accept' } : { action: 'accept', content };
   };
 }
 

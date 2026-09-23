@@ -1,4 +1,4 @@
-import type { TypedEventTarget } from 'lifecycle';
+import type { TypedEventTarget } from '@lostgradient/lifecycle';
 
 import {
   readBackendDescriptors,
@@ -262,7 +262,7 @@ export function withEnhancedStreaming(
       // whose ids all arrive after their names AND whose live starts fire out
       // of provider-index order; no adapter here produces it. Closing it for
       // good means carrying a correlation key on `ToolCallInput`, which is a
-      // change to the shared `interoperability` types rather than to this
+      // change to the shared tool-protocol types rather than to this
       // package.
       const unpaired = pairings.filter((pairing) => pairing.reported === undefined);
       if (unpaired.length === unmatchedReported.length) {
@@ -398,8 +398,8 @@ export function withEnhancedStreaming(
       });
 
       conversation.finalizeStreamingMessage(messageId, {
-        tokenUsage: response.usage,
-        metadata: response.metadata,
+        ...(response.usage === undefined ? {} : { tokenUsage: response.usage }),
+        ...(response.metadata === undefined ? {} : { metadata: response.metadata }),
       });
 
       return { ...response, messageAppended: true };

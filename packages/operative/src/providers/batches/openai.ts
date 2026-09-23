@@ -8,6 +8,11 @@ import type {
   OpenAIBatchListQuery,
 } from '../types.ts';
 
+function wrapOpenAIError(error: unknown): ProviderError {
+  if (error instanceof ProviderError) return error;
+  return new ProviderError({ provider: 'openai', cause: error });
+}
+
 /**
  * `openai` 4.34.0 introduced `client.batches` with `create`/`retrieve`/`cancel`;
  * `list` landed in 4.38.0. See `shared/batch-support.ts` for how both were
@@ -53,9 +58,9 @@ export interface OpenAIBatchClientOptions {
    * `providers/batch-client-assignability.test-d.ts`. This is also the escape
    * hatch for a non-default base URL; see the note on this interface.
    */
-  client?: OpenAIBatchClient;
+  client?: OpenAIBatchClient | undefined;
   /** Falls back to the SDK's own `OPENAI_API_KEY` lookup when omitted. */
-  apiKey?: string;
+  apiKey?: string | undefined;
 }
 
 /**
@@ -116,7 +121,7 @@ export function createOpenAIBatchClient(
     if (!clientPromise) {
       clientPromise = import('openai').then((module) => {
         const OpenAI = module.default ?? module.OpenAI;
-        const clientOptions: { apiKey?: string } = {};
+        const clientOptions: { apiKey?: string | undefined } = {};
         if (options.apiKey) clientOptions.apiKey = options.apiKey;
         // No cast: a real `OpenAI` satisfies `OpenAIBatchClient` as declared,
         // the same guarantee a consumer passing their own client relies on.
@@ -129,18 +134,13 @@ export function createOpenAIBatchClient(
     return clientPromise;
   }
 
-  function wrap(error: unknown): ProviderError {
-    if (error instanceof ProviderError) return error;
-    return new ProviderError({ provider: 'openai', cause: error });
-  }
-
   return {
     async create(request: OpenAIBatchCreateRequest): Promise<OpenAIBatch> {
       try {
         const client = await getClient();
         return await client.batches.create(request);
       } catch (error) {
-        throw wrap(error);
+        throw wrapOpenAIError(error);
       }
     },
 
@@ -149,7 +149,7 @@ export function createOpenAIBatchClient(
         const client = await getClient();
         return await client.batches.retrieve(batchId);
       } catch (error) {
-        throw wrap(error);
+        throw wrapOpenAIError(error);
       }
     },
 
@@ -158,7 +158,7 @@ export function createOpenAIBatchClient(
         const client = await getClient();
         yield* client.batches.list(query);
       } catch (error) {
-        throw wrap(error);
+        throw wrapOpenAIError(error);
       }
     },
 
@@ -167,7 +167,7 @@ export function createOpenAIBatchClient(
         const client = await getClient();
         return await client.batches.cancel(batchId);
       } catch (error) {
-        throw wrap(error);
+        throw wrapOpenAIError(error);
       }
     },
   };

@@ -6,9 +6,12 @@
  * durable pipeline. Sampling is driven by an injected RNG so `sampleRate` is
  * exercised deterministically: no test depends on `Math.random`.
  */
-import type { RunResult } from '@lostgradient/operative';
-import { LIVENESS_POLICY_VERSION, type StallWatchdogClock } from '@lostgradient/operative/liveness';
-import type { Action } from '@lostgradient/operative/store';
+import {
+  type Action,
+  LIVENESS_POLICY_VERSION,
+  type RunResult,
+  type StallWatchdogClock,
+} from '@lostgradient/operative';
 import { describe, expect, it, spyOn } from 'bun:test';
 import { Conversation } from 'conversationalist';
 
@@ -910,7 +913,7 @@ describe('createOnlineEvalSampler', () => {
       // One notification when the evaluation started tracking, one when it
       // finished — both delivered through the same subscription.
       expect(revisions.length).toBeGreaterThanOrEqual(3);
-      expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+      expect(revisions).toEqual([...revisions].toSorted((a, b) => a - b));
 
       subscription.unsubscribe();
       await sampler.dispose();

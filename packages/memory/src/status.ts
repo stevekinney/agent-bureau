@@ -1,4 +1,3 @@
-import type { CachedEmbedder } from './embedding-cache';
 import type { MemoryRecordStorage } from './memory-record-storage';
 
 export interface MemoryStatus {
@@ -27,6 +26,12 @@ export interface GetMemoryStatusOptions {
   storageType?: string;
 }
 
+type EmbeddingCacheSizeSource = { cache: ReadonlyMap<unknown, unknown> };
+
+function hasEmbeddingCache(value: unknown): value is EmbeddingCacheSizeSource {
+  return typeof value === 'function' && 'cache' in value && value.cache instanceof Map;
+}
+
 /**
  * Gathers status information about a memory instance.
  *
@@ -50,26 +55,23 @@ export async function getMemoryStatus(
       }),
     })),
   );
-  namespaces.sort((a, b) => b.count - a.count);
+  const sortedNamespaces = namespaces.toSorted((a, b) => b.count - a.count);
 
-  const totalEntries = namespaces.reduce((sum, namespace) => sum + namespace.count, 0);
+  const totalEntries = sortedNamespaces.reduce((sum, namespace) => sum + namespace.count, 0);
 
   const storageType = options.storageType ?? storage.constructor.name;
 
   // Check if the embedder has a cache property (CachedEmbedder).
   let embeddingCacheSize: number | undefined;
   const embedder = options.embedder;
-  if (embedder && typeof embedder === 'function' && 'cache' in embedder) {
-    const cache = (embedder as CachedEmbedder).cache;
-    if (cache instanceof Map || (cache && typeof cache.size === 'number')) {
-      embeddingCacheSize = cache.size;
-    }
+  if (hasEmbeddingCache(embedder)) {
+    embeddingCacheSize = embedder.cache.size;
   }
 
   return {
     totalEntries,
-    namespaces,
+    namespaces: sortedNamespaces,
     storageType,
-    embeddingCacheSize,
+    ...(embeddingCacheSize !== undefined ? { embeddingCacheSize } : {}),
   };
 }

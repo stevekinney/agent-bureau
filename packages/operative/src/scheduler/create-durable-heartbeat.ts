@@ -26,9 +26,9 @@ export interface CreateDurableHeartbeatOptions {
   scheduleId: string;
   spec: string | ScheduleSpec;
   createHeartbeatRun: () => SchedulerRunOptions | Promise<SchedulerRunOptions>;
-  priority?: SchedulerPriority;
-  onTick?: (result: RunResult | null) => void | Promise<void>;
-  onFailure?: (error: unknown) => void | Promise<void>;
+  priority?: SchedulerPriority | undefined;
+  onTick?: ((result: RunResult | null) => void | Promise<void>) | undefined;
+  onFailure?: ((error: unknown) => void | Promise<void>) | undefined;
   /**
    * Optional event dispatcher. When supplied, this call dispatches
    * `AgentScheduledEvent` (`schedule.created`, AB-298) exactly once when it
@@ -45,7 +45,7 @@ export interface CreateDurableHeartbeatOptions {
    * schedule alive (see `cancel`'s branches below). Omitted entirely for a
    * caller with no event surface.
    */
-  emitter?: EventDispatcher;
+  emitter?: EventDispatcher | undefined;
 }
 
 export interface DurableHeartbeat extends Disposable {
@@ -114,7 +114,7 @@ function assertDurableHeartbeatSchedule(
     throw new Error(`Schedule ${scheduleId} already exists with overlap ${schedule.overlap}.`);
   }
 
-  if (schedule.backfill !== false) {
+  if (schedule.backfill) {
     throw new Error(`Schedule ${scheduleId} already exists with backfill enabled.`);
   }
 

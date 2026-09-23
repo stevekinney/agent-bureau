@@ -47,8 +47,12 @@ export function createReflectionHook(options: CreateReflectionHookOptions): {
       const summary = summarizeRun(context);
       const insight = await reflect(summary);
 
-      const finishReason = context.metadata?.['finishReason'] as string | undefined;
-      const agentId = context.metadata?.['agentId'] as string | undefined;
+      const finishReason =
+        typeof context.metadata?.['finishReason'] === 'string'
+          ? context.metadata['finishReason']
+          : undefined;
+      const agentId =
+        typeof context.metadata?.['agentId'] === 'string' ? context.metadata['agentId'] : undefined;
 
       await memory.remember(insight, {
         source: 'experiential',

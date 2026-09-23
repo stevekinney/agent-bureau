@@ -1,19 +1,18 @@
 import type {
   ToolError as SharedToolError,
   ToolErrorCategory as SharedToolErrorCategory,
-} from 'interoperability';
+} from '@lostgradient/tool-protocol';
 
 export type ToolErrorCategory = SharedToolErrorCategory;
 export type ToolError = SharedToolError;
 
 export function isToolError(value: unknown): value is ToolError {
   if (!value || typeof value !== 'object') return false;
-  const candidate = value as ToolError;
   return (
-    typeof candidate.code === 'string' &&
-    typeof candidate.category === 'string' &&
-    typeof candidate.retryable === 'boolean' &&
-    typeof candidate.message === 'string'
+    typeof Reflect.get(value, 'code') === 'string' &&
+    typeof Reflect.get(value, 'category') === 'string' &&
+    typeof Reflect.get(value, 'retryable') === 'boolean' &&
+    typeof Reflect.get(value, 'message') === 'string'
   );
 }
 

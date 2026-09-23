@@ -37,7 +37,7 @@ export type ToolTenant = {
   metadata?: JsonObject;
 };
 
-export type ToolContext = {
+export type CoreToolContext = {
   runId?: string;
   requestId?: string;
   logger?: Logger;

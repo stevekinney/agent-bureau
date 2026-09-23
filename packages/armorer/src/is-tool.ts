@@ -1,19 +1,37 @@
-import type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
+import type {
+  EventIteratorOptions,
+  ObservableLike,
+  Observer,
+  Subscription,
+} from '@lostgradient/lifecycle';
 import { z } from 'zod';
 
-import type { ToolContext as CoreToolContext } from './core/context';
+import type { CoreToolContext } from './core/context';
 import type { ToolErrorCategory } from './core/errors';
 import type { SerializedToolDefinition } from './core/serialization';
 import type { JsonObject } from './core/serialization/json';
 import type { ToolAvailabilityHook, ToolDefinition } from './core/tool-definition';
-import type { ToolEventMap, ToolExecutionIdentity, ToolFinishedEvent } from './events';
+import type { ToolEventMap, ToolExecutionIdentity } from './event-types';
 import type { EffectiveToolExecutionContext, ToolRequestContext } from './execution-context';
 import type { ExecutionHandle, ExecutionLifecycle, ExecutionSnapshot } from './execution-lifecycle';
 import { policyPauseDecisionsSymbol, policyPauseTierSymbol } from './internal/approval-resume';
-import type { PolicyPauseTier, ToolCall, ToolExecutionResult } from './types';
+import type {
+  PolicyPauseTier,
+  ToolApprovalOperation,
+  ToolApprovalRisk,
+  ToolApprovalSandbox,
+  ToolCall,
+  ToolCallReturn,
+  ToolExecutionResult,
+} from './types';
 
 export type ToolParametersSchema = z.ZodType;
-export type { EventIteratorOptions, ObservableLike, Observer, Subscription } from 'lifecycle';
+export type {
+  EventIteratorOptions,
+  ObservableLike,
+  Observer,
+  Subscription,
+} from '@lostgradient/lifecycle';
 
 export type MinimalAbortSignal = AbortSignal;
 export type TimeoutHandle = unknown;
@@ -27,18 +45,29 @@ export type ClearScheduledTimeout = (handle: TimeoutHandle) => void;
  * from z.infer<T> while remaining compatible with all tool signatures.
  * Runtime schema validation provides actual type safety.
  */
-export type ToolConfiguration = ToolDefinition<Record<string, unknown>, unknown> & {
+export type ToolConfiguration = {
+  identity: import('./core/identity').ToolIdentity;
+  id: import('./core/identity').ToolId;
+  display: import('./core/tool-definition').ToolDisplay;
+  name: string;
+  description: string;
+  tags?: readonly string[] | undefined;
+  metadata?: ToolMetadata | undefined;
+  risk?: import('./core/risk').ToolRisk | undefined;
+  lifecycle?: import('./core/tool-definition').ToolLifecycle | undefined;
+  availability?: ToolAvailabilityHook | undefined;
   input: ToolParametersSchema;
-  metadata?: ToolMetadata;
-  availability?: ToolAvailabilityHook;
+  inputJsonSchema?: JsonObject | undefined;
   execute:
     | ((params: unknown, context?: unknown) => Promise<unknown>)
     | Promise<(params: unknown, context?: unknown) => Promise<unknown>>;
-  policy?: ToolPolicyHooks;
-  policyContext?: ToolPolicyContextProvider;
-  digests?: ToolDigestOptions;
-  concurrency?: number;
-  diagnostics?: ToolDiagnostics;
+  rawExecute?: unknown;
+  idempotencyKey?: (input: unknown) => string;
+  policy?: ToolPolicyHooks | undefined;
+  policyContext?: ToolPolicyContextProvider | undefined;
+  digests?: ToolDigestOptions | undefined;
+  concurrency?: number | undefined;
+  diagnostics?: ToolDiagnostics | undefined;
 };
 
 /**
@@ -61,6 +90,8 @@ export type ToolConfigurationShorthand = Omit<ToolConfiguration, 'id' | 'identit
  * the friendly shorthand above.
  */
 export type ToolConfigurationInput = ToolConfiguration | ToolConfigurationShorthand;
+export type ToolConfigurationInputWithoutExecute =
+  Omit<ToolConfiguration, 'execute'> | Omit<ToolConfigurationShorthand, 'execute'>;
 
 export type ToolEventsMap = Record<string, unknown>;
 
@@ -136,6 +167,15 @@ export type ToolPolicyDecision = {
   action?: {
     message?: string;
     schema?: unknown;
+    risk?: ToolApprovalRisk;
+    operation?: ToolApprovalOperation;
+    sandbox?: ToolApprovalSandbox;
+    env?: readonly string[];
+    snapshotId?: string;
+    expiresAt?: string;
+    editableArgs?: boolean;
+    policyVersion?: string;
+    idempotencyKey?: string;
   };
 };
 
@@ -220,7 +260,7 @@ export type DefaultToolEvents = {
   'execute-success': { result: unknown } & ToolEventDetailContext;
   'execute-error': { error: unknown } & ToolEventDetailContext;
   settled: {
-    status?: ToolFinishedEvent['status'];
+    status?: 'success' | 'error' | 'denied' | 'cancelled' | 'paused';
     result?: unknown;
     error?: unknown;
     /**
@@ -296,7 +336,7 @@ export interface ToolElicitationUrlRequest {
  * execution — typically an MCP client, but the shape is transport-agnostic.
  *
  * Mirrors the MCP spec's form/URL elicitation split without depending on
- * `@modelcontextprotocol/sdk` types. This is a discriminated union on `mode`
+ * MCP SDK types. This is a discriminated union on `mode`
  * so a URL-mode request can never be constructed without its `url`, and a
  * form-mode request can never carry a stray `url` that would silently be
  * dropped by a `mode`-unaware caller.
@@ -468,50 +508,46 @@ export type Tool<
 > = ToolDefinition & {
   name: string;
   description: string;
-  input: ToolParametersSchema;
+  input: T;
   configuration: ToolConfiguration;
   /** @internal Schema marker for inference. */
   __schema?: T;
   tags?: readonly string[];
   metadata: M;
-  (params: unknown): Promise<R>;
-  run: (params: unknown, context: ToolContext<E>) => Promise<R>;
+  (params: unknown): Promise<ToolCallReturn<R>>;
+  run(params: z.infer<T>, context: ToolContext<E>): Promise<R>;
 
   // Event listener methods
-  addEventListener: <K extends keyof (E & ToolEventMap) & string>(
+  addEventListener: <K extends keyof ToolEventMap & string>(
     type: K,
-    listener: (
-      event: K extends keyof ToolEventMap ? ToolEventMap[K] : Event,
-    ) => void | Promise<void>,
+    listener: (event: ToolEventMap[K]) => void | Promise<void>,
     options?: AddEventListenerOptions,
   ) => () => void;
   dispatchEvent: (event: Event) => boolean;
   emit: <K extends keyof E & string>(type: K, detail: E[K]) => boolean;
 
   // Observable-based event methods
-  on: <K extends keyof (E & ToolEventMap) & string>(
+  on: <K extends keyof ToolEventMap & string>(
     type: K,
     options?: { signal?: AbortSignal },
-  ) => ObservableLike<K extends keyof ToolEventMap ? ToolEventMap[K] : Event>;
-  once: <K extends keyof (E & ToolEventMap) & string>(
+  ) => ObservableLike<ToolEventMap[K]>;
+  once: <K extends keyof ToolEventMap & string>(
     type: K,
-    listener: (event: K extends keyof ToolEventMap ? ToolEventMap[K] : Event) => void,
+    listener: (event: ToolEventMap[K]) => void,
   ) => void;
-  subscribe: <K extends keyof (E & ToolEventMap) & string>(
+  subscribe: <K extends keyof ToolEventMap & string>(
     type: K,
-    observerOrNext?:
-      | Observer<K extends keyof ToolEventMap ? ToolEventMap[K] : Event>
-      | ((value: K extends keyof ToolEventMap ? ToolEventMap[K] : Event) => void),
+    observerOrNext?: Observer<ToolEventMap[K]> | ((value: ToolEventMap[K]) => void),
     error?: (err: unknown) => void,
     complete?: () => void,
   ) => Subscription;
   toObservable: () => ObservableLike<Event>;
 
   // Async iteration
-  events: <K extends keyof (E & ToolEventMap) & string>(
+  events: <K extends keyof ToolEventMap & string>(
     type: K,
     options?: EventIteratorOptions,
-  ) => AsyncIterableIterator<K extends keyof ToolEventMap ? ToolEventMap[K] : Event>;
+  ) => AsyncIterableIterator<ToolEventMap[K]>;
 
   // Lifecycle methods
   complete: () => Promise<void>;
@@ -524,10 +560,10 @@ export type Tool<
   // Tool execution methods
   execute: {
     (call: ToolCallWithArguments, options?: ToolExecuteOptions): Promise<ToolExecutionResult>;
-    (params: unknown, options?: ToolExecuteOptions): Promise<R>;
+    (params: unknown, options?: ToolExecuteOptions): Promise<ToolCallReturn<R>>;
   };
   executeWith: (options: ToolExecuteWithOptions) => Promise<ToolExecutionResult>;
-  rawExecute: (params: unknown, context: ToolContext<E>) => Promise<R>;
+  rawExecute(params: z.infer<T>, context: ToolContext<E>): Promise<R>;
   /** Serializes the tool's configuration (see `toJSON` in `src/create-tool.ts`). */
   toJSON: () => SerializedToolDefinition;
 };

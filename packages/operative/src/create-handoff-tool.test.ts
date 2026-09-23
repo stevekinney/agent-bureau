@@ -1,7 +1,7 @@
+import { CompletableEventTarget } from '@lostgradient/lifecycle';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { CompletableEventTarget } from 'lifecycle';
 import { z } from 'zod';
 
 import { stopWhen } from './conditions';
@@ -45,7 +45,10 @@ describe('createHandoffTool', () => {
 
     it('returns a JSON result with HANDOFF_MARKER type and agent name', async () => {
       const tool = createHandoffTool({ agent: makeAgent('writer') });
-      const result = JSON.parse(await tool.execute({})) as { type: string; agent: string };
+      const encoded = await tool.execute({});
+      expect(typeof encoded).toBe('string');
+      if (typeof encoded !== 'string') throw new Error('expected a JSON string result');
+      const result = JSON.parse(encoded) as { type: string; agent: string };
       expect(result.type).toBe(HANDOFF_MARKER);
       expect(result.agent).toBe('writer');
     });

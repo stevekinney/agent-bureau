@@ -1,8 +1,8 @@
-import { createTestToolbox } from 'armorer/test';
+import { createManualRuntimeServices, eventObservable } from '@lostgradient/lifecycle';
+import { createTestToolbox } from 'armorer';
 import { file } from 'bun';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
-import { createManualRuntimeServices, eventObservable } from 'lifecycle';
 
 import { createChildRunRegistry } from '../child-run';
 import { noToolCalls } from '../conditions/predicates';
@@ -361,7 +361,7 @@ describe('createResourceScope', () => {
 
     expect(specifiers.length).toBeGreaterThan(0);
     for (const specifier of specifiers) {
-      const allowed = specifier === 'lifecycle' || specifier.startsWith('.');
+      const allowed = specifier === '@lostgradient/lifecycle' || specifier.startsWith('.');
       expect(allowed).toBe(true);
     }
   });

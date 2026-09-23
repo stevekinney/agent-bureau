@@ -1,4 +1,4 @@
-import type { Embedder, EmbeddingVector } from 'interoperability';
+import type { Embedder, EmbeddingVector } from '@lostgradient/embeddings';
 
 import { ProviderError } from '../errors.ts';
 
@@ -6,8 +6,8 @@ import { ProviderError } from '../errors.ts';
  * Options for createOllamaEmbedder.
  */
 export interface OllamaEmbedderOptions {
-  model?: string;
-  baseURL?: string;
+  model?: string | undefined;
+  baseURL?: string | undefined;
 }
 
 /**

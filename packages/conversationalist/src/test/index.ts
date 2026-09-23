@@ -47,6 +47,7 @@ export function createTestConversation(
 export type ConversationRecorder = {
   events: ConversationEvent[];
   clear: () => void;
+  [key: symbol]: () => void;
 };
 
 export function createConversationRecorder(conversation: Conversation): ConversationRecorder {
@@ -75,7 +76,7 @@ export function createConversationRecorder(conversation: Conversation): Conversa
       conversation.removeEventListener('push', pushHandler);
       conversation.removeEventListener('undo', undoHandler);
     },
-  } as ConversationRecorder;
+  };
 }
 
 export function createTestInstructionContext(

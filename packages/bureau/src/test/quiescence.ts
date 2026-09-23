@@ -2,7 +2,7 @@
  * `BureauQuiescenceReport` / `assertBureauQuiescent` — AB-262's slice of
  * AB-92's Decision (2026-09-01), "Resource scope and quiescence report"
  * (AC4), narrowed to Bureau's own owned-work rows on top of AB-256's
- * `QuiescenceReport` (`@lostgradient/operative/test`).
+ * `QuiescenceReport` (`@lostgradient/operative`).
  *
  * `assertBureauQuiescent(harness)` reads every row from a surface a
  * production caller can also read, and always calls `harness.bureau.shutdown()`
@@ -134,7 +134,7 @@ import {
   type LeakedResource,
   QuiescenceError,
   type QuiescenceReport,
-} from '@lostgradient/operative/test';
+} from '@lostgradient/operative';
 
 import type { AgentDefinitions } from '../agent-catalog';
 import type { AbortingRun, BureauShutdownOptions, BureauShutdownReport } from '../types';
@@ -143,7 +143,7 @@ import type { BureauTestHarness } from './harness';
 /** One shutdown owner Bureau itself reported as `'unresolved'` — a bounded `timeoutMilliseconds` wait elapsed before its drain settled. */
 export interface BureauIncompleteWork {
   readonly kind: string;
-  readonly id?: string;
+  readonly id?: string | undefined;
   /** The shutdown report's own outcome for this owner — always `'unresolved'` today (AB-207 has no other incomplete outcome). */
   readonly reason: string;
 }

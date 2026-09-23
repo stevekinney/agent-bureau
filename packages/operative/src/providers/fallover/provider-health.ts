@@ -8,15 +8,15 @@ type ProviderEntry = {
   consecutiveFailures: number;
   totalCalls: number;
   totalFailures: number;
-  lastError?: { code: number; message: string; timestamp: number };
-  cooldownUntil?: number;
+  lastError?: { code: number; message: string; timestamp: number } | undefined;
+  cooldownUntil?: number | undefined;
 };
 
 type HealthTrackerOptions = {
   /** Duration in ms a provider stays on cooldown. Defaults to 300_000 (5 min). */
-  cooldownDuration?: number;
+  cooldownDuration?: number | undefined;
   /** Injectable clock for testing. Defaults to Date.now. */
-  now?: () => number;
+  now?: (() => number) | undefined;
 };
 
 type ProviderHealthTracker = {
@@ -35,6 +35,11 @@ type ProviderHealthTracker = {
     errorInfo: { code: number; message: string },
   ) => void;
 };
+
+function isProviderAvailable(entry: ProviderEntry, now: number): boolean {
+  if (entry.cooldownUntil === undefined) return true;
+  return now > entry.cooldownUntil;
+}
 
 /**
  * Creates a tracker that monitors per-provider health for fallover decisions.
@@ -58,11 +63,6 @@ export function createProviderHealthTracker(
       totalCalls: 0,
       totalFailures: 0,
     });
-  }
-
-  function isProviderAvailable(entry: ProviderEntry, now: number): boolean {
-    if (entry.cooldownUntil === undefined) return true;
-    return now > entry.cooldownUntil;
   }
 
   function toHealth(entry: ProviderEntry, now: number): ProviderHealth {

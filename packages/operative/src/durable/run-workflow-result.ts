@@ -22,12 +22,12 @@ export interface AgentRunWorkflowResult {
    * rebuilds an `Error` from it so consumers (e.g. gateway's `lastError`) see the
    * real cause rather than a synthetic placeholder.
    */
-  errorMessage?: string;
+  errorMessage?: string | undefined;
   /** Safe error classifier retained across durable serialization. */
-  errorKind?: AgentRunErrorKind;
-  errorCode?: AgentRunErrorCode;
+  errorKind?: AgentRunErrorKind | undefined;
+  errorCode?: AgentRunErrorCode | undefined;
   /** The abort reason, when `finishReason` is `aborted`. */
-  abortReason?: string;
+  abortReason?: string | undefined;
   /**
    * The structured-output validation outcome, when the run stopped after a
    * `output` was applied. Mirrors `RunResult.schemaValidation` on the
@@ -46,7 +46,7 @@ export interface AgentRunWorkflowResult {
    * schema library's error type; `success` is the contract, the error shape is
    * best-effort.
    */
-  schemaValidation?: { success: boolean; error?: string };
+  schemaValidation?: { success: boolean; error?: string | undefined } | undefined;
   /**
    * The `output`-validated structured output, when the run stopped
    * after a `output` was applied AND validation succeeded. Mirrors
@@ -73,7 +73,7 @@ export interface AgentRunWorkflowResult {
    * see `isFailureOutcome`'s gate on the park block below) or when the fired
    * wakeup carried no note.
    */
-  wakeupNote?: string;
+  wakeupNote?: string | undefined;
   /**
    * F3 — The LAST signal name the run genuinely parked on via
    * `requestHumanInput` and was released for. Present once the workflow has
@@ -86,7 +86,7 @@ export interface AgentRunWorkflowResult {
    * terminates. Callers can surface this so a later inspection knows which
    * signal most recently drove the run's resume.
    */
-  humanWaitSignal?: string;
+  humanWaitSignal?: string | undefined;
   /**
    * The tripped guardrail's identity, when `finishReason` is `'tripwire'`. The
    * live `GuardrailTripwireError` is not cloneable across a checkpoint, so its
@@ -94,13 +94,15 @@ export interface AgentRunWorkflowResult {
    * rebuilds the error from them — mirroring `errorMessage`'s
    * serialize/rebuild contract for `elicitation-denied` / `budget-exceeded`.
    */
-  tripwire?: {
-    guardrailName: string;
-    category: string;
-    phase: 'input' | 'output';
-    confidence: number;
-    detail?: string;
-  };
+  tripwire?:
+    | {
+        guardrailName: string;
+        category: string;
+        phase: 'input' | 'output';
+        confidence: number;
+        detail?: string;
+      }
+    | undefined;
 }
 
 /**

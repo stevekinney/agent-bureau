@@ -31,11 +31,11 @@ export type { AgentPreferences };
  * narrowing layer. Nothing below it may re-admit a candidate it denies.
  */
 export interface DeploymentInvariants {
-  readonly deniedProviders?: readonly ProviderName[];
-  readonly deniedModels?: readonly string[];
-  readonly deniedRoutes?: readonly string[];
-  readonly deniedRegions?: readonly string[];
-  readonly requireDataPolicy?: 'no-retention' | 'zero-day-retention' | 'standard';
+  readonly deniedProviders?: readonly ProviderName[] | undefined;
+  readonly deniedModels?: readonly string[] | undefined;
+  readonly deniedRoutes?: readonly string[] | undefined;
+  readonly deniedRegions?: readonly string[] | undefined;
+  readonly requireDataPolicy?: ('no-retention' | 'zero-day-retention' | 'standard') | undefined;
 }
 
 /**
@@ -56,9 +56,9 @@ export interface BureauInvariants extends DeploymentInvariants {}
  * traceable to the grant that caused it.
  */
 export interface DelegatedAuthority {
-  readonly grantedProviders?: readonly ProviderName[];
-  readonly grantedModels?: readonly string[];
-  readonly maximumEffort?: Effort;
+  readonly grantedProviders?: readonly ProviderName[] | undefined;
+  readonly grantedModels?: readonly string[] | undefined;
+  readonly maximumEffort?: Effort | undefined;
   readonly policyVersion: string;
 }
 
@@ -69,26 +69,28 @@ export interface DelegatedAuthority {
  * narrow by exclusion; both are absent-means-no-op.
  */
 export interface UserModelConfiguration {
-  readonly allowedProviders?: readonly ProviderName[];
-  readonly deniedProviders?: readonly ProviderName[];
-  readonly allowedModels?: readonly string[];
-  readonly deniedModels?: readonly string[];
-  readonly allowedRoutes?: readonly string[];
-  readonly deniedRoutes?: readonly string[];
-  readonly allowedRegions?: readonly string[];
-  readonly deniedRegions?: readonly string[];
-  readonly dataPolicy?: 'no-retention' | 'zero-day-retention' | 'standard';
-  readonly defaultEffort?: Effort;
-  readonly exactOverride?: {
-    readonly provider?: ProviderName;
-    readonly model?: string;
-    readonly route?: string;
-    readonly effort?: Effort;
-  };
-  readonly costPreference?: 'lowest-cost' | 'balanced' | 'no-preference';
-  readonly latencyPreference?: 'lowest-latency' | 'balanced' | 'no-preference';
-  readonly fallbackOrder?: readonly string[];
-  readonly effortFallbackMode?: 'reject' | 'degrade';
+  readonly allowedProviders?: readonly ProviderName[] | undefined;
+  readonly deniedProviders?: readonly ProviderName[] | undefined;
+  readonly allowedModels?: readonly string[] | undefined;
+  readonly deniedModels?: readonly string[] | undefined;
+  readonly allowedRoutes?: readonly string[] | undefined;
+  readonly deniedRoutes?: readonly string[] | undefined;
+  readonly allowedRegions?: readonly string[] | undefined;
+  readonly deniedRegions?: readonly string[] | undefined;
+  readonly dataPolicy?: ('no-retention' | 'zero-day-retention' | 'standard') | undefined;
+  readonly defaultEffort?: Effort | undefined;
+  readonly exactOverride?:
+    | {
+        readonly provider?: ProviderName;
+        readonly model?: string;
+        readonly route?: string;
+        readonly effort?: Effort;
+      }
+    | undefined;
+  readonly costPreference?: ('lowest-cost' | 'balanced' | 'no-preference') | undefined;
+  readonly latencyPreference?: ('lowest-latency' | 'balanced' | 'no-preference') | undefined;
+  readonly fallbackOrder?: readonly string[] | undefined;
+  readonly effortFallbackMode?: ('reject' | 'degrade') | undefined;
 }
 
 /**
@@ -119,21 +121,21 @@ export type SelectionExclusionCode =
 export interface PolicyCandidate {
   readonly provider: ProviderName;
   readonly model: string;
-  readonly route?: string;
+  readonly route?: string | undefined;
   readonly descriptor: BackendDescriptor;
   readonly eligible: boolean;
-  readonly exclusionCode?: SelectionExclusionCode;
-  readonly exclusionReason?: string;
+  readonly exclusionCode?: SelectionExclusionCode | undefined;
+  readonly exclusionReason?: string | undefined;
 }
 
 /** `composePolicy`'s input: a fixed descriptor set plus the five layers, each optional. */
 export interface ComposePolicyInput {
   readonly descriptors: readonly BackendDescriptor[];
-  readonly deployment?: DeploymentInvariants;
-  readonly bureau?: BureauInvariants;
-  readonly agent?: AgentPreferences;
-  readonly delegated?: DelegatedAuthority;
-  readonly user?: UserModelConfiguration;
+  readonly deployment?: DeploymentInvariants | undefined;
+  readonly bureau?: BureauInvariants | undefined;
+  readonly agent?: AgentPreferences | undefined;
+  readonly delegated?: DelegatedAuthority | undefined;
+  readonly user?: UserModelConfiguration | undefined;
 }
 
 const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -161,8 +163,8 @@ function hasCapability(descriptor: BackendDescriptor, key: keyof BackendDescript
 
 interface Verdict {
   readonly eligible: boolean;
-  readonly exclusionCode?: SelectionExclusionCode;
-  readonly exclusionReason?: string;
+  readonly exclusionCode?: SelectionExclusionCode | undefined;
+  readonly exclusionReason?: string | undefined;
 }
 
 const ELIGIBLE: Verdict = Object.freeze({ eligible: true });
@@ -224,7 +226,7 @@ function evaluateAgent(
       return {
         eligible: false,
         exclusionCode: 'missing-required-capability',
-        exclusionReason: `missing required capability: ${String(capability)}`,
+        exclusionReason: `missing required capability: ${capability}`,
       };
     }
   }

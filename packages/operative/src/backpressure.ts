@@ -21,13 +21,13 @@ export interface BackpressureStrategy {
  */
 export interface AdaptiveBackoffOptions {
   /** Initial delay in milliseconds after the first error. Defaults to 1000. */
-  initialDelay?: number;
+  initialDelay?: number | undefined;
   /** Maximum delay in milliseconds. Defaults to 60000. */
-  maximumDelay?: number;
+  maximumDelay?: number | undefined;
   /** Multiplier applied to the delay on each consecutive error. Defaults to 2. */
-  multiplier?: number;
+  multiplier?: number | undefined;
   /** Number of consecutive successes required to reset the delay to 0. Defaults to 1. */
-  resetAfterSuccesses?: number;
+  resetAfterSuccesses?: number | undefined;
 }
 
 /**
@@ -79,9 +79,9 @@ export interface TokenBucketOptions {
   /** Interval in milliseconds between token replenishments. */
   interval: number;
   /** Maximum number of tokens the bucket can hold. Defaults to `tokensPerInterval`. */
-  maximumTokens?: number;
+  maximumTokens?: number | undefined;
   /** Injectable clock for deterministic tests. Defaults to Date.now. */
-  now?: () => number;
+  now?: (() => number) | undefined;
 }
 
 /**
@@ -155,7 +155,7 @@ export interface SlidingWindowOptions {
   /** Maximum number of requests allowed within the window. */
   maximumRequests: number;
   /** Injectable clock for deterministic tests. Defaults to Date.now. */
-  now?: () => number;
+  now?: (() => number) | undefined;
 }
 
 /**

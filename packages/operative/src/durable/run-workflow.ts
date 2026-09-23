@@ -1,6 +1,6 @@
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import { workflow } from '@lostgradient/weft';
 import { Conversation, isConversation } from 'conversationalist';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { type AgentRunErrorCode, type AgentRunErrorKind, toAgentRunError } from '../errors';
 import { RunErrorEvent } from '../events';
@@ -57,7 +57,7 @@ import type { PendingHumanWait, PendingWakeup, RunCursor } from './types';
  *
  * Deferred seams (these only degrade the resume window, never the happy path):
  *
- * TODO(weft-integration): #1 durable in-step retry counters — `runStep`'s
+ * Durability limitation: in-step retry counters — `runStep`'s
  *   internal `onError` do/while and schema-retry decisions are not individually
  *   checkpointed, so a mid-step crash re-runs the whole step's retries from the
  *   step boundary rather than the exact retry attempt.
@@ -165,13 +165,13 @@ export function createRunWorkflow(
         // Seed the conversation on the first run from the run's options + prompt,
         // then persist it so the adapter and any external reader see the transcript.
         const seededConversation = (() => {
-          const options = runDepsFrom(ctx.services).options;
-          const seeded = isConversation(options.conversation)
-            ? options.conversation
+          const seededOptions = runDepsFrom(ctx.services).options;
+          const seeded = isConversation(seededOptions.conversation)
+            ? seededOptions.conversation
             : // AB-321: forwards the resolved runtime into the seeded
               // Conversation's own environment seam.
-              new Conversation(options.conversation, {
-                runtime: options.runtime ?? createDefaultRuntimeServices(),
+              new Conversation(seededOptions.conversation, {
+                runtime: seededOptions.runtime ?? createDefaultRuntimeServices(),
               });
           // Only a normal run appends `input.prompt` here; a scheduled fire's
           // prompt is already seeded into `options.conversation` by the resolver
@@ -189,7 +189,7 @@ export function createRunWorkflow(
         let errorKind: AgentRunErrorKind | undefined;
         let errorCode: AgentRunErrorCode | undefined;
         let abortReason: string | undefined;
-        let schemaValidation: { success: boolean; error?: string } | undefined;
+        let schemaValidation: { success: boolean; error?: string | undefined } | undefined;
         let output: unknown;
         let tripwire: AgentRunWorkflowResult['tripwire'];
         // True when a terminal outcome (stop/abort/error) broke the loop early.

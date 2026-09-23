@@ -2,14 +2,18 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { GenerateFunction } from '@lostgradient/operative';
-import { createAgent } from '@lostgradient/operative';
-import { createFaultEngine, type FaultPlan, waitForCondition } from '@lostgradient/operative/test';
-import { MemoryStorage, textValueStore } from '@lostgradient/weft/storage';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
+import {
+  createAgent,
+  createFaultEngine,
+  type FaultPlan,
+  type GenerateFunction,
+  waitForCondition,
+} from '@lostgradient/operative';
+import { MemoryStorage, textValueStore } from '@lostgradient/weft';
 import { createTool, createToolbox } from 'armorer';
 import { file } from 'bun';
 import { afterEach, describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 import { z } from 'zod';
 
 import {
@@ -164,7 +168,7 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
   it("imports nothing outside bureau's own internals plus the documented public packages", async () => {
     const source = await file(new URL('./quiescence.ts', import.meta.url)).text();
     const specifiers = [...source.matchAll(/from '([^']+)'/g)].map((match) => match[1] ?? '');
-    const allowedPackages = new Set(['@lostgradient/operative/test']);
+    const allowedPackages = new Set(['@lostgradient/operative']);
 
     expect(specifiers.length).toBeGreaterThan(0);
     for (const specifier of specifiers) {
@@ -887,7 +891,7 @@ describe('AB-322: fault-forced leftovers populate the corresponding rows', () =>
         // fence), not a plain `set` — `FaultOperation` gained
         // `storage:conditionalBatch` alongside the original four verbs so
         // this plan can still reach it (see `wrapStorage`'s own doc
-        // comment in `@lostgradient/operative/test`).
+        // comment in `@lostgradient/operative`).
         operation: 'storage:conditionalBatch',
         occurrence: { kind: 'nth', n: 1 },
         effect: {

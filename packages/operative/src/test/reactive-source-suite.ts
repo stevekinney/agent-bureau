@@ -12,19 +12,10 @@
  * second decision inventing checks per resource (AB-214 is the first
  * consumer, wired up separately per tst-05a).
  *
- * {@link ReactiveSourceConformanceTestRunner} is the one addition beyond
- * AB-92's sketch: an injectable `describe`/`it` pair, defaulted to
- * `bun:test`'s real ones for every production caller. It exists solely so
- * this module's own self-test (`reactive-source-suite.test.ts`) can run the
- * suite against seven deliberately broken fixtures and capture each case's
- * pass/fail outcome without those intentional failures making `bun test`
- * itself exit non-zero — the same factory-injection pattern this repo uses
- * everywhere else for testability (see `.claude/rules/testing-standards.md`),
- * applied to the suite's own test registration instead of a runtime
- * dependency.
+ * Callers supply test registration and structural equality through
+ * {@link ReactiveSourceConformanceTestRunner}. Importing the public library
+ * never loads a test framework or requires a particular runtime.
  */
-
-import { describe, expect, it } from 'bun:test';
 
 /**
  * The public observation surface a reactive resource must implement to
@@ -89,22 +80,21 @@ export interface ReactiveSourceConformanceOptions<TSnapshot> {
    * only for reattachable resources; when absent,
    * `serializableLocatorRoundTrip` is not registered at all.
    */
-  reattach?(locator: unknown): ReactiveSourceSubject<TSnapshot>;
+  reattach?: ((locator: unknown) => ReactiveSourceSubject<TSnapshot> | undefined) | undefined;
 }
 
-/**
- * The `describe`/`it` pair {@link runReactiveSourceConformanceSuite}
- * registers its cases through. Defaults to `bun:test`'s real `describe`/
- * `it`; only overridden by this module's own self-test, to capture each
- * case's pass/fail outcome for the seven negative-fixture proofs instead of
- * letting an intentional failure fail the whole file.
- */
+/** Test registration and structural equality supplied by the caller. */
 export interface ReactiveSourceConformanceTestRunner {
   describe(label: string, fn: () => void): void;
   it(name: string, fn: () => void | Promise<void>): void;
+  equal(left: unknown, right: unknown): boolean;
 }
 
-const defaultTestRunner: ReactiveSourceConformanceTestRunner = { describe, it };
+type SnapshotEquality = ReactiveSourceConformanceTestRunner['equal'];
+
+function assertCondition(condition: boolean, message: string): void {
+  if (!condition) throw new Error(message);
+}
 
 /**
  * `structuredClone`, guarded: several cases below clone a snapshot purely
@@ -130,19 +120,29 @@ function cloneSnapshot<TSnapshot>(snapshot: TSnapshot, caseName: string): TSnaps
 function assertStableSnapshotIdentity<TSnapshot>(subject: ReactiveSourceSubject<TSnapshot>): void {
   const first = subject.getSnapshot();
   const second = subject.getSnapshot();
-  expect(second).toBe(first);
+  assertCondition(
+    Object.is(second, first),
+    'stableSnapshotIdentity: unchanged reads must return the same object',
+  );
 }
 
 async function assertImmutableReplacementAfterChange<TSnapshot>(
   options: ReactiveSourceConformanceOptions<TSnapshot>,
+  equal: SnapshotEquality,
 ): Promise<void> {
   const subject = options.createSubject();
   const before = subject.getSnapshot();
   const beforeClone = cloneSnapshot(before, 'immutableReplacementAfterChange');
   await options.triggerChange(subject);
   const after = subject.getSnapshot();
-  expect(after).not.toBe(before);
-  expect(before).toEqual(beforeClone);
+  assertCondition(
+    !Object.is(after, before),
+    'immutableReplacementAfterChange: a change must replace the snapshot',
+  );
+  assertCondition(
+    equal(before, beforeClone),
+    'immutableReplacementAfterChange: previous snapshots must not mutate',
+  );
 }
 
 async function assertMultipleIndependentSubscribers<TSnapshot>(
@@ -159,20 +159,33 @@ async function assertMultipleIndependentSubscribers<TSnapshot>(
   });
 
   await options.triggerChange(subject);
-  expect(countA).toBeGreaterThanOrEqual(1);
-  expect(countB).toBeGreaterThanOrEqual(1);
+  assertCondition(
+    countA >= 1,
+    'multipleIndependentSubscribers: first subscriber was not invalidated',
+  );
+  assertCondition(
+    countB >= 1,
+    'multipleIndependentSubscribers: second subscriber was not invalidated',
+  );
   const countAAfterFirstChange = countA;
   const countBAfterFirstChange = countB;
 
   unsubscribeA();
   await options.triggerChange(subject);
-  expect(countA).toBe(countAAfterFirstChange);
-  expect(countB).toBeGreaterThan(countBAfterFirstChange);
+  assertCondition(
+    countA === countAAfterFirstChange,
+    'multipleIndependentSubscribers: unsubscribed listener was called',
+  );
+  assertCondition(
+    countB > countBAfterFirstChange,
+    'multipleIndependentSubscribers: unsubscribing removed another listener',
+  );
   unsubscribeB();
 }
 
 async function assertSubscribeReadRaceClosure<TSnapshot>(
   options: ReactiveSourceConformanceOptions<TSnapshot>,
+  equal: SnapshotEquality,
 ): Promise<void> {
   const subject = options.createSubject();
   const before = cloneSnapshot(subject.getSnapshot(), 'subscribeReadRaceClosure');
@@ -193,8 +206,8 @@ async function assertSubscribeReadRaceClosure<TSnapshot>(
   const after = cloneSnapshot(subject.getSnapshot(), 'subscribeReadRaceClosure');
   unsubscribe();
 
-  const matchesBefore = Bun.deepEquals(observed, before);
-  const matchesAfter = Bun.deepEquals(observed, after);
+  const matchesBefore = equal(observed, before);
+  const matchesAfter = equal(observed, after);
   const missedChange = matchesBefore && !invalidated;
   if ((!matchesBefore && !matchesAfter) || missedChange) {
     const message = missedChange
@@ -206,6 +219,7 @@ async function assertSubscribeReadRaceClosure<TSnapshot>(
 
 async function assertEarlyCompletionBeforeSubscription<TSnapshot>(
   options: ReactiveSourceConformanceOptions<TSnapshot>,
+  equal: SnapshotEquality,
 ): Promise<void> {
   const subject = options.createAlreadyTerminalSubject();
   const immediate = cloneSnapshot(subject.getSnapshot(), 'earlyCompletionBeforeSubscription');
@@ -215,7 +229,10 @@ async function assertEarlyCompletionBeforeSubscription<TSnapshot>(
   await Promise.resolve();
   const afterSubscribe = cloneSnapshot(subject.getSnapshot(), 'earlyCompletionBeforeSubscription');
   unsubscribe();
-  expect(afterSubscribe).toEqual(immediate);
+  assertCondition(
+    equal(afterSubscribe, immediate),
+    'earlyCompletionBeforeSubscription: subscription changed terminal state',
+  );
 }
 
 async function assertSubscribeUnsubscribeSubscribeNoDuplicateWork<TSnapshot>(
@@ -236,13 +253,20 @@ async function assertSubscribeUnsubscribeSubscribeNoDuplicateWork<TSnapshot>(
   await options.triggerChange(subject);
   unsubscribeSecond();
 
-  expect(countFirst).toBe(0);
-  expect(countSecond).toBe(1);
+  assertCondition(
+    countFirst === 0,
+    'subscribeUnsubscribeSubscribeNoDuplicateWork: removed listener was called',
+  );
+  assertCondition(
+    countSecond === 1,
+    'subscribeUnsubscribeSubscribeNoDuplicateWork: expected exactly one invalidation',
+  );
 }
 
 function assertSerializableLocatorRoundTrip<TSnapshot>(
   options: ReactiveSourceConformanceOptions<TSnapshot>,
-  reattach: (locator: unknown) => ReactiveSourceSubject<TSnapshot>,
+  reattach: (locator: unknown) => ReactiveSourceSubject<TSnapshot> | undefined,
+  equal: SnapshotEquality,
 ): void {
   const subject = options.createSubject();
   const toLocator = subject.toLocator;
@@ -257,8 +281,12 @@ function assertSerializableLocatorRoundTrip<TSnapshot>(
   // rather than merely structurally cloneable.
   const serializedLocator: unknown = JSON.parse(JSON.stringify(toLocator()));
   const reattached = reattach(serializedLocator);
+  if (!reattached) throw new Error('serializableLocatorRoundTrip reattach returned no subject');
   const after = reattached.getSnapshot();
-  expect(after).toEqual(before);
+  assertCondition(
+    equal(after, before),
+    'serializableLocatorRoundTrip: reattachment changed the snapshot',
+  );
 }
 
 /**
@@ -271,21 +299,23 @@ function assertSerializableLocatorRoundTrip<TSnapshot>(
  */
 export function runReactiveSourceConformanceSuite<TSnapshot>(
   options: ReactiveSourceConformanceOptions<TSnapshot>,
-  testRunner: ReactiveSourceConformanceTestRunner = defaultTestRunner,
+  testRunner: ReactiveSourceConformanceTestRunner,
 ): void {
   testRunner.describe(`reactive-source conformance: ${options.label}`, () => {
     testRunner.it('stableSnapshotIdentity', () => {
       assertStableSnapshotIdentity(options.createSubject());
     });
     testRunner.it('immutableReplacementAfterChange', () =>
-      assertImmutableReplacementAfterChange(options),
+      assertImmutableReplacementAfterChange(options, testRunner.equal),
     );
     testRunner.it('multipleIndependentSubscribers', () =>
       assertMultipleIndependentSubscribers(options),
     );
-    testRunner.it('subscribeReadRaceClosure', () => assertSubscribeReadRaceClosure(options));
+    testRunner.it('subscribeReadRaceClosure', () =>
+      assertSubscribeReadRaceClosure(options, testRunner.equal),
+    );
     testRunner.it('earlyCompletionBeforeSubscription', () =>
-      assertEarlyCompletionBeforeSubscription(options),
+      assertEarlyCompletionBeforeSubscription(options, testRunner.equal),
     );
     testRunner.it('subscribeUnsubscribeSubscribeNoDuplicateWork', () =>
       assertSubscribeUnsubscribeSubscribeNoDuplicateWork(options),
@@ -293,7 +323,7 @@ export function runReactiveSourceConformanceSuite<TSnapshot>(
     const reattach = options.reattach;
     if (reattach) {
       testRunner.it('serializableLocatorRoundTrip', () =>
-        assertSerializableLocatorRoundTrip(options, reattach),
+        assertSerializableLocatorRoundTrip(options, reattach, testRunner.equal),
       );
     }
   });

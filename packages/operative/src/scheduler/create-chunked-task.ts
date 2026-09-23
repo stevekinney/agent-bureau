@@ -1,8 +1,9 @@
+import { createToolbox } from 'armorer';
 import { Conversation } from 'conversationalist';
 
 import type { RunResult } from '../types';
 import type { Scheduler } from './create-scheduler';
-import type { SchedulerPriority, SchedulerRunOptions, SchedulerTask } from './types';
+import type { SchedulerPriority, SchedulerTask } from './types';
 
 /**
  * Options for creating a chunked background task.
@@ -11,18 +12,18 @@ export interface CreateChunkedTaskOptions<TState> {
   /** Human-readable name for logging. */
   name: string;
   /** Priority for all chunks. Default: 'background'. */
-  priority?: SchedulerPriority;
+  priority?: SchedulerPriority | undefined;
   /** Initial state for the first chunk. */
   initialState: TState;
   /** Process one chunk. Returns the updated state and whether more chunks remain. */
   processChunk: (state: TState, signal: AbortSignal) => Promise<{ state: TState; done: boolean }>;
   /** Called when all chunks are complete. */
-  onComplete?: (finalState: TState) => void | Promise<void>;
+  onComplete?: ((finalState: TState) => void | Promise<void>) | undefined;
   /** Called on error. */
-  onError?: (error: unknown, state: TState) => void | Promise<void>;
+  onError?: ((error: unknown, state: TState) => void | Promise<void>) | undefined;
   /** Maximum number of times a single chunk can be retried after permanent
    *  preemption (submit returned null) before giving up. Default: 5. */
-  maxPreemptionRetries?: number;
+  maxPreemptionRetries?: number | undefined;
 }
 
 /**
@@ -82,11 +83,7 @@ export function createChunkedTask<TState>(
             // A chunk never dispatches a tool, so this stub covers only the
             // three members the loop touches. The cast records that the rest
             // of the Toolbox surface is deliberately absent rather than missed.
-            toolbox: {
-              tools: () => [],
-              execute: () => Promise.resolve([]),
-              toObservable: () => ({ subscribe: () => ({ unsubscribe: () => {} }) }),
-            } as unknown as SchedulerRunOptions['toolbox'],
+            toolbox: createToolbox([]),
             conversation: new Conversation(),
             maximumSteps: 1,
           };

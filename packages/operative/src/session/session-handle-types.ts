@@ -1,4 +1,4 @@
-import type { RuntimeServices, TypedEventTarget } from 'lifecycle';
+import type { RuntimeServices, TypedEventTarget } from '@lostgradient/lifecycle';
 
 import type { AgentRun } from '../agent-run';
 import type { AgentSession } from '../agent-session';
@@ -54,7 +54,7 @@ export type SessionRunOptions = DistributiveOmit<RunOptions, 'conversation' | 'r
  */
 export interface MonitorOptions {
   /** Abort this process-local monitor loop and clear its current timer. */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 
   /**
    * How long to wait between ticks.
@@ -82,7 +82,7 @@ export interface MonitorOptions {
    * met) when the total elapsed time exceeds this value.
    * Milliseconds (number) or ISO-8601 duration string (e.g. `'PT24H'`).
    */
-  maxDuration?: number | string;
+  maxDuration?: (number | string) | undefined;
 }
 
 /**
@@ -283,13 +283,13 @@ export interface SessionHandleContext {
    * Required alongside `checkpointStore` for the durable `recover()` re-attach
    * path (D2).
    */
-  engine?: RegistryAgnosticEngine;
+  engine?: RegistryAgnosticEngine | undefined;
   /**
    * The checkpoint store for reading durable run transcripts. Required for the
    * durable `recover()` re-attach path (D2) when `engine` is present. If absent
    * while `engine` is set, `recover()` degrades to in-process-only.
    */
-  checkpointStore?: CheckpointStore;
+  checkpointStore?: CheckpointStore | undefined;
   /**
    * The agent name, stored on the session record.
    */
@@ -298,33 +298,34 @@ export interface SessionHandleContext {
    * The constant run behavior (generate fn, toolbox, hooks, etc.) for every
    * `run()` call in this session.
    */
-  runOptions?: SessionRunOptions;
+  runOptions?: SessionRunOptions | undefined;
   /**
    * Optional event emitter for session-scoped events (session.recover,
    * session.cancel, session.fork, session.sleep, session.signal,
    * session.update, session.query). When provided, each verb method
    * dispatches the corresponding typed event. Created internally if omitted.
    */
-  emitter?: TypedEventTarget<OperativeEventMap>;
+  emitter?: TypedEventTarget<OperativeEventMap> | undefined;
   /**
    * Process-local timer injection used by deterministic tests. Still wins
    * over `runtime.timers` when supplied explicitly — this generalizes the
    * seam onto `RuntimeServices.timers` rather than replacing it (AB-253).
    */
-  setTimeoutFunction?: (callback: () => void, milliseconds: number) => unknown;
+  setTimeoutFunction?: ((callback: () => void, milliseconds: number) => unknown) | undefined;
   /** Matching cleanup function for `setTimeoutFunction`. */
-  clearTimeoutFunction?: (timer: unknown) => void;
+  clearTimeoutFunction?: ((timer: unknown) => void) | undefined;
   /**
    * The AB-92/AB-252/AB-253 injectable runtime-service seam: wall time,
    * monotonic time, timers, identifiers, randomness, and deferred-work
    * tracking. Resolved exactly once at construction — omitted, this handle
    * reads the real globals via `createDefaultRuntimeServices()`; a test
    * composes its own deterministic instance with
-   * `createManualRuntimeServices()` from `@lostgradient/operative/test` so
+   * `createManualRuntimeServices()` from `@lostgradient/operative` so
    * `sleep()`/`monitor()`'s inter-tick delay and every id/timestamp this
-   * handle mints are fully time-controlled.
+   * handle mints are fully time-controlled. The helper is exported from the
+   * `@lostgradient/operative` root API.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 /** Raised synchronously when a session run has no configured execution options. */

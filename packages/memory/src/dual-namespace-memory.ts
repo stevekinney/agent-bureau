@@ -130,8 +130,7 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
         }
       }
 
-      merged.sort((a, b) => b.score - a.score);
-      return merged.slice(0, limit);
+      return merged.toSorted((a, b) => b.score - a.score).slice(0, limit);
     },
 
     async list(listOptions?: MemoryListOptions): Promise<MemorySearchResult[]> {
@@ -181,8 +180,7 @@ export function createDualNamespaceMemory(privateMemory: Memory, sharedMemory?: 
       }
 
       // Newest-first (consistent with the single-namespace list contract).
-      merged.sort((a, b) => b.createdAt - a.createdAt);
-      return merged.slice(offset, offset + limit);
+      return merged.toSorted((a, b) => b.createdAt - a.createdAt).slice(offset, offset + limit);
     },
 
     async forget(id: string): Promise<void> {

@@ -1,4 +1,3 @@
-export type { MaterializeToolCallOptions } from 'interoperability';
 export {
   materializeToolCall,
   materializeToolCalls,
@@ -6,4 +5,5 @@ export {
   materializeToolResultAsync,
   materializeToolResults,
   materializeToolResultsAsync,
-} from 'interoperability';
+} from '@lostgradient/tool-protocol';
+export type { MaterializeToolCallOptions } from '@lostgradient/tool-protocol';

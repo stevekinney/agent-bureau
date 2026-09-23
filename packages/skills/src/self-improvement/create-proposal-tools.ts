@@ -1,8 +1,8 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { TextValueStore } from '@lostgradient/weft';
 import { createTool } from 'armorer';
 import { z } from 'zod';
 
-import type { SkillProvider } from '../types';
+import type { SkillWriter } from '../types';
 import {
   acceptProposal,
   type AcceptProposalOptions,
@@ -16,7 +16,7 @@ import {
 
 export interface CreateProposalToolboxOptions {
   storage: TextValueStore;
-  skillProvider: SkillProvider;
+  skillProvider: SkillWriter;
   identityProvider?: IdentityProviderLike;
 }
 
@@ -36,8 +36,8 @@ export function createListProposalsTool(options: CreateProposalToolboxOptions) {
     }),
     async execute(params) {
       const proposals = await listProposals(options.storage, {
-        type: params.type,
-        status: params.status,
+        ...(params.type !== undefined ? { type: params.type } : {}),
+        ...(params.status !== undefined ? { status: params.status } : {}),
       });
       return {
         proposals: proposals.map((p) => ({
@@ -75,7 +75,9 @@ export function createViewProposalTool(options: CreateProposalToolboxOptions) {
 export function createAcceptProposalTool(options: CreateProposalToolboxOptions) {
   const acceptOptions: AcceptProposalOptions = {
     skillProvider: options.skillProvider,
-    identityProvider: options.identityProvider,
+    ...(options.identityProvider !== undefined
+      ? { identityProvider: options.identityProvider }
+      : {}),
   };
 
   return createTool({

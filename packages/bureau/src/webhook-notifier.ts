@@ -49,6 +49,7 @@
  * request can otherwise exceed the computed deadline without the delivery
  * code itself noticing.
  */
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 import {
   createStallWatchdog,
   LIVENESS_POLICY_VERSION,
@@ -63,9 +64,8 @@ import {
   type StallWatchdogClock,
   type Subscription,
   WEBHOOK_DELIVERY_POLICY,
-} from '@lostgradient/operative/liveness';
-import type { TextValueStore } from '@lostgradient/weft/storage';
-import { createDefaultRuntimeServices, type RuntimeServices } from 'lifecycle';
+} from '@lostgradient/operative';
+import type { TextValueStore } from '@lostgradient/weft';
 
 import type { AgentDefinitions } from './agent-catalog';
 import type { AuditTrail } from './audit-trail';
@@ -395,11 +395,11 @@ interface WebhookPayload {
   runId: string;
   reviewId?: string;
   deepLink: string;
-  message?: string;
-  prompt?: string;
+  message?: string | undefined;
+  prompt?: string | undefined;
   requestedAt: number;
   /** Extra fields for out-of-band triggers fired via {@link WebhookNotifier.notify}. */
-  detail?: Record<string, unknown>;
+  detail?: Record<string, unknown> | undefined;
 }
 
 function reviewTriggerType(kind: PendingReview['kind']): WebhookTriggerType {
@@ -627,7 +627,8 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
 
   function notifyAggregate(): void {
     const current = readAggregateSnapshot();
-    for (const record of [...aggregateSubscribers]) {
+    const currentSubscribers = [...aggregateSubscribers];
+    for (const record of currentSubscribers) {
       if (record.closed) continue;
       try {
         record.observer(current);
@@ -785,7 +786,7 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(payload),
-            signal,
+            ...(signal === undefined ? {} : { signal }),
           });
           if (!response.ok) {
             throw new Error(`Webhook target responded with status ${response.status}`);
@@ -929,14 +930,14 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
       return records;
     },
     async flush(): Promise<void> {
-      await Promise.allSettled([...activeDeliveries]);
+      await Promise.allSettled(activeDeliveries);
     },
     notify: notifyExternal,
     async dispose(): Promise<void> {
       disposed = true;
       shutdownController.abort();
       bureau.removeEventListener('action', listener);
-      await Promise.allSettled([...activeDeliveries]);
+      await Promise.allSettled(activeDeliveries);
     },
     activeDeliverySnapshots(): WebhookDeliveryLivenessSnapshot[] {
       return [...trackedDeliveries.values()].map(computeDeliverySnapshot);

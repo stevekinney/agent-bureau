@@ -43,9 +43,9 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Storage, StorageConfiguration } from '@lostgradient/weft/storage';
-import { MemoryStorage } from '@lostgradient/weft/storage';
-import type { RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import type { Storage, StorageConfiguration } from '@lostgradient/weft';
+import { MemoryStorage } from '@lostgradient/weft';
 
 /**
  * One isolated storage backend for a single test. `configuration` is ready

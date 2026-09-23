@@ -1,6 +1,6 @@
+import type { TypedEventTarget } from '@lostgradient/lifecycle';
 import type { ToolContext } from 'armorer';
 import { createTool } from 'armorer';
-import type { TypedEventTarget } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { SuccessfulRunResult } from './agent-run';
@@ -61,7 +61,7 @@ export interface SubagentSummaryContext {
    * leave summarization work running in the background after the tool call
    * has already been cancelled.
    */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -147,7 +147,7 @@ interface CreateSubagentToolOptionsBase<
    * stringification a caller who supplies no schema-shaped conversion gets
    * today.
    */
-  toAgentInput?: (input: TInput) => AgentInput;
+  toAgentInput?: ((input: TInput) => AgentInput) | undefined;
   /**
    * AB-64 — controls how much of the sub-agent's context comes back to the
    * parent agent.
@@ -164,20 +164,20 @@ interface CreateSubagentToolOptionsBase<
    *   extraction, a single close-coupled delegation) — not as the default
    *   posture for fan-out.
    */
-  returnMode?: 'summary' | 'full';
+  returnMode?: ('summary' | 'full') | undefined;
   /**
    * Condenses the sub-agent's `SuccessfulRunResult` into the string returned
    * to the parent when `returnMode` is `'summary'`. Defaults to
    * `defaultSubagentSummarizer` (character-based truncation). Ignored when
    * `returnMode` is `'full'`.
    */
-  summarizer?: SubagentSummarizer<TOutput, THasOutput>;
+  summarizer?: SubagentSummarizer<TOutput, THasOutput> | undefined;
   /**
    * Token budget for the summary returned to the parent when `returnMode`
    * is `'summary'`. Defaults to `500`. Ignored when `returnMode` is
    * `'full'`.
    */
-  summaryTokenCap?: number;
+  summaryTokenCap?: number | undefined;
   /**
    * F1/F3 — parent run context for event emission and child discovery.
    *
@@ -201,23 +201,25 @@ interface CreateSubagentToolOptionsBase<
    * fields remain the fallback for direct `dispatchChildRun` callers and
    * for tools built outside the ordinary loop.
    */
-  parentContext?: {
-    emitter: TypedEventTarget<OperativeEventMap>;
-    parentAgentName: string;
-    parentRunId: string;
-    /** True when the bureau has `.persistence()` configured (durable child workflow). */
-    durable: boolean;
-    /**
-     * AB-50 — when supplied, every child this tool dispatches registers
-     * into it, making it discoverable through the matching `AgentRun`'s
-     * `children()`/`abortChild()` (see `child-run.ts`'s module docs for how
-     * the two are wired together). Omit it and the tool behaves exactly as
-     * it did before AB-50 — discovery is opt-in, not a default. See the
-     * AB-233 note above: this is a fallback, superseded per-execution by
-     * `ToolContext.executionContext.childRegistry` when present.
-     */
-    registry?: MutableChildRunRegistry;
-  };
+  parentContext?:
+    | {
+        emitter: TypedEventTarget<OperativeEventMap>;
+        parentAgentName: string;
+        parentRunId: string;
+        /** True when the bureau has `.persistence()` configured (durable child workflow). */
+        durable: boolean;
+        /**
+         * AB-50 — when supplied, every child this tool dispatches registers
+         * into it, making it discoverable through the matching `AgentRun`'s
+         * `children()`/`abortChild()` (see `child-run.ts`'s module docs for how
+         * the two are wired together). Omit it and the tool behaves exactly as
+         * it did before AB-50 — discovery is opt-in, not a default. See the
+         * AB-233 note above: this is a fallback, superseded per-execution by
+         * `ToolContext.executionContext.childRegistry` when present.
+         */
+        registry?: MutableChildRunRegistry;
+      }
+    | undefined;
   /**
    * Wraps the child's `agent.run()` call in the parent's own trace context
    * (AB-19), exactly as `RunOptions.withTraceContext` wraps generate/tool
@@ -226,7 +228,7 @@ interface CreateSubagentToolOptionsBase<
    * than read off the parent tool call's `ToolContext` (which carries no
    * such callback), because it is a per-run wrapper, not per-call data.
    */
-  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  withTraceContext?: (<T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>) | undefined;
   /**
    * AB-300 — this tool's OWN narrowing of the delegated-authority grant
    * handed to every child it dispatches, composed via
@@ -242,7 +244,7 @@ interface CreateSubagentToolOptionsBase<
    * with `delegatedAuthority` left `undefined`, exactly as before this
    * option existed.
    */
-  delegatedAuthority?: DelegatedAuthority;
+  delegatedAuthority?: DelegatedAuthority | undefined;
 }
 
 /**
@@ -264,9 +266,9 @@ type ToToolOutputOption<
   TToolOutput,
 > = string extends TToolOutput
   ? {
-      toToolOutput?: (
-        result: SuccessfulRunResult<TOutput, THasOutput>,
-      ) => TToolOutput | Promise<TToolOutput>;
+      toToolOutput?:
+        | ((result: SuccessfulRunResult<TOutput, THasOutput>) => TToolOutput | Promise<TToolOutput>)
+        | undefined;
     }
   : {
       /**

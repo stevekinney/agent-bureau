@@ -36,7 +36,7 @@ const OPERATIVE_BACKEND_DESCRIPTORS: unique symbol = Symbol.for(
  * @internal
  */
 interface BackendDescriptorBearing {
-  readonly [OPERATIVE_BACKEND_DESCRIPTORS]?: readonly BackendDescriptor[];
+  readonly [OPERATIVE_BACKEND_DESCRIPTORS]?: readonly BackendDescriptor[] | undefined;
 }
 
 const EMPTY_DESCRIPTORS: readonly BackendDescriptor[] = Object.freeze([]);
@@ -104,7 +104,7 @@ export function withBackendDescriptors<T extends DescriptorBearingFunction>(
 ): T {
   const frozenDescriptors = Object.freeze(descriptors.map((descriptor) => deepFreeze(descriptor)));
   const target = generate as T & {
-    [OPERATIVE_BACKEND_DESCRIPTORS]?: readonly BackendDescriptor[];
+    [OPERATIVE_BACKEND_DESCRIPTORS]?: readonly BackendDescriptor[] | undefined;
   };
   target[OPERATIVE_BACKEND_DESCRIPTORS] = frozenDescriptors;
   return generate;
@@ -179,6 +179,6 @@ export function unionBackendDescriptors(
     }
   }
   return [...byKey.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([, descriptor]) => descriptor);
 }

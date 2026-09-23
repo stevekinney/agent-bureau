@@ -1,4 +1,4 @@
-import type { RuntimeServices } from 'lifecycle';
+import type { RuntimeServices } from '@lostgradient/lifecycle';
 
 import type {
   DeclaredWait,
@@ -135,7 +135,8 @@ export function createSessionLiveness({
 
   function notifyLiveness(): void {
     const snapshot = readLivenessSnapshot();
-    for (const record of [...livenessSubscribers]) {
+    const subscriberSnapshot = [...livenessSubscribers];
+    for (const record of subscriberSnapshot) {
       if (record.closed) continue;
       try {
         record.observer(snapshot);

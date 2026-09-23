@@ -12,13 +12,15 @@ function buildConversation(
   messages: Array<{
     role: 'system' | 'user' | 'assistant' | 'tool-call' | 'tool-result';
     content: string;
-    toolCall?: { id: string; name: string; arguments: string };
-    toolResult?: {
-      callId: string;
-      content: string;
-      outcome: 'success' | 'error' | 'action_required';
-      metadata?: Record<string, boolean>;
-    };
+    toolCall?: { id: string; name: string; arguments: string } | undefined;
+    toolResult?:
+      | {
+          callId: string;
+          content: string;
+          outcome: 'success' | 'error' | 'action_required';
+          metadata?: Record<string, boolean>;
+        }
+      | undefined;
   }>,
 ): Conversation {
   const conversation = new Conversation();

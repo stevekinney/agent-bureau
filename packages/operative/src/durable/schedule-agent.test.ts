@@ -1,3 +1,4 @@
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import type {
   ScheduleFilter,
   ScheduleOptions,
@@ -6,7 +7,6 @@ import type {
 } from '@lostgradient/weft';
 import { ScheduleHandle } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import type { AgentScheduledEvent, SchedulePausedEvent } from '../events';
 import type { ScheduledAgentRunInput, SchedulingEngine } from './schedule-agent';
@@ -31,6 +31,7 @@ const mockSummary: ScheduleSummary = {
   createdAt: 0,
   updatedAt: 0,
   missedFireCount: 0,
+  skippedCount: 0,
   nextFireAt: null,
   queuedRuns: [],
 };
@@ -39,7 +40,7 @@ interface ScheduleCall {
   type: string;
   input: unknown;
   spec: string | ScheduleSpec;
-  options?: ScheduleOptions;
+  options?: ScheduleOptions | undefined;
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { TextValueStore } from '@lostgradient/weft/storage';
+import type { TextValueStore } from '@lostgradient/weft';
 import type { ConversationSnapshot } from 'conversationalist';
 
 import type { RunCheckpoint, RunCursor, StepRecord } from './types';
@@ -42,10 +42,10 @@ export interface CheckpointStore {
 }
 
 /** Parse JSON, returning `null` on malformed data rather than throwing. */
-function parseJson<T>(raw: string | null): T | null {
+function parseJson(raw: string | null): unknown {
   if (raw === null) return null;
   try {
-    return JSON.parse(raw) as T;
+    return JSON.parse(raw);
   } catch {
     return null;
   }
@@ -65,7 +65,7 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
     },
 
     async loadCursor(runId) {
-      const cursor = parseJson<RunCursor>(await store.get(keys.cursor(runId)));
+      const cursor = parseJson(await store.get(keys.cursor(runId))) as RunCursor | null;
       // A cursor persisted before AB-221 added `lastAppliedConfigVersion` to
       // `RunCursor` deserializes with every OTHER field present but that one
       // `undefined` — `parseJson` casts the stored JSON to `RunCursor`
@@ -87,7 +87,7 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
     },
 
     async loadConversation(runId) {
-      return parseJson<ConversationSnapshot>(await store.get(keys.transcript(runId)));
+      return parseJson(await store.get(keys.transcript(runId))) as ConversationSnapshot | null;
     },
 
     async saveStep(runId, record) {
@@ -100,7 +100,7 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
       // make that match numeric step order, so no re-sort is required.
       const records: StepRecord[] = [];
       for (const key of stepKeys) {
-        const record = parseJson<StepRecord>(await store.get(key));
+        const record = parseJson(await store.get(key)) as StepRecord | null;
         if (record) records.push(record);
       }
       return records;

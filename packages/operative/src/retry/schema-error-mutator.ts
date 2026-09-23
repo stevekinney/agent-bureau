@@ -4,12 +4,14 @@ import type { GenerateContext } from '../types';
 import type { RetryMutator } from './types';
 
 interface ValidationIssue {
-  path?: ReadonlyArray<string | number>;
-  message?: string;
-  code?: string;
+  path?: ReadonlyArray<string | number> | undefined;
+  message?: string | undefined;
+  code?: string | undefined;
 }
 
-function isValidationError(error: unknown): error is Error & { issues?: ValidationIssue[] } {
+function isValidationError(
+  error: unknown,
+): error is Error & { issues?: ValidationIssue[] | undefined } {
   if (!(error instanceof Error)) return false;
   if (error.name === 'ZodError') return true;
 
@@ -35,9 +37,9 @@ function formatIssues(issues: ValidationIssue[]): string {
  */
 export function createSchemaErrorMutator(): RetryMutator {
   return (context: GenerateContext, error: unknown, _attempt: number) => {
-    if (!isValidationError(error)) return;
+    if (!isValidationError(error)) return undefined;
 
-    const issues = (error as { issues?: ValidationIssue[] }).issues;
+    const issues = (error as { issues?: ValidationIssue[] | undefined }).issues;
     const issueDetails = issues?.length ? `\n\nValidation issues:\n${formatIssues(issues)}` : '';
 
     const message = `Your previous response failed schema validation: ${error.message}${issueDetails}\n\nPlease correct your response to match the required schema.`;

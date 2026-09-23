@@ -31,14 +31,14 @@ export interface ScheduleWakeupInput {
    *
    * @example 'Wake me up to check if the deploy succeeded.'
    */
-  note?: string;
+  note?: string | undefined;
 }
 
 /** Output returned to the LLM when `scheduleWakeup` is called. */
 export interface ScheduleWakeupResult {
   scheduled: true;
   duration: number | string;
-  note?: string;
+  note?: string | undefined;
   /** Human-readable message the LLM can use in its response. */
   message: string;
 }

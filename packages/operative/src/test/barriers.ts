@@ -16,6 +16,8 @@
 // general-purpose barrier, not only a scripted double's own `block` step.
 // ---------------------------------------------------------------------------
 
+import { TypedEventTarget } from '@lostgradient/lifecycle';
+
 import type { EventRecorder } from './event-recorder';
 
 /** A barrier's current arrival/release counts, and whether an arrival is currently blocked. */
@@ -175,7 +177,7 @@ function createBarrier(name: string, recorder?: EventRecorder): Barrier {
     resolveArrived = resolve;
   });
 
-  const target = recorder ? new EventTarget() : undefined;
+  const target = recorder ? new TypedEventTarget<Record<string, Event>>() : undefined;
   if (recorder && target) {
     recorder.attach<BarrierEventMap>(target, { kind: 'barrier', id: name }, BARRIER_EVENT_TYPES);
   }

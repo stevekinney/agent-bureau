@@ -15,7 +15,7 @@
 // asynchronous work against via `AB-266`'s `BarrierRegistry`.
 // ---------------------------------------------------------------------------
 
-import { createManualRuntimeServices } from 'lifecycle';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { Barrier, BarrierRegistry } from './barriers';
 
@@ -64,7 +64,7 @@ export interface BoundedScheduleOptions {
 export interface BoundedScheduleReport {
   readonly schedulesRun: number;
   /** The ordering that failed, present only when a schedule failed before exhaustion. */
-  readonly failingSchedule?: readonly string[];
+  readonly failingSchedule?: readonly string[] | undefined;
   readonly seed: string;
 }
 

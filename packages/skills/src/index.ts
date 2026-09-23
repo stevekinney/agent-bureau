@@ -1,38 +1,112 @@
 // ── Providers ─────────────────────────────────────────────────────────
-export { createStaticSkillProvider } from './create-static-skill-provider';
+export { refusedByAdmissionPolicy } from './admission';
+export type { SkillAdmissionPolicy } from './admission';
 export { createStorageSkillProvider } from './create-storage-skill-provider';
+
+// ── Conformance ───────────────────────────────────────────────────────
+export {
+  AGENT_SKILLS_SPECIFICATION_REPOSITORY,
+  AGENT_SKILLS_SPECIFICATION_REVISION,
+  MAXIMUM_COMPATIBILITY_LENGTH,
+  MAXIMUM_DESCRIPTION_LENGTH,
+  MAXIMUM_SKILL_NAME_LENGTH,
+  PORTABLE_FRONTMATTER_FIELDS,
+  isPortableSkillName,
+  normalizeSkillName,
+  parseAllowedTools,
+  serializeAllowedTools,
+  validatePortableFrontmatter,
+} from './conformance';
 
 // ── Parser ────────────────────────────────────────────────────────────
 export {
+  SkillConformanceError,
+  SkillParseError,
+  importSkillMarkdown,
   isValidSkillName,
   parseSkillMarkdown,
   serializeSkillMarkdown,
-  SKILL_NAME_PATTERN,
-  SkillParseError,
 } from './parse-skill-markdown';
 
+// ── Artifacts ─────────────────────────────────────────────────────────
+export {
+  DEFAULT_SKILL_ADMISSION_LIMITS,
+  SKILL_MANIFEST_FALLBACK_FILENAME,
+  SKILL_MANIFEST_FILENAME,
+  createSkillArtifact,
+  decodeArtifactText,
+  findArtifactEntry,
+  findArtifactManifest,
+  normalizeArtifactPath,
+  resolveAdmissionLimits,
+  resolveMediaType,
+} from './artifact';
+export { readSkillArtifact } from './ingestion/read-skill-artifact';
+
+// ── Client ────────────────────────────────────────────────────────────
+export {
+  createFilesystemArtifactLoader,
+  createSkillArtifactLoader,
+  createStaticArtifactLoader,
+  createStorageArtifactLoader,
+  readInstructions,
+  readResource,
+} from './client/artifact-loader';
+export { createSkillClientToolbox, renderClientCatalog } from './client/client-toolbox';
+export {
+  isRenderedSkillContent,
+  renderActiveSkillInstructions,
+  renderSkillCatalog,
+} from './client/render';
+export { createSkillClient } from './client/skill-client';
+
+// ── Discovery ─────────────────────────────────────────────────────────
+export { availableRecords, findRecord, generalCatalogProjection } from './discovery/catalog';
+export { createSkillCatalogService } from './discovery/catalog-service';
+export { discoverSkills } from './discovery/discover';
+export { materializeRemoteSource } from './discovery/remote';
+export {
+  AGENTS_SKILLS_DIRECTORY,
+  CLAUDE_SKILLS_DIRECTORY,
+  DEFAULT_SOURCE_PRECEDENCE,
+  admitSources,
+  defaultSkillSources,
+  defaultTrustForKind,
+  resolveTrust,
+} from './discovery/source';
+export { readStoredSkillArtifacts } from './discovery/storage-source';
+
 // ── Ingestion ─────────────────────────────────────────────────────────
-export { fetchFromRegistry } from './ingestion/fetch-from-registry';
-export { scanDirectory } from './ingestion/scan-directory';
 
 // ── Memory ────────────────────────────────────────────────────────────
 export { createSkillMemory, createSkillMemoryHooks } from './skill-memory';
 
-// ── Session ──────────────────────────────────────────────────────────
-export { createSkillSession } from './skill-session';
+// ── Rendering ────────────────────────────────────────────────────────
+export { escapeXml } from './xml';
 
-// ── Catalog Hook ─────────────────────────────────────────────────────
-export { createSkillCatalogHook, escapeXml } from './create-skill-catalog-hook';
-
-// ── Tools ────────────────────────────────────────────────────────────
+// ── Events ───────────────────────────────────────────────────────────
 export {
-  createActivateSkillTool,
-  createDeactivateSkillTool,
-  createListSkillsTool,
-  createLoadSkillResourceTool,
-  createSkillToolbox,
-  isSkillContent,
-} from './create-skill-tools';
+  SkillActivatedEvent,
+  SkillCancelledEvent,
+  SkillCatalogRevisedEvent,
+  SkillCompatibilityDecidedEvent,
+  SkillDeactivatedEvent,
+  SkillFailedEvent,
+  SkillLoadedEvent,
+  SkillRecoveredEvent,
+  SkillReinjectedEvent,
+  SkillRejectedEvent,
+  SkillResourceLoadedEvent,
+  SkillSourceAdmittedEvent,
+} from './events';
+export type {
+  SkillAdmissionRule,
+  SkillEventClassMap,
+  SkillEventCorrelation,
+  SkillEventMap,
+  SkillEventType,
+  SkillRejectionReason,
+} from './events';
 
 // ── Proposals ────────────────────────────────────────────────────────
 export {
@@ -54,12 +128,91 @@ export {
 export { reflectionSweep } from './self-improvement/reflection-sweep';
 
 // ── Types ─────────────────────────────────────────────────────────────
-export type { CreateSkillCatalogHookOptions } from './create-skill-catalog-hook';
-export type { CreateSkillToolsOptions } from './create-skill-tools';
-export type { ScannedSkillContent, SkillGuardrailOptions } from './guardrail';
+export type {
+  CreateSkillArtifactOptions,
+  NormalizedArtifactPath,
+  ResolvedSkillAdmissionLimits,
+  SkillAdmissionCode,
+  SkillAdmissionDiagnostic,
+  SkillAdmissionLimits,
+  SkillArtifact,
+  SkillArtifactAdmission,
+  SkillArtifactEntry,
+  SkillArtifactInputFile,
+} from './artifact';
+export type {
+  ActiveSkill,
+  SkillActivationOutcome,
+  SkillActivationRecord,
+  SkillActivationRefusal,
+  SkillDeactivationOutcome,
+} from './client/activation';
+export type {
+  LoadedSkillResource,
+  SkillArtifactLoad,
+  SkillArtifactLoadFailure,
+  SkillArtifactLoader,
+} from './client/artifact-loader';
+export type {
+  CreateSkillClientOptions,
+  SkillClient,
+  SkillDelegationGrant,
+  SkillStanding,
+  SkillStandingEntry,
+} from './client/skill-client';
+export type {
+  PortableFrontmatterField,
+  SkillConformanceCode,
+  SkillConformanceDiagnostic,
+  ValidatePortableFrontmatterOptions,
+} from './conformance';
+export type {
+  SkillCatalogRecord,
+  SkillCatalogRevision,
+  SkillCompatibility,
+  SkillDiscoveryOutcome,
+  SkillSourceDiagnostic,
+  SkillUnavailableReason,
+} from './discovery/catalog';
+export type {
+  CreateSkillCatalogServiceOptions,
+  SkillCatalogRefreshCleanup,
+  SkillCatalogRefreshHandle,
+  SkillCatalogRefreshOptions,
+  SkillCatalogRefreshOutcome,
+  SkillCatalogRefreshResult,
+  SkillCatalogRefreshSnapshot,
+  SkillCatalogRefreshStatus,
+  SkillCatalogService,
+} from './discovery/catalog-service';
+export type { DiscoverSkillsOptions } from './discovery/discover';
+export type {
+  MaterializeRemoteSourceOptions,
+  RemoteAdmissionCode,
+  RemoteAdmissionDiagnostic,
+  RemoteMaterialization,
+  RemoteSignatureVerifier,
+  RemoteSkillIntegrity,
+  RemoteSkillSource,
+} from './discovery/remote';
+export type {
+  DefaultSkillSourcesOptions,
+  SkillBundleSupport,
+  SkillSource,
+  SkillSourceKind,
+  SkillTrustDecision,
+  SkillTrustPolicy,
+  SkillTrustState,
+} from './discovery/source';
 export { scanSkillResource } from './guardrail';
-export type { FetchFromRegistryOptions, FetchResult } from './ingestion/fetch-from-registry';
-export type { ScanDirectoryOptions, ScanResult } from './ingestion/scan-directory';
+export type { ScannedSkillContent, SkillGuardrailOptions } from './guardrail';
+export type { ReadSkillArtifactOptions } from './ingestion/read-skill-artifact';
+export type {
+  ParseSkillMarkdownOptions,
+  SkillImportRepair,
+  SkillImportRepairCode,
+  SkillImportResult,
+} from './parse-skill-markdown';
 export type { CreateProposalToolboxOptions } from './self-improvement/create-proposal-tools';
 export type {
   AcceptProposalOptions,
@@ -81,13 +234,14 @@ export type {
   StepContextLike,
   StepResultLike,
 } from './skill-memory';
-export type { SkillSession } from './skill-session';
 export type {
   Proposal,
   SkillCatalogEntry,
   SkillContent,
   SkillMetadata,
-  SkillProvider,
   SkillResource,
+  SkillWriter,
   ToolPolicy,
 } from './types';
+
+export { createMockKeyValueStore, createMockSkillProvider } from './test/index';

@@ -1,4 +1,4 @@
-import type { ToolPolicy } from 'interoperability';
+import type { ToolPolicy } from '@lostgradient/tool-protocol';
 
 export type { ToolPolicy };
 
@@ -8,7 +8,7 @@ export interface ToolLike {
 
 export interface CreatePolicyEnforcementHookOptions {
   /** Persona tool policy (static for the run). */
-  personaToolPolicy?: ToolPolicy;
+  personaToolPolicy?: ToolPolicy | undefined;
   /** Returns the currently active skill's tool policy (dynamic, changes during run). */
   getActiveSkillToolPolicy?: () => ToolPolicy | undefined;
 }

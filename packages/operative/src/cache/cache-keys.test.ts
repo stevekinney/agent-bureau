@@ -1,5 +1,4 @@
-import { createTool } from 'armorer';
-import { createTestToolbox } from 'armorer/test';
+import { createTestToolbox, createTool } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 

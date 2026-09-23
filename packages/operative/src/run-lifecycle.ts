@@ -1,6 +1,6 @@
+import type { RuntimeServices } from '@lostgradient/lifecycle';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { Conversation } from 'conversationalist';
-import type { RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices } from 'lifecycle';
 
 import { estimateCost, getModelPricing } from './cost-estimation';
 import {
@@ -20,6 +20,7 @@ import {
   RunStartedEvent,
   RunTripwireEvent,
 } from './events';
+import { observeHookPlan } from './hook-plan-events';
 import {
   DEFAULT_MAXIMUM_STEPS,
   type EventDispatcher,
@@ -59,18 +60,36 @@ function computeCostEstimate(
  */
 
 /**
- * Emit `RunStartedEvent` and run the `onRunStart` hook. The hook is sequential
- * and an error aborts the run, so this returns the error (rather than throwing)
- * for the caller to convert into an error result via {@link makeErrorResult}.
+ * Emit `RunStartedEvent`, begin observing this run's hook plan, and run the
+ * `onRunStart` hook. The hook is sequential and an error aborts the run, so
+ * the error is returned (rather than thrown) for the caller to convert into an
+ * error result via {@link makeErrorResult}.
  *
- * @returns the hook error if `onRunStart` threw, otherwise `undefined`.
+ * Hook-plan observation starts here, between `run.started` and the first hook
+ * this run invokes (COR-766). Both boundaries matter: after `run.started` so a
+ * consumer reading the stream in order learns which run the plan belongs to
+ * before being told what is in it, and before `onRunStart` because that is
+ * itself a plan entry whose invocation would otherwise go unreported.
+ *
+ * @returns the `onRunStart` error if it threw, and the function that stops
+ * observing the plan — which the caller must invoke when the run ends, or a
+ * registry outliving the run (one a direct caller supplied and reuses)
+ * accumulates an observer per run, each dispatching into a dead emitter.
  */
 export async function startRunLifecycle(
-  options: Pick<RunOptions, 'hooks' | 'toolbox' | 'maximumSteps'>,
+  options: Pick<
+    RunOptions,
+    'hooks' | 'toolbox' | 'maximumSteps' | 'runId' | 'sessionId' | 'childCorrelation'
+  >,
   conversation: Conversation,
   emitter: EventDispatcher | undefined,
-): Promise<unknown> {
+): Promise<{ error: unknown; stopObservingHookPlan: () => void }> {
   emitter?.dispatch(new RunStartedEvent(conversation));
+
+  const stopObservingHookPlan = observeHookPlan(options.hooks, emitter, options.runId, {
+    ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+    ...(options.childCorrelation === undefined ? {} : { correlation: options.childCorrelation }),
+  });
 
   if (options.hooks?.has('onRunStart')) {
     try {
@@ -81,10 +100,10 @@ export async function startRunLifecycle(
       });
     } catch (error) {
       emitter?.dispatch(new RunErrorEvent(0, error, 'contract'));
-      return error;
+      return { error, stopObservingHookPlan };
     }
   }
-  return undefined;
+  return { error: undefined, stopObservingHookPlan };
 }
 
 /**

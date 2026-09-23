@@ -7,56 +7,52 @@ export function assertJsonValue(
   value: unknown,
   path: string = 'metadata',
 ): asserts value is JsonValue {
-  const stack = new WeakSet<object>();
-  const walk = (current: unknown, currentPath: string) => {
-    if (current === null) return;
-    const type = typeof current;
-    if (type === 'string' || type === 'boolean') return;
-    if (type === 'number') {
-      if (Number.isFinite(current)) return;
-      throw new TypeError(`Non-finite number at ${currentPath}`);
-    }
-    if (type === 'undefined') {
-      throw new TypeError(`Undefined is not valid JSON at ${currentPath}`);
-    }
-    if (type === 'bigint') {
-      throw new TypeError(`BigInt is not valid JSON at ${currentPath}`);
-    }
-    if (type === 'function') {
-      throw new TypeError(`Function is not valid JSON at ${currentPath}`);
-    }
-    if (type === 'symbol') {
-      throw new TypeError(`Symbol is not valid JSON at ${currentPath}`);
-    }
-    if (Array.isArray(current)) {
-      if (stack.has(current)) {
-        throw new TypeError(`Circular reference detected at ${currentPath}`);
-      }
-      stack.add(current);
-      for (let index = 0; index < current.length; index += 1) {
-        walk(current[index], `${currentPath}[${index}]`);
-      }
-      stack.delete(current);
-      return;
-    }
-    if (type === 'object') {
-      if (!isPlainObject(current)) {
-        throw new TypeError(`Non-plain object is not valid JSON at ${currentPath}`);
-      }
-      const record = current;
-      if (stack.has(record)) {
-        throw new TypeError(`Circular reference detected at ${currentPath}`);
-      }
-      stack.add(record);
-      for (const key of Object.keys(record)) {
-        walk(record[key], `${currentPath}.${key}`);
-      }
-      stack.delete(record);
-      return;
-    }
-  };
+  validateJsonValue(value, path, new WeakSet<object>());
+}
 
-  walk(value, path);
+function validateJsonValue(value: unknown, path: string, stack: WeakSet<object>): void {
+  if (isJsonPrimitive(value)) return;
+  if (Array.isArray(value)) {
+    validateJsonArray(value, path, stack);
+    return;
+  }
+  validateJsonObjectLike(value, path, stack);
+}
+
+function isJsonPrimitive(value: unknown): value is JsonPrimitive {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number' && Number.isFinite(value)) return true;
+  return false;
+}
+
+function validateJsonArray(value: readonly unknown[], path: string, stack: WeakSet<object>): void {
+  assertNotCircular(value, path, stack);
+  for (let index = 0; index < value.length; index += 1) {
+    validateJsonValue(value[index], `${path}[${index}]`, stack);
+  }
+  stack.delete(value);
+}
+
+function validateJsonObjectLike(value: unknown, path: string, stack: WeakSet<object>): void {
+  rejectInvalidJsonType(value, path);
+  if (!isPlainObject(value)) throw new TypeError(`Non-plain object is not valid JSON at ${path}`);
+  assertNotCircular(value, path, stack);
+  for (const key of Object.keys(value)) validateJsonValue(value[key], `${path}.${key}`, stack);
+  stack.delete(value);
+}
+
+function rejectInvalidJsonType(value: unknown, path: string): void {
+  const type = typeof value;
+  if (type === 'number') throw new TypeError(`Non-finite number at ${path}`);
+  if (type === 'undefined') throw new TypeError(`Undefined is not valid JSON at ${path}`);
+  if (type === 'bigint') throw new TypeError(`BigInt is not valid JSON at ${path}`);
+  if (type === 'function') throw new TypeError(`Function is not valid JSON at ${path}`);
+  if (type === 'symbol') throw new TypeError(`Symbol is not valid JSON at ${path}`);
+}
+
+function assertNotCircular(value: object, path: string, stack: WeakSet<object>): void {
+  if (stack.has(value)) throw new TypeError(`Circular reference detected at ${path}`);
+  stack.add(value);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -65,24 +61,30 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+function isJsonObject(value: JsonValue): value is JsonObject {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
 export function sortJsonValue(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) {
-    const array = value as JsonArray;
-    return array.map((entry) => sortJsonValue(entry));
-  }
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const record = value as JsonObject;
-    const sorted: JsonObject = {};
-    const keys = Object.keys(record).sort((a, b) => a.localeCompare(b));
-    for (const key of keys) {
-      const entry = record[key];
-      if (entry !== undefined) {
-        sorted[key] = sortJsonValue(entry);
-      }
-    }
-    return sorted;
-  }
+  if (Array.isArray(value)) return value.map((entry) => sortJsonValue(entry));
+  if (isJsonObject(value)) return sortJsonObject(value);
   return value;
+}
+
+function sortJsonObject(value: JsonObject): JsonObject {
+  const sorted: JsonObject = {};
+  for (const key of Object.keys(value).toSorted((a, b) => a.localeCompare(b))) {
+    const entry = value[key];
+    if (entry !== undefined) {
+      Object.defineProperty(sorted, key, {
+        value: sortJsonValue(entry),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+  return sorted;
 }
 
 export function stableStringifyJson(value: JsonValue): string {

@@ -1,12 +1,18 @@
-import { createAgent } from '@lostgradient/operative';
-import { createMockGenerate } from '@lostgradient/operative/test';
+import { createAgent, createMockGenerate } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
+import { z } from 'zod';
 
 import { createAgentCatalog } from './agent-catalog';
 import { createAgentDiscoveryTool } from './create-agent-discovery-tool';
 
 function agent(name: string) {
   return createAgent({ generate: createMockGenerate([]), name });
+}
+
+function parseDiscoveryResult(value: unknown) {
+  const serialized = z.string().parse(value);
+  const parsed: unknown = JSON.parse(serialized);
+  return z.array(z.looseObject({ name: z.string() })).parse(parsed);
 }
 
 describe('createAgentDiscoveryTool', () => {
@@ -17,7 +23,7 @@ describe('createAgentDiscoveryTool', () => {
     });
     const tool = createAgentDiscoveryTool(catalog);
 
-    const result = JSON.parse(await tool.execute({})) as Array<{ name: string }>;
+    const result = parseDiscoveryResult(await tool.execute({}));
 
     expect(result.map((entry) => entry.name)).toEqual(['writer', 'researcher']);
   });
@@ -29,7 +35,7 @@ describe('createAgentDiscoveryTool', () => {
     });
     const tool = createAgentDiscoveryTool(catalog);
 
-    const result = JSON.parse(await tool.execute({ text: 'writ' })) as Array<{ name: string }>;
+    const result = parseDiscoveryResult(await tool.execute({ text: 'writ' }));
 
     expect(result.map((entry) => entry.name)).toEqual(['Writer']);
   });
@@ -38,7 +44,7 @@ describe('createAgentDiscoveryTool', () => {
     const catalog = createAgentCatalog({ writer: agent('writer') });
     const tool = createAgentDiscoveryTool(catalog);
 
-    const result = JSON.parse(await tool.execute({ text: 'nonexistent' })) as unknown[];
+    const result = parseDiscoveryResult(await tool.execute({ text: 'nonexistent' }));
 
     expect(result).toEqual([]);
   });
@@ -47,7 +53,7 @@ describe('createAgentDiscoveryTool', () => {
     const catalog = createAgentCatalog({});
     const tool = createAgentDiscoveryTool(catalog);
 
-    const result = JSON.parse(await tool.execute({})) as unknown[];
+    const result = parseDiscoveryResult(await tool.execute({}));
 
     expect(result).toEqual([]);
   });
@@ -56,7 +62,7 @@ describe('createAgentDiscoveryTool', () => {
     const catalog = createAgentCatalog({ writer: agent('writer') });
     const tool = createAgentDiscoveryTool(catalog);
 
-    const result = JSON.parse(await tool.execute({})) as Array<Record<string, unknown>>;
+    const result = parseDiscoveryResult(await tool.execute({}));
 
     expect(result).toEqual([{ name: 'writer' }]);
     expect(Object.keys(result[0]!)).toEqual(['name']);
@@ -76,7 +82,7 @@ describe('createAgentDiscoveryTool', () => {
     });
     const tool = createAgentDiscoveryTool(catalog);
 
-    const result = JSON.parse(await tool.execute({})) as Array<{ name: string }>;
+    const result = parseDiscoveryResult(await tool.execute({}));
 
     expect(result).toEqual([{ name: 'lazy' }]);
     expect(lazyLoaded).toBe(false);

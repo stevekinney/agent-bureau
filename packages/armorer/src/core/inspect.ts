@@ -109,7 +109,7 @@ function getSchemaTypeName(schema: unknown): string {
     return 'unknown';
   }
 
-  const innerType = candidate._def?.innerType;
+  const innerType = getNestedSchemaProperty(candidate, 'innerType');
   if (innerType) {
     const innerName = getSchemaTypeName(innerType);
     if (typeName === 'optional') return `${innerName}?`;
@@ -193,4 +193,9 @@ export function inspectRegistry(
     },
     tools: toolInspections,
   };
+}
+
+function getNestedSchemaProperty(candidate: ZodSchemaLike, key: string): unknown {
+  const definition = Reflect.get(candidate, '_def');
+  return definition && typeof definition === 'object' ? Reflect.get(definition, key) : undefined;
 }

@@ -1,6 +1,6 @@
+import { createDefaultRuntimeServices, TypedEventTarget } from '@lostgradient/lifecycle';
 import type { ConversationHistory } from 'conversationalist';
 import { createConversationHistory } from 'conversationalist';
-import { createDefaultRuntimeServices, TypedEventTarget } from 'lifecycle';
 
 import type { AgentSession } from '../agent-session';
 import { createAgentSession } from '../agent-session';
@@ -250,10 +250,10 @@ export function createSessionHandle(
       // provider connection → stops billing). This is the "load-bearing" abort
       // path from architecture.md: we do NOT rely on Weft termination reaching
       // the in-flight call, because Weft only honors cancel at the next `yield*`.
-      const run = sessionRunState.currentRun;
+      const currentRun = sessionRunState.currentRun;
       const targetRunId = sessionRunState.currentRunId;
-      if (run) {
-        run.abort('cancelled');
+      if (currentRun) {
+        currentRun.abort('cancelled');
       }
 
       // Request durable cancellation after signalling the attached run.
@@ -261,7 +261,7 @@ export function createSessionHandle(
       const cancelSession = await store.load(sessionId);
       const targetRun = targetRunId
         ? cancelSession?.runs.find((runRef) => runRef.runId === targetRunId)
-        : run
+        : currentRun
           ? undefined
           : newestRunningRunRef(cancelSession);
       const cancelRunId = targetRun?.runId ?? targetRunId;
@@ -275,7 +275,7 @@ export function createSessionHandle(
             await engine.cancel(targetRun.runId);
             // An attached run owns its atomic transcript/outcome commit. A
             // detached cancellation reconciles the actual durable terminal state.
-            if (!run) {
+            if (!currentRun) {
               await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, targetRun);
             }
           } catch {
@@ -284,7 +284,10 @@ export function createSessionHandle(
         }
       }
 
-      if (sessionRunState.currentRun === run && sessionRunState.currentRunId === targetRunId) {
+      if (
+        sessionRunState.currentRun === currentRun &&
+        sessionRunState.currentRunId === targetRunId
+      ) {
         sessionRunState.currentRun = null;
         sessionRunState.currentRunId = null;
       }

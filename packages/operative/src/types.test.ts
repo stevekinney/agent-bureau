@@ -46,6 +46,6 @@ describe('toRedactedRunResultSummary', () => {
     const result = buildResult();
     const summary = toRedactedRunResultSummary(result);
 
-    expect(Object.keys(summary).sort()).toEqual(['finishReason', 'hasError']);
+    expect(Object.keys(summary).toSorted()).toEqual(['finishReason', 'hasError']);
   });
 });

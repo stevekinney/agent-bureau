@@ -1,10 +1,6 @@
-import {
-  rewindBeforeMessage,
-  rewindBeforePosition,
-  type RewindOptions,
-  truncateFromPosition,
-  truncateToTokenLimit,
-} from './context';
+import { truncateFromPosition } from './context-recent';
+import { rewindBeforeMessage, rewindBeforePosition, type RewindOptions } from './context-rewind';
+import { truncateToTokenLimit } from './context-truncation';
 import type { RedactMessageOptions } from './conversation/index';
 import {
   appendAssistantMessage,

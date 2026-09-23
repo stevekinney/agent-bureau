@@ -22,7 +22,7 @@
  * same repository checkout.
  *
  * The `ReproductionArtifact` shape itself is NOT declared here (AB-334):
- * it is `@lostgradient/operative/test`'s canonical declaration, moved there
+ * it is `@lostgradient/operative`'s canonical declaration, owned there
  * because `bureau` can import from `operative` but never the reverse.
  * `ReproductionArtifact` below is that declaration instantiated with
  * Bureau's own widened `cleanupReport` union — the "Bureau-specific
@@ -31,20 +31,20 @@
  */
 import { dirname, join } from 'node:path';
 
-import { summarizeToolInput } from '@lostgradient/operative';
 import type {
   EventRecorder,
   FiredFault,
   ReproductionArtifact as OperativeReproductionArtifact,
   ReproductionCleanupReport,
   ScriptedOutcome,
-} from '@lostgradient/operative/test';
+} from '@lostgradient/operative';
+import { summarizeToolInput } from '@lostgradient/operative';
 
 import type { AgentDefinitions } from '../agent-catalog';
 import type { BureauShutdownReport } from '../types';
 import type { BureauTestHarness } from './harness';
 
-export type { ScriptedOutcome } from '@lostgradient/operative/test';
+export type { ScriptedOutcome } from '@lostgradient/operative';
 
 /**
  * AB-92 AC8's `ReproductionArtifact`, instantiated with Bureau's own
@@ -59,30 +59,22 @@ export type ReproductionArtifact = OperativeReproductionArtifact<
 >;
 
 /**
- * Options for {@link assembleReproductionArtifact}. Both fields are
- * intentionally `unknown` at this boundary: the caller has already produced
- * a concrete `CleanupAcknowledgement`/`DeferredDrainReport`/
- * `BureauShutdownReport` (for `cleanupReport`) and a concrete, possibly
- * unredacted run result (for `terminalResult`) from whichever driver it
- * used; this assembler's job is to redact and slot them into the artifact,
- * not to re-derive or validate their shape.
+ * Options for {@link assembleReproductionArtifact}. `terminalResult` remains
+ * unknown because the assembler redacts it. `cleanupReport` uses the
+ * artifact's actual union because it is forwarded verbatim.
  */
 export interface AssembleReproductionArtifactOptions {
   readonly terminalResult: unknown;
-  readonly cleanupReport: unknown;
+  readonly cleanupReport: ReproductionArtifact['cleanupReport'];
 }
 
 /**
  * Explicit `sourceRevision`/`packageVersions` values that, when supplied,
  * replace `assembleReproductionArtifact`'s own filesystem discovery
  * (`git rev-parse HEAD` and a `packages/*` manifest glob rooted at
- * `turbo.json`). Neither is reachable inside a packed-and-path-installed
- * tarball consumer (AB-264): no `.git` directory and no `turbo.json`
- * exist there, so a caller that already knows both — a verifier that just
- * ran `bun pm pack` against a real checkout, for instance — passes them
- * here instead of letting discovery throw. Omitting a field (or the whole
- * argument) leaves today's discovery for that field unchanged, so every
- * existing caller inside this repository keeps working with no changes.
+ * `turbo.json`). A caller running outside this checkout can provide the
+ * recorded environment explicitly. Omitted fields use local discovery;
+ * versionless private workspace packages do not produce version entries.
  */
 export interface ReproductionArtifactEnvironment {
   readonly sourceRevision?: string;
@@ -147,23 +139,35 @@ async function readSourceRevision(): Promise<string> {
 
 let packageVersionsPromise: Promise<Readonly<Record<string, string>>> | undefined;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Collects truthful package versions, omitting manifests without both string fields. */
+export function collectPackageVersions(
+  manifests: Iterable<unknown>,
+): Readonly<Record<string, string>> {
+  const entries: [string, string][] = [];
+  for (const manifest of manifests) {
+    if (!isRecord(manifest)) continue;
+    if (typeof manifest['name'] === 'string' && typeof manifest['version'] === 'string') {
+      entries.push([manifest['name'], manifest['version']]);
+    }
+  }
+  entries.sort(([nameA], [nameB]) => (nameA < nameB ? -1 : nameA > nameB ? 1 : 0));
+  return Object.freeze(Object.fromEntries(entries));
+}
+
 /** Every workspace package's resolved version, keyed by its `package.json` `name`, read from the installed manifests — never hard-coded. Sorted by name so key order (and therefore `JSON.stringify` output) never depends on filesystem enumeration order. */
 async function readPackageVersions(): Promise<Readonly<Record<string, string>>> {
   packageVersionsPromise ??= (async () => {
     const root = await repoRoot();
     const glob = new Bun.Glob('packages/*/package.json');
-    const entries: [string, string][] = [];
+    const manifests: unknown[] = [];
     for await (const relativePath of glob.scan({ cwd: root })) {
-      const manifest = (await Bun.file(join(root, relativePath)).json()) as {
-        name?: unknown;
-        version?: unknown;
-      };
-      if (typeof manifest.name === 'string' && typeof manifest.version === 'string') {
-        entries.push([manifest.name, manifest.version]);
-      }
+      manifests.push(await Bun.file(join(root, relativePath)).json());
     }
-    entries.sort(([nameA], [nameB]) => (nameA < nameB ? -1 : nameA > nameB ? 1 : 0));
-    return Object.freeze(Object.fromEntries(entries));
+    return collectPackageVersions(manifests);
   })();
   return packageVersionsPromise;
 }
@@ -207,13 +211,8 @@ function resolveEffectiveModel<D extends AgentDefinitions>(
  * `run-envelope.ts`) — before being embedded, so a privileged value (a key
  * matching its sensitive-key pattern: `password`, `secret`, `token`,
  * `apiKey`, `authorization`, `credential`, `privateKey`) never appears in
- * the serialized artifact. `cleanupReport` is forwarded verbatim: it is
- * already one of `CleanupAcknowledgement`/`DeferredDrainReport`/
- * `BureauShutdownReport` by construction at the caller (this assembler's
- * fixed `options: { terminalResult: unknown; cleanupReport: unknown }`
- * signature — AB-263's own acceptance criteria — leaves no room for a
- * narrower parameter type here), so the cast below only restates that
- * caller-side guarantee at the type level.
+ * the serialized artifact. `cleanupReport` is forwarded verbatim after the
+ * options type checks it against the composed Bureau artifact union.
  *
  * `environment` (optional, AB-264) supplies `sourceRevision` and/or
  * `packageVersions` explicitly, bypassing this function's own filesystem
@@ -243,6 +242,6 @@ export async function assembleReproductionArtifact<D extends AgentDefinitions = 
     firedFaults: EMPTY_FIRED_FAULTS,
     causalTrace: recorder.normalize(),
     terminalResult: summarizeToolInput(options.terminalResult),
-    cleanupReport: options.cleanupReport as ReproductionArtifact['cleanupReport'],
+    cleanupReport: options.cleanupReport,
   });
 }

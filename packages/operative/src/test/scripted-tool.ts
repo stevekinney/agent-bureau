@@ -31,12 +31,6 @@ export interface ScriptedSettlement {
 class SettlementTracker {
   private readonly tracked: Promise<ScriptedSettlement>[] = [];
 
-  // Explicit (even though empty) — see the matching comment on
-  // `BarrierCoordinator` in `scripted-generate.ts`: Bun's coverage
-  // instrumenter counts a class's implicit default constructor as an
-  // unhittable function, failing the 100%-functions gate.
-  constructor() {}
-
   track<T>(index: number, promise: Promise<T>): void {
     this.tracked.push(
       promise.then(

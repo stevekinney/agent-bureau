@@ -1,11 +1,16 @@
+import type {
+  HookObservationCorrelation,
+  HookRegistry,
+  RuntimeServices,
+} from '@lostgradient/lifecycle';
+import type { JSONValue, ToolCall, ToolCallInput } from '@lostgradient/tool-protocol';
 import type { AnyToolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
-import type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
-import type { HookRegistry, RuntimeServices } from 'lifecycle';
 import type { ZodType } from 'zod';
 
 import type { BackpressureStrategy } from './backpressure';
 import type { ChildRunRegistry } from './child-run';
+import type { ContextEpochSealer } from './context-epoch';
 import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { SteeringDesiredState } from './durable/types';
 import type { AgentRunErrorCode, AgentRunErrorKind } from './errors';
@@ -16,29 +21,29 @@ import type { SelectionGate } from './selection-gate';
 import type { LiveStreamEvent } from './streaming/types';
 import type { ResponseFormat, ToolChoice } from './structured-output/types';
 
+export type { JSONValue, ToolCall, ToolCallInput } from '@lostgradient/tool-protocol';
 export type { AnyToolbox, Toolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
 export type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
-export type { JSONValue, ToolCall, ToolCallInput } from 'interoperability';
 
 /**
  * Options passed to toolbox.execute() within the loop.
  */
 export type OperativeExecuteOptions = Omit<ToolExecuteOptions, 'durableOperationKey'> & {
-  concurrency?: number;
-  mode?: 'parallel' | 'sequential';
-  errorMode?: 'failFast' | 'collect';
+  concurrency?: number | undefined;
+  mode?: ('parallel' | 'sequential') | undefined;
+  errorMode?: ('failFast' | 'collect') | undefined;
   durableOperationKey?: string | ((call: ToolCall, index: number) => string | undefined);
 };
 
 export interface ElicitationOptions {
-  readonly toolCallId?: string;
+  readonly toolCallId?: string | undefined;
 }
 
 export interface ElicitationRequest<T = unknown> {
   /** Immutable identity for correlating the response to this request. */
   readonly requestId: string;
   /** Tool identity when elicitation was requested during tool execution. */
-  readonly toolCallId?: string;
+  readonly toolCallId?: string | undefined;
   readonly message: string;
   /** Parse the untrusted response payload before returning it. */
   readonly schema: ZodType<T>;
@@ -48,7 +53,7 @@ export interface ElicitationRequest<T = unknown> {
 export type ElicitationResponse<T = unknown> = {
   /** Must match the request's immutable requestId. */
   readonly requestId: string;
-  readonly toolCallId?: string;
+  readonly toolCallId?: string | undefined;
   readonly data: T;
 } | null;
 
@@ -65,16 +70,16 @@ export type OnElicitation = <T>(request: ElicitationRequest<T>) => Promise<Elici
  */
 export interface RetryOptions {
   attempts: number;
-  delay?: number | ((attempt: number) => number);
-  shouldRetry?: (error: unknown, attempt: number) => boolean | Promise<boolean>;
+  delay?: (number | ((attempt: number) => number)) | undefined;
+  shouldRetry?: ((error: unknown, attempt: number) => boolean | Promise<boolean>) | undefined;
   /** Transforms the generate context before a retry attempt. */
-  mutate?: RetryMutator;
+  mutate?: RetryMutator | undefined;
   /** Injectable sleep used between retry attempts. Defaults to a setTimeout-backed delay. */
-  sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  sleep?: ((milliseconds: number, signal?: AbortSignal) => Promise<void>) | undefined;
   /** Whether to add random jitter to the retry delay. Defaults to false. */
-  jitter?: boolean;
+  jitter?: boolean | undefined;
   /** Maximum jitter offset in milliseconds. Defaults to half the delay. */
-  maxJitter?: number;
+  maxJitter?: number | undefined;
 }
 
 /**
@@ -83,13 +88,13 @@ export interface RetryOptions {
 export interface ContextManagementOptions {
   maxTokens: number;
   onCompact: (conversation: Conversation, context: StepContext) => Promise<void>;
-  tokenEstimator?: (conversation: Conversation) => number;
+  tokenEstimator?: ((conversation: Conversation) => number) | undefined;
   /** Minimum tokens reserved for the model response. Default: `1500`. */
-  minimumResponseTokens?: number;
+  minimumResponseTokens?: number | undefined;
   /** Warning when remaining tokens drop to this level. Default: 20% of `maxTokens`. */
-  warningThreshold?: number;
+  warningThreshold?: number | undefined;
   /** Compaction triggered when used tokens reach this level. Default: 80% of `maxTokens`. */
-  compactionThreshold?: number;
+  compactionThreshold?: number | undefined;
 }
 
 /**
@@ -148,7 +153,7 @@ export interface ClosedOptions {
    * rather than hanging. A concurrent signal-free call keeps waiting on the
    * real settlement and observes it once it lands.
    */
-  readonly signal?: AbortSignal;
+  readonly signal?: AbortSignal | undefined;
 }
 
 /**
@@ -157,15 +162,15 @@ export interface ClosedOptions {
 export interface GenerateContext {
   conversation: Conversation;
   step: number;
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
   toolbox: AnyToolbox;
-  toolChoice?: ToolChoice;
-  responseFormat?: ResponseFormat;
+  toolChoice?: ToolChoice | undefined;
+  responseFormat?: ResponseFormat | undefined;
   /**
    * Per-request output token cap; overrides the provider's construction-time
    * maximumTokens for this call.
    */
-  maximumTokens?: number;
+  maximumTokens?: number | undefined;
   /**
    * The session's desired route/model/provider/effort configuration and
    * pause flag, as read at this step's `runStep` entry boundary (AB-67).
@@ -177,7 +182,7 @@ export interface GenerateContext {
    * boundary read after the hook returns, so a hook can read the session's
    * desired steering state but never silently drop or override it.
    */
-  steering?: SteeringDesiredState;
+  steering?: SteeringDesiredState | undefined;
 }
 
 /**
@@ -186,14 +191,14 @@ export interface GenerateContext {
 export interface GenerateResponse {
   content: string;
   toolCalls: ToolCallInput[];
-  usage?: TokenUsage;
-  metadata?: Record<string, JSONValue>;
+  usage?: TokenUsage | undefined;
+  metadata?: Record<string, JSONValue> | undefined;
   /**
    * When true, the generate function has already appended the assistant message
    * to the conversation (e.g. via streaming finalization). The loop will skip
    * its own `appendAssistantMessage` call to avoid duplicates.
    */
-  messageAppended?: boolean;
+  messageAppended?: boolean | undefined;
 }
 
 /**
@@ -215,14 +220,15 @@ export interface StepResult {
   content: string;
   toolCalls: readonly ToolCall[];
   results: readonly ToolExecutionResult[];
-  usage?: TokenUsage;
-  metadata?: Record<string, JSONValue>;
+  usage?: TokenUsage | undefined;
+  metadata?: Record<string, JSONValue> | undefined;
   final: boolean;
 }
 
 export interface RunOutcome {
   readonly finishReason: FinishReason;
-  readonly error?: { readonly kind: AgentRunErrorKind; readonly code: AgentRunErrorCode };
+  readonly error?:
+    { readonly kind: AgentRunErrorKind; readonly code: AgentRunErrorCode } | undefined;
 }
 
 /**
@@ -231,13 +237,11 @@ export interface RunOutcome {
 export interface StepContext {
   conversation: Conversation;
   step: number;
-  signal?: AbortSignal;
-  abortStep?: (reason?: string) => void;
-  elicit?: <T>(
-    message: string,
-    schema: ZodType<T>,
-    options?: ElicitationOptions,
-  ) => Promise<T | null>;
+  signal?: AbortSignal | undefined;
+  abortStep?: ((reason?: string) => void) | undefined;
+  elicit?:
+    | (<T>(message: string, schema: ZodType<T>, options?: ElicitationOptions) => Promise<T | null>)
+    | undefined;
 }
 
 /**
@@ -247,11 +251,9 @@ export interface ToolExecutionHookContext {
   conversation: Conversation;
   step: number;
   toolCalls: ToolCall[];
-  elicit?: <T>(
-    message: string,
-    schema: ZodType<T>,
-    options?: ElicitationOptions,
-  ) => Promise<T | null>;
+  elicit?:
+    | (<T>(message: string, schema: ZodType<T>, options?: ElicitationOptions) => Promise<T | null>)
+    | undefined;
 }
 
 /**
@@ -262,11 +264,9 @@ export interface ToolExecutionResultContext {
   step: number;
   toolCalls: readonly ToolCall[];
   results: readonly ToolExecutionResult[];
-  elicit?: <T>(
-    message: string,
-    schema: ZodType<T>,
-    options?: ElicitationOptions,
-  ) => Promise<T | null>;
+  elicit?:
+    | (<T>(message: string, schema: ZodType<T>, options?: ElicitationOptions) => Promise<T | null>)
+    | undefined;
 }
 
 /**
@@ -328,10 +328,10 @@ export interface RunResultBase {
    * This is an in-loop budgeting estimate, not a billing figure — see
    * {@link estimateCost}'s doc comment.
    */
-  costEstimate?: CostEstimate;
+  costEstimate?: CostEstimate | undefined;
   finishReason: FinishReason;
   error?: unknown;
-  schemaValidation?: { success: boolean; error?: unknown };
+  schemaValidation?: { success: boolean; error?: unknown } | undefined;
   /**
    * The `output`-schema-validated structured output (AB-18), present when
    * the run stopped after an `output` Zod schema was applied AND validation
@@ -347,7 +347,7 @@ export interface RunResultBase {
  * results while retaining the historical, unparameterized internal shape.
  */
 export type RunResult<O = unknown, H extends boolean = true> = RunResultBase &
-  ([H] extends [true] ? { output?: O } : Record<never, never>);
+  ([H] extends [true] ? { output?: O | undefined } : Record<never, never>);
 
 /**
  * The `RunResult` fields safe to expose under a `'redacted'` liveness
@@ -430,7 +430,7 @@ export interface SteeringGate {
    * forward via `RunCursor.lastAppliedConfigVersion`), to seed
    * `RunState.lastAppliedConfigVersion`.
    */
-  getAppliedFloor?(): number;
+  getAppliedFloor?(): number | undefined;
 }
 
 /**
@@ -450,47 +450,49 @@ export interface RunOptionsBase {
   generate: GenerateFunction;
   toolbox: AnyToolbox;
   conversation: Conversation | ConversationHistory;
-  stopWhen?: StopCondition | StopCondition[];
-  maximumSteps?: number;
+  stopWhen?: (StopCondition | StopCondition[]) | undefined;
+  maximumSteps?: number | undefined;
   /**
    * Per-request output token cap; overrides the provider's construction-time
    * maximumTokens for this call.
    */
-  maximumTokens?: number;
-  prepareStep?: PrepareStepHook | PrepareStepHook[];
-  beforeToolExecution?: BeforeToolExecutionHook | BeforeToolExecutionHook[];
-  afterToolExecution?: AfterToolExecutionHook | AfterToolExecutionHook[];
-  onStep?: OnStepHook | OnStepHook[];
-  executeOptions?: OperativeExecuteOptions;
-  signal?: AbortSignal;
+  maximumTokens?: number | undefined;
+  executeOptions?: OperativeExecuteOptions | undefined;
+  signal?: AbortSignal | undefined;
   /**
    * When true, tool results that resolve to promises are awaited and their
    * resolved values are appended to the conversation. Useful when tools return
    * deferred results like streaming content.
    */
-  collectAsync?: boolean;
-  retry?: RetryOptions;
+  collectAsync?: boolean | undefined;
+  retry?: RetryOptions | undefined;
   /**
    * Backpressure strategy applied before each step. When set, the loop
    * calls `backpressure.beforeStep()` and waits for the returned delay
    * before proceeding with the generate call.
    */
-  backpressure?: BackpressureStrategy;
-  validateResponse?: ValidateResponseHook | ValidateResponseHook[];
-  validateToolResult?: ValidateToolResultHook | ValidateToolResultHook[];
+  backpressure?: BackpressureStrategy | undefined;
+  onElicitation?: OnElicitation | undefined;
   /**
-   * Called before each step to dynamically select which tools are available.
-   * Return a filtered or entirely different toolbox to control which tools
-   * the model can call on a per-step basis.
+   * This run's hook plan — the ONLY way to configure hooks on a run
+   * (COR-1268, COR-567 Decision 1).
+   *
+   * A registry rather than per-hook arrays because it is the only shape that
+   * carries registration identity, priority, replay classification and plan
+   * observation. The parallel `prepareStep`/`onStep`/`selectTools`/... array
+   * fields that used to sit alongside it are gone: two surfaces meant hook
+   * ordering depended on which one a caller happened to use, and everything
+   * built on registration identity — `hook-plan.*` events, tier provenance,
+   * redacted plan inspection — was blind to whatever arrived through the
+   * arrays.
+   *
+   * Under Bureau this is the composed, snapshotted plan: Bureau's invariants
+   * first, the agent tier under them, and a direct tier last where one
+   * exists. Mutating a source registry afterwards cannot reach a run already
+   * dispatched.
    */
-  selectTools?: SelectToolsHook | SelectToolsHook[];
-  onElicitation?: OnElicitation;
-  /**
-   * A typed HookRegistry for structured hook registration with priority
-   * ordering. Runs in addition to any old-style hook arrays.
-   */
-  hooks?: HookRegistry<OperativeHookMap>;
-  contextManagement?: ContextManagementOptions;
+  hooks?: HookRegistry<OperativeHookMap> | undefined;
+  contextManagement?: ContextManagementOptions | undefined;
   /**
    * The Zod schema the final response must satisfy (AB-18) — the single
    * validated output contract. Validated with `.parseAsync()`; its
@@ -504,8 +506,8 @@ export interface RunOptionsBase {
    * run produces belongs in `RunResult.parts` as a managed-asset reference
    * part, never inlined as base64 inside the schema-validated `output`.
    */
-  output?: ZodType<unknown>;
-  schemaRetries?: number;
+  output?: ZodType | undefined;
+  schemaRetries?: number | undefined;
   /**
    * Custom message factory for schema validation retries. Called when the
    * response fails schema validation and retries remain. The returned string
@@ -513,14 +515,14 @@ export interface RunOptionsBase {
    *
    * Defaults to a generic message containing the validation error.
    */
-  schemaRetryMessage?: (error: unknown, attempt: number) => string;
+  schemaRetryMessage?: ((error: unknown, attempt: number) => string) | undefined;
   /**
    * Called when the loop exits due to reaching `maximumSteps`. If this
    * returns a string, it replaces the final content (e.g. a forced summary
    * from one last LLM call without tools). The `finishReason` remains
    * `'maximum-steps'` regardless.
    */
-  onMaximumSteps?: (context: StepContext) => Promise<string | void>;
+  onMaximumSteps?: ((context: StepContext) => Promise<string | void>) | undefined;
   /**
    * Opaque parent trace context (e.g. an OpenTelemetry Context) passed from
    * a parent agent. Used with `withTraceContext` to nest child spans under the
@@ -533,7 +535,27 @@ export interface RunOptionsBase {
    * `{agentName, runId, step}` metadata. Optional — only supplied when
    * running inside a named agent (bureau.agent / createAgent).
    */
-  agentName?: string;
+  agentName?: string | undefined;
+  /**
+   * The session this run belongs to, when it belongs to one (COR-1269).
+   *
+   * Read only to stamp the run's hook-plan observations, so an operator
+   * correlating a hook invocation can reach the session it happened in. Not a
+   * behavior input: nothing in the loop branches on it, and a run without a
+   * session simply omits it.
+   */
+  sessionId?: string | undefined;
+  /**
+   * Set when this run was dispatched as another run's child (COR-1269), by
+   * `dispatchChildRun` through `AgentRunContext.childCorrelation`.
+   *
+   * Carried so every hook observation a child run produces is attributable to
+   * the parent-child pair that produced it. It is correlation DATA, not a hook
+   * surface: nothing here can add, remove or reorder a handler, which is what
+   * keeps the child-hook rule ("no parent hook reaches a child") a property of
+   * the composition rather than a promise about who remembered not to copy one.
+   */
+  childCorrelation?: HookObservationCorrelation | undefined;
 
   /**
    * Enables replay-safe durable operation keys for tool calls. This is distinct
@@ -542,7 +564,7 @@ export interface RunOptionsBase {
    *
    * @internal
    */
-  durableOperationKeys?: boolean;
+  durableOperationKeys?: boolean | undefined;
   /**
    * Callback that runs a function within a parent trace context. When both
    * `parentContext` and `withTraceContext` are provided, the loop wraps
@@ -550,7 +572,7 @@ export interface RunOptionsBase {
    *
    * This keeps operative free of any `@opentelemetry/api` dependency.
    */
-  withTraceContext?: <T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>;
+  withTraceContext?: (<T>(parentContext: unknown, fn: () => Promise<T>) => Promise<T>) | undefined;
   /**
    * AB-233 (per AB-50's reuse gap) — this run's own child registry, threaded
    * into every tool call's per-execution `ToolContext.executionContext` as
@@ -561,12 +583,12 @@ export interface RunOptionsBase {
    * calls registers each call's children into THIS run's own registry
    * instead of whichever run happened to be active when the tool was built.
    */
-  childRegistry?: ChildRunRegistry;
+  childRegistry?: ChildRunRegistry | undefined;
   /**
    * Default tool choice constraint applied to every step unless overridden
    * by the `selectToolChoice` hook.
    */
-  toolChoice?: ToolChoice;
+  toolChoice?: ToolChoice | undefined;
   /**
    * When set, every terminal `RunResult` (stop-condition, maximum-steps,
    * abort, or error) carries a `costEstimate` computed from the run's
@@ -575,7 +597,7 @@ export interface RunOptionsBase {
    * leave `costEstimate` absent — no estimate is fabricated without an
    * explicit model.
    */
-  costEstimation?: { model: string; pricing?: CostEstimationOptions };
+  costEstimation?: { model: string; pricing?: CostEstimationOptions } | undefined;
   /**
    * The AB-64/AB-250 selection-revalidation gate, read at the same `runStep`
    * boundary as `steering` (after the pause-wait loop, before backpressure):
@@ -588,7 +610,19 @@ export interface RunOptionsBase {
    * matching today's non-selecting behavior exactly. Unlike `steering`,
    * `selection` carries no `runId` coupling — see {@link SelectionGate}.
    */
-  selection?: SelectionGate;
+  selection?: SelectionGate | undefined;
+  /**
+   * COR-581 — the effective-context epoch sealer. When supplied, every
+   * generate attempt seals one epoch immediately before `generate.started`
+   * and that event carries its `epochId`, so a postmortem can reconstruct
+   * which identified, versioned sources produced the turn without the
+   * epoch itself carrying any of their content.
+   *
+   * `undefined` — the default — is a complete no-op: nothing is sealed and
+   * `generate.started` carries no epoch id, matching today's behavior
+   * exactly.
+   */
+  contextEpoch?: ContextEpochSealer | undefined;
   /**
    * AB-300 — this run's ALREADY-attenuated delegated-authority grant
    * (forwarded from `AgentRunContext.delegatedAuthority`, itself set by
@@ -603,7 +637,7 @@ export interface RunOptionsBase {
    * `dispatchChildRun` call. `undefined` — the default — means this run
    * inherits no delegated-authority narrowing from a dispatching parent.
    */
-  delegatedAuthority?: DelegatedAuthority;
+  delegatedAuthority?: DelegatedAuthority | undefined;
   /**
    * AB-241 — the authenticated principal attributed with this run, forwarded
    * unchanged from `AgentRunContext.principal` by `createAgent`'s run path,
@@ -612,7 +646,7 @@ export interface RunOptionsBase {
    * record the run's owner exactly as `Bureau.createRun` does. `undefined`
    * — the default — means this run carries no attribution.
    */
-  principal?: string;
+  principal?: string | undefined;
   /**
    * The AB-92/AB-252 injectable runtime-service seam: wall time, monotonic
    * time, timers, identifiers, randomness, and deferred-work tracking.
@@ -622,9 +656,9 @@ export interface RunOptionsBase {
    * back to a global. Unconfigured (the default), a run reads the real
    * globals via `createDefaultRuntimeServices()`; a test composes its own
    * deterministic instance with `createManualRuntimeServices()` from
-   * `@lostgradient/operative/test`.
+   * `@lostgradient/operative`.
    */
-  runtime?: RuntimeServices;
+  runtime?: RuntimeServices | undefined;
 }
 
 /**
@@ -684,7 +718,7 @@ export type RunOptions = RunOptionsBase &
          * when `steering` is absent — only supplied when the run has a
          * stable identity (session-owned runs).
          */
-        readonly runId?: string;
+        readonly runId?: string | undefined;
         readonly steering?: undefined;
       }
     | {
@@ -705,7 +739,7 @@ export type RunOptions = RunOptionsBase &
          * enforces is that an actually-PRESENT gate requires `runId`, not
          * that `runId` requires a gate.
          */
-        readonly steering?: SteeringGate;
+        readonly steering?: SteeringGate | undefined;
       }
   );
 
@@ -728,7 +762,7 @@ export interface StreamingHandle {
    * calls it as `streaming.report?.(...)`, so neither half has to know whether
    * the other opted in.
    */
-  report?: (event: LiveStreamEvent) => void;
+  report?: ((event: LiveStreamEvent) => void) | undefined;
 }
 
 /**

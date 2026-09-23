@@ -1,22 +1,23 @@
 import { tmpdir } from 'node:os';
 
-import type { GenerateFunction } from '@lostgradient/operative';
-import { createAgent } from '@lostgradient/operative';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import {
+  createAgent,
   createEventRecorder,
   type EventRecorder,
+  type GenerateFunction,
   readReproductionArtifact,
   writeReproductionArtifact,
-} from '@lostgradient/operative/test';
+} from '@lostgradient/operative';
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
-import { createManualRuntimeServices } from 'lifecycle';
 
 import type { BureauShutdownReport } from '../types';
 import type { BureauTestHarness } from './harness';
 import { createBureauTestHarness } from './harness';
 import {
   assembleReproductionArtifact,
+  collectPackageVersions,
   locateWorkspaceRoot,
   type ReproductionArtifact,
 } from './reproduction-artifact';
@@ -186,14 +187,30 @@ describe('assembleReproductionArtifact', () => {
     expect(artifact.sourceRevision).toBe(expected);
   });
 
-  it('reads packageVersions from every workspace package.json, keyed by name', async () => {
-    const bureauManifest = (await Bun.file(
-      `${await locateWorkspaceRoot()}/packages/bureau/package.json`,
-    ).json()) as { name: string; version: string };
+  it('reads the exact versioned package manifests currently present in the workspace', async () => {
+    const root = await locateWorkspaceRoot();
+    const glob = new Bun.Glob('packages/*/package.json');
+    const manifests: unknown[] = [];
+    for await (const relativePath of glob.scan({ cwd: root })) {
+      manifests.push(await Bun.file(`${root}/${relativePath}`).json());
+    }
     const { artifact } = await runScriptedCase();
 
-    expect(artifact.packageVersions[bureauManifest.name]).toBe(bureauManifest.version);
-    expect(Object.keys(artifact.packageVersions).length).toBeGreaterThan(5);
+    expect(artifact.packageVersions).toEqual(collectPackageVersions(manifests));
+  });
+
+  it('omits versionless and malformed manifest values without inventing metadata', () => {
+    expect(
+      collectPackageVersions([
+        { name: '@lostgradient/versioned', version: '1.2.3' },
+        { name: '@lostgradient/no-version' },
+        { version: '4.5.6' },
+        { name: '@lostgradient/non-string-version', version: 7 },
+        null,
+        [],
+        'manifest',
+      ]),
+    ).toEqual({ '@lostgradient/versioned': '1.2.3' });
   });
 
   it('reads clockOrigin, identifierSeed, and randomSeed from an explicitly pinned harness runtime', async () => {
@@ -244,7 +261,7 @@ describe('assembleReproductionArtifact', () => {
     expect(
       assembleReproductionArtifact(harness, recorder, {
         terminalResult: undefined,
-        cleanupReport: undefined,
+        cleanupReport: { status: 'completed' },
       }),
     ).rejects.toThrow(/no configured `provider`/);
   });

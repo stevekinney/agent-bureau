@@ -11,6 +11,16 @@ import {
   toGeminiTools,
 } from './index';
 
+function approvalAction(message: string, idempotencyKey: string) {
+  return {
+    type: 'approval' as const,
+    message,
+    risk: 'high' as const,
+    operation: { kind: 'other' as const },
+    policyVersion: 'policy:test',
+    idempotencyKey,
+  };
+}
 describe('toGeminiTools', () => {
   const schema = z.object({
     query: z.string().describe('Search query'),
@@ -173,7 +183,7 @@ describe('formatGeminiToolResults', () => {
           toolCallId: 'call-2',
           toolName: 'approve',
           result: { prompt: 'approve' },
-          action: { type: 'approval', message: 'Approve this request' },
+          action: approvalAction('Approve this request', 'approval:gemini-format'),
         },
       ]),
     ).toEqual([
@@ -189,7 +199,7 @@ describe('formatGeminiToolResults', () => {
           response: {
             outcome: 'action_required',
             content: { prompt: 'approve' },
-            action: { type: 'approval', message: 'Approve this request' },
+            action: approvalAction('Approve this request', 'approval:gemini-format'),
           },
         },
       },

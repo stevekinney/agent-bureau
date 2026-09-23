@@ -1,4 +1,4 @@
-import { createManualRuntimeServices } from 'lifecycle';
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { GenerateContext } from '../../types.ts';
 import type { ModelRoute } from '../types.ts';

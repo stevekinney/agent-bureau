@@ -1,91 +1,110 @@
+import type { EventMap, HookReplayPolicy, RuntimeServices } from '@lostgradient/lifecycle';
+import {
+  createDefaultRuntimeServices,
+  HookRegistry,
+  mergeHookRegistries,
+  TypedEventTarget,
+} from '@lostgradient/lifecycle';
+import type { CreateMemoryOptions, Memory } from '@lostgradient/memory';
+import { createMemory } from '@lostgradient/memory';
 import type {
   AgentInput,
   AgentRunContext,
   AgentSession,
+  CheckpointStore,
+  DurableRunDeps,
   GenerateFunction,
+  GuardrailHooks,
   GuardrailsOptions,
   JSONValue,
   OnStepHook,
+  OperativeHookMap,
   PrepareStepHook,
+  RegistryAgnosticEngine,
   RequestHumanInputContext,
   RequestHumanInputInput,
+  RunEngineObservability,
   RunOptions,
+  ScheduledAgentRunInput,
   Scheduler,
   ScheduleWakeupContext,
   ScheduleWakeupInput,
   SessionStore,
   SessionSummary,
+  StepRecord,
   StreamEventMap,
-  ValidateResponseHook,
 } from '@lostgradient/operative';
 import {
   createAgentSession,
-  createGuardrails,
-  createIdentityHook,
-  createOutputPIIValidator,
-  createPromptInjectionDetector,
-  createRequestHumanInputTool,
-  createScheduler,
-  createScheduleWakeupTool,
-  createSessionStore,
-  DEFAULT_MAXIMUM_STEPS,
-  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
-  ScheduleCompletedEvent,
-  ScheduleFailedEvent,
-  withCache,
-  withEnhancedStreaming,
-  withMinimumTripwireConfidence,
-} from '@lostgradient/operative';
-import {
   createAnthropicProvider,
   createAnthropicProviderStream,
-} from '@lostgradient/operative/anthropic';
-import type {
-  CheckpointStore,
-  DurableRunDeps,
-  RegistryAgnosticEngine,
-  RunEngineObservability,
-  ScheduledAgentRunInput,
-  StepRecord,
-} from '@lostgradient/operative/durable';
-import {
   createCheckpointStore,
-  createRunEngine,
-  createRunWorkflow,
-  isAgentRunWorkflowInput,
-  isScheduledAgentRunInput,
-  SCHEDULER_ORIGIN_TAG,
-  SCHEDULER_RUN_ID_PREFIX,
-  WorkflowVersionMismatchEvent,
-} from '@lostgradient/operative/durable';
-import { createGeminiProvider, createGeminiProviderStream } from '@lostgradient/operative/gemini';
-import { createOpenAIProvider, createOpenAIProviderStream } from '@lostgradient/operative/openai';
-import {
   createComplexityStrategy,
   createCostAwareStrategy,
   createFalloverGenerate,
+  createGeminiProvider,
+  createGeminiProviderStream,
+  createGuardrails,
+  createIdentityHook,
+  createOpenAIProvider,
+  createOpenAIProviderStream,
+  createOutputPIIValidator,
+  createPolicyEnforcementHook,
+  createPromptInjectionDetector,
+  createRequestHumanInputTool,
   createRoutingGenerate,
+  createRunEngine,
+  createRunWorkflow,
+  createScheduler,
+  createScheduleWakeupTool,
+  createSessionStore,
   createStepBasedStrategy,
-} from '@lostgradient/operative/providers';
+  DEFAULT_MAXIMUM_STEPS,
+  DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
+  isAgentRunWorkflowInput,
+  isScheduledAgentRunInput,
+  ScheduleAttemptedEvent,
+  ScheduleCompletedEvent,
+  ScheduleFailedEvent,
+  SCHEDULER_ORIGIN_TAG,
+  SCHEDULER_RUN_ID_PREFIX,
+  ScheduleSkippedEvent,
+  withCache,
+  withEnhancedStreaming,
+  withMinimumTripwireConfidence,
+  WorkflowVersionMismatchEvent,
+} from '@lostgradient/operative';
 import {
+  createSkillArtifactLoader,
+  createSkillClient,
+  createSkillClientToolbox,
+  DEFAULT_SOURCE_PRECEDENCE,
+  discoverSkills,
+  renderActiveSkillInstructions,
+  renderClientCatalog,
+  type SkillActivationRecord,
+  type SkillCatalogRevision,
+  type SkillEventMap,
+  type SkillGuardrailOptions,
+  type ToolPolicy,
+} from '@lostgradient/skills';
+import {
+  type ConditionalTextValueStore,
   decode,
   deserializeCheckpoint,
   encode,
-  WorkflowCancelledEvent,
-  WorkflowCompletedEvent,
-  WorkflowFailedEvent,
-  type WorkflowServicesResolution,
-  type WorkflowServicesResolverInfo,
-} from '@lostgradient/weft';
-import {
   KEYS,
   resolveStorage,
   type Storage,
   type StorageConfiguration,
   type TextValueStore,
   textValueStore,
-} from '@lostgradient/weft/storage';
-import type { ConditionalTextValueStore } from '@lostgradient/weft/storage/text-value-store';
+  WorkflowCancelledEvent,
+  WorkflowCompletedEvent,
+  WorkflowFailedEvent,
+  type WorkflowServicesResolution,
+  type WorkflowServicesResolverInfo,
+} from '@lostgradient/weft';
 import {
   type AnyToolbox,
   combineToolboxes,
@@ -100,18 +119,6 @@ import {
   type ConversationHistory,
   createConversationHistory,
 } from 'conversationalist';
-import type { EventMap, HookReplayPolicy, RuntimeServices } from 'lifecycle';
-import { createDefaultRuntimeServices, TypedEventTarget } from 'lifecycle';
-import type { CreateMemoryOptions, Memory } from 'memory';
-import { createMemory } from 'memory';
-import type { SkillProvider as SkillsPackageProvider, SkillSession, ToolPolicy } from 'skills';
-import {
-  createSkillCatalogHook,
-  createSkillSession,
-  createStorageSkillProvider,
-  escapeXml,
-} from 'skills';
-import { z } from 'zod';
 
 import { resolveDiagnosticSink, serializeUnknownError } from './serialization';
 import type {
@@ -123,8 +130,6 @@ import type {
   RedactedProviderConfiguration,
   RedactedProviderRouteConfiguration,
   RoutingConfiguration,
-  SkillCatalogEntry,
-  SkillProvider,
   ToolSummary,
 } from './types';
 
@@ -421,6 +426,46 @@ export function createSchedulerServiceRequestContext(
   } satisfies ToolRequestContext;
 }
 
+/**
+ * COR-1228 — makes an active skill's `allowed-tools` actually narrow the tool
+ * set the model sees.
+ *
+ * Two halves of a designed mechanism existed and were never connected:
+ * `SkillSession.getActiveToolPolicy()` produced the merged policy and had no
+ * consumer, and `@lostgradient/operative`'s `createPolicyEnforcementHook` consumes
+ * exactly that shape through its `getActiveSkillToolPolicy` option and had no
+ * consumer either. This wires them together.
+ *
+ * Deliberately a FILTER, not a per-call gate. `armorer`'s own
+ * `PermissionGate` documentation draws the line: "a filter removes a tool from
+ * the array before the model ever sees it exists. A gate runs per call against
+ * the actual arguments the model chose." `ToolPolicy` is named there as the
+ * filter, so implementing it as one is faithful to the contract rather than
+ * inventing a stronger promise than the type makes. The per-call gate remains
+ * `createHeadlessPermissionPolicyHooks`, a complementary layer — the two
+ * compose, and this adds no second narrowing path.
+ *
+ * The policy is read live on each `tools()` call rather than captured, because
+ * the active skill set changes during a run as the model activates and
+ * deactivates skills. A proxy is used rather than rebuilding the toolbox so the
+ * emitter, approval wiring, and request context all survive untouched.
+ */
+function withActiveSkillToolPolicy(
+  toolbox: AnyToolbox,
+  getActiveSkillToolPolicy: () => ToolPolicy | undefined,
+): AnyToolbox {
+  const filterTools = createPolicyEnforcementHook({ getActiveSkillToolPolicy });
+
+  return new Proxy(toolbox, {
+    get(target, property, receiver) {
+      if (property === 'tools') {
+        return () => filterTools([...target.tools()]);
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+}
+
 function withDefaultToolboxRequestContext(
   toolbox: AnyToolbox,
   requestContext: ToolRequestContext | undefined,
@@ -436,7 +481,7 @@ function withDefaultToolboxRequestContext(
   ) => {
     const options =
       executeOptions?.requestContext === undefined
-        ? { ...(executeOptions ?? {}), requestContext }
+        ? { ...executeOptions, requestContext }
         : executeOptions;
     const executionRequestContext = options.requestContext;
     const authorizationRevision = executionRequestContext?.authority.authorizationRevision;
@@ -859,8 +904,8 @@ export function createMemoryRecallHook(memory: Memory, sessionId: string): Prepa
     }
 
     const messages = context.conversation.getMessages();
-    const latestUserMessage = [...messages]
-      .reverse()
+    const latestUserMessage = messages
+      .toReversed()
       .find((message) => message.role === 'user' && typeof message.content === 'string');
 
     if (!latestUserMessage || typeof latestUserMessage.content !== 'string') {
@@ -1164,69 +1209,75 @@ function appendConversationMessages(
   };
 }
 
-/**
- * A JSON-serializable snapshot of one active skill's name and optional tool policy.
- * Written to session metadata as `lastActiveSkills` after each step so a recovered
- * run can seed a fresh {@link SkillSession} with the pre-crash active set.
- */
-export interface ActiveSkillEntry {
-  name: string;
-  toolPolicy?: ToolPolicy;
-}
-
 const activeSkillsStepMetadataKey = '__bureauActiveSkills';
-const activeSkillsStepMetadataVersion = 1;
+const activeSkillsStepMetadataVersion = 2;
 
-function activeSkillsStepMetadata(entries: ActiveSkillEntry[]): JSONValue {
+function activeSkillsStepMetadata(records: readonly SkillActivationRecord[]): JSONValue {
   return {
     version: activeSkillsStepMetadataVersion,
-    entries: entries as unknown as JSONValue,
+    entries: records as unknown as JSONValue,
   };
 }
 
 export function activeSkillsFromStepMetadata(
   metadata: StepRecord['metadata'],
-): ActiveSkillEntry[] | undefined {
+): SkillActivationRecord[] | undefined {
   const raw = metadata?.[activeSkillsStepMetadataKey];
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
   const snapshot = raw as Record<string, unknown>;
   if (snapshot['version'] !== activeSkillsStepMetadataVersion) return undefined;
   const entries = snapshot['entries'];
-  return isActiveSkillEntryArray(entries) ? entries : undefined;
+  return isSkillActivationRecordArray(entries) ? entries : undefined;
 }
 
 /**
- * Validate that a value is a valid {@link ActiveSkillEntry} array for deserialization
- * from session metadata.
+ * Validates a value read back out of session or step metadata as activation records.
+ *
+ * Every digest field is required, not optional. A record missing one would recover a skill by name
+ * with nothing to check the content against, which is the failure the records exist to prevent —
+ * so a malformed snapshot recovers nothing rather than recovering unverifiably.
  */
-export function isActiveSkillEntryArray(value: unknown): value is ActiveSkillEntry[] {
+export function isSkillActivationRecordArray(value: unknown): value is SkillActivationRecord[] {
   if (!Array.isArray(value)) return false;
   for (const item of value) {
     if (typeof item !== 'object' || item === null) return false;
     const candidate = item as Record<string, unknown>;
-    if (typeof candidate['name'] !== 'string') return false;
-    if (candidate['toolPolicy'] !== undefined) {
-      const policy = candidate['toolPolicy'];
-      if (typeof policy !== 'object' || policy === null) return false;
-      const p = policy as Record<string, unknown>;
-      if (p['allowList'] !== undefined && !Array.isArray(p['allowList'])) return false;
-      if (p['denyList'] !== undefined && !Array.isArray(p['denyList'])) return false;
+    for (const field of [
+      'name',
+      'sourceId',
+      'sourceKind',
+      'trust',
+      'artifactDigest',
+      'instructionsDigest',
+      'activatedAt',
+    ]) {
+      if (typeof candidate[field] !== 'string') return false;
     }
+    if (typeof candidate['catalogRevision'] !== 'number') return false;
+    if (!Array.isArray(candidate['requestedTools'])) return false;
+    if (candidate['requestedTools'].some((tool) => typeof tool !== 'string')) return false;
   }
   return true;
 }
 
+/**
+ * The session-metadata keys a step boundary writes.
+ *
+ * The same keys {@link createSkillRecordSnapshotHook} writes, deliberately: one snapshot
+ * mechanism, one set of keys, one thing for recovery to read. Two parallel snapshots is how a
+ * recovered run ends up restoring whichever of them the reader happened to know about.
+ */
 function activeSkillSessionMetadataForStep(
-  entries: ActiveSkillEntry[],
+  records: readonly SkillActivationRecord[],
   step: number,
   runId?: string,
 ): Record<string, JSONValue> {
   return {
-    lastActiveSkills: entries as unknown as JSONValue,
+    activeSkillRecords: records as unknown as JSONValue,
     ...(runId !== undefined
       ? {
-          lastActiveSkillsRunId: runId,
-          lastActiveSkillsStep: step,
+          activeSkillRecordsRunId: runId,
+          activeSkillRecordsStep: step,
         }
       : {}),
   };
@@ -1265,180 +1316,51 @@ export function recordedAgentStep(value: unknown): StepRecord | undefined {
 }
 
 /**
- * A thin wrapper over a {@link SkillSession} that also tracks the per-skill tool
- * policy passed to {@link SkillSession.activate}. The base `SkillSession` interface
- * only exposes skill names (via `getActiveSkills`) and the MERGED policy (via
- * `getActiveToolPolicy`); for durable recovery we need the per-skill policy so we
- * can reconstruct the exact pre-crash active-skill set.
- */
-interface TrackedSkillSession extends SkillSession {
-  /**
-   * Returns the current active skills as {@link ActiveSkillEntry} pairs, including
-   * each skill's individual tool policy. Safe to serialize to session metadata.
-   */
-  getActiveEntries(): ActiveSkillEntry[];
-}
-
-/**
- * Wrap a {@link SkillSession} with per-skill policy tracking. All other methods
- * delegate unchanged; `activate` and `deactivate` additionally maintain an
- * internal Map of `name → toolPolicy` so `getActiveEntries()` can return the
- * full snapshot needed for durable recovery.
- */
-function createTrackedSkillSession(): TrackedSkillSession {
-  const inner = createSkillSession();
-  const policyMap = new Map<string, ToolPolicy | undefined>();
-  const activate = inner.activate.bind(inner);
-  const deactivate = inner.deactivate.bind(inner);
-
-  return Object.assign(inner, {
-    activate(name, toolPolicy) {
-      policyMap.set(name, toolPolicy);
-      activate(name, toolPolicy);
-    },
-    deactivate(name) {
-      policyMap.delete(name);
-      deactivate(name);
-    },
-    getActiveEntries(): ActiveSkillEntry[] {
-      return inner.getActiveSkills().map((name) => {
-        const toolPolicy = policyMap.get(name);
-        return toolPolicy !== undefined ? { name, toolPolicy } : { name };
-      });
-    },
-  } satisfies Pick<TrackedSkillSession, 'activate' | 'deactivate' | 'getActiveEntries'>);
-}
-
-/**
  * Snapshot the active skill set to session metadata after each completed step.
  *
  * EFFECTFUL hook (seam #11): on a durable recovery the crashed in-flight step
  * re-runs from its boundary, so this hook can fire AGAIN for the same step. The
- * write is IDEMPOTENT — a re-fire for step N overwrites `lastActiveSkills` with the
+ * write is IDEMPOTENT — a re-fire for step N overwrites `activeSkillRecords` with the
  * same value (completed steps do not re-run their tool executions, so the active-skill
  * set is unchanged on replay). This is a state snapshot, NOT an append — the last
- * writer wins (matching the single-source-of-truth model for `lastActiveSkills`).
+ * writer wins (matching the single-source-of-truth model for `activeSkillRecords`).
  *
  * Replay classification: `effectful` (writes to external storage) but SAFE across
  * recovery re-fires because the payload is deterministic for a given step boundary
  * (completed steps replay identically, producing the same active-skill set).
  */
-function createSkillStateSnapshotHook(
-  trackedSession: TrackedSkillSession,
+/**
+ * Snapshots the catalog revision and every activation record after each step.
+ *
+ * The provider-backed snapshot carries a name and a tool policy. That is enough to re-activate
+ * something with the same name and nothing at all to prove it is the same skill — COR-752 named
+ * exactly this gap ("neither carries source, trust decision, digest, or admitted instructions").
+ * These records carry the source, the trust decision, the artifact digest and the instructions
+ * digest, which is what lets recovery refuse a skill whose content drifted rather than silently
+ * resurrecting different text under a reviewed name.
+ */
+function createSkillRecordSnapshotHook(
+  client: { activationRecords(): readonly SkillActivationRecord[] },
+  catalog: { revision: number; digest: string },
   sessionId: string,
   store: SessionStore,
   runId?: string,
 ): OnStepHook {
   return async (context) => {
-    const entries = trackedSession.getActiveEntries();
     try {
-      await store.updateMetadata(
-        sessionId,
-        activeSkillSessionMetadataForStep(entries, context.step, runId),
-      );
+      await store.updateMetadata(sessionId, {
+        activeSkillRecords: client.activationRecords() as unknown as JSONValue,
+        skillCatalogRevision: catalog.revision,
+        skillCatalogDigest: catalog.digest,
+        ...(runId === undefined
+          ? {}
+          : { activeSkillRecordsRunId: runId, activeSkillRecordsStep: context.step }),
+      });
     } catch {
-      // Non-fatal: if we can't snapshot the active skills, recovery falls back to
-      // an empty session (the pre-existing behavior). Don't propagate — a failed
-      // state snapshot must not abort the step.
+      // Non-fatal, same as the entry-based hook: a failed snapshot must not abort the step. The
+      // cost is that recovery starts from an empty active set, which is the safe direction.
     }
   };
-}
-
-function createSkillManagementToolbox(provider: SkillProvider, session: SkillSession): AnyToolbox {
-  return createToolbox([
-    createTool({
-      name: 'activate_skill',
-      description:
-        'Activate a skill by name. Returns the skill instructions and available resources.',
-      input: z.object({
-        name: z.string().describe('The skill name to activate'),
-      }),
-      async execute(params) {
-        if (session.isActive(params.name)) {
-          return { alreadyActive: true, name: params.name };
-        }
-
-        const enabled = await provider.isEnabled(params.name);
-        if (!enabled) {
-          return { error: 'Skill is disabled', name: params.name };
-        }
-
-        const skill = await provider.loadSkill(params.name);
-        if (!skill) {
-          return { error: 'Skill not found', name: params.name };
-        }
-
-        const resources = await provider.listResources(params.name);
-        session.activate(params.name, skill.metadata.toolPolicy);
-
-        const escapedName = escapeXml(params.name);
-        let xml = `<skill_content name="${escapedName}">\n${skill.body}`;
-
-        if (resources.length > 0) {
-          const resourceElements = resources
-            .map((path) => `  <file>${escapeXml(path)}</file>`)
-            .join('\n');
-          xml += `\n\nSkill resources:\n<skill_resources>\n${resourceElements}\n</skill_resources>`;
-        }
-
-        xml += '\n</skill_content>';
-        return xml;
-      },
-    }),
-    createTool({
-      name: 'load_skill_resource',
-      description: 'Load a resource file from an active skill.',
-      input: z.object({
-        skillName: z.string().describe('The skill name'),
-        path: z.string().describe('The resource path within the skill'),
-      }),
-      async execute(params) {
-        if (!session.isActive(params.skillName)) {
-          return { error: 'Skill is not active', skillName: params.skillName };
-        }
-
-        const content = await provider.loadResource(params.skillName, params.path);
-        if (content === undefined) {
-          return {
-            error: 'Resource not found',
-            skillName: params.skillName,
-            path: params.path,
-          };
-        }
-
-        return { content };
-      },
-    }),
-    createTool({
-      name: 'deactivate_skill',
-      description: 'Deactivate a skill and remove it from the active set.',
-      input: z.object({
-        name: z.string().describe('The skill name to deactivate'),
-      }),
-      execute(params) {
-        const deactivated = session.isActive(params.name);
-        if (deactivated) {
-          session.deactivate(params.name);
-        }
-
-        return Promise.resolve({ deactivated, name: params.name });
-      },
-    }),
-    createTool({
-      name: 'list_skills',
-      description: 'List available skills and whether they are active.',
-      input: z.object({}),
-      async execute() {
-        const entries = await provider.listSkills();
-        return {
-          skills: entries.map((entry: SkillCatalogEntry) => ({
-            ...entry,
-            active: session.isActive(entry.name),
-          })),
-        };
-      },
-    }),
-  ]);
 }
 
 function createUnavailableToolbox(): BureauToolbox {
@@ -1470,16 +1392,21 @@ function createUnavailableToolbox(): BureauToolbox {
 export interface DurableComposition {
   engine: RegistryAgnosticEngine;
   checkpointStore: CheckpointStore;
-  observability?: RunEngineObservability;
+  observability?: RunEngineObservability | undefined;
 }
 
 /**
- * The two fire-terminal events a scheduled fire's AgentRun can dispatch onto
- * {@link RuntimeComposition.scheduleFireEvents} (AB-223).
+ * The schedule-fire events dispatched onto
+ * {@link RuntimeComposition.scheduleFireEvents}: the two fire-terminal
+ * outcomes (AB-223) and the two per-tick observation signals (COR-660) that
+ * report an occurrence the overlap policy attempted and, when it collided,
+ * dropped.
  */
 export interface ScheduleFireEventMap extends EventMap {
   [ScheduleCompletedEvent.type]: ScheduleCompletedEvent;
   [ScheduleFailedEvent.type]: ScheduleFailedEvent;
+  [ScheduleAttemptedEvent.type]: ScheduleAttemptedEvent;
+  [ScheduleSkippedEvent.type]: ScheduleSkippedEvent;
 }
 
 export interface RuntimeComposition {
@@ -1508,6 +1435,14 @@ export interface RuntimeComposition {
    */
   scheduleFireEvents: TypedEventTarget<ScheduleFireEventMap>;
   /**
+   * Skill lifecycle events (COR-767), dispatched by the `@lostgradient/skills`
+   * tool factories each run's toolbox is built from. One bureau-level target
+   * rather than one per run, matching `scheduleFireEvents`: each event carries
+   * its own `runId`/`sessionId` correlation, so a shared target loses nothing
+   * and `createBureau` forwards from exactly one place.
+   */
+  skillEvents: TypedEventTarget<SkillEventMap>;
+  /**
    * Run ids the durable engine flagged, during boot recovery, as resuming
    * under a DIFFERENT workflow version than the one they were checkpointed
    * with (AB-10 — workflow versioning for in-flight durable runs). Populated
@@ -1533,6 +1468,22 @@ export interface RuntimeComposition {
    * resolve a backend and do not own its lifecycle).
    */
   disposeStorage: (() => void) | undefined;
+  /**
+   * The resolved durable `Storage` backend itself, when one exists.
+   *
+   * Distinct from `kv`, which is a `ConditionalTextValueStore` *view* over
+   * this same backend: a `Mailbox` needs the raw `Storage` because it
+   * commits its own state transitions through `conditionalBatch`, which
+   * the text-value view does not expose. Distinct from `disposeStorage`,
+   * which closes the handle without lending it out.
+   *
+   * `undefined` when no persistent backend resolved — the caller is then
+   * genuinely non-durable and must not pretend otherwise.
+   *
+   * Lifecycle stays with this composition: a borrower uses the handle and
+   * never disposes it, because `disposeStorage` above is what owns that.
+   */
+  durableStorage: Storage | undefined;
   memory: Memory | undefined;
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
@@ -1612,17 +1563,31 @@ export interface RuntimeComposition {
     request: CreateRunRequest & { sessionId: string; runId?: string },
     options?: {
       liveStreaming?: boolean;
-      /** Active-skill entries to pre-seed the run's SkillSession for durable recovery. */
-      initialActiveSkills?: ReadonlyArray<ActiveSkillEntry>;
+      /**
+       * The pre-crash active set, as provenance-carrying activation records.
+       *
+       * Recovery re-validates these against the live catalog and re-checks each digest, so a skill
+       * whose source was revoked or whose content drifted while the run was away does not come
+       * back under a name somebody once reviewed.
+       */
+      initialActiveSkillRecords?: ReadonlyArray<SkillActivationRecord> | undefined;
     },
   ): Promise<{
     generate: GenerateFunction;
     toolbox: AnyToolbox;
-    prepareStep: PrepareStepHook[];
-    onStep: OnStepHook[];
-    validateResponse: ValidateResponseHook[];
+    /**
+     * The run's hook plan (COR-567). Bureau's own hooks were seven pushes into
+     * three legacy arrays until this became a registry; they are registered
+     * here, under stable ids, in the order those arrays ran.
+     *
+     * A registry rather than arrays because `RunOptions.hooks` is the only
+     * hook surface that carries registration identity, priority and plan
+     * observation — and bureau composing one is what makes those real for a
+     * production run instead of a capability nothing reaches.
+     */
+    hooks: HookRegistry<OperativeHookMap>;
     streamEventTarget: TypedEventTarget<StreamEventMap> | undefined;
-    getActiveSkillEntries: () => ActiveSkillEntry[];
+    getActiveSkillRecords: () => readonly SkillActivationRecord[];
   }>;
   /**
    * AB-260 — folded onto this interface directly rather than reached through
@@ -1659,7 +1624,15 @@ export interface RuntimeComposition {
     session: Awaited<ReturnType<SessionStore['load']>> | undefined,
     runId: string,
     recovering: boolean,
-  ): Promise<ActiveSkillEntry[] | undefined>;
+  ): Promise<SkillActivationRecord[] | undefined>;
+  /**
+   * COR-1265 criterion 3b — a fresh registry holding only the Bureau invariants
+   * that close over nothing run-specific, for a dispatch path that resolves its
+   * run options through a catalog agent rather than through
+   * {@link RuntimeComposition.createRunRuntime}. Merged as the first tier so
+   * Bureau's policy still applies to those runs.
+   */
+  createBureauInvariantHooks(): HookRegistry<OperativeHookMap>;
 }
 
 /**
@@ -1670,6 +1643,134 @@ export interface RuntimeComposition {
  * `createRuntimeComposition({...})` calls in this package's own test suite)
  * keeps working unchanged; it is not part of this function's contract.
  */
+/**
+ * Priority pinning a Bureau registration behind every other tier's entries on
+ * the same hook point (COR-1265, criteria 9 and 10).
+ *
+ * Two dispatch shapes let a later handler decide the outcome: `runLast`
+ * returns the last defined result, and the waterfall feeds each handler the
+ * previous one's return value. On both, "runs last" means "wins", so a Bureau
+ * registration that narrows — today `bureau:guardrails-validate-response` — has
+ * to sort behind whatever an agent or a direct caller registered. The trailing
+ * `onStep` hooks take the same value for the ordering reason rather than the
+ * authority one: they persist the session once the step's mutations settle, and
+ * an agent-tier `onStep` handler is one of those mutations.
+ *
+ * The tier band works against Bureau here. `mergeHookRegistries` offsets each
+ * participant by `(participants - 1 - index) * 1000` and Bureau is always the
+ * first participant, so it receives the LARGEST offset — `+2000` with the three
+ * tiers a composition can reach. The constant sits that far above
+ * `Number.MIN_SAFE_INTEGER` so adding the offset back cannot leave the
+ * safe-integer range, and so a merged Bureau entry still lands below anything
+ * registered at a priority a caller would plausibly write.
+ *
+ * The residual, stated rather than implied: a lower tier that deliberately
+ * registers at or below `Number.MIN_SAFE_INTEGER + 2000` sorts after this
+ * anyway. No finite constant closes that, because a priority is a plain number
+ * with no floor, and `-Infinity` closes it only until a second entry carries it
+ * — the registry's `b.priority - a.priority` comparator would then return
+ * `NaN`. A tier deliberately reaching for the bottom of the number line is not
+ * the threat this is defending against; an ordinary registration that happens
+ * to outrank Bureau is.
+ */
+const BUREAU_PINNED_LAST_PRIORITY = Number.MIN_SAFE_INTEGER + 2000;
+
+/**
+ * The ownership tier every registration Bureau makes belongs to (COR-1265) —
+ * set once on a registry, stamped by `on()` onto each entry so it survives
+ * `mergeHookRegistries`.
+ */
+export const BUREAU_HOOK_TIER = 'bureau';
+
+/**
+ * Registers the identity invariant. Shared by the per-run composition and by
+ * {@link RuntimeComposition.createBureauInvariantHooks}, which is the whole
+ * reason it is a function: the two register at different points in their own
+ * registries and must not drift into two different registrations.
+ */
+function registerIdentityInvariant(
+  registry: HookRegistry<OperativeHookMap>,
+  identity: NonNullable<RuntimeCompositionOptions['identity']>,
+): void {
+  registry.on('prepareStep', createIdentityHook(identity), {
+    id: 'bureau:identity',
+    // Appends a system message to the step's conversation and touches nothing
+    // outside it; a replayed step rebuilds that conversation from persisted
+    // history, so re-running this reproduces state rather than repeating an
+    // external effect.
+    replay: 'safe',
+  });
+}
+
+/**
+ * Registers both guardrail invariants, in the order the legacy arrays ran them.
+ *
+ * The caller decides WHEN — the per-run composition registers `prepareStep`
+ * last of all its `prepareStep` hooks on purpose, so the input guardrail scans a
+ * step context every earlier hook has already contributed to.
+ */
+function registerGuardrailInvariants(
+  registry: HookRegistry<OperativeHookMap>,
+  guardrails: GuardrailHooks,
+): void {
+  registry.on('prepareStep', guardrails.prepareStep, {
+    id: 'bureau:guardrails-prepare-step',
+    // Scans and may taint in-process session state; no external write.
+    replay: 'safe',
+  });
+  registry.on('validateResponse', guardrails.validateResponse, {
+    id: 'bureau:guardrails-validate-response',
+    // COR-1265 criterion 10. `validateResponse` is dispatched as a waterfall,
+    // so the LAST handler to answer hands its response to the run — an agent-
+    // or direct-tier handler running after this one would decide what the
+    // guardrail's narrowing was worth. Pinned last so it does not.
+    priority: BUREAU_PINNED_LAST_PRIORITY,
+    replay: 'safe',
+  });
+}
+
+/**
+ * Priority placing a hook after every hook bureau's own composition registered.
+ *
+ * The same value as {@link BUREAU_PINNED_LAST_PRIORITY}, and deliberately not a
+ * separate band: COR-1265's criterion 9 makes the two trailing hooks outrank
+ * every tier's `onStep` handlers, not merely Bureau's own, and a value chosen
+ * relative to Bureau's default `0` could not do that once a second tier exists.
+ */
+const TRAILING_HOOK_PRIORITY = BUREAU_PINNED_LAST_PRIORITY;
+
+/**
+ * Registers a per-call `onStep` hook that must run AFTER the run runtime's own
+ * — the session write-back on a scheduled fire, the pending-approval persist on
+ * an interactive run. Both were array spreads (`[...runRuntime.onStep, extra]`)
+ * whose ordering came from their position in the literal; the priority states
+ * it instead, so it survives the hook moving.
+ *
+ * This mutates the run's registry and returns it, rather than merging into a
+ * fresh one, because the registry is created per run inside `createRunRuntime`
+ * and the caller here owns that run outright.
+ *
+ * COR-1265: every caller now merges the result before handing it to a run, so
+ * the completed Bureau tier is what becomes `mergeHookRegistries`' first
+ * argument. That ordering is the point — registering here AFTER the merge would
+ * put the trailing hook in the merged registry at its raw priority while every
+ * other Bureau entry had already been offset, which is precisely the renumbering
+ * this function used to avoid by refusing to merge at all.
+ */
+export function registerTrailingOnStep(
+  hooks: HookRegistry<OperativeHookMap>,
+  id: string,
+  handler: OnStepHook,
+): HookRegistry<OperativeHookMap> {
+  hooks.on('onStep', handler, {
+    id,
+    priority: TRAILING_HOOK_PRIORITY,
+    // Writes a session record.
+    replay: 'effectful',
+  });
+  return hooks;
+}
+
 export type RuntimeCompositionOptions = Omit<BureauOptions, 'agents'>;
 
 export async function createRuntimeComposition(
@@ -1738,6 +1839,7 @@ export async function createRuntimeComposition(
   // state.
   const catalogRunRecoveryCache = new Map<string, CatalogRunRecoveryRecord>();
   const scheduleFireEvents = new TypedEventTarget<ScheduleFireEventMap>();
+  const skillEvents = new TypedEventTarget<SkillEventMap>();
 
   // Resolve the `persistence` option into its components. The three forms are:
   // - PersistenceOptions { store, history?, observability?, onLog? }
@@ -1841,7 +1943,7 @@ export async function createRuntimeComposition(
       checkpointStore,
       recover: false,
       backgroundTasks: options.durableBackgroundTasks ?? 'automatic',
-      startScheduler: options.durableBackgroundTasks === 'manual' ? false : true,
+      startScheduler: options.durableBackgroundTasks !== 'manual',
       resolveWorkflowServices: resolveRunServices,
       ...(effectiveObservability !== undefined ? { observability: effectiveObservability } : {}),
       ...(effectiveOnLog ? { onLog: effectiveOnLog } : {}),
@@ -1917,6 +2019,31 @@ export async function createRuntimeComposition(
     durable.engine.addEventListener(WorkflowCancelledEvent.type, (event) => {
       scheduledFireScheduleIds.delete(event.workflowId);
     });
+
+    // COR-660: the tick observation point Weft's COR-105 exposes. Unlike the
+    // terminal pair above, these arrive already keyed by scheduleId, so there
+    // is no `scheduledFireScheduleIds` correlation to do and nothing to
+    // filter: every schedule on this engine is one the bureau created
+    // (`createSchedule`, `createAgentScheduler`, or a durable heartbeat), the
+    // engine being bureau-owned. A tick that collides emits `attempted` then
+    // `skipped`; a tick that launches emits `attempted` and later one of the
+    // terminal pair.
+    durable.engine.addEventListener('schedule:attempted', (event) => {
+      scheduleFireEvents.dispatch(new ScheduleAttemptedEvent(event.scheduleId, event.occurrence));
+    });
+    durable.engine.addEventListener('schedule:skipped', (event) => {
+      scheduleFireEvents.dispatch(
+        new ScheduleSkippedEvent(
+          event.scheduleId,
+          event.policy,
+          event.occurrence,
+          // A scheduled fire's Weft workflow id IS its AgentRun id — the same
+          // identity `ScheduleFailedEvent`/`ScheduleCompletedEvent` carry as
+          // `runId` from `event.workflowId`.
+          event.blockingWorkflowId,
+        ),
+      );
+    });
   }
 
   let memory: Memory | undefined;
@@ -1925,19 +2052,36 @@ export async function createRuntimeComposition(
     await memory.init();
   }
 
-  // Resolve the SkillProvider from the bureau's persistence store when no
-  // explicit provider is supplied — same store-sharing pattern as memory.
-  // `createStorageSkillProvider` wraps the KV view with the `skill:` prefix
-  // namespace (disjoint from Weft's reserved prefixes and memory's
-  // `app:agent-bureau:memory:v1:` prefix — asserted disjoint by test).
+  // A run's skills come from a catalog revision, and only from one. COR-892 removed Bureau's
+  // second path — a provider it read skills out of directly — because a skill admitted that way
+  // had no trust decision, no artifact digest and no compatibility verdict, so a run holding one
+  // could not say where it came from.
   //
-  // The resolved provider is typed as `SkillsPackageProvider` (the full skills
-  // package interface with `saveResource`/`setEnabled`) so it is accepted by
-  // `createSkillCatalogHook`, which expects the full interface. The bureau's
-  // local `SkillProvider` type is a structural subset and is compatible.
-  const resolvedSkillProvider: SkillsPackageProvider | undefined =
-    (options.skills?.provider as SkillsPackageProvider | undefined) ??
-    (options.skills !== undefined && kv !== undefined ? createStorageSkillProvider(kv) : undefined);
+  // A caller that has already discovered a revision hands it in, which is the host's job under
+  // COR-752's Decision 1: discovery reads approved filesystem roots and remote URLs, and deciding
+  // which of those to trust is not Bureau's call to make. A caller that has only configured
+  // persistence gets the skills its own store holds, discovered here through the `storage` source.
+  // That is the one source Bureau can compose without deciding anything on the host's behalf: the
+  // store is already the bureau's, and what is in it is what this runtime itself put there.
+  const skillCatalog: SkillCatalogRevision | undefined =
+    options.skills === undefined
+      ? undefined
+      : (options.skills.catalog ??
+        (kv === undefined
+          ? undefined
+          : await discoverSkills({
+              sources: [
+                {
+                  id: 'storage',
+                  kind: 'storage',
+                  // Not a filesystem path and deliberately not credential-bearing: a catalog entry
+                  // exposes this verbatim.
+                  location: 'kv://skills',
+                  precedence: DEFAULT_SOURCE_PRECEDENCE.storage,
+                },
+              ],
+              storage: kv,
+            })));
 
   // AB-384 (Codex P2 review finding, PR #592, "Mint incarnations from the
   // Bureau's injected runtime"): `runtimeServices` (resolved above from
@@ -2083,6 +2227,64 @@ export async function createRuntimeComposition(
     scheduler.start();
   }
 
+  /**
+   * The guardrail configuration in force for this composition, with `false`
+   * narrowed away so a caller sees a real configuration or nothing.
+   *
+   * AB-40 — `undefined` (not configured) wires the enabled-by-default preset;
+   * `false` opts out entirely; anything else replaces the preset. A pure
+   * function of `options`, hoisted to composition scope because
+   * {@link createBureauInvariantHooks} needs the same answer for a run that
+   * never goes through `createRunRuntime` at all.
+   */
+  function resolveGuardrailsConfiguration(): GuardrailsOptions | undefined {
+    const resolved =
+      options.guardrails === undefined ? defaultGuardrailsPreset() : options.guardrails;
+    return resolved === false ? undefined : resolved;
+  }
+
+  /**
+   * The Bureau invariants that do not close over a run (COR-1265 criterion 3b,
+   * owner ruling 2026-09-20).
+   *
+   * A catalog-dispatched run resolves its provider, toolbox, memory and skills
+   * through the catalog agent's OWN `OPERATIVE_RESOLVE_RUN_OPTIONS`, never
+   * through `createRunRuntime` — that separation is AB-240's point and its
+   * rollback trigger. Bureau's hooks were absent from those runs entirely, which
+   * was survivable only while no tier reached them at all; once the agent tier
+   * became real, a catalog run would carry its agent's hooks and none of
+   * Bureau's policy, which contradicts COR-567's non-bypassable invariants.
+   *
+   * The whole Bureau tier cannot travel there. `bureau:memory-recall`,
+   * `bureau:memory-persist`, the skill hooks and `bureau:skill-record-snapshot`
+   * close over this run's session, memory and skill session, and a catalog run
+   * has none of them. The three that close over composition-level configuration
+   * only — the identity prompt and both guardrails — do, and they are exactly
+   * the registrations COR-567's "non-bypassable Bureau invariant hooks" section
+   * names.
+   *
+   * A fresh registry, and a fresh `createGuardrails`, per call: the guardrail
+   * carries per-run taint state, so sharing one across catalog runs would leak
+   * one run's detections into another.
+   *
+   * This does not reach every catalog path. A non-durable dispatch of a catalog
+   * agent that exposes no `OPERATIVE_RESOLVE_RUN_OPTIONS` goes straight to
+   * `agent.run()` with no `RunOptions` for anyone to augment; there is no seam
+   * short of a caller-facing hook field, which COR-567 Decision 4 declines. See
+   * `documentation/hierarchical-hook-composition.md`.
+   */
+  function createBureauInvariantHooks(): HookRegistry<OperativeHookMap> {
+    const invariants = new HookRegistry<OperativeHookMap>({ source: BUREAU_HOOK_TIER });
+    if (options.identity) {
+      registerIdentityInvariant(invariants, options.identity);
+    }
+    const guardrailsConfig = resolveGuardrailsConfiguration();
+    if (guardrailsConfig) {
+      registerGuardrailInvariants(invariants, createGuardrails(guardrailsConfig));
+    }
+    return invariants;
+  }
+
   function createRunRuntime(
     request: CreateRunRequest & { sessionId: string; runId?: string },
     runtimeOptions?: {
@@ -2091,11 +2293,19 @@ export async function createRuntimeComposition(
        * Active-skill entries to seed the run's {@link SkillSession} with on
        * construction. Used by the durable recovery path: when
        * `buildRunDepsFromSession` rebuilds deps for a recovered run, it reads the
-       * `lastActiveSkills` snapshot from session metadata and passes it here so the
+       * `activeSkillRecords` snapshot from session metadata and passes it here so the
        * recovered toolbox is aware of skills activated in completed pre-crash steps
        * (those steps are memoized and do not re-run their `activate_skill` calls).
        */
-      initialActiveSkills?: ReadonlyArray<ActiveSkillEntry>;
+
+      /**
+       * Provenance-carrying records for the catalog-backed path.
+       *
+       * Recovery
+       * re-validates these against the live catalog and re-checks each digest, so a skill whose
+       * source was revoked or whose content drifted does not come back.
+       */
+      initialActiveSkillRecords?: ReadonlyArray<SkillActivationRecord> | undefined;
     },
   ) {
     const liveStreaming = runtimeOptions?.liveStreaming ?? true;
@@ -2151,98 +2361,226 @@ export async function createRuntimeComposition(
         : hasSkillTools
           ? fallbackToolbox.extend()
           : createUnavailableToolbox();
-    const prepareStep: PrepareStepHook[] = [];
-    const onStep: OnStepHook[] = [];
-    const validateResponse: ValidateResponseHook[] = [];
-    let getActiveSkillEntries = (): ActiveSkillEntry[] => [];
+    // COR-567 — one registry per run. Per-run rather than per-composition
+    // because these hooks close over this run's session, memory and skill
+    // session; a registry shared across runs would leak one run's state into
+    // another exactly the way the per-run toolbox clone above exists to
+    // prevent.
+    //
+    // Registration order is the order the legacy arrays ran in, and every id
+    // below is explicit: a generated `<hookName>#<n>` would renumber whenever
+    // an earlier conditional block stops registering, so an observer
+    // correlating across runs would see the same hook under different names
+    // depending on whether memory or skills happened to be configured.
+    // COR-1265 — `source` names the owning tier once, and `on()` stamps it onto
+    // every entry. On the entry rather than only here because a merged plan has
+    // one registry and many tiers: afterwards this object can no longer say
+    // where an entry came from, but the entry still can.
+    const hooks = new HookRegistry<OperativeHookMap>({ source: BUREAU_HOOK_TIER });
+    let getActiveSkillRecords = (): readonly SkillActivationRecord[] => [];
+    let getActiveSkillToolPolicy: (() => ToolPolicy | undefined) | undefined;
 
     if (options.identity) {
-      prepareStep.push(createIdentityHook(options.identity));
+      registerIdentityInvariant(hooks, options.identity);
     }
 
     if (memory) {
-      prepareStep.push(createMemoryRecallHook(memory, request.sessionId));
-      onStep.push(createMemoryPersistHook(memory, request.sessionId, request.runId));
+      hooks.on('prepareStep', createMemoryRecallHook(memory, request.sessionId), {
+        id: 'bureau:memory-recall',
+        // Reads memory and injects the result; no external write.
+        replay: 'safe',
+      });
+      hooks.on('onStep', createMemoryPersistHook(memory, request.sessionId, request.runId), {
+        id: 'bureau:memory-persist',
+        // Writes to the memory store, so a replayed step writes again. The
+        // classification records that at-least-once contract; it does not
+        // suppress the second write, which would drop the persistence for a
+        // step whose generation genuinely re-ran.
+        replay: 'effectful',
+      });
     }
 
-    if (options.skills && resolvedSkillProvider) {
-      // Use a policy-tracking session so getActiveEntries() can reconstruct the
-      // per-skill policy for the durable snapshot hook (see createTrackedSkillSession).
-      const skillSession = createTrackedSkillSession();
+    // COR-1226 — resolved here rather than at the hook-registration site below,
+    // because the skill toolbox needs the same detectors and the same session
+    // taint tracker, and it is constructed before that point. `createGuardrails`
+    // is a pure function of its options, so calling it earlier changes nothing
+    // about what it returns.
+    const guardrailsConfig = resolveGuardrailsConfiguration();
+    const guardrails = guardrailsConfig ? createGuardrails(guardrailsConfig) : undefined;
 
-      // Seed active skills from a prior checkpoint on durable recovery. Completed
-      // pre-crash steps are memoized by Weft and do not re-run their tool
-      // executions, so a fresh empty session would miss any `activate_skill` calls
-      // made in those steps. `initialActiveSkills` carries the last-known snapshot
-      // (written by createSkillStateSnapshotHook after each step) so the recovered
-      // toolbox reflects the pre-crash active set without replaying the tools.
-      // Replay classification: seam #11 — safe (read-only rehydration from
-      // persisted state; no external side effect on the skill provider).
-      if (runtimeOptions?.initialActiveSkills) {
-        for (const entry of runtimeOptions.initialActiveSkills) {
-          skillSession.activate(entry.name, entry.toolPolicy);
-        }
+    // COR-1226 — skill bodies and skill resources are untrusted instruction
+    // input and must pass the same detector pipeline as anything else entering
+    // context. `GuardrailHooks.taint`'s own doc comment names skill resources
+    // as one of the retrieval surfaces that cannot reach the model through
+    // `prepareStep`/`validateResponse` and so must scan directly and fold its
+    // detections back into the session-wide taint state. The taint wiring below
+    // mirrors `create-guardrails.ts`'s own input-guardrail wiring, including its
+    // confidence threshold check.
+    const skillGuardrail: SkillGuardrailOptions | undefined =
+      guardrails && guardrailsConfig?.input
+        ? {
+            detectors: guardrailsConfig.input.detectors,
+            ...(guardrailsConfig.input.action !== undefined
+              ? { action: guardrailsConfig.input.action === 'warn' ? 'warn' : 'block' }
+              : {}),
+            getSessionTainted: () => guardrails.taint.isTainted(),
+            onTriggered: (event) => {
+              if (event.confidence >= (guardrailsConfig.taint?.taintThreshold ?? 0.8)) {
+                guardrails.taint.taint({
+                  reason: event.detail ?? `Detection by ${event.detector}`,
+                  detector: event.detector,
+                  confidence: event.confidence,
+                  step: 0,
+                  provenance: event.provenance,
+                });
+              }
+              guardrailsConfig.input?.onTriggered?.(event);
+            },
+          }
+        : undefined;
+
+    let skillRecovery: Promise<unknown> | undefined;
+    if (options.skills && skillCatalog !== undefined) {
+      // COR-892 — the catalog-backed path. Bureau composes policy and durability *around*
+      // Agent-owned behaviour rather than reimplementing it: discovery, trust admission,
+      // digest-verified activation and the active set all live in `@lostgradient/skills`, and what
+      // Bureau adds here is the run and session correlation the client cannot see, plus durable
+      // persistence of what the client decided.
+      const skillClient = createSkillClient({
+        catalog: skillCatalog,
+        // Routed by source kind rather than fixed to the filesystem: a catalog can mix a host's
+        // filesystem roots with the bureau's own store, and a `storage` record's `sourceLocation`
+        // is a store namespace that no filesystem read can follow.
+        loadArtifact: createSkillArtifactLoader(kv === undefined ? {} : { storage: kv }),
+        // COR-1226's scan, carried onto the client path. Migrating without it would have created
+        // the guardrail bypass COR-892 names: skill bodies are untrusted instruction input and
+        // pass the same detector pipeline as anything else entering context.
+        ...(skillGuardrail === undefined ? {} : { guardrail: skillGuardrail }),
+        ...(skillEvents === undefined ? {} : { events: skillEvents }),
+        correlation: {
+          ...(request.runId === undefined ? {} : { runId: request.runId }),
+          sessionId: request.sessionId,
+          ...(request.agentName === undefined ? {} : { agentName: request.agentName }),
+        },
+      });
+
+      // Recovery before anything else reads the active set: a resumed run must re-validate every
+      // stored record against the live catalog and re-check its digest, so a skill whose source
+      // was revoked or whose content drifted while the run was away does not come back.
+      const recoverable = runtimeOptions?.initialActiveSkillRecords;
+      if (recoverable !== undefined && recoverable.length > 0) {
+        // Detached deliberately: composition is synchronous, and recovery re-reads bundles. The
+        // first step's `prepareStep` awaits the same promise below, so nothing reads a half-filled
+        // active set.
+        skillRecovery = skillClient.recover(recoverable);
       }
-      getActiveSkillEntries = () => skillSession.getActiveEntries();
+
+      // The records verbatim, not a name-and-policy projection of them. The projection was what
+      // the provider-backed snapshot could carry; narrowing to it here would throw away the
+      // provenance every reader of this snapshot now depends on.
+      getActiveSkillRecords = () => skillClient.activationRecords();
+      getActiveSkillToolPolicy = () => {
+        const narrowed = skillClient.narrowedTools();
+        return narrowed === undefined ? undefined : { allowList: [...narrowed] };
+      };
 
       if (options.skills.includeTools !== false) {
-        // Inject the skill catalog on step 0 — same hook pattern as identity.
-        // `createSkillCatalogHook` from the `skills` package handles enabled-status
-        // filtering, skill policy (allow/deny list), and graceful degradation on
-        // provider errors. The hook caches the catalog for the run (one fetch per run).
-        //
-        // The catalog is gated on `includeTools !== false` because its text directs
-        // the model to call `activate_skill`. When tools are disabled, that tool is
-        // not wired and a model following the catalog instruction would call an
-        // unavailable tool and fail. All three skill-tool surfaces (toolbox, tool
-        // summaries, and catalog) must be consistently absent when tools are off.
-        // (PRRT_kwDORvupsc6MZ-vj)
-        const catalogHook = createSkillCatalogHook({
-          provider: resolvedSkillProvider,
-          skillPolicy: options.skills.skillPolicy,
-        });
-        prepareStep.push(async (context) => {
-          const catalog = await catalogHook.prepareStep(context);
-          if (catalog) {
-            context.conversation.appendSystemMessage(catalog, {
-              _skillCatalogInjected: true,
-            });
-          }
-        });
+        const skillToolset = createSkillClientToolbox(
+          skillClient,
+          skillGuardrail === undefined ? undefined : { guardrail: skillGuardrail },
+        );
+        // `undefined` when the admitted catalog is empty, so no skill tool is exposed at all —
+        // a model handed `activate_skill` against an empty catalog invents a name to pass it.
+        if (skillToolset !== undefined) {
+          hooks.on(
+            'prepareStep',
+            (context) => {
+              if (context.step !== 0) return Promise.resolve();
+              const rendered = renderClientCatalog(skillClient);
+              if (rendered !== undefined) {
+                context.conversation.appendSystemMessage(rendered, {
+                  _skillCatalogInjected: true,
+                });
+              }
+              return Promise.resolve();
+            },
+            {
+              id: 'bureau:skill-client-catalog',
+              // Reads the client's frozen catalog revision and appends to the
+              // step's conversation; nothing outside it is touched.
+              replay: 'safe',
+            },
+          );
 
-        const skillToolbox = createSkillManagementToolbox(resolvedSkillProvider, skillSession);
-        toolbox = combineToolboxes(toolbox, skillToolbox);
+          toolbox = combineToolboxes(
+            toolbox,
+            createToolbox([
+              skillToolset.activateSkill,
+              skillToolset.loadSkillResource,
+              skillToolset.deactivateSkill,
+            ]) as AnyToolbox,
+          );
+        }
       }
 
-      // Snapshot the active skill set to session metadata after each step.
-      // Present only when a session store is configured (durable / KV-backed path).
-      // This is what allows buildRunDepsFromSession to rehydrate the skill set on
-      // a cross-process recovery (see resolveRunServices → buildRunDepsFromSession).
+      // Active instructions are re-rendered every step rather than left in the transcript, which
+      // is what makes them survive a compaction strategy that rewrote the whole history.
+      hooks.on(
+        'prepareStep',
+        async (context) => {
+          // Recovery settles before the first step reads the active set, so nothing renders a
+          // half-filled one.
+          if (skillRecovery !== undefined) await skillRecovery;
+          const instructions = renderActiveSkillInstructions(skillClient.active());
+          if (instructions !== undefined) {
+            context.conversation.appendSystemMessage(instructions, { _skillContentInjected: true });
+          }
+        },
+        {
+          id: 'bureau:skill-client-instructions',
+          // Renders the active set into the step's conversation. Re-rendering on
+          // a replayed step is the point — see the comment above — and reaches
+          // nothing outside that conversation.
+          replay: 'safe',
+        },
+      );
+
       if (sessionStore) {
-        onStep.push(
-          createSkillStateSnapshotHook(
-            skillSession,
+        hooks.on(
+          'onStep',
+          createSkillRecordSnapshotHook(
+            skillClient,
+            skillCatalog,
             request.sessionId,
             sessionStore,
             request.runId,
           ),
+          {
+            id: 'bureau:skill-record-snapshot',
+            // Writes the activation records to the session store.
+            replay: 'effectful',
+          },
         );
       }
     }
 
     // AB-40 — `undefined` (not configured) wires the enabled-by-default
     // preset; `false` opts out entirely; anything else replaces the preset.
-    const guardrailsConfig = usingDefaultGuardrailsPreset
-      ? defaultGuardrailsPreset()
-      : options.guardrails;
-    if (guardrailsConfig) {
-      const guardrails = createGuardrails(guardrailsConfig);
-      prepareStep.push(guardrails.prepareStep);
-      validateResponse.push(guardrails.validateResponse);
+    if (guardrails) {
+      // Registered last on `prepareStep`, as the array push order had it, so
+      // the input guardrail scans a step context every earlier hook has
+      // already contributed to rather than one they then append to.
+      registerGuardrailInvariants(hooks, guardrails);
     }
 
     const runToolbox = withDefaultToolboxRequestContext(
-      toolbox,
+      // COR-1228 — narrow by active-skill policy first, then apply the request
+      // context. Order matters only for readability here: both are proxies and
+      // neither observes the other, but filtering nearest the toolbox keeps the
+      // request-context wrapper the outermost thing a caller sees.
+      getActiveSkillToolPolicy
+        ? withActiveSkillToolPolicy(toolbox, getActiveSkillToolPolicy)
+        : toolbox,
       requestContext,
       () => requestAuthorityValidator,
       runtimeServices,
@@ -2250,11 +2588,9 @@ export async function createRuntimeComposition(
     return Promise.resolve({
       generate,
       toolbox: runToolbox,
-      prepareStep,
-      onStep,
-      validateResponse,
+      hooks,
       streamEventTarget,
-      getActiveSkillEntries,
+      getActiveSkillRecords,
     });
   }
 
@@ -2296,11 +2632,11 @@ export async function createRuntimeComposition(
     // recovered toolbox is aware of skills activated in completed pre-crash steps.
     // Completed steps are memoized by Weft and do not re-run their tool executions,
     // so a fresh SkillSession would be unaware of any `activate_skill` calls made
-    // before the crash. `lastActiveSkills` is written by createSkillStateSnapshotHook
-    // after each step boundary and is validated here before use (PRRT_kwDORvupsc6MZ1Md).
-    const lastActiveSkillsRaw = session.metadata['lastActiveSkills'];
-    const initialActiveSkills = isActiveSkillEntryArray(lastActiveSkillsRaw)
-      ? lastActiveSkillsRaw
+    // before the crash. `activeSkillRecords` is written by createSkillRecordSnapshotHook after
+    // each step boundary and is validated here before use (PRRT_kwDORvupsc6MZ1Md).
+    const activeSkillRecordsRaw = session.metadata['activeSkillRecords'];
+    const initialActiveSkillRecords = isSkillActivationRecordArray(activeSkillRecordsRaw)
+      ? activeSkillRecordsRaw
       : undefined;
     const requestContext = recoveredRequestContext(
       session.metadata,
@@ -2320,7 +2656,7 @@ export async function createRuntimeComposition(
         ...(agentName !== undefined ? { agentName } : {}),
         ...(requestContext ? { requestContext } : {}),
       },
-      { liveStreaming: false, initialActiveSkills },
+      { liveStreaming: false, initialActiveSkillRecords },
     );
 
     // AB-336: wire `requestHumanInput`/`scheduleWakeup` in on the RECOVERY
@@ -2367,7 +2703,7 @@ export async function createRuntimeComposition(
     const services: DurableRunDeps = {
       toolbox: runToolbox,
       getStepMetadata: () => ({
-        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillEntries()),
+        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillRecords()),
       }),
       options: {
         generate: runRuntime.generate,
@@ -2375,9 +2711,13 @@ export async function createRuntimeComposition(
         conversation: new Conversation(session.conversationHistory),
         maximumSteps: recoveredMaximumSteps,
         stopWhen: options.stopWhen,
-        prepareStep: runRuntime.prepareStep,
-        onStep: runRuntime.onStep,
-        validateResponse: runRuntime.validateResponse,
+        // COR-1269 — stamped onto this run's hook-plan observations.
+        sessionId: session.id,
+        // COR-1265 — the completed Bureau tier, snapshotted. A single-tier
+        // merge still copies every entry into a fresh registry, so a
+        // registration added to `runRuntime.hooks` after this point cannot
+        // reach the run that already holds the copy.
+        hooks: mergeHookRegistries(runRuntime.hooks),
         // AB-260: the bureau's single composed RuntimeServices instance,
         // snapshotted into every run it starts — including a recovered run
         // rebuilt here from a persisted session.
@@ -2427,11 +2767,11 @@ export async function createRuntimeComposition(
     baseConversationHistory: ConversationHistory,
     runId: string,
     replaceCurrentFireTranscript: boolean,
-    getActiveSkillEntries: () => ActiveSkillEntry[],
+    getActiveSkillRecords: () => readonly SkillActivationRecord[],
   ): OnStepHook {
     return async (context) => {
       await store.update(sessionId, (existing: AgentSession | undefined) => {
-        const activeSkillEntries = getActiveSkillEntries();
+        const activeSkillRecords = getActiveSkillRecords();
         const sessionOwnedByAnotherRunningRun =
           existing?.metadata['lastRunStatus'] === 'running' &&
           typeof existing.metadata['lastRunId'] === 'string' &&
@@ -2454,7 +2794,7 @@ export async function createRuntimeComposition(
             lastScheduledFireRunId: runId,
             ...(sessionOwnedByAnotherRunningRun
               ? {}
-              : activeSkillSessionMetadataForStep(activeSkillEntries, context.step, runId)),
+              : activeSkillSessionMetadataForStep(activeSkillRecords, context.step, runId)),
           },
           conversationHistory: existingConversationHistory
             ? appendConversationMessages(
@@ -2671,9 +3011,24 @@ export async function createRuntimeComposition(
           `${resolution.definitionRevision}); reattaching with the current definition.`,
       });
     }
+    // COR-1265 criterion 3b. AB-240's separation is about the PROVIDER and the
+    // TOOLBOX — a recovered catalog run must reattach against the agent's own,
+    // not the Bureau's, and that is unchanged here. Only the hook tier is added,
+    // and only the invariants that close over nothing run-specific, so Bureau's
+    // identity and guardrail policy hold on this path as they do on every other.
+    // The agent's own tier arrives inside `resolution.options.hooks`, from its
+    // own `buildRunOptions`; Bureau goes first so it wins `runFirst` and, being
+    // pinned last, still wins the waterfall.
+    const invariants = createBureauInvariantHooks();
     return {
       status: 'available',
-      services: { options: resolution.options, toolbox: resolution.options.toolbox },
+      services: {
+        options: {
+          ...resolution.options,
+          hooks: mergeHookRegistries(invariants, resolution.options.hooks),
+        },
+        toolbox: resolution.options.toolbox,
+      },
     };
   }
 
@@ -2720,18 +3075,18 @@ export async function createRuntimeComposition(
     session: Awaited<ReturnType<SessionStore['load']>> | undefined,
     runId: string,
     recovering: boolean,
-  ): Promise<ActiveSkillEntry[] | undefined> {
+  ): Promise<SkillActivationRecord[] | undefined> {
     if (!recovering || !session) return undefined;
 
     const metadata = session.metadata;
-    const lastActiveSkillsRaw = metadata['lastActiveSkills'];
-    const lastActiveSkillsStep = metadata['lastActiveSkillsStep'];
+    const activeSkillRecordsRaw = metadata['activeSkillRecords'];
+    const activeSkillRecordsStep = metadata['activeSkillRecordsStep'];
     if (
       metadata['lastScheduledFireRunId'] !== runId ||
-      metadata['lastActiveSkillsRunId'] !== runId ||
-      typeof lastActiveSkillsStep !== 'number' ||
-      !Number.isInteger(lastActiveSkillsStep) ||
-      lastActiveSkillsStep < 0
+      metadata['activeSkillRecordsRunId'] !== runId ||
+      typeof activeSkillRecordsStep !== 'number' ||
+      !Number.isInteger(activeSkillRecordsStep) ||
+      activeSkillRecordsStep < 0
     ) {
       return undefined;
     }
@@ -2750,8 +3105,8 @@ export async function createRuntimeComposition(
       }
 
       const latestCommittedStep = committedStepRecords
-        .filter((step) => step.step <= lastActiveSkillsStep)
-        .sort((a, b) => b.step - a.step)
+        .filter((step) => step.step <= activeSkillRecordsStep)
+        .toSorted((a, b) => b.step - a.step)
         .find((step) => activeSkillsFromStepMetadata(step.metadata) !== undefined);
 
       if (latestCommittedStep !== undefined) {
@@ -2759,10 +3114,10 @@ export async function createRuntimeComposition(
       }
 
       if (
-        committedStepRecords.some((step) => step.step === lastActiveSkillsStep) &&
-        isActiveSkillEntryArray(lastActiveSkillsRaw)
+        committedStepRecords.some((step) => step.step === activeSkillRecordsStep) &&
+        isSkillActivationRecordArray(activeSkillRecordsRaw)
       ) {
-        return lastActiveSkillsRaw;
+        return activeSkillRecordsRaw;
       }
 
       return undefined;
@@ -2892,7 +3247,7 @@ export async function createRuntimeComposition(
     // Same runtime a normal run builds (generate/toolbox/memory/skills/guardrails),
     // wired to this fire's session + per-fire runId, with live streaming off (no
     // ActiveRun surface for a scheduled fire).
-    const initialActiveSkills = await loadCommittedScheduledActiveSkills(
+    const initialActiveSkillRecords = await loadCommittedScheduledActiveSkills(
       existing,
       runId,
       isRecoveredFireReplay,
@@ -2901,13 +3256,13 @@ export async function createRuntimeComposition(
 
     const runRuntime = await createRunRuntime(
       { message: scheduledInput.input, sessionId, runId, agentName, requestContext },
-      { liveStreaming: false, initialActiveSkills },
+      { liveStreaming: false, initialActiveSkillRecords },
     );
 
     const services: DurableRunDeps = {
       toolbox: runRuntime.toolbox,
       getStepMetadata: () => ({
-        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillEntries()),
+        [activeSkillsStepMetadataKey]: activeSkillsStepMetadata(runRuntime.getActiveSkillRecords()),
       }),
       options: {
         generate: runRuntime.generate,
@@ -2918,22 +3273,29 @@ export async function createRuntimeComposition(
         // AB-260: the bureau's single composed RuntimeServices instance,
         // snapshotted into every run it starts — including a scheduled fire.
         runtime: runtimeServices,
-        prepareStep: runRuntime.prepareStep,
-        // Append the session write-back hook so recurring fires accumulate and a
-        // stateless fire is observable; runs AFTER the runtime's own onStep hooks.
-        onStep: [
-          ...runRuntime.onStep,
-          createScheduledSessionPersistHook(
-            store,
-            sessionId,
-            agentName,
-            baseConversationHistory,
-            runId,
-            isRecoveredFireReplay,
-            runRuntime.getActiveSkillEntries,
+        // The session write-back runs AFTER the runtime's own onStep hooks so
+        // recurring fires accumulate and a stateless fire is observable.
+        // COR-1269 — stamped onto this run's hook-plan observations.
+        sessionId,
+        // COR-1265 criterion 8 — merged AFTER the trailing registration, so the
+        // Bureau tier is complete before it becomes the merge's first argument
+        // and the trailing hook is offset with every other Bureau entry rather
+        // than beside them at a raw priority.
+        hooks: mergeHookRegistries(
+          registerTrailingOnStep(
+            runRuntime.hooks,
+            'bureau:scheduled-session-write-back',
+            createScheduledSessionPersistHook(
+              store,
+              sessionId,
+              agentName,
+              baseConversationHistory,
+              runId,
+              isRecoveredFireReplay,
+              runRuntime.getActiveSkillRecords,
+            ),
           ),
-        ],
-        validateResponse: runRuntime.validateResponse,
+        ),
         executeOptions: { requestContext },
         agentName,
         runId,
@@ -3194,8 +3556,10 @@ export async function createRuntimeComposition(
     durable,
     workflowVersionMismatches,
     scheduleFireEvents,
+    skillEvents,
     disposeStorage:
       durableStorage && ownsDurableStorage ? () => durableStorage[Symbol.dispose]() : undefined,
+    durableStorage,
     memory,
     sessionStore,
     scheduler,
@@ -3235,6 +3599,7 @@ export async function createRuntimeComposition(
     resolveRunServices,
     buildScheduledRunServices,
     loadCommittedScheduledActiveSkills,
+    createBureauInvariantHooks,
   };
 
   return composition;

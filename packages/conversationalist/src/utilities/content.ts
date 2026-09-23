@@ -16,6 +16,12 @@ export function toMultiModalArray(
  * Single MultiModalContent items are wrapped in an array.
  */
 export function normalizeContent(
+  content: string | MultiModalContent | MultiModalContent[],
+): string | MultiModalContent[];
+export function normalizeContent(
+  content?: string | MultiModalContent | MultiModalContent[],
+): string | MultiModalContent[] | undefined;
+export function normalizeContent(
   content?: string | MultiModalContent | MultiModalContent[],
 ): string | MultiModalContent[] | undefined {
   if (content === undefined) return undefined;
