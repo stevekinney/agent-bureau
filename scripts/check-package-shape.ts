@@ -14,7 +14,15 @@
  *      this package, or declared in `dependencies`/`peerDependencies`. Catches a real external
  *      left undeclared (the same `Cannot find module` failure class as a foundation leak).
  *   4. No dependency field in the shipped manifest uses a workspace-only protocol such as
- *      `workspace:*`, because external consumers cannot resolve the monorepo.
+ *      `workspace:*` or `catalog:`, because external consumers cannot resolve the monorepo. And
+ *      for a dependency that names another workspace package by a concrete version (as
+ *      `scripts/release.ts` rewrites a `workspace:*` specifier to just before publishing): that
+ *      version must actually exist — either on the npm registry already, or in the
+ *      `RELEASE_KNOWN_VERSIONS` environment variable `scripts/release.ts` sets to the versions it
+ *      has already published or confirmed published earlier in the same run. This is what would
+ *      have caught this class of bug before it happened: publishing a package whose dependency on
+ *      a sibling package hasn't actually been published yet is refused, not just one that still
+ *      says `workspace:*`.
  *   5. No `package.json` lifecycle script (`prepack`/`prepare`/`prepublishOnly`/`publish`/
  *      `postpack`/`postpublish`) can mutate the publish payload — so the bytes `npm pack` validated
  *      are the bytes `npm publish` ships.
@@ -98,6 +106,109 @@ function dependencySections(manifest: PackageManifest): Array<{
     { name: 'peerDependencies', dependencies: manifest.peerDependencies ?? {} },
     { name: 'devDependencies', dependencies: manifest.devDependencies ?? {} },
   ];
+}
+
+/**
+ * Every workspace package's public name, from every `packages/*\/package.json` — not just
+ * publishable ones. A shipped dependency on any of these by a concrete version has to resolve on
+ * the registry (or have been published earlier in this run); a shipped dependency on anything else
+ * is an ordinary external and is never subject to that check.
+ */
+async function workspacePackageNames(): Promise<Set<string>> {
+  const names = new Set<string>();
+  const glob = new Bun.Glob('packages/*/package.json');
+  for await (const manifestPath of glob.scan({
+    cwd: resolve(import.meta.dir, '..'),
+    onlyFiles: true,
+  })) {
+    const manifest = (await Bun.file(resolve(import.meta.dir, '..', manifestPath)).json()) as {
+      name?: string;
+    };
+    if (manifest.name) names.add(manifest.name);
+  }
+  return names;
+}
+
+/**
+ * Versions `scripts/release.ts` already knows are good for this run — either just published or
+ * confirmed already on the registry for a package processed earlier in `RELEASE_INVENTORY`'s
+ * order. Set as a `{ [packageName]: version }` JSON object in `RELEASE_KNOWN_VERSIONS`. Absent (or
+ * unparseable, e.g. a standalone `bun run check-package-shape` invocation with no such run in
+ * progress) is treated as empty — every internal dependency then falls through to the live
+ * registry check below.
+ */
+function knownGoodVersionsFromEnvironment(): Map<string, string> {
+  const raw = process.env['RELEASE_KNOWN_VERSIONS'];
+  if (!raw) return new Map();
+  try {
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return new Map(Object.entries(parsed));
+  } catch {
+    return new Map();
+  }
+}
+
+/** Whether `name@version` is resolvable on the configured npm registry right now. */
+async function registryHasVersion(name: string, version: string): Promise<boolean> {
+  const result = await $`npm view ${`${name}@${version}`} version`.quiet().nothrow();
+  if (result.exitCode !== 0) return false;
+  return result.stdout.toString().trim() === version;
+}
+
+export type DependencySpecifierError = {
+  section: string;
+  dependencyName: string;
+  versionRange: string;
+  reason: 'workspace-or-catalog-protocol' | 'unpublished-internal-version';
+};
+
+/**
+ * Gate 4, as a pure function over one manifest's dependency sections plus an injected policy, so
+ * it's testable without a filesystem, a real `npm pack`, or a real registry call:
+ *
+ *   - Any `workspace:` or `catalog:` specifier is always an error — external consumers cannot
+ *     resolve either protocol.
+ *   - A concrete-version dependency that names another *workspace* package (per `workspaceNames`)
+ *     is an error unless that exact version is already known-good (`knownGoodVersions` — what
+ *     `scripts/release.ts` has already published or confirmed published earlier in this run) or
+ *     resolves on the registry right now (`registryHasVersion`, called only for a workspace-named
+ *     dependency that isn't already known-good, so an ordinary external dependency never triggers a
+ *     network call).
+ *   - A concrete-version dependency on anything that isn't a workspace package name at all is never
+ *     checked — it's an ordinary external and none of this gate's business.
+ */
+export async function findDependencySpecifierErrors(
+  manifest: PackageManifest,
+  policy: {
+    workspaceNames: ReadonlySet<string>;
+    knownGoodVersions: ReadonlyMap<string, string>;
+    registryHasVersion: (name: string, version: string) => Promise<boolean>;
+  },
+): Promise<DependencySpecifierError[]> {
+  const errors: DependencySpecifierError[] = [];
+
+  for (const { name: section, dependencies } of dependencySections(manifest)) {
+    for (const [dependencyName, versionRange] of Object.entries(dependencies)) {
+      if (versionRange.startsWith('workspace:') || versionRange.startsWith('catalog:')) {
+        errors.push({
+          section,
+          dependencyName,
+          versionRange,
+          reason: 'workspace-or-catalog-protocol',
+        });
+        continue;
+      }
+
+      if (!policy.workspaceNames.has(dependencyName)) continue; // an ordinary external
+
+      if (policy.knownGoodVersions.get(dependencyName) === versionRange) continue;
+      if (await policy.registryHasVersion(dependencyName, versionRange)) continue;
+
+      errors.push({ section, dependencyName, versionRange, reason: 'unpublished-internal-version' });
+    }
+  }
+
+  return errors;
 }
 
 /** Strip block and line comments so doc-comment and region markers never read as imports. */
@@ -283,16 +394,27 @@ async function checkPackage(packageName: string): Promise<void> {
     }
   }
 
-  // Gate 4: no workspace-only dependency specifiers in the shipped manifest.
-  for (const { name, dependencies } of dependencySections(packedManifest)) {
-    for (const [dependencyName, versionRange] of Object.entries(dependencies)) {
-      if (versionRange.startsWith('workspace:')) {
-        fail(
-          packageName,
-          'workspace-dependency',
-          `${name}.${dependencyName} uses "${versionRange}" in the shipped package.json; publishable packages must not require monorepo workspace resolution`,
-        );
-      }
+  // Gate 4: no workspace- or catalog-only dependency specifiers in the shipped manifest, and every
+  // dependency that names another workspace package by a concrete version actually exists --
+  // either on the registry already, or published earlier in this same `scripts/release.ts` run.
+  const dependencyErrors = await findDependencySpecifierErrors(packedManifest, {
+    workspaceNames: await workspacePackageNames(),
+    knownGoodVersions: knownGoodVersionsFromEnvironment(),
+    registryHasVersion,
+  });
+  for (const error of dependencyErrors) {
+    if (error.reason === 'workspace-or-catalog-protocol') {
+      fail(
+        packageName,
+        'workspace-dependency',
+        `${error.section}.${error.dependencyName} uses "${error.versionRange}" in the shipped package.json; publishable packages must not require monorepo workspace or catalog resolution`,
+      );
+    } else {
+      fail(
+        packageName,
+        'unpublished-internal-version',
+        `${error.section}.${error.dependencyName} is pinned to "${error.versionRange}", which is not on the npm registry and was not published earlier in this run -- ${error.dependencyName} must publish before ${packageName} can depend on it`,
+      );
     }
   }
 
