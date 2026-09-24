@@ -50,7 +50,20 @@ const BUILTINS = new Set<string>([
   ...builtinModules.map((name) => `node:${name}`),
 ]);
 
-type PackageManifest = {
+/**
+ * `package.json#exports` condition values nest: a condition (e.g. `"import"`) can itself map to
+ * further conditions (e.g. `{ "types": ..., "default": ... }`), to `null` (an explicitly blocked
+ * subpath, as `conversationalist`'s `"browser": null` uses), or to an array of fallbacks. Any of
+ * those can appear at any depth, so the target collector below must recurse rather than assume a
+ * single level of `{ [condition]: string }`.
+ */
+export type ExportsConditionValue =
+  | string
+  | null
+  | readonly ExportsConditionValue[]
+  | { [condition: string]: ExportsConditionValue };
+
+export type PackageManifest = {
   name: string;
   version: string;
   main?: string;
@@ -58,7 +71,7 @@ type PackageManifest = {
   types?: string;
   bin?: string | Record<string, string>;
   typesVersions?: Record<string, Record<string, string[]>>;
-  exports?: Record<string, Record<string, string> | string>;
+  exports?: Record<string, ExportsConditionValue>;
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
@@ -139,7 +152,29 @@ async function listFiles(directory: string): Promise<string[]> {
   return entries;
 }
 
-function collectManifestFileTargets(manifest: PackageManifest): string[] {
+/**
+ * Recursively walk an `exports` condition value and hand every string leaf to `push`. Handles
+ * arbitrary nesting (`"import": { "types": ..., "default": ... }`), `null` leaves (an explicitly
+ * blocked subpath, e.g. `"browser": null`), and array fallbacks — a flat `Object.values(...)`
+ * pass over one level is not enough once a condition itself maps to another condition object.
+ */
+function collectExportsConditionTargets(
+  value: ExportsConditionValue,
+  push: (value: string) => void,
+): void {
+  if (value === null) return;
+  if (typeof value === 'string') {
+    push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectExportsConditionTargets(entry, push);
+    return;
+  }
+  for (const nested of Object.values(value)) collectExportsConditionTargets(nested, push);
+}
+
+export function collectManifestFileTargets(manifest: PackageManifest): string[] {
   const targets: string[] = [];
   const push = (value: string | undefined): void => {
     if (value && value.startsWith('.')) targets.push(value);
@@ -153,8 +188,7 @@ function collectManifestFileTargets(manifest: PackageManifest): string[] {
   else if (manifest.bin) for (const value of Object.values(manifest.bin)) push(value);
 
   for (const condition of Object.values(manifest.exports ?? {})) {
-    if (typeof condition === 'string') push(condition);
-    else for (const value of Object.values(condition)) push(value);
+    collectExportsConditionTargets(condition, push);
   }
 
   for (const mapping of Object.values(manifest.typesVersions ?? {})) {
@@ -318,22 +352,28 @@ async function checkPackage(packageName: string): Promise<void> {
   }
 }
 
-const targets = Bun.argv.slice(2);
-if (targets.length === 0) {
-  console.error('Usage: bun run scripts/check-package-shape.ts <packageName> [<packageName> ...]');
-  process.exit(1);
-}
-
-for (const packageName of targets) {
-  await checkPackage(packageName);
-}
-
-if (failures.length > 0) {
-  console.error(`\n✖ package-shape gate FAILED (${failures.length} issue(s)):\n`);
-  for (const { package: pkg, gate, detail } of failures) {
-    console.error(`  [${pkg}] ${gate}: ${detail}`);
+// Guarded like `release.ts` and `check-changesets.ts`'s entrypoints: without this, merely
+// `import`-ing the module (as the regression test for `collectManifestFileTargets` does) ran this
+// CLI block as a side effect and called `process.exit`, before any test in the importing file got
+// a chance to run.
+if (import.meta.main) {
+  const targets = Bun.argv.slice(2);
+  if (targets.length === 0) {
+    console.error('Usage: bun run scripts/check-package-shape.ts <packageName> [<packageName> ...]');
+    process.exit(1);
   }
-  process.exit(1);
-}
 
-console.log(`✓ package-shape gate passed for: ${targets.join(', ')}`);
+  for (const packageName of targets) {
+    await checkPackage(packageName);
+  }
+
+  if (failures.length > 0) {
+    console.error(`\n✖ package-shape gate FAILED (${failures.length} issue(s)):\n`);
+    for (const { package: pkg, gate, detail } of failures) {
+      console.error(`  [${pkg}] ${gate}: ${detail}`);
+    }
+    process.exit(1);
+  }
+
+  console.log(`✓ package-shape gate passed for: ${targets.join(', ')}`);
+}
