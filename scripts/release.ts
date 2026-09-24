@@ -36,6 +36,15 @@ export type ReleaseTarget = {
 };
 
 export const RELEASE_INVENTORY: readonly ReleaseTarget[] = [
+  // The four foundation packages armorer/conversationalist/operative now depend on by a real
+  // (non-`workspace:`) version, listed before their dependents in a valid dependency order:
+  // `cryptography` and `embeddings` depend on nothing else here, so they lead; `lifecycle` has no
+  // internal dependency either; `tool-protocol` depends on `lifecycle` and so comes after it. This
+  // ordering matches the order `.github/workflows/mirror-verify.yaml` packs and verifies them in.
+  { directory: 'cryptography', packageName: '@lostgradient/cryptography' },
+  { directory: 'embeddings', packageName: '@lostgradient/embeddings' },
+  { directory: 'lifecycle', packageName: '@lostgradient/lifecycle' },
+  { directory: 'tool-protocol', packageName: '@lostgradient/tool-protocol' },
   { directory: 'armorer', packageName: 'armorer' },
   { directory: 'conversationalist', packageName: 'conversationalist' },
   { directory: 'operative', packageName: '@lostgradient/operative' },
