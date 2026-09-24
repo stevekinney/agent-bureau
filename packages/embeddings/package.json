@@ -1,6 +1,11 @@
 {
   "name": "@lostgradient/embeddings",
   "description": "Shared embedding vector contracts, validation, and similarity utilities",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stevekinney/agent-bureau.git"
+  },
   "type": "module",
   "exports": {
     ".": {

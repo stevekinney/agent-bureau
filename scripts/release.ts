@@ -36,11 +36,20 @@ export type ReleaseTarget = {
 };
 
 export const RELEASE_INVENTORY: readonly ReleaseTarget[] = [
-  // The four foundation packages armorer/conversationalist/operative now depend on by a real
-  // (non-`workspace:`) version, listed before their dependents in a valid dependency order:
+  // The four foundation packages armorer/conversationalist/operative declare a `workspace:*`
+  // dependency on in source today, listed before their dependents in a valid dependency order:
   // `cryptography` and `embeddings` depend on nothing else here, so they lead; `lifecycle` has no
   // internal dependency either; `tool-protocol` depends on `lifecycle` and so comes after it. This
   // ordering matches the order `.github/workflows/mirror-verify.yaml` packs and verifies them in.
+  //
+  // KNOWN GAP (see ab-release/README.md "Known issues" from the branch that added these four
+  // entries): `bunx changeset version` does not rewrite a `workspace:*` dependency to a concrete
+  // version -- verified directly, and it contradicts RELEASING.md's claim that it does. So once
+  // armorer/conversationalist/operative have a pending changeset again, this publisher's
+  // package-shape gate will correctly refuse to publish them (their shipped manifest will still
+  // say `workspace:*` for these four packages) until something rewrites that dependency to a real
+  // version before `npm publish` runs from the package directory below. That rewrite does not
+  // exist yet in this file.
   { directory: 'cryptography', packageName: '@lostgradient/cryptography' },
   { directory: 'embeddings', packageName: '@lostgradient/embeddings' },
   { directory: 'lifecycle', packageName: '@lostgradient/lifecycle' },
