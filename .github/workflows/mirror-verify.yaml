@@ -107,105 +107,140 @@ jobs:
         run: |
           bun pm pack --ignore-scripts --quiet --destination ${{ runner.temp }}/mirror-verify/tarballs
 
+      - name: move @lostgradient/cryptography's packed tarball into the shared tarballs directory
+        working-directory: packages/cryptography
+        run: |
+          bun -e 'const [source, stem, destination] = process.argv.slice(-3); const { readFileSync, renameSync } = require("node:fs"); const { version } = JSON.parse(readFileSync("package.json", "utf8")); renameSync(require("node:path").join(source, stem + "-" + version + ".tgz"), destination);' ${{ runner.temp }}/mirror-verify/tarballs lostgradient-cryptography ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography.tgz
+
       - name: publint @lostgradient/cryptography
         working-directory: .
         run: |
-          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography-0.0.0.tgz
+          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography.tgz
 
       - name: check @lostgradient/cryptography's published types with attw
         working-directory: .
         run: |
-          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography-0.0.0.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
+          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
       - name: pack @lostgradient/embeddings
         working-directory: packages/embeddings
         run: |
           bun pm pack --ignore-scripts --quiet --destination ${{ runner.temp }}/mirror-verify/tarballs
 
+      - name: move @lostgradient/embeddings's packed tarball into the shared tarballs directory
+        working-directory: packages/embeddings
+        run: |
+          bun -e 'const [source, stem, destination] = process.argv.slice(-3); const { readFileSync, renameSync } = require("node:fs"); const { version } = JSON.parse(readFileSync("package.json", "utf8")); renameSync(require("node:path").join(source, stem + "-" + version + ".tgz"), destination);' ${{ runner.temp }}/mirror-verify/tarballs lostgradient-embeddings ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings.tgz
+
       - name: publint @lostgradient/embeddings
         working-directory: .
         run: |
-          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings-0.0.0.tgz
+          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings.tgz
 
       - name: check @lostgradient/embeddings's published types with attw
         working-directory: .
         run: |
-          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings-0.0.0.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
+          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
       - name: pack @lostgradient/lifecycle
         working-directory: packages/lifecycle
         run: |
           bun pm pack --ignore-scripts --quiet --destination ${{ runner.temp }}/mirror-verify/tarballs
 
+      - name: move @lostgradient/lifecycle's packed tarball into the shared tarballs directory
+        working-directory: packages/lifecycle
+        run: |
+          bun -e 'const [source, stem, destination] = process.argv.slice(-3); const { readFileSync, renameSync } = require("node:fs"); const { version } = JSON.parse(readFileSync("package.json", "utf8")); renameSync(require("node:path").join(source, stem + "-" + version + ".tgz"), destination);' ${{ runner.temp }}/mirror-verify/tarballs lostgradient-lifecycle ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle.tgz
+
       - name: publint @lostgradient/lifecycle
         working-directory: .
         run: |
-          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle-0.0.1.tgz
+          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle.tgz
 
       - name: check @lostgradient/lifecycle's published types with attw
         working-directory: .
         run: |
-          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle-0.0.1.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
+          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
       - name: pack @lostgradient/tool-protocol
         working-directory: packages/tool-protocol
         run: |
           bun pm pack --ignore-scripts --quiet --destination ${{ runner.temp }}/mirror-verify/tarballs
 
+      - name: move @lostgradient/tool-protocol's packed tarball into the shared tarballs directory
+        working-directory: packages/tool-protocol
+        run: |
+          bun -e 'const [source, stem, destination] = process.argv.slice(-3); const { readFileSync, renameSync } = require("node:fs"); const { version } = JSON.parse(readFileSync("package.json", "utf8")); renameSync(require("node:path").join(source, stem + "-" + version + ".tgz"), destination);' ${{ runner.temp }}/mirror-verify/tarballs lostgradient-tool-protocol ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol.tgz
+
       - name: publint @lostgradient/tool-protocol
         working-directory: .
         run: |
-          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol-0.0.0.tgz
+          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol.tgz
 
       - name: check @lostgradient/tool-protocol's published types with attw
         working-directory: .
         run: |
-          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol-0.0.0.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
+          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
       - name: pack armorer
         working-directory: packages/armorer
         run: |
           bun pm pack --ignore-scripts --quiet --destination ${{ runner.temp }}/mirror-verify/tarballs
 
+      - name: move armorer's packed tarball into the shared tarballs directory
+        working-directory: packages/armorer
+        run: |
+          bun -e 'const [source, stem, destination] = process.argv.slice(-3); const { readFileSync, renameSync } = require("node:fs"); const { version } = JSON.parse(readFileSync("package.json", "utf8")); renameSync(require("node:path").join(source, stem + "-" + version + ".tgz"), destination);' ${{ runner.temp }}/mirror-verify/tarballs armorer ${{ runner.temp }}/mirror-verify/tarballs/armorer.tgz
+
       - name: publint armorer
         working-directory: .
         run: |
-          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/armorer-2.4.0.tgz
+          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/armorer.tgz
 
       - name: check armorer's published types with attw
         working-directory: .
         run: |
-          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/armorer-2.4.0.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
+          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/armorer.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
       - name: pack conversationalist
         working-directory: packages/conversationalist
         run: |
           bun pm pack --ignore-scripts --quiet --destination ${{ runner.temp }}/mirror-verify/tarballs
 
+      - name: move conversationalist's packed tarball into the shared tarballs directory
+        working-directory: packages/conversationalist
+        run: |
+          bun -e 'const [source, stem, destination] = process.argv.slice(-3); const { readFileSync, renameSync } = require("node:fs"); const { version } = JSON.parse(readFileSync("package.json", "utf8")); renameSync(require("node:path").join(source, stem + "-" + version + ".tgz"), destination);' ${{ runner.temp }}/mirror-verify/tarballs conversationalist ${{ runner.temp }}/mirror-verify/tarballs/conversationalist.tgz
+
       - name: publint conversationalist
         working-directory: .
         run: |
-          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/conversationalist-1.2.0.tgz
+          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/conversationalist.tgz
 
       - name: check conversationalist's published types with attw
         working-directory: .
         run: |
-          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/conversationalist-1.2.0.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
+          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/conversationalist.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
       - name: pack @lostgradient/operative
         working-directory: packages/operative
         run: |
           bun pm pack --ignore-scripts --quiet --destination ${{ runner.temp }}/mirror-verify/tarballs
 
+      - name: move @lostgradient/operative's packed tarball into the shared tarballs directory
+        working-directory: packages/operative
+        run: |
+          bun -e 'const [source, stem, destination] = process.argv.slice(-3); const { readFileSync, renameSync } = require("node:fs"); const { version } = JSON.parse(readFileSync("package.json", "utf8")); renameSync(require("node:path").join(source, stem + "-" + version + ".tgz"), destination);' ${{ runner.temp }}/mirror-verify/tarballs lostgradient-operative ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative.tgz
+
       - name: publint @lostgradient/operative
         working-directory: .
         run: |
-          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative-0.12.0.tgz
+          bunx --bun publint@0.3.24 --strict ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative.tgz
 
       - name: check @lostgradient/operative's published types with attw
         working-directory: .
         run: |
-          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative-0.12.0.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
+          bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
       - name: typecheck @lostgradient/bureau
         working-directory: packages/bureau
@@ -232,21 +267,21 @@ jobs:
             "private": true,
             "type": "module",
             "dependencies": {
-              "armorer": "file:${{ runner.temp }}/mirror-verify/tarballs/armorer-2.4.0.tgz",
-              "conversationalist": "file:${{ runner.temp }}/mirror-verify/tarballs/conversationalist-1.2.0.tgz",
-              "@lostgradient/cryptography": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography-0.0.0.tgz",
-              "@lostgradient/embeddings": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings-0.0.0.tgz",
-              "@lostgradient/lifecycle": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle-0.0.1.tgz",
-              "@lostgradient/operative": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative-0.12.0.tgz",
-              "@lostgradient/tool-protocol": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol-0.0.0.tgz"
+              "armorer": "file:${{ runner.temp }}/mirror-verify/tarballs/armorer.tgz",
+              "conversationalist": "file:${{ runner.temp }}/mirror-verify/tarballs/conversationalist.tgz",
+              "@lostgradient/cryptography": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography.tgz",
+              "@lostgradient/embeddings": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings.tgz",
+              "@lostgradient/lifecycle": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle.tgz",
+              "@lostgradient/operative": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative.tgz",
+              "@lostgradient/tool-protocol": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol.tgz"
             },
             "overrides": {
-              "@lostgradient/cryptography": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography-0.0.0.tgz",
-              "@lostgradient/embeddings": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings-0.0.0.tgz",
-              "@lostgradient/lifecycle": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle-0.0.1.tgz",
-              "@lostgradient/tool-protocol": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol-0.0.0.tgz",
-              "armorer": "file:${{ runner.temp }}/mirror-verify/tarballs/armorer-2.4.0.tgz",
-              "conversationalist": "file:${{ runner.temp }}/mirror-verify/tarballs/conversationalist-1.2.0.tgz"
+              "@lostgradient/cryptography": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-cryptography.tgz",
+              "@lostgradient/embeddings": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-embeddings.tgz",
+              "@lostgradient/lifecycle": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-lifecycle.tgz",
+              "@lostgradient/tool-protocol": "file:${{ runner.temp }}/mirror-verify/tarballs/lostgradient-tool-protocol.tgz",
+              "armorer": "file:${{ runner.temp }}/mirror-verify/tarballs/armorer.tgz",
+              "conversationalist": "file:${{ runner.temp }}/mirror-verify/tarballs/conversationalist.tgz"
             }
           }
           MIRROR_VERIFY_EOF
