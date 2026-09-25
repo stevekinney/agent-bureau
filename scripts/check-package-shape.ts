@@ -32,7 +32,7 @@
  * false-positive classes observed during the tsdown migration: tsdown `//#region` markers, object
  * properties named like a package, JSDoc `@example` imports, and bare Node builtins (`url`).
  *
- * Usage: `bun run scripts/check-package-shape.ts <packageName> [<packageName> ...]`
+ * Usage: `bun run scripts/check-package-shape.ts <packageDirectory> [<packageDirectory> ...]`
  * Exit code 0 = all gates pass; 1 = at least one gate failed (fail-closed).
  */
 import { builtinModules } from 'node:module';
@@ -66,10 +66,7 @@ const BUILTINS = new Set<string>([
  * single level of `{ [condition]: string }`.
  */
 export type ExportsConditionValue =
-  | string
-  | null
-  | readonly ExportsConditionValue[]
-  | { [condition: string]: ExportsConditionValue };
+  string | null | readonly ExportsConditionValue[] | { [condition: string]: ExportsConditionValue };
 
 export type PackageManifest = {
   name: string;
@@ -201,10 +198,18 @@ export async function findDependencySpecifierErrors(
 
       if (!policy.workspaceNames.has(dependencyName)) continue; // an ordinary external
 
-      if (policy.knownGoodVersions.get(dependencyName) === versionRange) continue;
-      if (await policy.registryHasVersion(dependencyName, versionRange)) continue;
+      // `scripts/release.ts` rewrites `workspace:^` and `workspace:~` to a range over the
+      // sibling's exact version, so the version to confirm is the one the range names.
+      const version = versionRange.replace(/^[\^~]/, '');
+      if (policy.knownGoodVersions.get(dependencyName) === version) continue;
+      if (await policy.registryHasVersion(dependencyName, version)) continue;
 
-      errors.push({ section, dependencyName, versionRange, reason: 'unpublished-internal-version' });
+      errors.push({
+        section,
+        dependencyName,
+        versionRange,
+        reason: 'unpublished-internal-version',
+      });
     }
   }
 
@@ -481,7 +486,9 @@ async function checkPackage(packageName: string): Promise<void> {
 if (import.meta.main) {
   const targets = Bun.argv.slice(2);
   if (targets.length === 0) {
-    console.error('Usage: bun run scripts/check-package-shape.ts <packageName> [<packageName> ...]');
+    console.error(
+      'Usage: bun run scripts/check-package-shape.ts <packageDirectory> [<packageDirectory> ...]',
+    );
     process.exit(1);
   }
 

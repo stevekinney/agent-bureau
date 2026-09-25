@@ -33,12 +33,7 @@ describe('collectManifestFileTargets', () => {
     };
 
     expect(new Set(collectManifestFileTargets(manifest))).toEqual(
-      new Set([
-        './dist/index.js',
-        './dist/index.d.ts',
-        './dist/index.d.cts',
-        './dist/index.cjs',
-      ]),
+      new Set(['./dist/index.js', './dist/index.d.ts', './dist/index.d.cts', './dist/index.cjs']),
     );
   });
 
@@ -113,6 +108,22 @@ describe('findDependencySpecifierErrors', () => {
   }
 
   const neverCalled = registryCheckExpecting({}, false);
+
+  test('checks the version a rewritten `workspace:^` or `workspace:~` range names', async () => {
+    const manifest: PackageManifest = {
+      name: '@lostgradient/operative',
+      version: '0.12.1',
+      dependencies: { armorer: '^2.4.0', conversationalist: '~1.3.0' },
+    };
+
+    const errors = await findDependencySpecifierErrors(manifest, {
+      workspaceNames: new Set(['armorer', 'conversationalist']),
+      knownGoodVersions: new Map([['conversationalist', '1.3.0']]),
+      registryHasVersion: registryCheckExpecting({ armorer: '2.4.0' }, true),
+    });
+
+    expect(errors).toEqual([]);
+  });
 
   test('flags a `workspace:*` dependency -- this is "today\'s path" before any rewrite runs, reproduced directly against a fixture shaped like tool-protocol\'s real dependency on lifecycle', async () => {
     const manifest: PackageManifest = {

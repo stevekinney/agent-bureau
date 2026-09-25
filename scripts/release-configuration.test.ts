@@ -26,13 +26,20 @@ type ChangesetConfiguration = {
 
 type PackageManifestDependencies = {
   dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
 };
 
 async function readPackageDependencies(directory: string): Promise<Record<string, string>> {
   const manifest = (await Bun.file(
     resolve(repositoryRoot, 'packages', directory, 'package.json'),
   ).json()) as PackageManifestDependencies;
-  return manifest.dependencies ?? {};
+  // Every section a consumer's install reads, which is every section the release rewrite resolves.
+  return {
+    ...manifest.dependencies,
+    ...manifest.peerDependencies,
+    ...manifest.optionalDependencies,
+  };
 }
 
 async function readWorkflow(): Promise<ReleaseWorkflow> {
