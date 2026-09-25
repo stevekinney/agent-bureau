@@ -10,7 +10,7 @@
     "changeset": "changeset",
     "version": "changeset version",
     "release": "bun run scripts/release.ts",
-    "check-package-shape": "bun run scripts/check-package-shape.ts armorer conversationalist operative"
+    "check-package-shape": "bun run scripts/check-package-shape.ts cryptography embeddings lifecycle tool-protocol armorer conversationalist operative"
   },
   "devDependencies": {
     "@changesets/cli": "3.0.0",

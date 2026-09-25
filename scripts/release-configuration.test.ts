@@ -24,6 +24,24 @@ type ChangesetConfiguration = {
   ignore?: string[];
 };
 
+type PackageManifestDependencies = {
+  dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+};
+
+async function readPackageDependencies(directory: string): Promise<Record<string, string>> {
+  const manifest = (await Bun.file(
+    resolve(repositoryRoot, 'packages', directory, 'package.json'),
+  ).json()) as PackageManifestDependencies;
+  // Every section a consumer's install reads, which is every section the release rewrite resolves.
+  return {
+    ...manifest.dependencies,
+    ...manifest.peerDependencies,
+    ...manifest.optionalDependencies,
+  };
+}
+
 async function readWorkflow(): Promise<ReleaseWorkflow> {
   const text = await Bun.file(resolve(repositoryRoot, '.github/workflows/release.yml')).text();
   return Bun.YAML.parse(text) as ReleaseWorkflow;
@@ -129,6 +147,33 @@ describe('release inventory and changesets configuration agreement', () => {
 
     for (const target of RELEASE_INVENTORY) {
       expect(ignored.has(target.packageName)).toBe(false);
+    }
+  });
+});
+
+describe('release inventory dependency order', () => {
+  // Regression coverage for the bug class this branch fixed: `RELEASE_INVENTORY` must list every
+  // package after every other release-inventory package it depends on, so a fresh publish run
+  // never reaches a package whose dependency doesn't exist on the registry yet. Derived from each
+  // package's own `dependencies` rather than hardcoded, so the next package added to the inventory
+  // out of order fails this test instead of failing silently at publish time.
+  test('every package appears after every release-inventory package it depends on', async () => {
+    const packageNameToIndex = new Map(
+      RELEASE_INVENTORY.map((target, index) => [target.packageName, index]),
+    );
+
+    for (const [index, target] of RELEASE_INVENTORY.entries()) {
+      const dependencies = await readPackageDependencies(target.directory);
+
+      for (const dependencyName of Object.keys(dependencies)) {
+        const dependencyIndex = packageNameToIndex.get(dependencyName);
+        if (dependencyIndex === undefined) continue; // not a release-inventory package
+
+        expect(
+          dependencyIndex,
+          `${target.packageName} (index ${index}) depends on ${dependencyName}, which must appear earlier in RELEASE_INVENTORY but is at index ${dependencyIndex}`,
+        ).toBeLessThan(index);
+      }
     }
   });
 });

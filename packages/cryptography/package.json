@@ -1,6 +1,11 @@
 {
   "name": "@lostgradient/cryptography",
   "description": "Cross-platform hashing, signing, and timing-safe comparison utilities",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stevekinney/agent-bureau.git"
+  },
   "type": "module",
   "exports": {
     ".": {
