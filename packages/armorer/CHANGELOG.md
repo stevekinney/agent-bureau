@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.4.1
+
+### Patch Changes
+
+- 06a095c: Emit the settled event for approval and input gated tool invocations with `status: 'paused'`, preserving the status through Operative's live and durable projections so owning runtimes can finish cleanup after an `action_required` result.
+
+  Complete cancellation before the tool callback starts while preserving cleanup tracking for callbacks still running after abort.
+
+- Updated dependencies [1b5a7af]
+  - @lostgradient/cryptography@0.0.1
+  - @lostgradient/embeddings@0.0.1
+  - @lostgradient/lifecycle@0.0.2
+  - @lostgradient/tool-protocol@0.0.1
+
 ## 2.4.0
 
 ### Minor Changes
