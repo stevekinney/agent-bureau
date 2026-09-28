@@ -28,7 +28,7 @@
     },
     "packages/armorer": {
       "name": "armorer",
-      "version": "2.4.0",
+      "version": "2.4.1",
       "dependencies": {
         "@lostgradient/cryptography": "workspace:*",
         "@lostgradient/embeddings": "workspace:*",
@@ -96,7 +96,7 @@
         "@lostgradient/operative": "workspace:*",
         "@lostgradient/skills": "workspace:*",
         "@lostgradient/tool-protocol": "workspace:*",
-        "@lostgradient/weft": "^0.26.0",
+        "@lostgradient/weft": "^0.26.1",
         "armorer": "workspace:*",
         "conversationalist": "workspace:*",
         "zod": "^4.4.3",
@@ -128,7 +128,7 @@
     },
     "packages/conversationalist": {
       "name": "conversationalist",
-      "version": "1.2.0",
+      "version": "1.3.0",
       "dependencies": {
         "@lostgradient/lifecycle": "workspace:*",
         "@lostgradient/tool-protocol": "workspace:*",
@@ -174,7 +174,7 @@
     },
     "packages/cryptography": {
       "name": "@lostgradient/cryptography",
-      "version": "0.0.0",
+      "version": "0.0.1",
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "oxlint": "^1.83.0",
@@ -184,7 +184,7 @@
     },
     "packages/embeddings": {
       "name": "@lostgradient/embeddings",
-      "version": "0.0.0",
+      "version": "0.0.1",
       "devDependencies": {
         "@types/bun": "^1.4.2",
         "oxlint": "^1.83.0",
@@ -194,7 +194,7 @@
     },
     "packages/lifecycle": {
       "name": "@lostgradient/lifecycle",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "devDependencies": {
         "@eslint/compat": "^2.1.0",
         "@eslint/js": "^10.0.1",
@@ -225,7 +225,7 @@
         "@lostgradient/cryptography": "workspace:*",
         "@lostgradient/embeddings": "workspace:*",
         "@lostgradient/lifecycle": "workspace:*",
-        "@lostgradient/weft": "^0.26.0",
+        "@lostgradient/weft": "^0.26.1",
         "armorer": "workspace:*",
         "zod": "^4.4.3",
       },
@@ -237,14 +237,14 @@
     },
     "packages/operative": {
       "name": "@lostgradient/operative",
-      "version": "0.12.0",
+      "version": "0.12.1",
       "dependencies": {
         "@lostgradient/cryptography": "workspace:*",
         "@lostgradient/embeddings": "workspace:*",
         "@lostgradient/environmentalist": "0.1.0",
         "@lostgradient/lifecycle": "workspace:*",
         "@lostgradient/tool-protocol": "workspace:*",
-        "@lostgradient/weft": "^0.26.0",
+        "@lostgradient/weft": "^0.26.1",
         "armorer": "workspace:*",
         "conversationalist": "workspace:*",
       },
@@ -296,7 +296,7 @@
         "@lostgradient/cryptography": "workspace:*",
         "@lostgradient/lifecycle": "workspace:*",
         "@lostgradient/tool-protocol": "workspace:*",
-        "@lostgradient/weft": "^0.26.0",
+        "@lostgradient/weft": "^0.26.1",
         "armorer": "workspace:*",
         "gray-matter": "^4.0.3",
         "js-yaml": "^4.1.0",
@@ -311,7 +311,7 @@
     },
     "packages/tool-protocol": {
       "name": "@lostgradient/tool-protocol",
-      "version": "0.0.0",
+      "version": "0.0.1",
       "dependencies": {
         "@lostgradient/lifecycle": "workspace:*",
       },
@@ -456,7 +456,7 @@
 
     "@lostgradient/tool-protocol": ["@lostgradient/tool-protocol@workspace:packages/tool-protocol"],
 
-    "@lostgradient/weft": ["@lostgradient/weft@0.26.0", "", { "dependencies": { "@lostgradient/environmentalist": "0.1.0", "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2", "pg": "^8.11.0" }, "optionalPeers": ["@libsql/client", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb", "pg"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-pRzfNJZChu0bmwlBZqqEFst3oFS4oEcBS7FarQC6//OC4k4AhkAZO3sMysVNgk/2cKFhK8HtBT9pXYodXYHxhg=="],
+    "@lostgradient/weft": ["@lostgradient/weft@0.26.1", "", { "dependencies": { "@lostgradient/environmentalist": "0.1.0", "@msgpack/msgpack": "^3.1.3", "zod": "^4.3.6" }, "optionalDependencies": { "@valibot/to-json-schema": "^1.7.0" }, "peerDependencies": { "@libsql/client": "^0.17.2", "@neondatabase/serverless": "^1.1.0", "@opentelemetry/api": "^1.0.0", "better-sqlite3": "^12.8.0", "lmdb": "^3.5.2", "pg": "^8.11.0" }, "optionalPeers": ["@libsql/client", "@neondatabase/serverless", "@opentelemetry/api", "better-sqlite3", "lmdb", "pg"], "bin": { "weft": "dist/cli-main.js", "weft-mcp": "dist/mcp/cli.js" } }, "sha512-zUBZdCEJtI0muSCq8OWAwUZAZKzZJn/E8yz7Z+qsfZpDkxtPhOO5gq6bqF3WGzbGMo3gmCYZuclPIdy4bL2MOw=="],
 
     "@manypkg/find-root": ["@manypkg/find-root@3.1.0", "", { "dependencies": { "@manypkg/tools": "^2.1.0" } }, "sha512-BcSqCyKhBVZ5YkSzOiheMCV41kqAFptW6xGqYSTjkVTl9XQpr+pqHhwgGCOHQtjDCv7Is6EFyA14Sm5GVbVABA=="],
 
@@ -466,7 +466,7 @@
 
     "@modelcontextprotocol/client": ["@modelcontextprotocol/client@2.0.0", "", { "dependencies": { "@modelcontextprotocol/core": "2.0.0", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "jose": "^6.1.3", "pkce-challenge": "^5.0.0", "zod": "^4.2.0" } }, "sha512-8f1OghQ2rjzIOfqgUCP+8GiUWqRs89njoWLNqAe8kWmDePv3s1fZXseej+QXemssEuuOvLLmLO/kqM3IQHtISw=="],
 
-    "@modelcontextprotocol/core": ["@modelcontextprotocol/core@2.0.0", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-pJCEwGG7Lfr/+PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG+RjhsvS1FKrDbKux+M1HhlnGWqcA=="],
+    "@modelcontextprotocol/core": ["@modelcontextprotocol/core@2.1.0", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-YdFj5gMRHr0gYNAhTbQDgjLHiEJdIAUYxomhKseUNye7ZGlISQmUoLh2sveFFCiQ7j2YMffT1kgSND0FSfIFjQ=="],
 
     "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.30.0", "", { "dependencies": { "@hono/node-server": "^1.19.9 || ^2.0.5", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA=="],
 
@@ -1690,9 +1690,9 @@
 
     "@lostgradient/operative/@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.122.0", "", { "dependencies": { "json-schema-to-ts": "^3.1.1", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-GGPNftt0caaz9MDlmNQGHX8855Ojaduyy5pm9Sm1h7HalCn0cWNb5/bweadJF+4yzbal+QL6ztBa09WAAOzLmQ=="],
 
-    "@modelcontextprotocol/sdk/ajv": ["ajv@8.18.0", "", { "dependencies": { "fast-deep-equal": "^3.1.3", "fast-uri": "^3.0.1", "json-schema-traverse": "^1.0.0", "require-from-string": "^2.0.2" } }, "sha512-PlXPeEWMXMZ7sPYOHqmDyCJzcfNrUr3fGNKtezX14ykXOEIvyK81d+qydx89KY5O71FKMPaQ2vBfBFI5NHR63A=="],
+    "@modelcontextprotocol/client/@modelcontextprotocol/core": ["@modelcontextprotocol/core@2.0.0", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-pJCEwGG7Lfr/+PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG+RjhsvS1FKrDbKux+M1HhlnGWqcA=="],
 
-    "@modelcontextprotocol/server/@modelcontextprotocol/core": ["@modelcontextprotocol/core@2.1.0", "", { "dependencies": { "zod": "^4.2.0" } }, "sha512-YdFj5gMRHr0gYNAhTbQDgjLHiEJdIAUYxomhKseUNye7ZGlISQmUoLh2sveFFCiQ7j2YMffT1kgSND0FSfIFjQ=="],
+    "@modelcontextprotocol/sdk/ajv": ["ajv@8.18.0", "", { "dependencies": { "fast-deep-equal": "^3.1.3", "fast-uri": "^3.0.1", "json-schema-traverse": "^1.0.0", "require-from-string": "^2.0.2" } }, "sha512-PlXPeEWMXMZ7sPYOHqmDyCJzcfNrUr3fGNKtezX14ykXOEIvyK81d+qydx89KY5O71FKMPaQ2vBfBFI5NHR63A=="],
 
     "@typescript-eslint/eslint-plugin/ignore": ["ignore@7.0.5", "", {}, "sha512-Hs59xBNfUIunMFgWAbGX5cq6893IbWg4KnrjbYwX3tx0ztorVgTDA6B2sxf8ejHJ4wz8BqGUMYlnzNBer5NvGg=="],
 
