@@ -427,7 +427,7 @@
     "@lostgradient/environmentalist": "0.1.0",
     "@lostgradient/lifecycle": "workspace:*",
     "@lostgradient/tool-protocol": "workspace:*",
-    "@lostgradient/weft": "^0.27.1",
+    "@lostgradient/weft": "^0.27.2",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*"
   },

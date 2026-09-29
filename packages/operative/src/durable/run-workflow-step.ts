@@ -12,7 +12,51 @@ import {
   serializeError,
   tripwireDetailFrom,
 } from './run-workflow-result';
-import type { PendingHumanWait, PendingWakeup, RunCursor, StepRecord } from './types';
+import type {
+  DurableRunDeps,
+  PendingHumanWait,
+  PendingWakeup,
+  RunCursor,
+  StepRecord,
+} from './types';
+
+type ConversationSnapshot = ReturnType<Conversation['snapshot']>;
+
+/**
+ * The conversation each run's latest step left behind, keyed by that run's
+ * in-process deps (`ctx.services`). The workflow carries only the snapshot
+ * across steps, and restoring it rebuilds every history node, so a run that
+ * restored on every step grew with the cube of its length. A step reuses the
+ * previous step's conversation when the snapshot it is handed is the one that
+ * conversation produced and nothing has changed it since; anything else, such
+ * as a fresh process resuming from its checkpoint (which builds new deps), falls
+ * back to a full restore. The non-durable loop likewise runs every step on one
+ * conversation.
+ */
+const liveConversations = new WeakMap<
+  DurableRunDeps,
+  { readonly conversation: Conversation; readonly digest: string }
+>();
+
+function conversationForStep(deps: DurableRunDeps, snapshot: ConversationSnapshot): Conversation {
+  const live = liveConversations.get(deps);
+  if (
+    live !== undefined &&
+    live.digest === snapshot.integrity.digest &&
+    live.conversation.revision === snapshot.controllerRevision
+  ) {
+    return live.conversation;
+  }
+  return Conversation.from(snapshot, {
+    runtime: deps.options.runtime ?? createDefaultRuntimeServices(),
+  });
+}
+
+function snapshotAfterStep(deps: DurableRunDeps, conversation: Conversation): ConversationSnapshot {
+  const snapshot = conversation.snapshot();
+  liveConversations.set(deps, { conversation, digest: snapshot.integrity.digest });
+  return snapshot;
+}
 
 export interface DurableStepMemoResult {
   outcome: Pick<Awaited<ReturnType<typeof runStep>>, 'kind'>;
@@ -37,7 +81,7 @@ export interface DurableStepMemoResult {
 
 export function runStepMemo(
   ctx: Pick<WorkflowContext, 'services' | 'memo'>,
-  snapshot: ReturnType<Conversation['snapshot']>,
+  snapshot: ConversationSnapshot,
   stepIndex: number,
   carriedAccumulators: DurableStepMemoResult['nextAccumulators'],
   runId: string,
@@ -46,9 +90,7 @@ export function runStepMemo(
     const deps = runDepsFrom(ctx.services);
     deps.pendingHumanWait = undefined;
     deps.pendingWakeup = undefined;
-    const conversation = Conversation.from(snapshot, {
-      runtime: deps.options.runtime ?? createDefaultRuntimeServices(),
-    });
+    const conversation = conversationForStep(deps, snapshot);
     const stepDeps = {
       ...buildStepDeps(deps.options),
       toolbox: deps.toolbox,
@@ -103,7 +145,7 @@ export function runStepMemo(
           : undefined,
       output: outcome.kind === 'stop' ? outcome.output : undefined,
       record,
-      conversationSnapshot: conversation.snapshot(),
+      conversationSnapshot: snapshotAfterStep(deps, conversation),
       nextAccumulators: {
         totalUsage: runState.totalUsage,
         lastContent: runState.lastContent,
