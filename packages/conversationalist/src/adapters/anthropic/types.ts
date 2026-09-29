@@ -1,4 +1,3 @@
-import type { MessageParam, TextBlockParam } from '@anthropic-ai/sdk/resources/messages';
 /**
  * Anthropic-shaped types with no dependency on `@anthropic-ai/sdk`.
  *
@@ -221,11 +220,6 @@ export interface AnthropicSystemBlock {
 export interface AnthropicConversation {
   system?: string | AnthropicSystemBlock[];
   messages: AnthropicMessage[];
-}
-
-export interface AnthropicSdkConversation {
-  system?: string | TextBlockParam[];
-  messages: MessageParam[];
 }
 
 export interface ToAnthropicMessagesOptions {

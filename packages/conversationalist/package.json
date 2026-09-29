@@ -120,6 +120,13 @@
       "import": "./dist/adapters/anthropic/index.js",
       "default": "./dist/adapters/anthropic/index.js"
     },
+    "./adapters/anthropic/sdk": {
+      "types": "./dist/adapters/anthropic/sdk.d.ts",
+      "bun": "./dist/adapters/anthropic/sdk.js",
+      "browser": null,
+      "import": "./dist/adapters/anthropic/sdk.js",
+      "default": "./dist/adapters/anthropic/sdk.js"
+    },
     "./adapters/gemini": {
       "types": "./dist/adapters/gemini/index.d.ts",
       "bun": "./dist/adapters/gemini/index.js",

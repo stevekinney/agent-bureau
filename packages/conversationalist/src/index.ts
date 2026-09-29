@@ -1,7 +1,6 @@
 export { anthropicConversationAdapter } from './adapters/anthropic';
 export { appendAnthropicMessages, fromAnthropicMessages } from './adapters/anthropic/inbound';
 export { toAnthropicMessages } from './adapters/anthropic/outbound';
-export { toAnthropicMessagesForSdk } from './adapters/anthropic/sdk';
 export type * from './adapters/anthropic/types';
 export { geminiConversationAdapter } from './adapters/gemini';
 export { appendGeminiMessages, fromGeminiMessages } from './adapters/gemini/inbound';
