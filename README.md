@@ -2,7 +2,7 @@
 
 > This repository is a **publication mirror** of the private corvidae workspace, which is its source of truth (Linear COR-1287, owner ruling of 2026-09-21). Pull requests are welcome, but they are ported into corvidae by hand and arrive back here through a sync — lint, tests, coverage and documentation audits all run in corvidae before a sync ever reaches this repository. The mirror's own CI is the transform-emitted `mirror-verify.yaml` plus `release.yml`, which publishes exactly as before.
 
-Merge mirror sync pull requests with their `Corvidae-Commit` trailer intact. A merge commit preserves the mirror commit and its trailer; a squash merge must include that trailer in the resulting commit message. The next sync checks this provenance and refuses to overwrite an unrecognized source change.
+When squash-merging a mirror sync pull request, copy its `Corvidae-Commit` trailer into the resulting commit message. The next sync checks this provenance and refuses to overwrite an unrecognized source change.
 
 Agent Bureau is a Bun-first monorepo for building, running, and operating agent systems. It ships the low-level libraries the agent loop is built from: tool registries, conversation state, memory, skills, and the runtime composition point that assembles them.
 
