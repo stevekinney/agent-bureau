@@ -1,5 +1,12 @@
 # @lostgradient/operative
 
+## 0.12.3
+
+### Patch Changes
+
+- Updated dependencies [d53e1db]
+  - conversationalist@2.0.0
+
 ## 0.12.2
 
 ### Patch Changes
