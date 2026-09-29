@@ -8,6 +8,12 @@
  * and the operative store snapshots on every step. Here a node costs its
  * appended ids and changed messages, so an append-only history snapshots in
  * space linear in its messages.
+ *
+ * Nodes are a flat, pre-ordered list that names each node's parent, not a
+ * nested tree. History is a chain of one node per commit, so nesting put a
+ * long conversation's snapshot hundreds of levels deep, past what codecs such
+ * as msgpack accept (Weft's checkpoint encoder stops at 100) and deep enough to
+ * recurse through. Encoding and decoding here walk the list without recursion.
  */
 import type {
   ConversationHistory,
@@ -130,12 +136,16 @@ export function encodeSnapshot(state: EncodableSnapshot): ConversationSnapshot {
     }
     return index;
   };
-  const encodeNode = (
-    node: EncodableSnapshotNode,
-    parent: EncodableSnapshotNode | null,
-  ): ConversationNodeSnapshot => {
+  const nodes: ConversationNodeSnapshot[] = [];
+  // Pre-order with an explicit stack: children are pushed in reverse so they
+  // are emitted in order, which is what `currentPath` indexes.
+  const pending: Array<[EncodableSnapshotNode, EncodableSnapshotNode | null]> = [
+    [state.root, null],
+  ];
+  for (let entry = pending.pop(); entry !== undefined; entry = pending.pop()) {
+    const [node, parent] = entry;
     const delta = nodeDelta(parent?.conversation ?? null, node.conversation);
-    return {
+    nodes.push({
       id: node.id,
       revision: node.revision,
       parentId: parent?.id ?? null,
@@ -145,10 +155,11 @@ export function encodeSnapshot(state: EncodableSnapshot): ConversationSnapshot {
       messageReferences: Object.fromEntries(
         delta.changedMessages.map((message) => [message.id, referenceMessage(message)]),
       ),
-      children: node.children.map((child) => encodeNode(child, node)),
-    };
-  };
-  const root = encodeNode(state.root, null);
+    });
+    for (let index = node.children.length - 1; index >= 0; index -= 1) {
+      pending.push([node.children[index]!, node]);
+    }
+  }
   return finalizeSnapshot({
     snapshotFormatVersion: CURRENT_SNAPSHOT_FORMAT_VERSION,
     conversationSchemaVersion: state.conversationSchemaVersion,
@@ -156,14 +167,14 @@ export function encodeSnapshot(state: EncodableSnapshot): ConversationSnapshot {
     conversationId: state.conversationId,
     currentBranchId: state.currentBranchId,
     messages,
-    root,
+    nodes,
     currentPath: state.currentPath,
     createdAt: state.createdAt,
     lineage: state.lineage,
   });
 }
 
-interface NodeFields {
+export interface NodeFields {
   readonly id: string;
   readonly revision: number;
   readonly header: Record<string, unknown>;
@@ -172,7 +183,7 @@ interface NodeFields {
 }
 
 /** The message ids a node resolves to, each mapped to its index in the envelope's table. */
-interface NodeMessages {
+export interface NodeMessages {
   readonly ids: readonly string[];
   readonly sources: ReadonlyMap<string, number>;
 }
@@ -181,11 +192,12 @@ interface ParentContext extends NodeMessages {
   readonly id: string;
 }
 
-function readNodeFields(
+export function readNodeFields(
   value: unknown,
   envelope: SnapshotEnvelope,
   tableLength: number,
   parent: ParentContext | null,
+  shape: 'flat' | 'nested' = 'flat',
 ): NodeFields & NodeMessages {
   const node = asRecord(value, 'node');
   const id = readString(node, 'id', 'node');
@@ -196,7 +208,8 @@ function readNodeFields(
   if (parentId !== (parent?.id ?? null)) throw snapshotError(`inconsistent parent for ${id}`);
   const header = asRecord(node['conversation'], 'node');
   const children = node['children'];
-  if (!Array.isArray(children)) throw snapshotError('invalid node');
+  if (shape === 'nested' && !Array.isArray(children)) throw snapshotError('invalid node');
+  if (shape === 'flat' && children !== undefined) throw snapshotError('invalid node');
 
   const parentIds = parent?.ids ?? [];
   const retainedMessageCount = node['retainedMessageCount'];
@@ -242,10 +255,18 @@ function readNodeFields(
       throw snapshotError(`message reference ${messageId} is not listed for ${id}`);
     }
   }
-  return { id, revision, header, messageReferences, children, ids, sources };
+  return {
+    id,
+    revision,
+    header,
+    messageReferences,
+    children: Array.isArray(children) ? children : [],
+    ids,
+    sources,
+  };
 }
 
-function deserializeNodeConversation(
+export function deserializeNodeConversation(
   fields: NodeFields & NodeMessages,
   table: readonly unknown[],
   schemaVersion: number,
@@ -271,29 +292,54 @@ function deserializeNodeConversation(
   return conversation;
 }
 
-function readEnvelopeV2(value: unknown): { envelope: SnapshotEnvelope; table: readonly unknown[] } {
+interface EnvelopeV2 {
+  readonly envelope: SnapshotEnvelope;
+  readonly table: readonly unknown[];
+  readonly nodes: readonly unknown[];
+}
+
+function readEnvelopeV2(value: unknown): EnvelopeV2 {
   const envelope = readSnapshotEnvelope(value);
   if (envelope.snapshotFormatVersion !== 2) {
     throw unsupportedSnapshotFormatVersion(envelope.snapshotFormatVersion);
   }
   const table = envelope.record['messages'];
   if (!Array.isArray(table)) throw snapshotError('invalid message table');
+  const nodes = envelope.record['nodes'];
+  if (!Array.isArray(nodes) || nodes.length === 0) throw snapshotError('invalid node list');
   assertSnapshotDigest(envelope);
-  return { envelope, table };
+  return { envelope, table, nodes };
+}
+
+/** A node's parent id as written, before its other fields are validated. */
+function declaredParentId(value: unknown): string | null {
+  const parentId = asRecord(value, 'node')['parentId'];
+  if (parentId !== null && typeof parentId !== 'string') throw snapshotError('invalid node');
+  return parentId;
+}
+
+interface MutableDecodedNode extends DecodedSnapshotNode {
+  readonly children: DecodedSnapshotNode[];
 }
 
 export function decodeSnapshotV2(value: unknown): DecodedSnapshot {
-  const { envelope, table } = readEnvelopeV2(value);
-  const seenIds = new Set<string>();
+  const { envelope, table, nodes } = readEnvelopeV2(value);
   const referencedIndexes = new Set<number>();
   // One instance per table entry, so restored nodes share messages exactly as
   // committed history does and the next snapshot stays compact.
   const canonicalMessages = new Map<number, Message>();
+  const decodedById = new Map<string, { node: MutableDecodedNode; context: ParentContext }>();
+  let root: MutableDecodedNode | undefined;
 
-  const decodeNode = (nodeValue: unknown, parent: ParentContext | null): DecodedSnapshotNode => {
-    const fields = readNodeFields(nodeValue, envelope, table.length, parent);
-    if (seenIds.has(fields.id)) throw snapshotError(`duplicate node id ${fields.id}`);
-    seenIds.add(fields.id);
+  for (const [position, nodeValue] of nodes.entries()) {
+    const parentId = declaredParentId(nodeValue);
+    const parent = parentId === null ? undefined : decodedById.get(parentId);
+    if ((position === 0) !== (parentId === null) || (parentId !== null && parent === undefined)) {
+      // The root comes first, and every other node follows its parent.
+      throw snapshotError(`inconsistent parent at node ${position}`);
+    }
+    const fields = readNodeFields(nodeValue, envelope, table.length, parent?.context ?? null);
+    if (decodedById.has(fields.id)) throw snapshotError(`duplicate node id ${fields.id}`);
     for (const index of fields.messageReferences.values()) referencedIndexes.add(index);
 
     const deserialized = deserializeNodeConversation(
@@ -311,20 +357,25 @@ export function decodeSnapshotV2(value: unknown): DecodedSnapshot {
       }
       messages[messageId] = message;
     }
-    const context: ParentContext = { id: fields.id, ids: fields.ids, sources: fields.sources };
-    return {
+    const node: MutableDecodedNode = {
       id: fields.id,
       revision: fields.revision,
       conversation: deepFreeze({ ...deserialized, messages }),
-      children: fields.children.map((child) => decodeNode(child, context)),
+      children: [],
     };
-  };
+    decodedById.set(fields.id, {
+      node,
+      context: { id: fields.id, ids: fields.ids, sources: fields.sources },
+    });
+    if (parent === undefined) root = node;
+    else parent.node.children.push(node);
+  }
 
-  const root = decodeNode(envelope.record['root'], null);
-  if (referencedIndexes.size !== table.length)
+  if (referencedIndexes.size !== table.length) {
     throw snapshotError('unreferenced message table entry');
-  assertLineageMatchesTree(envelope.lineage, root.id, seenIds);
-  let current = root;
+  }
+  assertLineageMatchesTree(envelope.lineage, root!.id, new Set(decodedById.keys()));
+  let current: DecodedSnapshotNode = root!;
   for (const index of envelope.currentPath) {
     const child = current.children[index];
     if (!child) throw snapshotError(`current path index ${index} is out of range`);
@@ -344,7 +395,7 @@ export function decodeSnapshotV2(value: unknown): DecodedSnapshot {
     createdAt: envelope.createdAt,
     currentPath: envelope.currentPath,
     lineage: envelope.lineage,
-    root,
+    root: root!,
   };
 }
 
@@ -355,10 +406,18 @@ export function decodeSnapshotV2(value: unknown): DecodedSnapshot {
  * just the final one, so it costs one conversation rather than a full restore.
  */
 export function currentConversationFromSnapshotV2(value: unknown): ConversationHistory {
-  const { envelope, table } = readEnvelopeV2(value);
-  let fields = readNodeFields(envelope.record['root'], envelope, table.length, null);
+  const { envelope, table, nodes } = readEnvelopeV2(value);
+  const childrenById = new Map<string, unknown[]>();
+  for (const nodeValue of nodes.slice(1)) {
+    const parentId = declaredParentId(nodeValue);
+    if (parentId === null) throw snapshotError('inconsistent parent for a non-root node');
+    const siblings = childrenById.get(parentId) ?? [];
+    siblings.push(nodeValue);
+    childrenById.set(parentId, siblings);
+  }
+  let fields = readNodeFields(nodes[0], envelope, table.length, null);
   for (const index of envelope.currentPath) {
-    const child = fields.children[index];
+    const child = childrenById.get(fields.id)?.[index];
     if (child === undefined) throw snapshotError(`current path index ${index} is out of range`);
     fields = readNodeFields(child, envelope, table.length, {
       id: fields.id,

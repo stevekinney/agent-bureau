@@ -224,7 +224,6 @@ export interface ConversationNodeSnapshot {
   retainedMessageCount: number;
   appendedMessageIds: readonly string[];
   messageReferences: Readonly<Record<string, number>>;
-  children: readonly ConversationNodeSnapshot[];
 }
 
 /**
@@ -232,7 +231,9 @@ export interface ConversationNodeSnapshot {
  *
  * Each distinct message is stored once in `messages`; nodes reference it by
  * index, so a snapshot grows with the number of distinct messages and
- * per-node changes rather than with every node's full transcript.
+ * per-node changes rather than with every node's full transcript. `nodes` is
+ * flat and pre-ordered: the root comes first, every other node follows its
+ * parent, and siblings appear in child order, which `currentPath` indexes.
  */
 export interface ConversationSnapshot {
   snapshotFormatVersion: 2;
@@ -241,7 +242,7 @@ export interface ConversationSnapshot {
   conversationId: string;
   currentBranchId: string;
   messages: readonly Message[];
-  root: ConversationNodeSnapshot;
+  nodes: readonly ConversationNodeSnapshot[];
   currentPath: readonly number[];
   createdAt: string;
   lineage: ConversationSnapshotLineage;
