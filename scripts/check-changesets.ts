@@ -73,6 +73,51 @@ export function findWorkspaceLockVersionErrors(
   return errors;
 }
 
+export function synchronizeWorkspaceLockVersions(
+  lockfileText: string,
+  manifests: ReadonlyMap<string, VersionedManifest>,
+): string {
+  const lines = lockfileText.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const updatedPaths = new Set<string>();
+  let inWorkspaces = false;
+  let workspacePath = '';
+
+  const updated = lines.map((line) => {
+    if (line === '  "workspaces": {\n') {
+      inWorkspaces = true;
+      return line;
+    }
+    if (inWorkspaces && /^  },?\r?\n$/.test(line)) {
+      inWorkspaces = false;
+      workspacePath = '';
+      return line;
+    }
+    if (!inWorkspaces) return line;
+
+    const heading = /^    "([^"]+)": \{\r?\n$/.exec(line);
+    if (heading) {
+      workspacePath = heading[1] ?? '';
+      return line;
+    }
+    const manifest = manifests.get(workspacePath);
+    const versionLine = /^(      "version": )"[^"]*"(,?\r?\n)$/.exec(line);
+    if (!manifest || !versionLine) return line;
+    updatedPaths.add(workspacePath);
+    return `${versionLine[1]}${JSON.stringify(manifest.version)}${versionLine[2]}`;
+  });
+
+  for (const path of manifests.keys()) {
+    if (!updatedPaths.has(path)) {
+      throw new Error(`bun.lock ${path} has no version line to update`);
+    }
+  }
+
+  const result = updated.join('');
+  const errors = findWorkspaceLockVersionErrors(manifests, Bun.JSONC.parse(result));
+  if (errors.length > 0) throw new Error(errors.join('\n'));
+  return result;
+}
+
 export function findChangesetTargetErrors(
   changesets: readonly PendingChangeset[],
   policy: ChangesetPolicy,
@@ -207,8 +252,18 @@ async function checkChangesets(repositoryRoot: string): Promise<number> {
 
 if (import.meta.main) {
   try {
-    const changesetCount = await checkChangesets(resolve(import.meta.dir, '..'));
-    console.log(`✓ ${changesetCount} pending changeset(s) target publishable packages.`);
+    const repositoryRoot = resolve(import.meta.dir, '..');
+    if (process.argv.includes('--synchronize-lockfile')) {
+      const lockfilePath = resolve(repositoryRoot, 'bun.lock');
+      const original = await Bun.file(lockfilePath).text();
+      const manifests = await readWorkspaceManifests(repositoryRoot);
+      const updated = synchronizeWorkspaceLockVersions(original, manifests);
+      if (updated !== original) await Bun.write(lockfilePath, updated);
+      console.log('✓ bun.lock workspace versions match package manifests.');
+    } else {
+      const changesetCount = await checkChangesets(repositoryRoot);
+      console.log(`✓ ${changesetCount} pending changeset(s) target publishable packages.`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`✖ ${message}`);
