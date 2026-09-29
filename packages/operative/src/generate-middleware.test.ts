@@ -16,6 +16,7 @@ import {
 } from './providers/backend-descriptor-attachment';
 import type { BackendDescriptor } from './providers/model-catalog';
 import { createModelCatalog } from './providers/model-catalog';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 import type { GenerateContext, GenerateFunction, GenerateMiddleware } from './types';
 
 const FIXED_NOW = () => '2026-09-02T12:00:00.000Z';
@@ -102,7 +103,7 @@ describe('createFallbackGenerate — error handling', () => {
       shouldFallback: () => false,
     });
 
-    expect(generate(makeContext())).rejects.toThrow('boom');
+    expect(await throwingRejectionOf(generate(makeContext()))).toThrow('boom');
   });
 
   it('throws the last error when every provider is exhausted', async () => {
@@ -114,7 +115,7 @@ describe('createFallbackGenerate — error handling', () => {
     };
     const generate = createFallbackGenerate({ providers: [failingA, failingB] });
 
-    expect(generate(makeContext())).rejects.toThrow('boom-b');
+    expect(await throwingRejectionOf(generate(makeContext()))).toThrow('boom-b');
   });
 });
 

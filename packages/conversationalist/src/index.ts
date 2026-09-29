@@ -109,6 +109,8 @@ export type {
   RedactMessageOptions,
   ToolInteraction,
 } from './conversation/index';
+export { currentConversationFromSnapshot } from './conversation/snapshot-format';
+export { migrateConversationSnapshotV1 } from './conversation/snapshot-v1';
 export {
   defineMessagePlugin,
   getMessagePluginIdentity,
@@ -238,9 +240,14 @@ export type {
   ChatMessage,
   ChatMessageRole,
   ConversationHistory,
+  ConversationHistoryHeader,
   ConversationNodeSnapshot,
+  ConversationNodeSnapshotV1,
   ConversationProvider,
   ConversationSnapshot,
+  ConversationSnapshotIntegrity,
+  ConversationSnapshotLineage,
+  ConversationSnapshotV1,
   ConversationStatus,
   JSONValue,
   Message,

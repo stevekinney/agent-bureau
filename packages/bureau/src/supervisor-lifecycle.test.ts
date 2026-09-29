@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 import { createAgentCatalog } from './agent-catalog';
 import { createSupervisor } from './create-supervisor';
 import { makeAgent } from './supervisor-test-helpers';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 describe('createSupervisor', () => {
   describe('abort signal', () => {
     it('rejects delegate() when the signal is already aborted', async () => {
@@ -15,7 +16,7 @@ describe('createSupervisor', () => {
         signal: controller.signal,
       });
 
-      expect(supervisor.delegate('task')).rejects.toThrow();
+      expect(await throwingRejectionOf(supervisor.delegate('task'))).toThrow();
     });
 
     it('rejects delegation without invoking any agent when the signal aborts during an asynchronous routing strategy', async () => {
@@ -37,7 +38,7 @@ describe('createSupervisor', () => {
         signal: controller.signal,
       });
 
-      expect(supervisor.delegate('task')).rejects.toThrow();
+      expect(await throwingRejectionOf(supervisor.delegate('task'))).toThrow();
       // Give the rejected delegation's microtasks a turn, then confirm the
       // routed agent was never actually invoked — this is the behavior the
       // rejection needs to prove, not just that SOME error surfaced.

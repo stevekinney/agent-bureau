@@ -213,7 +213,7 @@ describe('formatAnthropicToolResults', () => {
 describe('formatAnthropicToolResultsAsync', () => {
   it('collects stream payloads from runtime result streams', async () => {
     expect(
-      formatAnthropicToolResultsAsync([
+      await formatAnthropicToolResultsAsync([
         {
           callId: 'call-1',
           outcome: 'success',
@@ -236,7 +236,7 @@ describe('formatAnthropicToolResultsAsync', () => {
           },
         },
       ]),
-    ).resolves.toEqual([
+    ).toEqual([
       {
         type: 'tool_result',
         tool_use_id: 'call-1',

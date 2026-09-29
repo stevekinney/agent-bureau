@@ -1,11 +1,23 @@
-export { createSoulSeed } from './create-seed';
+// Public type surface.
 export type { CreateSoulSeedOptions } from './create-seed';
-export { createSoulDistillationTask } from './create-soul-distillation';
 export type {
   CreateSoulDistillationOptions,
   SoulDistillationChunkedTaskOptions,
   SoulDistillationState,
 } from './create-soul-distillation';
+export type { SoulDiff, SoulDiffEntry } from './soul-approval';
+export type {
+  AgentIdentity,
+  IdentityProvider,
+  PersonaDescriptor,
+  SoulBudget,
+  SoulHistoryEntry,
+  SoulItem,
+} from './types';
+
+// Public runtime surface.
+export { createSoulSeed } from './create-seed';
+export { createSoulDistillationTask } from './create-soul-distillation';
 export { createStaticIdentityProvider } from './create-static-provider';
 export { createStorageIdentityProvider } from './create-storage-provider';
 export { resolveIdentity } from './resolve-identity';
@@ -16,7 +28,6 @@ export {
   rejectSoulUpdate,
   unpinSoulItem,
 } from './soul-approval';
-export type { SoulDiff, SoulDiffEntry } from './soul-approval';
 export {
   createIdentityToolbox,
   createPersonaCreateTool,
@@ -30,11 +41,3 @@ export {
   createSoulRejectTool,
   createSoulViewTool,
 } from './tools';
-export type {
-  AgentIdentity,
-  IdentityProvider,
-  PersonaDescriptor,
-  SoulBudget,
-  SoulHistoryEntry,
-  SoulItem,
-} from './types';

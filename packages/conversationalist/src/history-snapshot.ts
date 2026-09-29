@@ -1,10 +1,7 @@
-import {
-  CURRENT_SNAPSHOT_FORMAT_VERSION,
-  finalizeSnapshot,
-} from './conversation/snapshot-integrity';
+import { encodeSnapshot } from './conversation/snapshot-v2';
 import type { ConversationEnvironment } from './environment';
 import type { HistoryNode } from './history-tree';
-import { getHistoryNodePath, serializeHistoryNode } from './history-tree';
+import { getHistoryNodePath } from './history-tree';
 import type { ConversationSnapshot } from './types';
 import { CURRENT_SCHEMA_VERSION } from './types';
 
@@ -17,13 +14,12 @@ export function createSnapshot(
 ): ConversationSnapshot {
   let root = currentNode;
   while (root.parent) root = root.parent;
-  return finalizeSnapshot({
-    snapshotFormatVersion: CURRENT_SNAPSHOT_FORMAT_VERSION,
+  return encodeSnapshot({
     conversationSchemaVersion: CURRENT_SCHEMA_VERSION,
     controllerRevision: revision,
     conversationId: currentNode.conversation.id,
     currentBranchId: currentNode.id,
-    root: serializeHistoryNode(root),
+    root,
     currentPath: getHistoryNodePath(currentNode),
     createdAt: environment.now(),
     lineage: {

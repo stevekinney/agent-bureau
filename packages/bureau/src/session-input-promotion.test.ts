@@ -21,6 +21,7 @@ import {
   SESSION_INPUT_PROMOTION_OUTBOX_NAMESPACE,
   type SessionInputPromotionAttachment,
 } from './session-input-promotion';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 
 /**
  * COR-435 AC6/AC7 — the promotion mechanism's own crash-safety contract,
@@ -197,7 +198,9 @@ describe('promoteSessionInput / projectSessionInputPromotion (COR-435 AC6/AC7)',
       attachmentFor(sessionId, id),
       fixedNowISO,
     );
-    await expect(attempt).rejects.toThrow('simulated crash before the promotion batch commits');
+    expect(await throwingRejectionOf(attempt)).toThrow(
+      'simulated crash before the promotion batch commits',
+    );
 
     // Nothing durable happened: a fresh, real session store reads no
     // promotion and no outbox entry.

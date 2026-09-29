@@ -8,6 +8,7 @@ import {
   runEventsSubscriptionOperation,
   type RunEventsOperationEngine,
 } from './run-events-operation.ts';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 
 function conversation() {
   return {} as never;
@@ -56,7 +57,7 @@ describe('the operative.runs.events subscription', () => {
 
     // A run may have completed and been reaped between listing and
     // subscribing, so this is a caller error rather than a transport failure.
-    await expect(invoke({ runId: 'missing' }, { runFeeds: registry })).rejects.toThrow(
+    expect(await throwingRejectionOf(invoke({ runId: 'missing' }, { runFeeds: registry }))).toThrow(
       /Unknown run "missing"/,
     );
   });

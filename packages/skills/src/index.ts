@@ -1,133 +1,5 @@
-// ── Providers ─────────────────────────────────────────────────────────
-export { refusedByAdmissionPolicy } from './admission';
+// Public type surface.
 export type { SkillAdmissionPolicy } from './admission';
-export { createStorageSkillProvider } from './create-storage-skill-provider';
-
-// ── Conformance ───────────────────────────────────────────────────────
-export {
-  AGENT_SKILLS_SPECIFICATION_REPOSITORY,
-  AGENT_SKILLS_SPECIFICATION_REVISION,
-  MAXIMUM_COMPATIBILITY_LENGTH,
-  MAXIMUM_DESCRIPTION_LENGTH,
-  MAXIMUM_SKILL_NAME_LENGTH,
-  PORTABLE_FRONTMATTER_FIELDS,
-  isPortableSkillName,
-  normalizeSkillName,
-  parseAllowedTools,
-  serializeAllowedTools,
-  validatePortableFrontmatter,
-} from './conformance';
-
-// ── Parser ────────────────────────────────────────────────────────────
-export {
-  SkillConformanceError,
-  SkillParseError,
-  importSkillMarkdown,
-  isValidSkillName,
-  parseSkillMarkdown,
-  serializeSkillMarkdown,
-} from './parse-skill-markdown';
-
-// ── Artifacts ─────────────────────────────────────────────────────────
-export {
-  DEFAULT_SKILL_ADMISSION_LIMITS,
-  SKILL_MANIFEST_FALLBACK_FILENAME,
-  SKILL_MANIFEST_FILENAME,
-  createSkillArtifact,
-  decodeArtifactText,
-  findArtifactEntry,
-  findArtifactManifest,
-  normalizeArtifactPath,
-  resolveAdmissionLimits,
-  resolveMediaType,
-} from './artifact';
-export { readSkillArtifact } from './ingestion/read-skill-artifact';
-
-// ── Client ────────────────────────────────────────────────────────────
-export {
-  createFilesystemArtifactLoader,
-  createSkillArtifactLoader,
-  createStaticArtifactLoader,
-  createStorageArtifactLoader,
-  readInstructions,
-  readResource,
-} from './client/artifact-loader';
-export { createSkillClientToolbox, renderClientCatalog } from './client/client-toolbox';
-export {
-  isRenderedSkillContent,
-  renderActiveSkillInstructions,
-  renderSkillCatalog,
-} from './client/render';
-export { createSkillClient } from './client/skill-client';
-
-// ── Discovery ─────────────────────────────────────────────────────────
-export { availableRecords, findRecord, generalCatalogProjection } from './discovery/catalog';
-export { createSkillCatalogService } from './discovery/catalog-service';
-export { discoverSkills } from './discovery/discover';
-export { materializeRemoteSource } from './discovery/remote';
-export {
-  AGENTS_SKILLS_DIRECTORY,
-  CLAUDE_SKILLS_DIRECTORY,
-  DEFAULT_SOURCE_PRECEDENCE,
-  admitSources,
-  defaultSkillSources,
-  defaultTrustForKind,
-  resolveTrust,
-} from './discovery/source';
-export { readStoredSkillArtifacts } from './discovery/storage-source';
-
-// ── Ingestion ─────────────────────────────────────────────────────────
-
-// ── Memory ────────────────────────────────────────────────────────────
-export { createSkillMemory, createSkillMemoryHooks } from './skill-memory';
-
-// ── Rendering ────────────────────────────────────────────────────────
-export { escapeXml } from './xml';
-
-// ── Events ───────────────────────────────────────────────────────────
-export {
-  SkillActivatedEvent,
-  SkillCancelledEvent,
-  SkillCatalogRevisedEvent,
-  SkillCompatibilityDecidedEvent,
-  SkillDeactivatedEvent,
-  SkillFailedEvent,
-  SkillLoadedEvent,
-  SkillRecoveredEvent,
-  SkillReinjectedEvent,
-  SkillRejectedEvent,
-  SkillResourceLoadedEvent,
-  SkillSourceAdmittedEvent,
-} from './events';
-export type {
-  SkillAdmissionRule,
-  SkillEventClassMap,
-  SkillEventCorrelation,
-  SkillEventMap,
-  SkillEventType,
-  SkillRejectionReason,
-} from './events';
-
-// ── Proposals ────────────────────────────────────────────────────────
-export {
-  createAcceptProposalTool,
-  createListProposalsTool,
-  createProposalToolbox,
-  createRejectProposalTool,
-  createViewProposalTool,
-} from './self-improvement/create-proposal-tools';
-export {
-  acceptProposal,
-  clearProposals,
-  getProposal,
-  isRejectedPattern,
-  listProposals,
-  rejectProposal,
-  saveProposal,
-} from './self-improvement/proposals';
-export { reflectionSweep } from './self-improvement/reflection-sweep';
-
-// ── Types ─────────────────────────────────────────────────────────────
 export type {
   CreateSkillArtifactOptions,
   NormalizedArtifactPath,
@@ -150,9 +22,10 @@ export type {
 export type {
   LoadedSkillResource,
   SkillArtifactLoad,
-  SkillArtifactLoadFailure,
   SkillArtifactLoader,
 } from './client/artifact-loader';
+// Artifact load failures are a separate public result shape.
+export type { SkillArtifactLoadFailure } from './client/artifact-loader';
 export type {
   CreateSkillClientOptions,
   SkillClient,
@@ -204,7 +77,14 @@ export type {
   SkillTrustPolicy,
   SkillTrustState,
 } from './discovery/source';
-export { scanSkillResource } from './guardrail';
+export type {
+  SkillAdmissionRule,
+  SkillEventClassMap,
+  SkillEventCorrelation,
+  SkillEventMap,
+  SkillEventType,
+  SkillRejectionReason,
+} from './events';
 export type { ScannedSkillContent, SkillGuardrailOptions } from './guardrail';
 export type { ReadSkillArtifactOptions } from './ingestion/read-skill-artifact';
 export type {
@@ -244,4 +124,113 @@ export type {
   ToolPolicy,
 } from './types';
 
+// Public runtime surface.
+export { refusedByAdmissionPolicy } from './admission';
+export {
+  createSkillArtifact,
+  decodeArtifactText,
+  findArtifactEntry,
+  findArtifactManifest,
+  normalizeArtifactPath,
+  resolveAdmissionLimits,
+  resolveMediaType,
+} from './artifact';
+// Admission limits and manifest filenames are public constants.
+export {
+  DEFAULT_SKILL_ADMISSION_LIMITS,
+  SKILL_MANIFEST_FALLBACK_FILENAME,
+  SKILL_MANIFEST_FILENAME,
+} from './artifact';
+export {
+  createFilesystemArtifactLoader,
+  createSkillArtifactLoader,
+  createStaticArtifactLoader,
+  createStorageArtifactLoader,
+  readInstructions,
+  readResource,
+} from './client/artifact-loader';
+export { createSkillClientToolbox, renderClientCatalog } from './client/client-toolbox';
+export {
+  isRenderedSkillContent,
+  renderActiveSkillInstructions,
+  renderSkillCatalog,
+} from './client/render';
+export { createSkillClient } from './client/skill-client';
+export {
+  isPortableSkillName,
+  normalizeSkillName,
+  parseAllowedTools,
+  serializeAllowedTools,
+  validatePortableFrontmatter,
+} from './conformance';
+// Specification limits and fields are public constants.
+export {
+  AGENT_SKILLS_SPECIFICATION_REPOSITORY,
+  AGENT_SKILLS_SPECIFICATION_REVISION,
+  MAXIMUM_COMPATIBILITY_LENGTH,
+  MAXIMUM_DESCRIPTION_LENGTH,
+  MAXIMUM_SKILL_NAME_LENGTH,
+  PORTABLE_FRONTMATTER_FIELDS,
+} from './conformance';
+export { createStorageSkillProvider } from './create-storage-skill-provider';
+export { availableRecords, findRecord, generalCatalogProjection } from './discovery/catalog';
+export { createSkillCatalogService } from './discovery/catalog-service';
+export { discoverSkills } from './discovery/discover';
+export { materializeRemoteSource } from './discovery/remote';
+export {
+  admitSources,
+  defaultSkillSources,
+  defaultTrustForKind,
+  resolveTrust,
+} from './discovery/source';
+// Well-known source directories and precedence are public constants.
+export {
+  AGENTS_SKILLS_DIRECTORY,
+  CLAUDE_SKILLS_DIRECTORY,
+  DEFAULT_SOURCE_PRECEDENCE,
+} from './discovery/source';
+export { readStoredSkillArtifacts } from './discovery/storage-source';
+export {
+  SkillActivatedEvent,
+  SkillCancelledEvent,
+  SkillCatalogRevisedEvent,
+  SkillCompatibilityDecidedEvent,
+  SkillDeactivatedEvent,
+  SkillFailedEvent,
+  SkillLoadedEvent,
+  SkillRecoveredEvent,
+  SkillReinjectedEvent,
+  SkillRejectedEvent,
+  SkillResourceLoadedEvent,
+  SkillSourceAdmittedEvent,
+} from './events';
+export { scanSkillResource } from './guardrail';
+export { readSkillArtifact } from './ingestion/read-skill-artifact';
+export {
+  importSkillMarkdown,
+  isValidSkillName,
+  parseSkillMarkdown,
+  serializeSkillMarkdown,
+} from './parse-skill-markdown';
+// Parser errors are public constructors.
+export { SkillConformanceError, SkillParseError } from './parse-skill-markdown';
+export {
+  createAcceptProposalTool,
+  createListProposalsTool,
+  createProposalToolbox,
+  createRejectProposalTool,
+  createViewProposalTool,
+} from './self-improvement/create-proposal-tools';
+export {
+  acceptProposal,
+  clearProposals,
+  getProposal,
+  isRejectedPattern,
+  listProposals,
+  rejectProposal,
+  saveProposal,
+} from './self-improvement/proposals';
+export { reflectionSweep } from './self-improvement/reflection-sweep';
+export { createSkillMemory, createSkillMemoryHooks } from './skill-memory';
 export { createMockKeyValueStore, createMockSkillProvider } from './test/index';
+export { escapeXml } from './xml';

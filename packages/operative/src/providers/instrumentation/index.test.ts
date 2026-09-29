@@ -49,7 +49,7 @@ describe('instrumentGenerate — backend-descriptor propagation', () => {
 
     expect(readBackendDescriptors(wrapped)).toEqual([descriptor]);
     // The wrapper still functions as a normal GenerateFunction.
-    expect(wrapped(makeContext())).resolves.toEqual({ content: 'ok', toolCalls: [] });
+    expect(await wrapped(makeContext())).toEqual({ content: 'ok', toolCalls: [] });
   });
 
   it("reports a fixed generation profile, not opaque, for an Agent whose generate is the wrapper's output", () => {

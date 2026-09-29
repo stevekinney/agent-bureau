@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 
+import { rejectionOf, throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import {
   assembleBaselineArtifact,
   InvalidReproductionArtifactError,
@@ -115,14 +116,18 @@ describe('readReproductionArtifact — validation', () => {
     const path = scratchPath('malformed-json');
     await Bun.write(path, '{ this is not valid JSON');
 
-    expect(readReproductionArtifact(path)).rejects.toBeInstanceOf(InvalidReproductionArtifactError);
+    expect(await rejectionOf(readReproductionArtifact(path))).toBeInstanceOf(
+      InvalidReproductionArtifactError,
+    );
   });
 
   it('rejects a file whose top-level value is not an object', async () => {
     const path = scratchPath('not-an-object');
     await Bun.write(path, JSON.stringify([1, 2, 3]));
 
-    expect(readReproductionArtifact(path)).rejects.toBeInstanceOf(InvalidReproductionArtifactError);
+    expect(await rejectionOf(readReproductionArtifact(path))).toBeInstanceOf(
+      InvalidReproductionArtifactError,
+    );
   });
 
   it('rejects a file missing a required field', async () => {
@@ -131,7 +136,9 @@ describe('readReproductionArtifact — validation', () => {
     const { sourceRevision: _sourceRevision, ...withoutSourceRevision } = artifact;
     await Bun.write(path, JSON.stringify(withoutSourceRevision));
 
-    expect(readReproductionArtifact(path)).rejects.toBeInstanceOf(InvalidReproductionArtifactError);
+    expect(await rejectionOf(readReproductionArtifact(path))).toBeInstanceOf(
+      InvalidReproductionArtifactError,
+    );
   });
 
   it('rejects a non-object packageVersions', async () => {
@@ -139,7 +146,9 @@ describe('readReproductionArtifact — validation', () => {
     const path = scratchPath('invalid-package-versions');
     await Bun.write(path, JSON.stringify({ ...artifact, packageVersions: 'not-an-object' }));
 
-    expect(readReproductionArtifact(path)).rejects.toBeInstanceOf(InvalidReproductionArtifactError);
+    expect(await rejectionOf(readReproductionArtifact(path))).toBeInstanceOf(
+      InvalidReproductionArtifactError,
+    );
   });
 
   it('rejects a packageVersions entry that is not a string', async () => {
@@ -147,7 +156,9 @@ describe('readReproductionArtifact — validation', () => {
     const path = scratchPath('invalid-package-entry');
     await Bun.write(path, JSON.stringify({ ...artifact, packageVersions: { operative: 123 } }));
 
-    expect(readReproductionArtifact(path)).rejects.toThrow(/packageVersions\.operative/);
+    expect(await throwingRejectionOf(readReproductionArtifact(path))).toThrow(
+      /packageVersions\.operative/,
+    );
   });
 
   it('rejects a non-object effectiveModel', async () => {
@@ -155,7 +166,9 @@ describe('readReproductionArtifact — validation', () => {
     const path = scratchPath('invalid-effective-model');
     await Bun.write(path, JSON.stringify({ ...artifact, effectiveModel: 'not-an-object' }));
 
-    expect(readReproductionArtifact(path)).rejects.toThrow(/"effectiveModel" must be an object/);
+    expect(await throwingRejectionOf(readReproductionArtifact(path))).toThrow(
+      /"effectiveModel" must be an object/,
+    );
   });
 
   it('rejects an effectiveModel.effort that is not a string', async () => {
@@ -169,7 +182,9 @@ describe('readReproductionArtifact — validation', () => {
       }),
     );
 
-    expect(readReproductionArtifact(path)).rejects.toThrow(/effectiveModel\.effort/);
+    expect(await throwingRejectionOf(readReproductionArtifact(path))).toThrow(
+      /effectiveModel\.effort/,
+    );
   });
 
   it('rejects a non-array causalTrace', async () => {
@@ -177,7 +192,9 @@ describe('readReproductionArtifact — validation', () => {
     const path = scratchPath('invalid-causal-trace');
     await Bun.write(path, JSON.stringify({ ...artifact, causalTrace: 'not-an-array' }));
 
-    expect(readReproductionArtifact(path)).rejects.toThrow(/"causalTrace" must be an array/);
+    expect(await throwingRejectionOf(readReproductionArtifact(path))).toThrow(
+      /"causalTrace" must be an array/,
+    );
   });
 
   it('rejects an artifact missing the terminalResult key entirely', async () => {
@@ -186,7 +203,9 @@ describe('readReproductionArtifact — validation', () => {
     const path = scratchPath('missing-terminal-result');
     await Bun.write(path, JSON.stringify(withoutTerminalResult));
 
-    expect(readReproductionArtifact(path)).rejects.toThrow(/"terminalResult" is required/);
+    expect(await throwingRejectionOf(readReproductionArtifact(path))).toThrow(
+      /"terminalResult" is required/,
+    );
   });
 
   it('rejects an artifact missing the cleanupReport key entirely', async () => {
@@ -195,7 +214,9 @@ describe('readReproductionArtifact — validation', () => {
     const path = scratchPath('missing-cleanup-report');
     await Bun.write(path, JSON.stringify(withoutCleanupReport));
 
-    expect(readReproductionArtifact(path)).rejects.toThrow(/"cleanupReport" is required/);
+    expect(await throwingRejectionOf(readReproductionArtifact(path))).toThrow(
+      /"cleanupReport" is required/,
+    );
   });
 
   it('accepts an explicit null terminalResult/cleanupReport — present, just null, not missing', async () => {
@@ -216,7 +237,7 @@ describe('readReproductionArtifact — validation', () => {
 describe('replayReproductionArtifact', () => {
   it('replays a freshly assembled artifact green', async () => {
     const artifact = await assembleBaselineArtifact({ randomSeed: 'replay-green' });
-    expect(replayReproductionArtifact(artifact)).resolves.toBeUndefined();
+    expect(await replayReproductionArtifact(artifact)).toBeUndefined();
   });
 
   it('compares causalTrace and firedFaults entries by value, not by key insertion order', async () => {
@@ -237,7 +258,7 @@ describe('replayReproductionArtifact', () => {
       firedFaults: reorderedFaults,
     };
 
-    expect(replayReproductionArtifact(reordered)).resolves.toBeUndefined();
+    expect(await replayReproductionArtifact(reordered)).toBeUndefined();
   });
 
   it('replays the same artifact from disk green', async () => {
@@ -246,7 +267,7 @@ describe('replayReproductionArtifact', () => {
     await writeReproductionArtifact(artifact, path);
 
     const read = await readReproductionArtifact(path);
-    expect(replayReproductionArtifact(read)).resolves.toBeUndefined();
+    expect(await replayReproductionArtifact(read)).toBeUndefined();
   });
 
   it('fails naming the mismatching causalTrace entry when a trace field is corrupted', async () => {
@@ -259,17 +280,19 @@ describe('replayReproductionArtifact', () => {
       causalTrace: [corruptedEntry, ...restEntries],
     };
 
-    expect(replayReproductionArtifact(corrupted)).rejects.toThrow(
+    expect(await throwingRejectionOf(replayReproductionArtifact(corrupted))).toThrow(
       ReproductionArtifactMismatchError,
     );
-    expect(replayReproductionArtifact(corrupted)).rejects.toThrow(/causalTrace\[0\]/);
+    expect(await throwingRejectionOf(replayReproductionArtifact(corrupted))).toThrow(
+      /causalTrace\[0\]/,
+    );
   });
 
   it('fails when clockOrigin is corrupted, since firedFaults[].firedAt is origin-relative', async () => {
     const artifact = await assembleBaselineArtifact({ randomSeed: 'corrupt-clock-origin' });
     const corrupted = { ...artifact, clockOrigin: '2099-01-01T00:00:00.000Z' };
 
-    expect(replayReproductionArtifact(corrupted)).rejects.toThrow(
+    expect(await throwingRejectionOf(replayReproductionArtifact(corrupted))).toThrow(
       ReproductionArtifactMismatchError,
     );
   });
@@ -281,13 +304,17 @@ describe('replayReproductionArtifact', () => {
       firedFaults: [...artifact.firedFaults, ...artifact.firedFaults],
     };
 
-    expect(replayReproductionArtifact(corrupted)).rejects.toThrow(/firedFaults length mismatch/);
+    expect(await throwingRejectionOf(replayReproductionArtifact(corrupted))).toThrow(
+      /firedFaults length mismatch/,
+    );
   });
 
   it('fails when the recorded causalTrace length does not match the replayed run', async () => {
     const artifact = await assembleBaselineArtifact({ randomSeed: 'corrupt-trace-length' });
     const corrupted = { ...artifact, causalTrace: artifact.causalTrace.slice(0, -1) };
 
-    expect(replayReproductionArtifact(corrupted)).rejects.toThrow(/causalTrace length mismatch/);
+    expect(await throwingRejectionOf(replayReproductionArtifact(corrupted))).toThrow(
+      /causalTrace length mismatch/,
+    );
   });
 });

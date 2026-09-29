@@ -6,6 +6,7 @@ import { createChildRunRegistry } from '../child-run';
 import { createClosedAcknowledgement } from '../closed-acknowledgement';
 import { createTokenBudget } from '../context/token-budget';
 import type { OperativeHookMap } from '../hooks';
+import { rejectionOf } from '../testing/promise-outcome.test-support.ts';
 import { createBarrierRegistry } from './barriers';
 import type { Schedule } from './schedule-runner';
 import {
@@ -162,9 +163,9 @@ describe('runBoundedSchedules — bound behavior', () => {
         seed: 'party-count',
       });
 
-    expect(attempt(['only-one'])).rejects.toBeInstanceOf(InvalidPartyCountError);
-    expect(attempt(['a', 'b', 'c', 'd'])).rejects.toBeInstanceOf(InvalidPartyCountError);
-    expect(attempt([])).rejects.toBeInstanceOf(InvalidPartyCountError);
+    expect(await rejectionOf(attempt(['only-one']))).toBeInstanceOf(InvalidPartyCountError);
+    expect(await rejectionOf(attempt(['a', 'b', 'c', 'd']))).toBeInstanceOf(InvalidPartyCountError);
+    expect(await rejectionOf(attempt([]))).toBeInstanceOf(InvalidPartyCountError);
   });
 
   it('throws InvalidMaximumSchedulesError for a non-positive or non-integer bound', async () => {
@@ -177,9 +178,9 @@ describe('runBoundedSchedules — bound behavior', () => {
         seed: 'maximum-schedules',
       });
 
-    expect(attempt(0)).rejects.toBeInstanceOf(InvalidMaximumSchedulesError);
-    expect(attempt(-1)).rejects.toBeInstanceOf(InvalidMaximumSchedulesError);
-    expect(attempt(1.5)).rejects.toBeInstanceOf(InvalidMaximumSchedulesError);
+    expect(await rejectionOf(attempt(0))).toBeInstanceOf(InvalidMaximumSchedulesError);
+    expect(await rejectionOf(attempt(-1))).toBeInstanceOf(InvalidMaximumSchedulesError);
+    expect(await rejectionOf(attempt(1.5))).toBeInstanceOf(InvalidMaximumSchedulesError);
   });
 
   it('throws DuplicatePartyNameError when two parties share a name', async () => {
@@ -191,7 +192,7 @@ describe('runBoundedSchedules — bound behavior', () => {
       seed: 'duplicate-party',
     });
 
-    expect(attempt).rejects.toBeInstanceOf(DuplicatePartyNameError);
+    expect(await rejectionOf(attempt)).toBeInstanceOf(DuplicatePartyNameError);
   });
 
   it('propagates UnsupportedScenarioError immediately instead of recording it as a failing schedule', async () => {
@@ -207,7 +208,7 @@ describe('runBoundedSchedules — bound behavior', () => {
       seed: 'unsupported',
     });
 
-    expect(attempt).rejects.toBeInstanceOf(UnsupportedScenarioError);
+    expect(await rejectionOf(attempt)).toBeInstanceOf(UnsupportedScenarioError);
     // The runner stops at the first attempt rather than treating the
     // capability gap as "schedule 1 failed, try schedule 2".
     expect(calls).toBe(1);
@@ -263,7 +264,7 @@ describe('runBoundedSchedules — AB-95 scenarios', () => {
       seed: 'session-admission',
     });
 
-    expect(attempt).rejects.toMatchObject({
+    expect(await rejectionOf(attempt)).toMatchObject({
       name: 'UnsupportedScenarioError',
       owningIssue: 'AB-42',
     });
@@ -284,7 +285,7 @@ describe('runBoundedSchedules — AB-95 scenarios', () => {
       seed: 'review-resolution',
     });
 
-    expect(attempt).rejects.toMatchObject({
+    expect(await rejectionOf(attempt)).toMatchObject({
       name: 'UnsupportedScenarioError',
       owningIssue: 'AB-46',
     });

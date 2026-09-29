@@ -12,6 +12,7 @@ import {
 } from './approval-resolution-test-helpers';
 import { createTool, createToolCall } from './create-tool';
 import { createToolbox } from './create-toolbox';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 import type { SignedPendingToolApproval, ToolApprovalResolution } from './types';
 
 describe('approval resolution mutable caller boundaries', () => {
@@ -184,13 +185,15 @@ describe('approval resolution mutable caller boundaries', () => {
       arguments: { value: 'injected' },
     } as unknown as Parameters<typeof toolbox.resolveApproval>[2];
 
-    await expect(
-      toolbox.resolveApproval(
-        requireSignedApproval(parked),
-        { decision: 'approve', remember: false },
-        options,
+    expect(
+      await throwingRejectionOf(
+        toolbox.resolveApproval(
+          requireSignedApproval(parked),
+          { decision: 'approve', remember: false },
+          options,
+        ),
       ),
-    ).rejects.toThrow('Approval resolution options cannot include arguments');
+    ).toThrow('Approval resolution options cannot include arguments');
     expect(executedValue).toBeUndefined();
     expect(counts.reserve).toBe(0);
     expect(counts.commit).toBe(0);

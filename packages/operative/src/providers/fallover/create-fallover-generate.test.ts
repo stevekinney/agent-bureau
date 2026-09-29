@@ -3,6 +3,7 @@ import { describe, expect, it } from 'bun:test';
 
 import { createAgent } from '../../create-agent.ts';
 import { readGenerationProfile } from '../../generation-profile.ts';
+import { throwingRejectionOf } from '../../testing/promise-outcome.test-support.ts';
 import {
   readBackendDescriptors,
   withBackendDescriptors,
@@ -128,7 +129,7 @@ describe('createFalloverGenerate', () => {
       providers: [failingProvider('primary', overflowError), secondary],
     });
 
-    expect(generate(makeContext())).rejects.toThrow(overflowError);
+    expect(await throwingRejectionOf(generate(makeContext()))).toThrow(overflowError);
     expect(secondaryCalls).toBe(0);
   });
 
@@ -180,7 +181,9 @@ describe('createFalloverGenerate', () => {
     controller.abort();
     const generate = createFalloverGenerate({ providers: [okProvider('primary')] });
 
-    expect(generate(makeContext({ signal: controller.signal }))).rejects.toThrow(/aborted/i);
+    expect(await throwingRejectionOf(generate(makeContext({ signal: controller.signal })))).toThrow(
+      /aborted/i,
+    );
   });
 
   it('aborts an in-progress retry backoff when the signal fires mid-sleep', async () => {
@@ -208,7 +211,7 @@ describe('createFalloverGenerate', () => {
     await Promise.resolve();
     controller.abort();
 
-    expect(resultPromise).rejects.toThrow(/aborted/i);
+    expect(await throwingRejectionOf(resultPromise)).toThrow(/aborted/i);
     expect(attempts).toBe(1);
   });
 

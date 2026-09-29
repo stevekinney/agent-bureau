@@ -273,7 +273,7 @@ describe('formatGeminiToolResults', () => {
 describe('formatGeminiToolResultsAsync', () => {
   it('collects stream payloads and stringifies non-JSON chunks', async () => {
     expect(
-      formatGeminiToolResultsAsync([
+      await formatGeminiToolResultsAsync([
         {
           callId: 'call-stream',
           outcome: 'success',
@@ -296,7 +296,7 @@ describe('formatGeminiToolResultsAsync', () => {
           },
         },
       ]),
-    ).resolves.toEqual([
+    ).toEqual([
       {
         functionResponse: {
           name: 'unknown',

@@ -3,6 +3,7 @@ import { MemoryStorage, textValueStore, yieldToPortableEventLoop } from '@lostgr
 import { afterEach, describe, expect, it } from 'bun:test';
 import { createConversationHistory } from 'conversationalist';
 
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import { createSessionStore } from './create-session-store';
 import { createSessionHandle } from './session-handle';
 import { appendConversationMessages } from './session-handle-support';
@@ -30,7 +31,9 @@ describe('regression — concurrent terminal commits', () => {
       runOptions: createTestRunOptions(),
     });
 
-    expect(handle.run('prompt').result()).rejects.toThrow('Failed to reserve a run');
+    expect(await throwingRejectionOf(handle.run('prompt').result())).toThrow(
+      'Failed to reserve a run',
+    );
   });
 
   it('rejects when the runtime cannot mint an originating user message id', async () => {
@@ -44,7 +47,9 @@ describe('regression — concurrent terminal commits', () => {
       runOptions: createTestRunOptions(),
     });
 
-    expect(handle.run('prompt').result()).rejects.toThrow('Failed to identify the user message');
+    expect(await throwingRejectionOf(handle.run('prompt').result())).toThrow(
+      'Failed to identify the user message',
+    );
   });
 
   it('rejects the run when its terminal session update becomes a no-op', async () => {
@@ -65,7 +70,7 @@ describe('regression — concurrent terminal commits', () => {
       runOptions: createTestRunOptions(),
     });
 
-    expect(handle.run('prompt').result()).rejects.toThrow('disappeared');
+    expect(await throwingRejectionOf(handle.run('prompt').result())).toThrow('disappeared');
     expect(await baseStore.load(sessionId)).toBeDefined();
   });
 
@@ -180,7 +185,7 @@ describe('regression — concurrent terminal commits', () => {
       runOptions: createTestRunOptions(),
     });
 
-    expect(handle.run('prompt').result()).rejects.toThrow('disappeared');
+    expect(await throwingRejectionOf(handle.run('prompt').result())).toThrow('disappeared');
   });
 
   it('rejects a conflicting local result when a concurrent terminal commit is authoritative', async () => {
@@ -217,7 +222,9 @@ describe('regression — concurrent terminal commits', () => {
       runOptions: createTestRunOptions(),
     });
 
-    expect(handle.run('prompt').result()).rejects.toThrow('conflicting terminal');
+    expect(await throwingRejectionOf(handle.run('prompt').result())).toThrow(
+      'conflicting terminal',
+    );
     const conflictedSession = await baseStore.load('terminal-commit-conflict');
     expect(conflictedSession?.runs[0]?.outcome).toEqual({
       finishReason: 'aborted',

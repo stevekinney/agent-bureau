@@ -11,6 +11,7 @@ import {
 } from './approval-resolution-test-helpers';
 import { createTool, createToolCall } from './create-tool';
 import { createToolbox } from './create-toolbox';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 
 describe('approval resolution reservations and authority', () => {
   it.each([
@@ -150,23 +151,25 @@ describe('approval resolution reservations and authority', () => {
       requestContext: createRequestContext(),
     });
 
-    await expect(
-      toolbox.resolveApproval(
-        requireSignedApproval(parked),
-        { decision: 'deny', remember: false },
-        {
-          requestContext: createRequestContext({
-            authority: {
-              principalId: ownerId,
-              tenantId: 'approval-resolution-tenant',
-              ownerId,
-              capabilities: [],
-              authorizationRevision: 'stale',
-            },
-          }),
-        },
+    expect(
+      await throwingRejectionOf(
+        toolbox.resolveApproval(
+          requireSignedApproval(parked),
+          { decision: 'deny', remember: false },
+          {
+            requestContext: createRequestContext({
+              authority: {
+                principalId: ownerId,
+                tenantId: 'approval-resolution-tenant',
+                ownerId,
+                capabilities: [],
+                authorizationRevision: 'stale',
+              },
+            }),
+          },
+        ),
       ),
-    ).rejects.toThrow('authorizationRevision');
+    ).toThrow('authorizationRevision');
     expect(counts.revoke).toBe(0);
   });
 
@@ -238,13 +241,15 @@ describe('approval resolution reservations and authority', () => {
       requestContext: createRequestContext(),
     });
 
-    await expect(
-      toolbox.resolveApproval(
-        requireSignedApproval(parked),
-        { decision: 'deny', remember: false },
-        { requestContext },
+    expect(
+      await throwingRejectionOf(
+        toolbox.resolveApproval(
+          requireSignedApproval(parked),
+          { decision: 'deny', remember: false },
+          { requestContext },
+        ),
       ),
-    ).rejects.toThrow(field);
+    ).toThrow(field);
     expect(counts.revoke).toBe(0);
   });
 
@@ -276,13 +281,15 @@ describe('approval resolution reservations and authority', () => {
       { ownerId, requestContext },
     );
 
-    await expect(
-      changed.resolveApproval(
-        requireSignedApproval(parked),
-        { decision: 'deny', remember: false },
-        { requestContext },
+    expect(
+      await throwingRejectionOf(
+        changed.resolveApproval(
+          requireSignedApproval(parked),
+          { decision: 'deny', remember: false },
+          { requestContext },
+        ),
       ),
-    ).rejects.toThrow('toolDefinitionRevision');
+    ).toThrow('toolDefinitionRevision');
     expect(counts.revoke).toBe(0);
   });
 
@@ -323,13 +330,15 @@ describe('approval resolution reservations and authority', () => {
       requestContext,
     });
 
-    await expect(
-      changed.resolveApproval(
-        requireSignedApproval(parked),
-        { decision: 'deny', remember: false },
-        { requestContext },
+    expect(
+      await throwingRejectionOf(
+        changed.resolveApproval(
+          requireSignedApproval(parked),
+          { decision: 'deny', remember: false },
+          { requestContext },
+        ),
       ),
-    ).rejects.toThrow(field);
+    ).toThrow(field);
     expect(counts.revoke).toBe(0);
   });
 
@@ -357,9 +366,15 @@ describe('approval resolution reservations and authority', () => {
     const approval = requireSignedApproval(parked);
     now = approval.approvalBinding!.expiresAt;
 
-    await expect(
-      toolbox.resolveApproval(approval, { decision: 'deny', remember: false }, { requestContext }),
-    ).rejects.toThrow('expired');
+    expect(
+      await throwingRejectionOf(
+        toolbox.resolveApproval(
+          approval,
+          { decision: 'deny', remember: false },
+          { requestContext },
+        ),
+      ),
+    ).toThrow('expired');
     expect(counts.revoke).toBe(0);
   });
 });

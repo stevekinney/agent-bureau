@@ -10,6 +10,7 @@ import { buildConversationEventDetail, type ConversationChangeContext } from './
 import type { HistoryNode } from './history-tree';
 import { pruneHistoryToDepth } from './history-tree';
 import type { ConversationHistory, MessagePluginIdentity } from './types';
+import { cloneSharingFrozen } from './utilities/type-helpers';
 
 export type ConversationLifecycle = 'open' | 'closed' | 'disposed';
 
@@ -113,7 +114,7 @@ export class HistoryTransaction {
   ): void {
     this.assertOpen(lifecycle);
     const previousConversation = this.current;
-    const safeNext = ensureConversationSafe(structuredClone(next));
+    const safeNext = ensureConversationSafe(cloneSharingFrozen(next));
     this.controllerRevision += 1;
     const newNode: HistoryNode = {
       id: `${safeNext.id}:${this.controllerRevision}`,

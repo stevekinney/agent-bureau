@@ -3,6 +3,7 @@ import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
 import { createSessionHandle } from './session-handle';
@@ -43,7 +44,7 @@ describe('session.run() — startup and settlement', () => {
         finishReason: 'stop-condition',
         ...(success ? {} : { error: { kind: 'output', code: 'INVALID_OUTPUT' } }),
       });
-      if (!success) expect(run.unwrap()).rejects.toThrow();
+      if (!success) expect(await throwingRejectionOf(run.unwrap())).toThrow();
     },
   );
 

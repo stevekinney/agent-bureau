@@ -1,3 +1,5 @@
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+
 import { deepCloneAndFreeze, type SkillCatalogRevision } from './catalog';
 import { discoverSkills, type DiscoverSkillsOptions } from './discover';
 
@@ -153,7 +155,8 @@ interface LiveRefresh extends SkillCatalogRefreshHandle {
 export function createSkillCatalogService(
   options: CreateSkillCatalogServiceOptions,
 ): SkillCatalogService {
-  const now = options.now ?? ((): string => new Date().toISOString());
+  const runtime = options.runtime ?? createDefaultRuntimeServices();
+  const now = options.now ?? runtime.clock.nowISO;
   let current: SkillCatalogRevision = options.initial
     ? deepCloneAndFreeze(options.initial)
     : emptyRevision(now());
@@ -272,7 +275,7 @@ export function createSkillCatalogService(
     const scan = (async (): Promise<SkillCatalogRefreshResult> => {
       const timer =
         timeoutMilliseconds > 0
-          ? setTimeout(() => {
+          ? runtime.timers.setTimeout(() => {
               timedOut = true;
               controller.abort();
               abandon?.({
@@ -330,7 +333,7 @@ export function createSkillCatalogService(
           completedAt: now(),
         };
       } finally {
-        if (timer !== undefined) clearTimeout(timer);
+        if (timer !== undefined) runtime.timers.clearTimeout(timer);
       }
     })();
 

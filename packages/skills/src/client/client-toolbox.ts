@@ -1,6 +1,5 @@
-import { z } from 'zod';
-
 import { createTool } from 'armorer';
+import { z } from 'zod';
 
 import { scanSkillResource, type SkillGuardrailOptions } from '../guardrail';
 import { renderActiveSkillInstructions, renderSkillCatalog } from './render';
@@ -59,12 +58,13 @@ export function createSkillClientToolbox(
       input: z.object({
         name: z.string().describe('The skill name to deactivate'),
       }),
-      // `async` because the tool contract requires a promise, even where the work is synchronous.
-      async execute(params) {
+      execute(params) {
         const outcome = client.deactivate(params.name);
-        return outcome.deactivated
-          ? { deactivated: true as const, name: params.name }
-          : { error: 'Skill is not active', name: params.name };
+        return Promise.resolve(
+          outcome.deactivated
+            ? { deactivated: true as const, name: params.name }
+            : { error: 'Skill is not active', name: params.name },
+        );
       },
     }),
 

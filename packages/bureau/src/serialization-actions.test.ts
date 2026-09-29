@@ -1,5 +1,6 @@
 import { AbortAgentRunError } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
+import { Conversation } from 'conversationalist';
 import { serializeActionDetail } from './serialization';
 import { requireRecord, requireRecords, requireString } from './serialization-test-helpers';
 
@@ -200,6 +201,26 @@ describe('serializeActionDetail', () => {
     expect(result).not.toHaveProperty('conversation');
     expect(result['content']).toBe('done');
     expect(result['finishReason']).toBe('error');
+  });
+
+  it.each(['run.started', 'step.started'])(
+    'drops the live Conversation controller from %s details',
+    (eventType) => {
+      const conversation = new Conversation();
+      conversation.appendUserMessage('hello');
+      const detail = { conversation, step: 0 };
+
+      const result = requireRecord(serializeActionDetail(eventType, detail));
+      expect(result).not.toHaveProperty('conversation');
+      expect(result['step']).toBe(0);
+      expect(JSON.stringify(result)).not.toContain('[Function');
+    },
+  );
+
+  it('keeps a plain-data conversation field on events that do not strip it by type', () => {
+    const detail = { conversation: { id: 'history-1', messages: [] } };
+
+    expect(serializeActionDetail('custom.event', detail)).toEqual(detail);
   });
 
   it('passes through other event types unchanged', () => {

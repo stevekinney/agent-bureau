@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { noToolCalls } from '../conditions/predicates';
 import { createActiveRun } from '../create-run';
 import type { OperativeHookMap } from '../hooks';
+import { rejectionOf, throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { GenerateContext, GenerateResponse } from '../types';
 import {
   createFaultEngine,
@@ -135,7 +136,7 @@ describe('createFaultEngine', () => {
   });
 
   describe('effect validation', () => {
-    it('throws a TypeError when an effect does not match its boundary', () => {
+    it('throws a TypeError when an effect does not match its boundary', async () => {
       const runtime = createManualRuntimeServices();
       const engine = createFaultEngine(
         [
@@ -151,7 +152,7 @@ describe('createFaultEngine', () => {
         runtime,
       );
       const generate = engine.wrapGenerate(async () => ({ content: 'ok', toolCalls: [] }));
-      expect(generate(minimalGenerateContext())).rejects.toBeInstanceOf(TypeError);
+      expect(await rejectionOf(generate(minimalGenerateContext()))).toBeInstanceOf(TypeError);
     });
   });
 
@@ -241,7 +242,7 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const wrapped = engine.wrapGenerate(generateDouble);
 
-      expect(wrapped(minimalGenerateContext())).rejects.toThrow('boom');
+      expect(await throwingRejectionOf(wrapped(minimalGenerateContext()))).toThrow('boom');
       expect(generateDouble.callCount).toBe(0);
       expect(engine.fired()).toHaveLength(1);
     });
@@ -265,7 +266,9 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const wrapped = engine.wrapGenerate(generateDouble);
 
-      expect(wrapped(minimalGenerateContext())).rejects.toThrow('after-effect boom');
+      expect(await throwingRejectionOf(wrapped(minimalGenerateContext()))).toThrow(
+        'after-effect boom',
+      );
       expect(generateDouble.callCount).toBe(1);
     });
   });
@@ -286,7 +289,9 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const wrapped = engine.wrapStorage(store);
 
-      expect(wrapped.set('key-1', 'computed-value')).rejects.toThrow('no commit');
+      expect(await throwingRejectionOf(wrapped.set('key-1', 'computed-value'))).toThrow(
+        'no commit',
+      );
       expect(store.calls).toHaveLength(0);
       expect(store.data.has('key-1')).toBe(false);
     });
@@ -306,7 +311,9 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const wrapped = engine.wrapStorage(store);
 
-      expect(wrapped.set('key-1', 'real-value')).rejects.toThrow('commit but fail');
+      expect(await throwingRejectionOf(wrapped.set('key-1', 'real-value'))).toThrow(
+        'commit but fail',
+      );
       expect(store.calls).toEqual([{ verb: 'set', key: 'key-1' }]);
       expect(store.data.get('key-1')).toBe('real-value');
     });
@@ -718,7 +725,7 @@ describe('createFaultEngine', () => {
 
       await wrapped.set('key-1', 'value');
       expect(store.data.get('key-1')).toBe('value');
-      expect(wrapped.get('key-1')).rejects.toThrow('get is down');
+      expect(await throwingRejectionOf(wrapped.get('key-1'))).toThrow('get is down');
     });
 
     it('a conditionalBatch-only fault fires on conditionalBatch and never on set (AB-391: FaultOperation gained this verb alongside the original four)', async () => {
@@ -738,7 +745,9 @@ describe('createFaultEngine', () => {
 
       await wrapped.set('key-1', 'value');
       expect(store.data.get('key-1')).toBe('value');
-      expect(wrapped.conditionalBatch()).rejects.toThrow('conditionalBatch is down');
+      expect(await throwingRejectionOf(wrapped.conditionalBatch())).toThrow(
+        'conditionalBatch is down',
+      );
     });
   });
 
@@ -757,9 +766,11 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const generate = engine.wrapGenerate(async () => ({ content: 'ok', toolCalls: [] }));
 
-      expect(generate(minimalGenerateContext())).resolves.toEqual({ content: 'ok', toolCalls: [] });
-      expect(generate(minimalGenerateContext())).rejects.toThrow('second call fails');
-      expect(generate(minimalGenerateContext())).resolves.toEqual({ content: 'ok', toolCalls: [] });
+      expect(await generate(minimalGenerateContext())).toEqual({ content: 'ok', toolCalls: [] });
+      expect(await throwingRejectionOf(generate(minimalGenerateContext()))).toThrow(
+        'second call fails',
+      );
+      expect(await generate(minimalGenerateContext())).toEqual({ content: 'ok', toolCalls: [] });
       expect(engine.fired()).toHaveLength(1);
       expect(engine.fired()[0]?.occurrence).toBe(2);
     });
@@ -780,9 +791,9 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const generate = engine.wrapGenerate(async () => ({ content: 'ok', toolCalls: [] }));
 
-      expect(generate(minimalGenerateContext())).rejects.toThrow('always fails');
-      expect(generate(minimalGenerateContext())).rejects.toThrow('always fails');
-      expect(generate(minimalGenerateContext())).rejects.toThrow('always fails');
+      expect(await throwingRejectionOf(generate(minimalGenerateContext()))).toThrow('always fails');
+      expect(await throwingRejectionOf(generate(minimalGenerateContext()))).toThrow('always fails');
+      expect(await throwingRejectionOf(generate(minimalGenerateContext()))).toThrow('always fails');
       expect(engine.fired()).toHaveLength(3);
       expect(engine.fired().map((f) => f.occurrence)).toEqual([1, 2, 3]);
     });
@@ -804,7 +815,7 @@ describe('createFaultEngine', () => {
       const generate = engine.wrapGenerate(async () => ({ content: 'ok', toolCalls: [] }));
 
       // Nothing tracked yet — the fault must not fire.
-      expect(generate(minimalGenerateContext())).resolves.toEqual({ content: 'ok', toolCalls: [] });
+      expect(await generate(minimalGenerateContext())).toEqual({ content: 'ok', toolCalls: [] });
       expect(engine.fired()).toHaveLength(0);
 
       // Track and settle two deferred promises.
@@ -822,7 +833,7 @@ describe('createFaultEngine', () => {
       expect(engine.fired()).toHaveLength(1);
 
       // Having fired once, subsequent calls succeed again (single-fire).
-      expect(generate(minimalGenerateContext())).resolves.toEqual({ content: 'ok', toolCalls: [] });
+      expect(await generate(minimalGenerateContext())).toEqual({ content: 'ok', toolCalls: [] });
       expect(engine.fired()).toHaveLength(1);
     });
 
@@ -957,7 +968,7 @@ describe('createFaultEngine', () => {
       const engine = createFaultEngine(plan, runtime);
       const generate = engine.wrapGenerate(async () => ({ content: 'ok', toolCalls: [] }));
 
-      expect(generate(minimalGenerateContext())).rejects.toThrow('boom');
+      expect(await throwingRejectionOf(generate(minimalGenerateContext()))).toThrow('boom');
 
       expect(engine.fired()).toEqual([
         {
@@ -988,7 +999,7 @@ describe('createFaultEngine', () => {
         const runtime = createManualRuntimeServices({ origin: '2031-01-01T00:00:00.000Z' });
         const engine = createFaultEngine(buildPlan(), runtime);
         const generate = engine.wrapGenerate(async () => ({ content: 'ok', toolCalls: [] }));
-        expect(generate(minimalGenerateContext())).rejects.toThrow('boom');
+        expect(await throwingRejectionOf(generate(minimalGenerateContext()))).toThrow('boom');
         return JSON.parse(JSON.stringify(engine.fired()));
       }
 

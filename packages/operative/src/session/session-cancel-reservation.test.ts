@@ -79,7 +79,7 @@ describe('session.cancel() — durable cancellation', () => {
 
     // Allow the run to finish so we don't leave dangling promises.
     blocking.resolveGenerate();
-    expect(agentRun.result()).resolves.toMatchObject({ finishReason: 'aborted' });
+    expect(await agentRun.result()).toMatchObject({ finishReason: 'aborted' });
 
     const persisted = await store.load('cancel-session');
     const persistedRun = persisted!.runs[0]!;

@@ -2,6 +2,7 @@ import { MemoryStorage, textValueStore, yieldToPortableEventLoop } from '@lostgr
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
 import { createSessionEngine } from './session-engine-test-fixture';
@@ -272,7 +273,7 @@ describe('session.run() — durable engine and terminal authority', () => {
         runOptions: createTestRunOptions(),
       });
 
-      expect(handle.run('prompt').result()).rejects.toThrow(
+      expect(await throwingRejectionOf(handle.run('prompt').result())).toThrow(
         commitMode === 'matching'
           ? 'engine infrastructure failure'
           : 'Failed to persist terminal failure',

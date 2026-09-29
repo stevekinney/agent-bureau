@@ -4,6 +4,7 @@ import type { Toolbox } from 'armorer';
 import { createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 
+import { rejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
 import { createSessionHandle } from './session-handle';
@@ -64,17 +65,19 @@ describe('createSessionHandle — sleep() against an injected manual runtime', (
     const controller = new AbortController();
     const { handle } = createSessionHandleFixture();
 
-    await expect(
-      handle.monitor({
-        every: 1,
-        input: 'check',
-        until: () => {
-          controller.abort();
-          return false;
-        },
-        signal: controller.signal,
-      }),
-    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(
+      await rejectionOf(
+        handle.monitor({
+          every: 1,
+          input: 'check',
+          until: () => {
+            controller.abort();
+            return false;
+          },
+          signal: controller.signal,
+        }),
+      ),
+    ).toMatchObject({ name: 'AbortError' });
   });
 
   it('cleans up when an earlier abort listener stops delay notification', async () => {
@@ -98,7 +101,7 @@ describe('createSessionHandle — sleep() against an injected manual runtime', (
       },
     });
 
-    await expect(handle.sleep(10, { signal: controller.signal })).rejects.toMatchObject({
+    expect(await rejectionOf(handle.sleep(10, { signal: controller.signal }))).toMatchObject({
       name: 'AbortError',
     });
     expect(cleared).toBe(true);
@@ -107,7 +110,7 @@ describe('createSessionHandle — sleep() against an injected manual runtime', (
   it('rejects immediately when the sleep signal is already aborted', async () => {
     const { handle } = createSessionHandleFixture();
 
-    await expect(handle.sleep(10, { signal: AbortSignal.abort() })).rejects.toMatchObject({
+    expect(await rejectionOf(handle.sleep(10, { signal: AbortSignal.abort() }))).toMatchObject({
       name: 'AbortError',
     });
   });
@@ -130,7 +133,7 @@ describe('createSessionHandle — sleep() against an injected manual runtime', (
       },
     });
 
-    await expect(handle.sleep(10, { signal: controller.signal })).rejects.toMatchObject({
+    expect(await rejectionOf(handle.sleep(10, { signal: controller.signal }))).toMatchObject({
       name: 'AbortError',
     });
     expect(cleared).toBe(true);

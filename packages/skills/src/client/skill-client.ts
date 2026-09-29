@@ -1,5 +1,9 @@
 import { sha256Hex } from '@lostgradient/cryptography';
-import type { TypedEventTarget } from '@lostgradient/lifecycle';
+import {
+  createDefaultRuntimeServices,
+  type RuntimeServices,
+  type TypedEventTarget,
+} from '@lostgradient/lifecycle';
 
 import { refusedByAdmissionPolicy, type SkillAdmissionPolicy } from '../admission';
 import type { SkillArtifact } from '../artifact';
@@ -7,18 +11,18 @@ import { parseAllowedTools } from '../conformance';
 import { availableRecords, findRecord, type SkillCatalogRevision } from '../discovery/catalog';
 import {
   SkillActivatedEvent,
+  type SkillAdmissionRule,
   SkillCatalogRevisedEvent,
   SkillCompatibilityDecidedEvent,
   SkillDeactivatedEvent,
+  type SkillEventCorrelation,
+  type SkillEventMap,
   SkillLoadedEvent,
   SkillRecoveredEvent,
   SkillRejectedEvent,
+  type SkillRejectionReason,
   SkillResourceLoadedEvent,
   SkillSourceAdmittedEvent,
-  type SkillAdmissionRule,
-  type SkillEventCorrelation,
-  type SkillEventMap,
-  type SkillRejectionReason,
 } from '../events';
 import { scanSkillResource, type SkillGuardrailOptions } from '../guardrail';
 import { importSkillMarkdown } from '../parse-skill-markdown';
@@ -29,9 +33,9 @@ import type {
   SkillDeactivationOutcome,
 } from './activation';
 import {
+  type LoadedSkillResource,
   readInstructions,
   readResource,
-  type LoadedSkillResource,
   type SkillArtifactLoader,
 } from './artifact-loader';
 
@@ -82,6 +86,8 @@ export interface CreateSkillClientOptions {
   readonly loadArtifact: SkillArtifactLoader;
   /** Injectable so a test need not read a real clock. */
   readonly now?: () => string;
+  /** Production clock by default; tests may supply a manual runtime. */
+  readonly runtime?: RuntimeServices;
   /**
    * Where lifecycle events are dispatched.
    *
@@ -201,7 +207,7 @@ function standingFor(
 
 /** Creates a client bound to one catalog revision. */
 export function createSkillClient(options: CreateSkillClientOptions): SkillClient {
-  const now = options.now ?? ((): string => new Date().toISOString());
+  const now = options.now ?? (options.runtime ?? createDefaultRuntimeServices()).clock.nowISO;
   const activeOrder: string[] = [];
   const activeSkills = new Map<string, ActiveSkill>();
   const activeArtifacts = new Map<string, SkillArtifact>();

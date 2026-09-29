@@ -202,40 +202,94 @@ export interface MessagePluginIdentity {
   readonly authority: 'transcript-transform';
 }
 
+/** A conversation's fields other than its ordered messages, as stored on each snapshot node. */
+export type ConversationHistoryHeader = Omit<ConversationHistory, 'ids' | 'messages'>;
+
 /**
- * Serialized form of a single node in the conversation tree.
+ * Serialized form of a single node in the conversation tree (snapshot format
+ * version 2).
+ *
+ * A node stores its conversation relative to its parent: the first
+ * `retainedMessageCount` of the parent's message ids, then `appendedMessageIds`.
+ * `messageReferences` maps the ids whose message differs from the parent's (or
+ * that the parent lacks) to an index in {@link ConversationSnapshot.messages};
+ * every other id resolves to the parent's message. The root has no parent, so
+ * it retains nothing and references every message.
  */
 export interface ConversationNodeSnapshot {
   id: string;
   revision: number;
   parentId: string | null;
-  conversation: ConversationHistory;
+  conversation: ConversationHistoryHeader;
+  retainedMessageCount: number;
+  appendedMessageIds: readonly string[];
+  messageReferences: Readonly<Record<string, number>>;
   children: readonly ConversationNodeSnapshot[];
 }
 
 /**
- * Serialized form of the entire conversation tree.
+ * Serialized form of the entire conversation tree (snapshot format version 2).
+ *
+ * Each distinct message is stored once in `messages`; nodes reference it by
+ * index, so a snapshot grows with the number of distinct messages and
+ * per-node changes rather than with every node's full transcript.
  */
 export interface ConversationSnapshot {
+  snapshotFormatVersion: 2;
+  conversationSchemaVersion: number;
+  controllerRevision: number;
+  conversationId: string;
+  currentBranchId: string;
+  messages: readonly Message[];
+  root: ConversationNodeSnapshot;
+  currentPath: readonly number[];
+  createdAt: string;
+  lineage: ConversationSnapshotLineage;
+  integrity: ConversationSnapshotIntegrity;
+}
+
+/** Fork and prune lineage carried by every snapshot format version. */
+export interface ConversationSnapshotLineage {
+  parentConversationId?: string;
+  forkPointMessageId?: string;
+  sourceRevision?: number;
+  retainedFloorNodeId: string;
+  removedNodeIds: readonly string[];
+}
+
+/** Integrity evidence carried by every snapshot format version. */
+export interface ConversationSnapshotIntegrity {
+  algorithm: 'fnv1a-64';
+  digest: string;
+}
+
+/**
+ * Serialized form of a single node in snapshot format version 1, in which
+ * every node carries its complete conversation.
+ */
+export interface ConversationNodeSnapshotV1 {
+  id: string;
+  revision: number;
+  parentId: string | null;
+  conversation: ConversationHistory;
+  children: readonly ConversationNodeSnapshotV1[];
+}
+
+/**
+ * Snapshot format version 1. `Conversation.from()` still restores it through
+ * `migrateConversationSnapshotV1`; `Conversation.snapshot()` no longer produces it.
+ */
+export interface ConversationSnapshotV1 {
   snapshotFormatVersion: 1;
   conversationSchemaVersion: number;
   controllerRevision: number;
   conversationId: string;
   currentBranchId: string;
-  root: ConversationNodeSnapshot;
+  root: ConversationNodeSnapshotV1;
   currentPath: readonly number[];
   createdAt: string;
-  lineage: {
-    parentConversationId?: string;
-    forkPointMessageId?: string;
-    sourceRevision?: number;
-    retainedFloorNodeId: string;
-    removedNodeIds: readonly string[];
-  };
-  integrity: {
-    algorithm: 'fnv1a-64';
-    digest: string;
-  };
+  lineage: ConversationSnapshotLineage;
+  integrity: ConversationSnapshotIntegrity;
 }
 
 /**

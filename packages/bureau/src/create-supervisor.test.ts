@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { createAgentCatalog } from './agent-catalog';
 import { createSupervisor } from './create-supervisor';
 import { makeAgent, makeRunResult } from './supervisor-test-helpers';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 describe('createSupervisor', () => {
   describe('delegate', () => {
     it('routes the task to the chosen agent and returns its result', async () => {
@@ -47,7 +48,9 @@ describe('createSupervisor', () => {
         routing: () => 'nonexistent',
       });
 
-      expect(supervisor.delegate('task')).rejects.toThrow(/unknown agent "nonexistent"/i);
+      expect(await throwingRejectionOf(supervisor.delegate('task'))).toThrow(
+        /unknown agent "nonexistent"/i,
+      );
     });
 
     it('never invokes .run() on an unselected agent, including a lazy one (only selected lazy agents load)', async () => {
@@ -81,7 +84,9 @@ describe('createSupervisor', () => {
       });
 
       await supervisor.delegate('first');
-      expect(supervisor.delegate('second')).rejects.toThrow('Maximum delegations');
+      expect(await throwingRejectionOf(supervisor.delegate('second'))).toThrow(
+        'Maximum delegations',
+      );
     });
 
     it('exposes all event facade methods on delegated runs', async () => {

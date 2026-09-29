@@ -8,6 +8,7 @@ import {
   type BureauEventsOperationEngine,
 } from './bureau-events-operation.ts';
 import { BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events.ts';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 
 async function invoke(
   input: { bureauId: string; fromCursor?: string; kinds?: string | string[] },
@@ -36,9 +37,11 @@ describe('the bureau.events subscription', () => {
   });
 
   it('refuses a bureau the registry does not know', async () => {
-    await expect(
-      invoke({ bureauId: 'missing' }, { bureauFeeds: createBureauEventRegistry() }),
-    ).rejects.toThrow(/Unknown bureau "missing"/);
+    expect(
+      await throwingRejectionOf(
+        invoke({ bureauId: 'missing' }, { bureauFeeds: createBureauEventRegistry() }),
+      ),
+    ).toThrow(/Unknown bureau "missing"/);
   });
 
   it('delivers only the kinds a subscriber asked for', async () => {
