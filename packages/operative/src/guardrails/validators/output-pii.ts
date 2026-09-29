@@ -8,9 +8,11 @@ type PIIRule =
  * PII redaction rules duplicated from conversationalist's PII redaction plugin.
  *
  * These are intentionally duplicated rather than imported to keep the operative
- * package independent of conversationalist at runtime.
+ * package independent of conversationalist at runtime. Exported inside the
+ * package (not from its root) so the fresh-attempt secret scan (COR-1354)
+ * reuses `apiKey` rather than restating it.
  */
-const PII_RULES: Record<string, PIIRule> = {
+export const PII_RULES = {
   email: {
     regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
     replace: '[EMAIL_REDACTED]',
@@ -24,7 +26,7 @@ const PII_RULES: Record<string, PIIRule> = {
       /(?:[a-zA-Z0-9_-]*(?:api|key|secret|token|password|auth)[a-zA-Z0-9_-]*[:=]\s*["']?)([a-zA-Z0-9._-]{16,})(?:["']?)/gi,
     replace: (match: string, key: string) => match.replace(key, '[KEY_REDACTED]'),
   },
-};
+} satisfies Record<string, PIIRule>;
 
 /**
  * Checks whether any PII pattern matches in the given text.

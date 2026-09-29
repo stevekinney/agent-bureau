@@ -64,8 +64,12 @@ function hasLegacyStructuredOutput(value: unknown): boolean {
 // Redacted tool input/output summaries
 // ---------------------------------------------------------------------------
 
-/** Keys treated as sensitive and redacted wholesale from a tool input/output summary. */
-const SENSITIVE_KEY_PATTERN =
+/**
+ * Keys treated as sensitive and redacted wholesale from a tool input/output
+ * summary. Also the key-name test the fresh-attempt secret scan (COR-1354)
+ * applies to every key of a `key: value` pair inside an artifact string.
+ */
+export const SENSITIVE_KEY_PATTERN =
   /(password|secret|token|api[-_]?key|authorization|credential|private[-_]?key)/i;
 
 const DEFAULT_MAX_STRING_LENGTH = 500;

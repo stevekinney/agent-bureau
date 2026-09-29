@@ -1,6 +1,6 @@
 export * from './agent-run';
 export { createAgentSession, loadAgentSession, saveAgentSession } from './agent-session';
-export type { AgentSession, RunRef } from './agent-session';
+export type { AgentSession, RunConversationBoundary, RunRef } from './agent-session';
 export * from './backpressure';
 export * from './cache/index';
 export {
@@ -19,9 +19,53 @@ export type {
   ChildRunTerminalStatus,
   DispatchChildRunOptions,
   MutableChildRunRegistry,
+  SignaledChildRunHandle,
 } from './child-run';
+export {
+  DEFAULT_CHILD_SIGNAL_BUFFER_LIMIT,
+  createChildSignalChannel,
+  defineChildSignals,
+  readParentSignals,
+} from './child-signals';
+export type {
+  ChildEventEmission,
+  ChildEventOutcome,
+  ChildSignalAcknowledgement,
+  ChildSignalChannel,
+  ChildSignalCloseReason,
+  ChildSignalContract,
+  ChildSignalCorrelation,
+  ChildSignalHandler,
+  ChildSignalMessage,
+  ChildSignalOutcome,
+  ChildSignalPort,
+  ChildSignalRejection,
+  ChildSignalRejectionCode,
+  ChildSignalSchemas,
+  CreateChildSignalChannelOptions,
+  ParentSignalEndpoint,
+} from './child-signals';
 export * from './conditions/index';
 export * from './context/index';
+export {
+  DELEGATION_GRANT_VERSION,
+  attenuateDelegationBudget,
+  attenuateDelegationCapabilities,
+  digestDelegationArtifact,
+  isDelegationGrant,
+  revokeDelegationGrant,
+  signDelegationGrant,
+  verifyDelegationGrant,
+} from './delegation-grant';
+export type {
+  DelegationBudget,
+  DelegationCapabilities,
+  DelegationDisclosurePolicy,
+  DelegationGrant,
+  DelegationGrantVerification,
+  DelegationGrantVerificationCode,
+  UnsignedDelegationGrant,
+} from './delegation-grant';
 
 export * from './cost-budget-monitor';
 export * from './cost-estimation';
@@ -196,6 +240,69 @@ export type {
   SkillActivationBinding,
   SkillActivationContext,
 } from './context-epoch';
+// COR-1354 — fresh-attempt handoff artifacts and conversation policies
+export { createFreshAttemptArtifactStore } from './fresh-attempt/artifact-store';
+export type {
+  FreshAttemptArtifactStore,
+  FreshAttemptArtifactStoreContext,
+} from './fresh-attempt/artifact-store';
+export { applyConversationPolicy } from './fresh-attempt/conversation-policy';
+export type {
+  ApplyConversationPolicyOptions,
+  ConversationPolicy,
+} from './fresh-attempt/conversation-policy';
+export {
+  CorruptFreshAttemptArtifactError,
+  FreshAttemptArtifactError,
+  IncompatibleFreshAttemptArtifactError,
+  InvalidFreshAttemptArtifactError,
+  OverbroadFreshAttemptArtifactError,
+  OversizedFreshAttemptArtifactError,
+  ProvenanceFreeFreshAttemptArtifactError,
+  SecretBearingFreshAttemptArtifactError,
+  StaleFreshAttemptArtifactError,
+  UnauthorizedFreshAttemptArtifactError,
+} from './fresh-attempt/errors';
+export type {
+  FreshAttemptRejectionDiagnostic,
+  FreshAttemptRejectionOutcome,
+} from './fresh-attempt/errors';
+export {
+  FRESH_ATTEMPT_ARTIFACT_DIGEST_ALGORITHM,
+  FRESH_ATTEMPT_ARTIFACT_SCHEMA_VERSION,
+  computeFreshAttemptArtifactDigest,
+  finalizeFreshAttemptHandoffArtifact,
+  freshAttemptHandoffArtifactSchema,
+} from './fresh-attempt/handoff-artifact';
+export type {
+  EvidenceReference,
+  FailureRecord,
+  FreshAttemptArtifactDigest,
+  FreshAttemptHandoffArtifact,
+  FreshAttemptHandoffArtifactDraft,
+  FreshAttemptLineage,
+  FreshAttemptProducer,
+  FreshAttemptProvenance,
+  FreshAttemptSourceRunOrAttempt,
+} from './fresh-attempt/handoff-artifact';
+export {
+  FRESH_ATTEMPT_ARTIFACT_CLOCK_SKEW_MS,
+  FRESH_ATTEMPT_ARTIFACT_ENTROPY_MINIMUM_TOKEN_LENGTH,
+  FRESH_ATTEMPT_ARTIFACT_ENTROPY_THRESHOLD,
+  FRESH_ATTEMPT_ARTIFACT_MAX_BYTES,
+  FRESH_ATTEMPT_ARTIFACT_MAX_CARRY_FORWARD_SOURCES,
+  FRESH_ATTEMPT_ARTIFACT_RETENTION_MS,
+} from './fresh-attempt/thresholds';
+export {
+  validateFreshAttemptArtifact,
+  validateFreshAttemptArtifactForPublication,
+} from './fresh-attempt/validate';
+export type {
+  FreshAttemptSourceRecord,
+  FreshAttemptSourceResolver,
+  FreshAttemptValidationContext,
+  ValidatedFreshAttemptArtifact,
+} from './fresh-attempt/validate';
 // C3 — session verb events
 export {
   SessionCancelEvent,
@@ -305,6 +412,7 @@ export type {
   AfterGenerateHook,
   AfterToolExecutionHook,
   AnyToolbox,
+  BackgroundCompactionOptions,
   BeforeGenerateHook,
   BeforeToolExecutionHook,
   CleanupAcknowledgement,

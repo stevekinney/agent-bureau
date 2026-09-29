@@ -11,6 +11,7 @@ import {
   type AgentInput,
   type AgentRun,
   type AgentSession,
+  type ChildSignalContract,
   type CombinedOperativeEventMap,
   createActiveRun,
   createAgentRunEventRegistry,
@@ -95,8 +96,10 @@ import {
   type ListFilter,
   type ListOptions,
   Mailbox,
+  MemoryStorage,
   type RecoveredWorkflowInfo,
   type ScheduleSpec,
+  textValueStore,
   type WorkflowState,
 } from '@lostgradient/weft';
 import {
@@ -118,7 +121,7 @@ import {
   recoveredRequestContextFromMetadata,
 } from './session-request-context';
 
-import { type AgentDefinitions, createAgentCatalog } from './agent-catalog';
+import { type AgentDefinitions, type AgentNames, createAgentCatalog } from './agent-catalog';
 import {
   type AuditTrail,
   auditTrailSessionOwnerId,
@@ -129,6 +132,12 @@ import {
 import { createCatalogDispatcher } from './bureau-catalog-dispatch';
 import { createBureauEventFeed } from './bureau-event-feed.ts';
 import { createSessionPersistence } from './bureau-session-persistence';
+import {
+  type BureauChildren,
+  type ChildTopologyParent,
+  createChildTopology,
+} from './child-topology';
+import { createChildTopologyStore } from './child-topology-store';
 import {
   createDurableEventHistory,
   createDurableEventProducer,
@@ -210,6 +219,7 @@ import {
 import type {
   AbortingRun,
   Bureau,
+  BureauChildrenOptions,
   BureauOptions,
   BureauRecoveryReport,
   BureauRunOptions,
@@ -1122,6 +1132,25 @@ function validateCheckpointRetentionOption(value: CheckpointRetentionOption | un
 }
 
 /**
+ * COR-772 — `BureauOptions.children.delegation` signs every child's grant, so
+ * an empty secret or a lifetime that expires every grant on issue is a
+ * construction-time error rather than a silently unusable topology.
+ */
+function validateChildrenOption(value: BureauChildrenOptions | undefined): void {
+  const delegation = value?.delegation;
+  if (delegation === undefined) return;
+  if (typeof delegation.secret !== 'string' || delegation.secret.length === 0) {
+    toBadRequest('"options.children.delegation.secret" must be a non-empty string');
+  }
+  const timeToLive = delegation.defaultTimeToLiveMilliseconds;
+  if (timeToLive !== undefined && !(Number.isFinite(timeToLive) && timeToLive > 0)) {
+    toBadRequest(
+      '"options.children.delegation.defaultTimeToLiveMilliseconds" must be a positive, finite number',
+    );
+  }
+}
+
+/**
  * The trailing `onStep` hook that records a step's pending tool approvals —
  * registered as `bureau:pending-approval-persist`.
  *
@@ -1186,6 +1215,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     options.sessionInput?.principalBacklogLimit ?? DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT;
   validateAuditRetentionOption(options.auditRetention);
   validateCheckpointRetentionOption(options.checkpointRetention);
+  validateChildrenOption(options.children);
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
   const ownsStore = !options.store;
   // AB-260 — resolve the injectable runtime-service seam exactly once,
@@ -1379,7 +1409,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // it stores and calls back into. Registered before `recoverDurableRuns()`
   // (called later, once this bureau's construction finishes) so every boot
   // recovery pass sees it.
-  runtime.setCatalogAgentRunOptionsResolver(async (name, input, context) => {
+  runtime.setCatalogAgentRunOptionsResolver(async (name, input, context, runId) => {
     const agent = agentCatalog.find(name);
     if (!agent) return { status: 'missing-agent' };
     // AB-240 review finding: distinct from `'missing-agent'` — the name IS
@@ -1390,8 +1420,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // genuinely is still there.
     if (!hasDefinitionResolver(agent)) return { status: 'not-durable-capable' };
     try {
+      // COR-772 — a recovered child gets back its correlation and a freshly
+      // opened signal port, bound to the same parent-child pair, before its
+      // workflow resumes. Anything else resolves exactly as before.
+      const childContext = childTopology.recoveredRunContext(runId);
       // Invoke through the agent so a method-shaped resolver retains its receiver.
-      const resolvedOptions = await agent[OPERATIVE_RESOLVE_RUN_OPTIONS](input, context);
+      const resolvedOptions = await agent[OPERATIVE_RESOLVE_RUN_OPTIONS](
+        input,
+        childContext === undefined ? context : { ...context, ...childContext },
+      );
       const resolution: CatalogAgentRunOptionsResolution = {
         status: 'resolved',
         options: resolvedOptions,
@@ -4083,7 +4120,25 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       });
     }
 
-    if (!runtime.durable) return { outcome: 'clean', perRunFailures: [] };
+    // COR-772 — load every non-terminal child relationship and reopen its
+    // signal channel BEFORE Weft resumes any workflow, so a recovered child's
+    // re-resolved run options can carry its port. Reconciled below, after
+    // `recoverAll()`, and never by starting a workflow.
+    try {
+      await childTopology.prepareRecovery();
+    } catch (error) {
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Could not load child relationships for recovery; durable run recovery continues: ${serializeUnknownError(error)}`,
+        cause: error,
+      });
+    }
+
+    if (!runtime.durable) {
+      await childTopology.reconcileRecovery();
+      return { outcome: 'clean', perRunFailures: [] };
+    }
 
     const durable = runtime.durable;
 
@@ -4422,6 +4477,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // exists to catch. Safe to run before the detached orphan-cancel
       // promises above settle: none of them touch this cache.
       runtime.clearCatalogRunRecoveryCache();
+      // COR-772 — reconciled even when `recoverAll()` itself threw: the
+      // engine's durable state is still readable, and a child left
+      // unreconciled would have no observer for the life of this process.
+      // `reconcileRecovery()` diagnoses each child's failure itself and
+      // never rejects, so it cannot mask the error this `finally` follows.
+      await childTopology.reconcileRecovery();
     }
 
     const perRunFailures = dedupeRecoveryPerRunFailures(currentRecoveryPerRunFailures ?? []);
@@ -4635,6 +4696,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       detachBestEffortPromise(
         revokePendingApprovalsForRun(id, { status: 'canceled', principal: 'system:run-abort' }),
       );
+      // COR-772 — the explicit parent-cancellation policy. A child never
+      // shares this run's abort signal; each running child's recorded
+      // `parentCancellation` decides whether it is cancelled or detached.
+      detachBestEffortPromise(childTopology.parentCancelled(id, 'Aborted via API'));
     }
 
     return {
@@ -4827,6 +4892,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // reaches the same memoized step, which is what keeps
       // cancel-then-terminal at exactly one step rather than two.
       await runTerminalCheckpointCleanup(runId);
+      // COR-772 — only a committed cancellation applies the child policy.
+      await childTopology.parentCancelled(runId, 'Cancelled via cancelDurableRun');
     }
     return outcome;
   }
@@ -8217,6 +8284,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // below this line awaits — see `maintenanceAdmissionClosed`'s own
       // doc comment for why the ordering matters.
       maintenanceAdmissionClosed = true;
+      // COR-772 — land every child-settlement write the run teardown above
+      // produced before the audit trail and storage below go away. Only
+      // writes already under way are awaited, never a child's own result, so
+      // a child that ignores its abort cannot hold shutdown open.
+      await childTopology.drain();
+      // Land terminal session saves already under way before the outbox
+      // drain await and `backgroundShutdownController.abort()` below: a save
+      // committing after that abort leaves its `session.saved` entry
+      // unrecorded. Its commit triggers the drain synchronously, so the
+      // `outboxDrainInFlight` await then covers it. See `drain()` for why
+      // this cannot wedge on a run; `timeoutMilliseconds` bounds a hung store.
+      await sessionPersistence.drain();
       if (automaticRunOwnershipPruneTimerStarted) {
         runtimeServices.timers.clearInterval(automaticRunOwnershipPruneTimer);
         automaticRunOwnershipPruneTimerStarted = false;
@@ -8802,7 +8881,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return page;
   }
 
-  const { runAgent } = createCatalogDispatcher({
+  const { runAgent, planChildRun, startChildRun } = createCatalogDispatcher({
     agentCatalog,
     runtime,
     runtimeServices,
@@ -8813,6 +8892,100 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     createBureauError: (message, code) => new BureauError(message, code),
     validateAgentRunInput,
     validateBureauRunOptions,
+    // COR-772 — a durable `bureau.run` parent aborted through its own handle
+    // is a cancelled parent like any other. Once shutdown has begun, dispose
+    // — not the policy — ends every live run, and boot recovery applies the
+    // policy to whatever it left running from the cancelled parent's
+    // durable state.
+    onDurableRunAborted: (runId, reason) => {
+      if (shutdownPromise) return;
+      void childTopology.parentCancelled(runId, reason);
+    },
+  });
+
+  // COR-772 — the durable parent-child topology, persisted in the same KV
+  // store as the audit trail (or in memory for an ephemeral bureau, where
+  // there is nothing to recover across a restart anyway).
+  const childTopologyStore = createChildTopologyStore(
+    runtime.kv ?? textValueStore(new MemoryStorage()),
+    {
+      onCorrupt: (key) =>
+        diagnose({
+          level: 'error',
+          scope: 'child-topology',
+          message: `[bureau] Ignoring an unreadable child-topology record at "${key}".`,
+        }),
+    },
+  );
+
+  /**
+   * What Bureau knows about a run that wants to own a child: another child
+   * (nested delegation), a `createRun` run, or a durable `bureau.run` run.
+   * `undefined` for anything else — `children.dispatch` reports that as
+   * `not-found`.
+   */
+  async function resolveChildParent(parentRunId: string): Promise<ChildTopologyParent | undefined> {
+    const attribution = runAttribution.get(parentRunId);
+    const childParent = await childTopologyStore.get(parentRunId);
+    if (childParent) {
+      return {
+        agentName: childParent.childAgentName,
+        principal: childParent.principal,
+        live: childParent.status === 'running',
+      };
+    }
+    const runState = store.getRun(parentRunId);
+    if (runState) {
+      return {
+        agentName: attribution?.agentName ?? findRunAgentName(runState) ?? BUREAU_AGENT_NAME,
+        principal: attribution?.principal,
+        live: runState.status === 'running',
+      };
+    }
+    const state = runtime.durable ? await runtime.durable.engine.get(parentRunId) : null;
+    if (!state || !isAgentRunWorkflowInput(state.input)) return undefined;
+    return {
+      agentName: state.input.agentName,
+      principal: attribution?.principal,
+      live: DURABLE_FORCIBLY_TERMINABLE_STATUSES.has(state.status),
+    };
+  }
+
+  /**
+   * COR-772 — whether `runId` already names a run or workflow this bureau
+   * knows other than through a child record. A child's identifier becomes
+   * its durable run identifier, so `children.dispatch` refuses one of these
+   * rather than let a caller take over that run's attribution, recovery
+   * record, or place in the topology.
+   */
+  async function isKnownRun(runId: string): Promise<boolean> {
+    if (runAttribution.has(runId) || store.getRun(runId) !== undefined) return true;
+    if (!runtime.durable) return false;
+    if ((await runtime.durable.engine.get(runId)) !== null) return true;
+    return runtime.isCatalogRecoveredRun(runId);
+  }
+
+  const childTopology = createChildTopology({
+    store: childTopologyStore,
+    runtime: runtimeServices,
+    diagnose,
+    recordAudit: async ({ principal, ...entry }) => {
+      await auditTrailInstance?.record({
+        ...entry,
+        ...(principal === undefined ? {} : { principal }),
+      });
+    },
+    resolveParent: resolveChildParent,
+    isKnownRun,
+    planChild: planChildRun,
+    startChild: startChildRun,
+    getEngine: () => runtime.durable?.engine,
+    cancelDurable: cancelDurableRun,
+    validateInput: validateAgentRunInput,
+    createBadRequest: (message) => new BureauError(message, 'BAD_REQUEST'),
+    signalContracts: options.children?.signals as
+      Readonly<Record<string, ChildSignalContract>> | undefined,
+    delegation: options.children?.delegation,
   });
 
   const bureau: Bureau<D> = {
@@ -8835,6 +9008,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // narrowing this cast restores; at runtime the returned `AgentRun` IS
     // exactly the named entry's own handle, unaffected by the cast.
     run: runAgent as Bureau<D>['run'],
+    // The topology is keyed by plain runtime strings; `D` only narrows which
+    // agent names a caller may pass, exactly as `run` above.
+    children: childTopology.children as BureauChildren<AgentNames<D>>,
     get auditTrail(): AuditTrail | undefined {
       return auditTrailInstance;
     },

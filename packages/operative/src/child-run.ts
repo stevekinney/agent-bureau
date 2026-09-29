@@ -51,6 +51,12 @@ import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import type { RunEvent } from './agent-run';
 import {
+  type ChildSignalCloseReason,
+  type ChildSignalContract,
+  createChildSignalChannel,
+  type ParentSignalEndpoint,
+} from './child-signals';
+import {
   ChildWorkflowAbortedEvent,
   ChildWorkflowCompletedEvent,
   ChildWorkflowFailedEvent,
@@ -95,6 +101,21 @@ export interface ChildRunHandle<
   abort(reason?: string): void;
   /** Releases this handle's resources. Equivalent to `abort()` if still in flight. */
   [Symbol.dispose](): void;
+}
+
+/**
+ * The handle `dispatchChildRun` returns when its options carry a signal
+ * contract (COR-814): a {@link ChildRunHandle} plus the parent's end of a
+ * typed channel bound to exactly this parent-child pair. The channel closes
+ * when this child is aborted (by `abort()` or the parent's `signal`),
+ * settles, or is disposed — see `child-signals.ts`.
+ */
+export interface SignaledChildRunHandle<
+  O = never,
+  H extends boolean = false,
+  C extends ChildSignalContract = ChildSignalContract,
+> extends ChildRunHandle<O, H> {
+  readonly signals: ParentSignalEndpoint<C>;
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +648,23 @@ export interface DispatchChildRunOptions {
    * time-controlled, deterministic child id.
    */
   runtime?: RuntimeServices | undefined;
+  /**
+   * COR-814 — the typed signal map for this parent-child pair. When
+   * supplied, the returned handle is a {@link SignaledChildRunHandle} whose
+   * `signals` endpoint sends to and observes only this child, and the child
+   * receives the matching port as `AgentRunContext.parentSignals`. Omitted,
+   * no channel exists and the child receives no port.
+   */
+  signals?: ChildSignalContract | undefined;
+  /**
+   * The most messages each direction of this child's signal channel may
+   * buffer while no consumer is registered. Defaults to
+   * `DEFAULT_CHILD_SIGNAL_BUFFER_LIMIT`; `0` refuses every message sent
+   * before its consumer exists. A value that is not a non-negative integer
+   * throws a `RangeError` before the child is registered or started.
+   * Ignored without `signals`.
+   */
+  signalBufferLimit?: number | undefined;
 }
 
 /**
@@ -700,12 +738,30 @@ function isAbortedResult(result: RunResult): boolean {
  * abort / dispose surface. `createSubagentTool` is implemented on top of
  * this; a caller may also call it directly to retain a typed handle instead
  * of going through a tool at all.
+ *
+ * Supplying `options.signals` (COR-814) also opens a typed parent-child
+ * signal channel: the returned handle's `signals` endpoint and the child's
+ * `AgentRunContext.parentSignals` port.
  */
+export function dispatchChildRun<
+  O = never,
+  H extends boolean = false,
+  C extends ChildSignalContract = ChildSignalContract,
+>(
+  agent: RunnableAgent<O, H>,
+  input: AgentInput,
+  options: DispatchChildRunOptions & { signals: C },
+): SignaledChildRunHandle<O, H, C>;
 export function dispatchChildRun<O = never, H extends boolean = false>(
   agent: RunnableAgent<O, H>,
   input: AgentInput,
   options: DispatchChildRunOptions,
-): ChildRunHandle<O, H> {
+): ChildRunHandle<O, H>;
+export function dispatchChildRun<O = never, H extends boolean = false>(
+  agent: RunnableAgent<O, H>,
+  input: AgentInput,
+  options: DispatchChildRunOptions,
+): ChildRunHandle<O, H> | SignaledChildRunHandle<O, H> {
   const runtime = options.runtime ?? createDefaultRuntimeServices();
   const childRunId = options.childRunId ?? runtime.identifiers.next('child');
   const parentAgentName = options.parentAgentName ?? '';
@@ -742,6 +798,35 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     childAgentName: options.agentName,
     childRunId,
   };
+
+  // COR-814 — one typed channel per dispatch, bound to exactly this
+  // parent-child pair. It closes the moment the composed `signal` aborts
+  // (a child-targeted `abort()` or the parent's own signal), and otherwise
+  // when the child settles or the handle is disposed; the first reason wins.
+  const channel =
+    options.signals === undefined
+      ? undefined
+      : createChildSignalChannel(
+          options.signals,
+          { parentRunId: options.parentRunId, childRunId },
+          { bufferLimit: options.signalBufferLimit },
+        );
+  const closeChannelOnAbort = (): void => {
+    channel?.close('aborted');
+  };
+  // Every close detaches the abort listener. A composed signal that still
+  // has a listener and a live source stays reachable from that source, so a
+  // parent signal reused across many children would otherwise keep every
+  // finished child's run alive until the parent itself aborted.
+  const closeChannel = (reason: ChildSignalCloseReason): void => {
+    if (channel === undefined) return;
+    signal.removeEventListener('abort', closeChannelOnAbort);
+    channel.close(reason);
+  };
+  if (channel !== undefined) {
+    if (signal.aborted) closeChannel('aborted');
+    else signal.addEventListener('abort', closeChannelOnAbort, { once: true });
+  }
 
   options.registry?.register({
     id: childRunId,
@@ -781,8 +866,13 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
       // function composes no registry and references none, which is what makes
       // "no parent hook reaches a child" structural rather than a convention.
       childCorrelation: correlation,
+      // COR-814 — the child's own end of this pair's channel. Only this
+      // child receives it; nothing here forwards a port the parent itself
+      // may hold from its own parent.
+      ...(channel === undefined ? {} : { parentSignals: channel.child }),
     });
   } catch (error) {
+    closeChannel('failed');
     options.registry?.settle(childRunId, 'failed');
     options.emitter?.dispatchEvent(
       new ChildWorkflowFailedEvent({
@@ -825,6 +915,7 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
       : asBaseResult.finishReason === 'stop-condition'
         ? 'completed'
         : 'failed';
+    closeChannel(status);
     options.registry?.settle(childRunId, status, asBaseResult);
 
     if (status === 'aborted') {
@@ -850,6 +941,7 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
   };
 
   const settleRejection = (error: unknown): never => {
+    closeChannel('failed');
     options.registry?.settle(childRunId, 'failed');
     options.emitter?.dispatchEvent(
       new ChildWorkflowFailedEvent({
@@ -881,7 +973,7 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     }
   })().then(settle, settleRejection);
 
-  return {
+  const handle: ChildRunHandle<O, H> = {
     childRunId,
     parentRunId: options.parentRunId,
     agentName: options.agentName,
@@ -890,6 +982,9 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
     },
     abort,
     [Symbol.dispose](): void {
+      // Disposal closes the channel as `disposed` before the abort below
+      // can close it as `aborted`.
+      closeChannel('disposed');
       abort();
       agentRun[Symbol.dispose]();
     },
@@ -897,4 +992,5 @@ export function dispatchChildRun<O = never, H extends boolean = false>(
       return agentRun[Symbol.asyncIterator]();
     },
   };
+  return channel === undefined ? handle : { ...handle, signals: channel.parent };
 }

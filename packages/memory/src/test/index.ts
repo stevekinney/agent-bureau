@@ -1,10 +1,13 @@
 import { cosineSimilarity, type EmbeddingVectorLike } from '@lostgradient/embeddings';
 
-import type {
-  MemoryRecord,
-  MemoryRecordScope,
-  MemoryRecordStorage,
-  MemoryVectorSearchResult,
+import {
+  type MemoryRecord,
+  type MemoryRecordReference,
+  type MemoryRecordScope,
+  type MemoryRecordStorage,
+  type MemoryRecordUpdateOptions,
+  MemoryRecordVersionConflictError,
+  type MemoryVectorSearchResult,
 } from '../memory-record-storage';
 
 /**
@@ -245,10 +248,19 @@ export function createInMemoryMemoryRecordStorage(
       id: string,
       scope: MemoryRecordScope,
       patch: { content?: string; vector?: Float32Array; metadata?: Record<string, unknown> },
+      updateOptions: MemoryRecordUpdateOptions = {},
     ): Promise<MemoryRecord | undefined> {
       const key = scopeMapKey(scope, id);
       const existing = records.get(key);
       if (!existing || existing.status !== 'active') return undefined;
+      // Check and write with no await in between: nothing can change the record
+      // after the version is compared, which is this helper's compare-and-swap.
+      if (
+        updateOptions.expectedVersion !== undefined &&
+        existing.version !== updateOptions.expectedVersion
+      ) {
+        throw new MemoryRecordVersionConflictError([id]);
+      }
 
       const updated: MemoryRecord = {
         ...existing,
@@ -276,6 +288,33 @@ export function createInMemoryMemoryRecordStorage(
         if (typeof dedupeKey === 'string') {
           dedupeKeys.delete(dedupeMapKey(scope, dedupeKey));
         }
+      }
+      return removed;
+    },
+
+    async deleteMany(references: readonly MemoryRecordReference[]): Promise<number> {
+      // Synchronous map mutations with no await between them: no other caller
+      // can observe a partially applied deletion, which is this helper's
+      // equivalent of the Weft backend's single atomic batch. Every version
+      // condition is checked before anything is removed.
+      for (const reference of references) {
+        const existing = records.get(scopeMapKey(reference.scope, reference.id));
+        if (
+          existing?.status === 'active' &&
+          reference.expectedVersion !== undefined &&
+          existing.version !== reference.expectedVersion
+        ) {
+          throw new MemoryRecordVersionConflictError([reference.id]);
+        }
+      }
+      let removed = 0;
+      for (const reference of references) {
+        const key = scopeMapKey(reference.scope, reference.id);
+        const existing = records.get(key);
+        if (existing?.status !== 'active') continue;
+        records.delete(key);
+        removeDedupeIndex(existing);
+        removed++;
       }
       return removed;
     },

@@ -723,6 +723,10 @@ export function createAgent(options: CreateAgentOptions): StandaloneAgent<unknow
       ...(context?.childCorrelation !== undefined
         ? { childCorrelation: context.childCorrelation }
         : {}),
+      // COR-814 — `AgentRunContext.parentSignals` forwards into
+      // `RunOptions.parentSignals`, so `run-step.ts` hands this run's own
+      // port to every tool call as `ToolContext.executionContext.parentSignals`.
+      ...(context?.parentSignals !== undefined ? { parentSignals: context.parentSignals } : {}),
     };
   }
 

@@ -28,6 +28,11 @@ type ExternalHooks = {
   ) => ConversationEventDetail;
   readonly emit: (type: 'mutation.rejected', detail: ConversationEventDetail) => void;
   readonly commit: (next: ConversationHistory, context: ConversationChangeContext) => void;
+  readonly commitAtRevision: (
+    expectedRevision: number,
+    next: ConversationHistory,
+    context: ConversationChangeContext,
+  ) => boolean;
 };
 
 export function createExternalMutationActions(hooks: ExternalHooks) {
@@ -55,14 +60,13 @@ export function createExternalMutationActions(hooks: ExternalHooks) {
     hooks.assertOpen();
     if (options.expectedRevision !== hooks.revision())
       return rejected(options, 'revision-conflict');
-    const startingRevision = hooks.revision();
     const next = mutation(hooks.current());
-    if (hooks.revision() !== startingRevision) return rejected(options, 'revision-conflict');
-    hooks.commit(next, {
+    const committed = hooks.commitAtRevision(options.expectedRevision, next, {
       ...(options.correlationId ? { correlationId: options.correlationId } : {}),
       ...(options.actor ? { actor: options.actor } : {}),
       ...(options.durability ? { durability: options.durability } : {}),
     });
+    if (!committed) return rejected(options, 'revision-conflict');
     return Object.freeze({ accepted: true, revision: hooks.revision() });
   };
   const reconcileExternalSnapshot = (

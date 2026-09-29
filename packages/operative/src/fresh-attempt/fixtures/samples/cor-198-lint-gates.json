@@ -1,0 +1,73 @@
+{
+  "artifactId": "handoff:cor-198-lint",
+  "revision": 1,
+  "objective": "Bring the task-attempt event and identity-filter additions back under the lint gates.",
+  "successRevision": "COR-198#acceptance-2026-09-26",
+  "constraints": [
+    "task-polling.ts must return under its 800-line ceiling.",
+    "matchesIdentity must drop under a cyclomatic complexity of 10.",
+    "Do not duplicate the crossBuildRetry computation between claim transports."
+  ],
+  "completedWork": [
+    "Identified that both claim transports compute crossBuildRetry and previousExecutionIdentity separately."
+  ],
+  "validatedFacts": [
+    "The new event-listener test carries an unnecessary type assertion that the linter reports."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-198",
+      "uri": "linear:COR-198"
+    },
+    {
+      "kind": "commit",
+      "id": "2e230f63",
+      "digest": "2e230f6311f625f30d59241607e113147793ea51",
+      "uri": "git:2e230f63"
+    },
+    {
+      "kind": "commit",
+      "id": "6dd6062c",
+      "digest": "6dd6062c84e1dcac97b078639c227c78d738f003",
+      "uri": "git:6dd6062c"
+    },
+    {
+      "kind": "file",
+      "id": "packages/weft/src/server/runtime/task-polling.ts"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "oxlint reported max-lines on task-polling.ts, complexity on matchesIdentity, and an unnecessary type assertion in the new event-listener test.",
+      "occurredAt": "2026-09-26T15:14:48.000Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Extract buildTaskAttemptTransitionEvent as one shared helper, rewrite matchesIdentity as a data-driven loop, and drop the type assertion.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox", "hook-plan", "steering-desired"],
+  "producer": {
+    "agentName": "reviewer",
+    "runId": "cor-198-attempt-1:0",
+    "sessionId": "cor-198-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-198-attempt-1",
+    "runId": "cor-198-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T15:57:59.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T15:57:59.000Z",
+    "producingActor": "operator:steve-kinney"
+  },
+  "lineage": {
+    "sourceRevision": 12
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "67ec43d390d4920ed74373c2a8651d7133c3f90c4ef534e6cce06929f496569e"
+  }
+}

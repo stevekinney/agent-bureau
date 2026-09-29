@@ -2,10 +2,36 @@ import type { RuntimeServices } from '@lostgradient/lifecycle';
 import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { JSONValue } from '@lostgradient/tool-protocol';
 import type { ConditionalTextValueStore } from '@lostgradient/weft';
-import type { ConversationHistory } from 'conversationalist';
+import type { ConversationHistory, Message } from 'conversationalist';
 
 import { createSessionStore } from './session/create-session-store';
 import type { RunOutcome } from './types';
+
+/**
+ * One run's immutable conversation boundary (COR-816), stored as a delta
+ * against `baseSequence`'s chain of earlier, equally immutable boundaries,
+ * so a session stores each message id and body once rather than once per
+ * run. `baseSequence` and `baseIdCount` are absent when the boundary is
+ * self-contained.
+ */
+export interface RunConversationBoundary {
+  /** The earlier run whose boundary this one is encoded against. */
+  readonly baseSequence?: number | undefined;
+  /**
+   * How many leading ids of the base boundary's history this boundary's
+   * history begins with; absent means none.
+   */
+  readonly baseIdCount?: number | undefined;
+  /** The boundary history's header and metadata, without `ids` or `messages`. */
+  readonly conversation: Readonly<Omit<ConversationHistory, 'ids' | 'messages'>>;
+  /** The history's ordered ids after the `baseIdCount` it shares with its base. */
+  readonly ids: ReadonlyArray<string>;
+  /**
+   * Only the bodies the base chain cannot already supply unchanged; every
+   * other listed body resolves through that chain, newest boundary first.
+   */
+  readonly messages: Readonly<Record<string, Message>>;
+}
 
 /**
  * A lightweight reference to one run within a session.
@@ -36,6 +62,23 @@ export interface RunRef {
   readonly baseConversationMetadata?: Readonly<Record<string, JSONValue>> | undefined;
   /** Safe terminal classification; absence means in-progress or legacy, never success. */
   outcome?: RunOutcome | undefined;
+  /**
+   * COR-816: this run's immutable conversation boundary — the transcript the
+   * run committed when it first reached a terminal status: the history it
+   * was seeded with at reservation plus every message it produced. It is
+   * written once, in the same store update that records the terminal status,
+   * and never rewritten afterwards, so later runs, concurrent commits, and
+   * edits to the session's live `conversationHistory` cannot change it.
+   * Because the seed was captured when this run reserved its sequence, it
+   * can never contain a message from a later run.
+   *
+   * `session.fork({ throughRun: sequence })` copies exactly this history.
+   * Absent while the run is `'running'`, on refs recorded before this field
+   * existed, and when the commit that first made the run terminal had no
+   * transcript to record (a recovered durable run that rejected, or whose
+   * checkpoint held none) — none of those can be forked through.
+   */
+  readonly conversationBoundary?: RunConversationBoundary | undefined;
   /** ISO timestamp when this run was started. */
   startedAt: string;
   /**

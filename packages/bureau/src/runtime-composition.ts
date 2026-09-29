@@ -5,8 +5,8 @@ import {
   mergeHookRegistries,
   TypedEventTarget,
 } from '@lostgradient/lifecycle';
-import type { CreateMemoryOptions, Memory } from '@lostgradient/memory';
-import { createMemory } from '@lostgradient/memory';
+import type { GovernedMemory, MemoryAuthority, MemoryCapability } from '@lostgradient/memory';
+import { createMemoryAuthority, MEMORY_CAPABILITIES, requestPrincipal } from '@lostgradient/memory';
 import type {
   AgentInput,
   AgentRunContext,
@@ -96,6 +96,7 @@ import {
   KEYS,
   resolveStorage,
   type Storage,
+  storageConditionalBatch,
   type StorageConfiguration,
   type TextValueStore,
   textValueStore,
@@ -122,6 +123,7 @@ import {
 
 import { resolveDiagnosticSink, serializeUnknownError } from './serialization';
 import type {
+  BureauMemoryAuthorityOptions,
   BureauOptions,
   CacheConfiguration,
   CreateRunRequest,
@@ -694,8 +696,47 @@ export function isRunFailureFinishReason(finishReason: unknown): boolean {
   );
 }
 
-function isMemoryInstance(value: CreateMemoryOptions | Memory): value is Memory {
-  return typeof (value as Memory).remember === 'function';
+/** COR-41 — what Bureau delegates to a run when the deployment configures nothing else. */
+export const DEFAULT_RUN_MEMORY_CAPABILITIES: readonly MemoryCapability[] = Object.freeze([
+  'memory:search',
+  'memory:write',
+]);
+
+/**
+ * COR-41 — the memory authority a run acts under, derived from its persisted
+ * request authority. The delegation chain runs from Bureau (holding the
+ * deployment's `runCapabilities`) through the request principal to the run, so
+ * every memory record and receipt names who acted, for whom, and under which
+ * authorization revision. Explicit `memory:*` capabilities on the request can
+ * only narrow the deployment grant; a request that names none receives it.
+ */
+export function createRunMemoryAuthority(
+  requestContext: ToolRequestContext,
+  run: { readonly runId: string },
+  options: BureauMemoryAuthorityOptions = {},
+): MemoryAuthority {
+  const deployment = options.runCapabilities ?? DEFAULT_RUN_MEMORY_CAPABILITIES;
+  const known = new Set<string>(MEMORY_CAPABILITIES);
+  const requested = requestContext.authority.capabilities.filter((capability) =>
+    known.has(capability),
+  );
+  const granted =
+    requested.length === 0
+      ? deployment
+      : deployment.filter((capability) => requested.includes(capability));
+  return createMemoryAuthority({
+    principal: { kind: 'run', id: run.runId },
+    tenantId: requestContext.authority.tenantId,
+    ownerId: requestContext.authority.ownerId,
+    purpose: options.purpose ?? 'conversation-memory',
+    capabilities: granted,
+    policyRevision: requestContext.authority.authorizationRevision,
+    projection: 'bureau',
+    delegatedBy: [
+      { principal: { kind: 'service', id: 'bureau' }, capabilities: deployment },
+      { principal: requestPrincipal(requestContext.authority.principalId), capabilities: granted },
+    ],
+  });
 }
 
 function persistedScheduleMarker(input: ScheduledAgentRunInput): string | undefined {
@@ -836,6 +877,12 @@ export type CatalogAgentRunOptionsResolver = (
   agentName: string,
   input: AgentInput,
   context: AgentRunContext,
+  /**
+   * COR-772 — the recovered workflow's run identifier, so a resolver can
+   * restore run-scoped context the recovery record does not carry (a
+   * recovered child's parent-signal port and correlation).
+   */
+  runId: string,
 ) => Promise<CatalogAgentRunOptionsResolution>;
 
 type RecoveredScheduleMarker =
@@ -891,13 +938,26 @@ function redactProvider(provider: ProviderConfiguration): RedactedProviderConfig
 }
 
 /**
- * Inject recalled memories as a system message on step 0. Replay classification
- * (seam #11): `safe` — it only reads (`memory.recall`) and mutates the step's
- * transient `Conversation` (the durable workflow rehydrates a fresh
- * `Conversation.from(snapshot)` per step, so a recovery re-fire just re-injects
- * into that step's conversation; no external side effect, no idempotency needed).
+ * Inject recalled memory on step 0 through governed memory's mandatory recall
+ * admission (COR-41). Only records the run's authority may search, whose trust
+ * meets the policy minimum for their class, and that pass the recall detectors
+ * reach the conversation, and they arrive inside a labeled evidence envelope
+ * whose content cannot close the envelope or claim authority. A record a
+ * detector trips on is quarantined instead.
+ *
+ * Replay classification (seam #11): `effectful`, because recall admission
+ * writes to the governance ledger and can quarantine a poisoned record. Both
+ * effects are idempotent under a recovery re-fire: the durable workflow
+ * rehydrates a fresh `Conversation.from(snapshot)` per step, so the re-fire
+ * re-injects into that step's conversation, a record quarantined the first
+ * time is simply absent the second, and the ledger records the second recall
+ * that genuinely happened.
  */
-export function createMemoryRecallHook(memory: Memory, sessionId: string): PrepareStepHook {
+export function createMemoryRecallHook(
+  memory: GovernedMemory,
+  authority: MemoryAuthority,
+  sessionId: string,
+): PrepareStepHook {
   return async (context) => {
     if (context.step !== 0) {
       return;
@@ -912,25 +972,33 @@ export function createMemoryRecallHook(memory: Memory, sessionId: string): Prepa
       return;
     }
 
-    const recalls = await memory.recall(latestUserMessage.content, {
+    const bundle = await memory.recallForModel(authority, latestUserMessage.content, {
+      collection: sessionId,
       limit: 5,
-      namespace: sessionId,
+      contextId: authority.principal.id,
     });
 
-    if (recalls.length === 0) {
+    if (bundle.evidence.length === 0) {
       return;
     }
 
-    const content = recalls.map((entry, index) => `${index + 1}. ${entry.content}`).join('\n');
-    context.conversation.appendSystemMessage(`Relevant memory:\n${content}`, {
-      _memoryInjected: true,
-      _memorySessionId: sessionId,
+    context.conversation.appendSystemMessage(bundle.rendered, {
+      memoryEvidence: {
+        sessionId,
+        recordIds: bundle.evidence.map((item) => item.id),
+        withheld: bundle.withheld,
+      },
     });
   };
 }
 
 /**
- * Persist the final assistant content of a step as an experiential memory.
+ * Persist the final assistant content of a step as governed memory (COR-41).
+ * Assistant output is ordinary conversation, so it is admitted as an untrusted
+ * `conversation` write under the run's memory authority: it is scanned, quota
+ * checked, and quarantined when poisoned, and its record carries the run's full
+ * attribution. A refused or quarantined write is recorded in the governance
+ * ledger, not surfaced to the run.
  *
  * EFFECTFUL hook (seam #11): on a durable recovery the crashed in-flight step
  * re-runs from its boundary, so this hook can fire AGAIN for the same step. The
@@ -939,22 +1007,20 @@ export function createMemoryRecallHook(memory: Memory, sessionId: string): Prepa
  * leaving memory out of sync with a step that ran.
  *
  * Idempotency is enforced by a DETERMINISTIC operation key, not by content: a
- * replayed step may produce non-byte-identical content (its `generate` re-runs),
- * so relying on the memory store's cosine-similarity dedup is not sufficient.
- * Instead the write uses a stable `dedupeKey` of `${runId}:${step}` (the durable
- * operation's identity — same run, same step index across a replay) with
- * `memory.rememberOnce()`, so a re-fire is an atomic no-op regardless of content
- * drift.
+ * replayed step may produce non-byte-identical content (its `generate` re-runs).
+ * The write uses a stable `dedupeKey` of `${runId}:${step}` (the durable
+ * operation's identity — same run, same step index across a replay), so a
+ * re-fire is an atomic no-op regardless of content drift.
  *
  * When no `runId` is available (a non-durable run, where there is no replay and
- * therefore no re-fire hazard), the dedup guard is skipped and the write proceeds
- * — the at-least-once concern only exists on the durable recovery path.
+ * therefore no re-fire hazard), the write carries no dedupe key.
  *
  * `replay: 'effectful'` ({@link HookReplayPolicy}) is recorded on the write for
  * diagnostics; it documents the contract and never gates execution.
  */
 export function createMemoryPersistHook(
-  memory: Memory,
+  memory: GovernedMemory,
+  authority: MemoryAuthority,
   sessionId: string,
   runId?: string,
 ): OnStepHook {
@@ -968,23 +1034,16 @@ export function createMemoryPersistHook(
     // produce a second record.
     const dedupeKey = runId === undefined ? undefined : `${runId}:${context.step}`;
 
-    const metadata = {
-      namespace: sessionId,
-      source: 'experiential',
-      step: context.step,
-      ...(dedupeKey !== undefined ? { dedupeKey } : {}),
+    await memory.write(authority, context.content, {
+      collection: sessionId,
+      source: 'conversation',
+      memoryClass: 'episodic',
       // Replay classification (seam #11): an external write → `effectful`, kept
       // safe across a recovery re-fire by the atomic dedupeKey write. Metadata
       // only; never gates execution.
-      replay: 'effectful' satisfies HookReplayPolicy,
-    } as const;
-
-    if (dedupeKey === undefined) {
-      await memory.remember(context.content, metadata);
-      return;
-    }
-
-    await memory.rememberOnce(context.content, { ...metadata, dedupeKey });
+      metadata: { step: context.step, replay: 'effectful' satisfies HookReplayPolicy },
+      ...(dedupeKey === undefined ? {} : { dedupeKey }),
+    });
   };
 }
 
@@ -1484,7 +1543,7 @@ export interface RuntimeComposition {
    * never disposes it, because `disposeStorage` above is what owns that.
    */
   durableStorage: Storage | undefined;
-  memory: Memory | undefined;
+  memory: GovernedMemory | undefined;
   sessionStore: SessionStore | undefined;
   scheduler: Scheduler | undefined;
   /**
@@ -1516,6 +1575,17 @@ export interface RuntimeComposition {
     runId: string,
     record: Omit<CatalogRunRecoveryRecord, 'schemaVersion'>,
   ): Promise<void>;
+  /**
+   * COR-772 — {@link persistCatalogRunRecoveryRecord}, but create-if-absent:
+   * `false`, writing nothing, when a record already exists for `runId`. A
+   * child run's identifier is chosen by its caller rather than minted here,
+   * so its record must never replace the one another run already holds.
+   * `true` with no durable storage, where there is nothing to claim.
+   */
+  claimCatalogRunRecoveryRecord(
+    runId: string,
+    record: Omit<CatalogRunRecoveryRecord, 'schemaVersion'>,
+  ): Promise<boolean>;
   /**
    * Whether `runId` has a persisted catalog-run recovery record — used by
    * `createBureau`'s boot-recovery classification to route a catalog run to
@@ -2046,11 +2116,8 @@ export async function createRuntimeComposition(
     });
   }
 
-  let memory: Memory | undefined;
-  if (options.memory) {
-    memory = isMemoryInstance(options.memory) ? options.memory : createMemory(options.memory);
-    await memory.init();
-  }
+  const memory: GovernedMemory | undefined = options.memory;
+  await memory?.init();
 
   // A run's skills come from a catalog revision, and only from one. COR-892 removed Bureau's
   // second path — a provider it read skills out of directly — because a skill admitted that way
@@ -2384,20 +2451,36 @@ export async function createRuntimeComposition(
       registerIdentityInvariant(hooks, options.identity);
     }
 
-    if (memory) {
-      hooks.on('prepareStep', createMemoryRecallHook(memory, request.sessionId), {
+    // COR-41 — memory hooks run only under a persisted request authority. A
+    // recovered run whose authority could not be restored gets none: no
+    // conversation can reach memory outside the authority it was granted.
+    const memoryAuthority =
+      memory && requestContext
+        ? createRunMemoryAuthority(
+            requestContext,
+            { runId: request.runId ?? request.sessionId },
+            options.memoryAuthority,
+          )
+        : undefined;
+    if (memory && memoryAuthority) {
+      hooks.on('prepareStep', createMemoryRecallHook(memory, memoryAuthority, request.sessionId), {
         id: 'bureau:memory-recall',
-        // Reads memory and injects the result; no external write.
-        replay: 'safe',
-      });
-      hooks.on('onStep', createMemoryPersistHook(memory, request.sessionId, request.runId), {
-        id: 'bureau:memory-persist',
-        // Writes to the memory store, so a replayed step writes again. The
-        // classification records that at-least-once contract; it does not
-        // suppress the second write, which would drop the persistence for a
-        // step whose generation genuinely re-ran.
+        // Recall admission records the read and can quarantine a poisoned
+        // record; both are idempotent on a replayed step.
         replay: 'effectful',
       });
+      hooks.on(
+        'onStep',
+        createMemoryPersistHook(memory, memoryAuthority, request.sessionId, request.runId),
+        {
+          id: 'bureau:memory-persist',
+          // Writes to the memory store, so a replayed step writes again. The
+          // classification records that at-least-once contract; it does not
+          // suppress the second write, which would drop the persistence for a
+          // step whose generation genuinely re-ran.
+          replay: 'effectful',
+        },
+      );
     }
 
     // COR-1226 — resolved here rather than at the hook-registration site below,
@@ -2828,6 +2911,20 @@ export async function createRuntimeComposition(
     await durableStorage.put(catalogRunRecoveryKey(runId), encode(fullRecord));
   }
 
+  async function claimCatalogRunRecoveryRecord(
+    runId: string,
+    record: Omit<CatalogRunRecoveryRecord, 'schemaVersion'>,
+  ): Promise<boolean> {
+    if (!durableStorage) return true;
+    const key = catalogRunRecoveryKey(runId);
+    const fullRecord: CatalogRunRecoveryRecord = { schemaVersion: 1, ...record };
+    return storageConditionalBatch(
+      durableStorage,
+      [{ key, expectedValue: null }],
+      [{ type: 'put', key, value: encode(fullRecord) }],
+    );
+  }
+
   type CatalogRunRecoveryLoad =
     | { status: 'found'; record: CatalogRunRecoveryRecord }
     | { status: 'missing' }
@@ -2967,14 +3064,19 @@ export async function createRuntimeComposition(
         reason: `run ${runId}: no catalog agent recovery resolver is configured`,
       };
     }
-    const resolution = await catalogAgentRunOptionsResolver(record.agentName, record.input, {
-      agentName: record.agentName,
-      // AB-241 review finding: without this, a recovered catalog agent's
-      // re-invoked `OPERATIVE_RESOLVE_RUN_OPTIONS` rebuilt `RunOptions` with
-      // no `principal` at all, so a resumed run silently lost attribution
-      // across a restart.
-      ...(record.principal !== undefined ? { principal: record.principal } : {}),
-    });
+    const resolution = await catalogAgentRunOptionsResolver(
+      record.agentName,
+      record.input,
+      {
+        agentName: record.agentName,
+        // AB-241 review finding: without this, a recovered catalog agent's
+        // re-invoked `OPERATIVE_RESOLVE_RUN_OPTIONS` rebuilt `RunOptions` with
+        // no `principal` at all, so a resumed run silently lost attribution
+        // across a restart.
+        ...(record.principal !== undefined ? { principal: record.principal } : {}),
+      },
+      runId,
+    );
     if (resolution.status === 'missing-agent') {
       return {
         status: 'unavailable',
@@ -3577,6 +3679,7 @@ export async function createRuntimeComposition(
       catalogAgentRunOptionsResolver = resolver;
     },
     persistCatalogRunRecoveryRecord,
+    claimCatalogRunRecoveryRecord,
     isCatalogRecoveredRun,
     classifyCatalogRecoveredRun,
     clearCatalogRunRecoveryCache,

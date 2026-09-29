@@ -4,14 +4,18 @@ import { z } from 'zod';
 import { type MemoryGuardrailOptions, scanMemoryContent } from '../guardrail';
 import type { Memory } from '../types';
 
+// The model chooses what to look for and how much, never where: a namespace is
+// pinned by the host through `CreateMemoryRecallToolOptions.namespace`, so a
+// model-supplied namespace cannot widen the scope the agent was configured with.
 const memoryRecallInput = z.object({
   query: z.string().describe('The search query to find relevant memories'),
   limit: z.number().optional().describe('Maximum number of results to return'),
-  namespace: z.string().optional().describe('Memory namespace to search in'),
 });
 
 /** Options for `createMemoryRecallTool`. */
 export interface CreateMemoryRecallToolOptions {
+  /** The namespace every recall searches. Defaults to the memory's configured namespace. */
+  namespace?: string;
   /**
    * Runs recalled content through the shared guardrail detector pipeline
    * before it's returned to the model. Omit to skip scanning entirely
@@ -34,7 +38,7 @@ export function createMemoryRecallTool(
   memory: Memory,
   options: CreateMemoryRecallToolOptions = {},
 ) {
-  const { guardrail } = options;
+  const { guardrail, namespace } = options;
 
   return createTool({
     name: 'memory_recall',
@@ -43,7 +47,7 @@ export function createMemoryRecallTool(
     async execute(params) {
       const results = await memory.recall(params.query, {
         ...(params.limit !== undefined ? { limit: params.limit } : {}),
-        ...(params.namespace !== undefined ? { namespace: params.namespace } : {}),
+        ...(namespace !== undefined ? { namespace } : {}),
       });
 
       if (results.length === 0) {

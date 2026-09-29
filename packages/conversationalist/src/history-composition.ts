@@ -1,5 +1,9 @@
 import type { CompletableEventTarget, Observer, Subscription } from '@lostgradient/lifecycle';
-import type { CompactionOptions, CompactionResult, Summarizer } from './compaction/types';
+import type {
+  CompactionOptions,
+  ConversationCompactionResult,
+  Summarizer,
+} from './compaction/types';
 import type { ConversationEnvironment } from './environment';
 import type {
   ConversationActionType,
@@ -68,7 +72,7 @@ export type ConversationActions<T> = StoreActions &
     readonly compact: (
       summarizer: Summarizer,
       options?: CompactionOptions,
-    ) => Promise<CompactionResult>;
+    ) => Promise<ConversationCompactionResult>;
     readonly close: () => void;
     readonly complete: () => void;
     readonly dispose: () => Promise<void>;
@@ -96,6 +100,14 @@ export type CompositionHooks<T> = {
     events: readonly ConversationActionType[],
     context?: ConversationChangeContext,
   ) => void;
+  /** Compare-and-swap commit over the controller revision; `false` means nothing changed. */
+  readonly commitAtRevision: (
+    expectedRevision: number,
+    next: ConversationHistory,
+    action: ConversationActionType,
+    events: readonly ConversationActionType[],
+    context?: ConversationChangeContext,
+  ) => boolean;
   readonly changeContext: (
     previous: ConversationHistory,
     next: ConversationHistory,
@@ -166,6 +178,8 @@ export function composeConversationActions<T>(hooks: CompositionHooks<T>): Conve
     detail: hooks.detail,
     emit: (type, detail) => hooks.emit(type, detail),
     commit: (next, context) => hooks.commit(next, 'push', ['push'], context),
+    commitAtRevision: (expectedRevision, next, context) =>
+      hooks.commitAtRevision(expectedRevision, next, 'push', ['push'], context),
   });
   const providers = createProviderActions({
     current: hooks.current,
@@ -213,7 +227,7 @@ export function composeConversationActions<T>(hooks: CompositionHooks<T>): Conve
   const compact = async (
     summarizer: Summarizer,
     options?: CompactionOptions,
-  ): Promise<CompactionResult> => {
+  ): Promise<ConversationCompactionResult> => {
     hooks.assertOpen();
     return compactOwned(summarizer, options, hooks.environment, {
       signal: hooks.lifecycle.signal,
@@ -224,11 +238,18 @@ export function composeConversationActions<T>(hooks: CompositionHooks<T>): Conve
       untrack: (operation) => hooks.lifecycle.untrack(operation),
       event: (type, detail) => hooks.emit(type, detail),
       detail: hooks.detail,
-      commit: (conversation, previous) =>
-        hooks.commit(conversation, 'compaction.completed', ['push', 'compaction.completed'], {
-          ...hooks.changeContext(previous, conversation, 'messages.removed'),
-          outcome: 'completed',
-        }),
+      commitAtRevision: (baseRevision, conversation, previous, attempt) =>
+        hooks.commitAtRevision(
+          baseRevision,
+          conversation,
+          'compaction.completed',
+          ['push', 'compaction.completed'],
+          {
+            ...hooks.changeContext(previous, conversation, 'messages.removed'),
+            outcome: 'completed',
+            compaction: attempt,
+          },
+        ),
     });
   };
   const dispose = async (): Promise<void> => {

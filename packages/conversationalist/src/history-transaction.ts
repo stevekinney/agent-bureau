@@ -63,10 +63,6 @@ export class HistoryTransaction {
     this.currentNode = node;
   }
 
-  setRevision(revision: number): void {
-    this.controllerRevision = revision;
-  }
-
   getRemovedNodeIds(): readonly string[] {
     return [...this.removedNodeIds];
   }
@@ -157,6 +153,29 @@ export class HistoryTransaction {
       hooks.emit(eventType, this.buildEventDetail(eventType, previousConversation, eventContext));
     }
     this.publishStoreSnapshot();
+  }
+
+  /**
+   * Compare-and-swap over the controller revision: commits `next` only while
+   * the revision still equals `expectedRevision`, and otherwise returns
+   * `false` having changed nothing — no node, no revision, no event. A match
+   * commits exactly as {@link commit} does, lifecycle check included.
+   *
+   * The comparison and the commit run in one synchronous step, so no other
+   * write can land between them.
+   */
+  commitAtRevision(
+    expectedRevision: number,
+    next: ConversationHistory,
+    changeAction: ConversationActionType,
+    emittedEvents: readonly ConversationActionType[],
+    context: ConversationChangeContext | undefined,
+    lifecycle: ConversationLifecycle,
+    hooks: HistoryTransactionHooks,
+  ): boolean {
+    if (this.controllerRevision !== expectedRevision) return false;
+    this.commit(next, changeAction, emittedEvents, context, lifecycle, hooks);
+    return true;
   }
 
   navigate(

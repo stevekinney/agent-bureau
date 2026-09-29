@@ -1,0 +1,75 @@
+{
+  "artifactId": "handoff:cor-1334",
+  "revision": 1,
+  "objective": "Put the cinder z-index-scale hang-guard tests and generate-artifacts-check inside their declared time policy.",
+  "successRevision": "COR-1334#acceptance-2026-09-26",
+  "constraints": [
+    "Keep the 30s in-body ceiling as a hang guard only.",
+    "The N-vs-2N scaling tests stay unchanged.",
+    "A drifted registry.generated.json must still fail generate-artifacts-check.",
+    "The per-test 35_000 is the only timeout change, as agreed by Steve Kinney on 2026-09-26."
+  ],
+  "completedWork": [
+    "Found 20 of 21 hang-guard tests declared no per-test timeout, so the five-second default fired first."
+  ],
+  "validatedFacts": [
+    "The one conforming hang-guard test already declares 35_000.",
+    "generate-artifacts-check ran the whole generator and Prettier as a subprocess inside the test body.",
+    "Run alone, both files passed 1360 of 1360 on three runs at load 18 to 33."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-1334",
+      "uri": "linear:COR-1334"
+    },
+    {
+      "kind": "file",
+      "id": "components/cinder/scripts/stylelint/z-index-scale.test.ts"
+    },
+    {
+      "kind": "commit",
+      "id": "e7f57ab4",
+      "digest": "e7f57ab4cc028405fdd4ade98fe444f6b04b19b7",
+      "uri": "git:e7f57ab4"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "bun run validate on e7f57ab4 timed out a z-index hang-guard test at 5669ms.",
+      "occurredAt": "2026-09-26T17:17:08.000Z"
+    },
+    {
+      "kind": "tool",
+      "summary": "generate-artifacts-check timed out at 5028ms in the same run.",
+      "occurredAt": "2026-09-26T17:17:08.000Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Give all 21 hang-guard tests the per-test 35_000, add a test that enforces it, and start the generator subprocess at module scope.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-1334-attempt-1:0",
+    "sessionId": "cor-1334-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-1334-attempt-1",
+    "runId": "cor-1334-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T18:27:30.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T18:27:30.000Z",
+    "producingActor": "operator:steve-kinney"
+  },
+  "lineage": {
+    "sourceRevision": 25
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "c9e692c8780a166a42d78845dab2e18fa95090fb66bd95ec533cbd1e791d5cc1"
+  }
+}

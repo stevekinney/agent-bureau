@@ -12,6 +12,7 @@ import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import type { CombinedOperativeEventMap, SessionRecoverFailure } from '../events';
 import { SessionRecoverEvent } from '../events';
 import type { RunOutcome, RunResult } from '../types';
+import { createRunConversationBoundary } from './run-conversation-boundary';
 import {
   appendRecoveredConversation,
   finishReasonToStatus,
@@ -134,6 +135,15 @@ export function createSessionRecovery(
                         ...currentRef,
                         status: terminalStatus,
                         outcome: terminalOutcome,
+                        ...(terminalConversation !== undefined
+                          ? {
+                              conversationBoundary: createRunConversationBoundary(
+                                freshSession.runs,
+                                currentRef.sequence,
+                                terminalConversation,
+                              ),
+                            }
+                          : {}),
                       };
                 return {
                   ...freshSession,

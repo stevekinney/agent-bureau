@@ -25,6 +25,13 @@ export type CachedEmbedder = Embedder & {
    * Only meaningful when cache entries were created with a namespace prefix.
    */
   clearNamespace(namespace: string): void;
+  /**
+   * Evict every entry whose embedded text has one of these SHA-256 hex digests,
+   * whatever the namespace or key hash. Governed memory's deletion uses it to
+   * evict a deleted record's content after the record itself is gone. Returns
+   * how many entries were evicted.
+   */
+  evictContent(contentDigests: readonly string[]): number;
 };
 
 const DEFAULT_MAXIMUM_ENTRIES = 10_000;
@@ -54,37 +61,53 @@ export function withEmbeddingCache(
   const namespaceKeys = new Map<string, Set<string>>();
   // Reverse index: cache key → namespace, for O(1) eviction cleanup.
   const keyToNamespace = new Map<string, string>();
+  // Content index: SHA-256 digest of the embedded text → cache keys, and back.
+  const digestKeys = new Map<string, Set<string>>();
+  const keyToDigest = new Map<string, string>();
+  // Without a namespace or custom hash, a key already is the text's SHA-256 digest.
+  const keysAreDigests = defaultNamespace === undefined && options?.hash === undefined;
 
-  function trackNamespaceKey(namespace: string | undefined, key: string): void {
-    if (namespace === undefined) return;
-    let keys = namespaceKeys.get(namespace);
+  function addToIndex(index: Map<string, Set<string>>, group: string, key: string): void {
+    let keys = index.get(group);
     if (!keys) {
       keys = new Set();
-      namespaceKeys.set(namespace, keys);
+      index.set(group, keys);
     }
     keys.add(key);
-    keyToNamespace.set(key, namespace);
   }
 
-  function removeFromNamespaceIndex(key: string): void {
-    const namespace = keyToNamespace.get(key);
-    if (namespace === undefined) return;
-    keyToNamespace.delete(key);
-    const keys = namespaceKeys.get(namespace);
-    if (keys) {
-      keys.delete(key);
-      if (keys.size === 0) {
-        namespaceKeys.delete(namespace);
-      }
-    }
+  function removeFromIndex(
+    index: Map<string, Set<string>>,
+    reverse: Map<string, string>,
+    key: string,
+  ): void {
+    const group = reverse.get(key);
+    if (group === undefined) return;
+    reverse.delete(key);
+    const keys = index.get(group)!;
+    keys.delete(key);
+    if (keys.size === 0) index.delete(group);
+  }
+
+  function trackKey(key: string, digest: string): void {
+    addToIndex(digestKeys, digest, key);
+    keyToDigest.set(key, digest);
+    if (defaultNamespace === undefined) return;
+    addToIndex(namespaceKeys, defaultNamespace, key);
+    keyToNamespace.set(key, defaultNamespace);
+  }
+
+  function forgetKey(key: string): void {
+    cache.delete(key);
+    removeFromIndex(namespaceKeys, keyToNamespace, key);
+    removeFromIndex(digestKeys, keyToDigest, key);
   }
 
   function evictIfNeeded(): void {
     while (cache.size > maximumEntries) {
       const oldest = cache.keys().next().value;
       if (oldest === undefined) return;
-      cache.delete(oldest);
-      removeFromNamespaceIndex(oldest);
+      forgetKey(oldest);
     }
   }
 
@@ -134,7 +157,7 @@ export function withEmbeddingCache(
           const vector = freshVectors[j]!;
           const hash = hashes[originalIndex]!;
           cache.set(hash, vector);
-          trackNamespaceKey(defaultNamespace, hash);
+          trackKey(hash, keysAreDigests ? hash : await sha256Hex(missTexts[j]!));
           results[originalIndex] = vector;
         }
         evictIfNeeded();
@@ -149,16 +172,24 @@ export function withEmbeddingCache(
         cache.clear();
         namespaceKeys.clear();
         keyToNamespace.clear();
+        digestKeys.clear();
+        keyToDigest.clear();
       },
 
       clearNamespace(namespace: string): void {
-        const keys = namespaceKeys.get(namespace);
-        if (!keys) return;
-        for (const key of keys) {
-          cache.delete(key);
-          keyToNamespace.delete(key);
+        // Deleting the visited key while iterating a Set is well-defined.
+        for (const key of namespaceKeys.get(namespace) ?? []) forgetKey(key);
+      },
+
+      evictContent(contentDigests: readonly string[]): number {
+        let evicted = 0;
+        for (const digest of contentDigests) {
+          for (const key of digestKeys.get(digest) ?? []) {
+            forgetKey(key);
+            evicted++;
+          }
         }
-        namespaceKeys.delete(namespace);
+        return evicted;
       },
     },
   );

@@ -11,6 +11,7 @@ import type { RegistryAgnosticEngine } from '../durable/create-run-engine';
 import { normalizeAgentRunWorkflowResult } from '../durable/run-workflow-result';
 import { toAgentRunError } from '../errors';
 import type { RunOutcome, RunResult } from '../types';
+import { createRunConversationBoundary } from './run-conversation-boundary';
 import type { SessionStore } from './types';
 
 export function historyOrEmpty(
@@ -319,6 +320,15 @@ export async function reconcileTerminalRunRef(
       ...current,
       status: outcome.status,
       ...(outcome.outcome !== undefined ? { outcome: outcome.outcome } : {}),
+      ...(outcome.conversation !== undefined
+        ? {
+            conversationBoundary: createRunConversationBoundary(
+              freshSession.runs,
+              current.sequence,
+              outcome.conversation,
+            ),
+          }
+        : {}),
     };
     return {
       ...freshSession,

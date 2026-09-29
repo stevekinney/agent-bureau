@@ -39,11 +39,12 @@ export interface MemoryRecord {
   /** Last-update timestamp in epoch milliseconds. */
   updatedAt: number;
   /**
-   * Best-effort local change marker. Starts at `1` and is bumped on `update()`.
-   * It is NOT a concurrency token: the local backend's `update()` is a
-   * read-modify-write without compare-and-swap, so two overlapping updates can
-   * both observe version N and both write N+1. Do not rely on it to detect or
-   * order concurrent writes.
+   * Change marker. Starts at `1` and is bumped on `update()`. A plain `update()`
+   * is a read-modify-write without compare-and-swap, so two overlapping plain
+   * updates can both observe version N and both write N+1. A writer that must
+   * not lose a concurrent change passes the version it read as
+   * `expectedVersion` to `update()` or on a `deleteMany()` reference, which
+   * turns the write into a compare-and-swap.
    */
   version: number;
   /**
@@ -62,6 +63,45 @@ export interface MemoryVectorSearchResult {
   /** Similarity score. Higher is more similar. */
   score: number;
   record: MemoryRecord;
+}
+
+/**
+ * One record addressed by id within its scope, as {@link MemoryRecordStorage.deleteMany} takes it.
+ */
+export interface MemoryRecordReference {
+  id: string;
+  scope: MemoryRecordScope;
+  /**
+   * When set, the record is deleted only if it is still at this version. A live
+   * record at any other version aborts the whole `deleteMany()` with a
+   * {@link MemoryRecordVersionConflictError}; an absent record is still ignored.
+   */
+  expectedVersion?: number;
+}
+
+/** Options for {@link MemoryRecordStorage.update}. */
+export interface MemoryRecordUpdateOptions {
+  /**
+   * Apply the update only if the live record is still at this version. A live
+   * record at any other version is left unchanged and the update rejects with a
+   * {@link MemoryRecordVersionConflictError}.
+   */
+  expectedVersion?: number;
+}
+
+/**
+ * A version-conditional write found a record changed since the writer read it.
+ * Nothing was written; the writer re-reads and decides again. `recordIds` names
+ * the record that changed or, when the backend cannot tell which of a
+ * transaction's conditions failed, every record the transaction conditioned on.
+ */
+export class MemoryRecordVersionConflictError extends Error {
+  readonly code = 'version-conflict';
+
+  constructor(readonly recordIds: readonly string[]) {
+    super(`Memory record(s) ${recordIds.join(', ')} changed since they were read.`);
+    this.name = 'MemoryRecordVersionConflictError';
+  }
 }
 
 /**
@@ -154,12 +194,16 @@ export interface MemoryRecordStorage {
   ): Promise<MemoryVectorSearchResult[]>;
   /**
    * Apply a partial update to a live record and bump its `version`. Returns the
-   * updated record, or `undefined` if no live record matched.
+   * updated record, or `undefined` if no live record matched. With
+   * `options.expectedVersion`, the update is a compare-and-swap: it rejects with
+   * a {@link MemoryRecordVersionConflictError} instead of overwriting a record
+   * that changed since it was read.
    */
   update(
     id: string,
     scope: MemoryRecordScope,
     patch: { content?: string; vector?: Float32Array; metadata?: Record<string, unknown> },
+    options?: MemoryRecordUpdateOptions,
   ): Promise<MemoryRecord | undefined>;
   /**
    * Delete a record so it vanishes from every subsequent read. Returns `true`
@@ -168,6 +212,23 @@ export interface MemoryRecordStorage {
    * Cloudflare — is a backend detail; see the interface-level delete invariant.)
    */
   delete(id: string, scope: MemoryRecordScope): Promise<boolean>;
+  /**
+   * Delete every referenced record in ONE storage transaction: either every live
+   * record in `references` is gone afterwards or none is. References may span
+   * scopes; absent references are ignored, so repeating a completed deletion is a
+   * no-op. Returns the number of live records removed. A reference carrying
+   * `expectedVersion` makes the whole transaction conditional on that record
+   * being unchanged: if it changed, nothing is deleted and the call rejects
+   * with a {@link MemoryRecordVersionConflictError}.
+   *
+   * Memory governance requires this primitive, with its version conditions
+   * (COR-806's synchronous deletion lane removes source evidence, canonical
+   * projections, identity views, and the managed-asset canonical record
+   * together, and never a record placed under legal hold after it was read); a
+   * custom backend that omits it still satisfies the base contract but cannot
+   * back a governed memory.
+   */
+  deleteMany?(references: readonly MemoryRecordReference[]): Promise<number>;
   /**
    * Remove every record in the scope. Returns the number of records removed;
    * afterwards every read in that scope is empty.

@@ -1,3 +1,4 @@
+import type { CompactionAttempt } from './compaction/types';
 import type { ConversationHistory, MessagePluginIdentity } from './types';
 
 /**
@@ -53,6 +54,8 @@ export interface ConversationEventDetail {
   childConversationId?: string | undefined;
   plugin?: MessagePluginIdentity | undefined;
   reason?: string | undefined;
+  /** The compaction attempt this event belongs to, on every event a `compact()` call emits. */
+  compaction?: CompactionAttempt | undefined;
 }
 
 /**
@@ -75,6 +78,7 @@ export class ConversationEvent extends Event {
   readonly childConversationId?: string | undefined;
   readonly plugin?: ConversationEventDetail['plugin'];
   readonly reason?: string | undefined;
+  readonly compaction?: CompactionAttempt | undefined;
 
   constructor(type: string, detail: ConversationEventDetail) {
     super(type);
@@ -93,6 +97,7 @@ export class ConversationEvent extends Event {
     this.childConversationId = detail.childConversationId;
     this.plugin = detail.plugin;
     this.reason = detail.reason;
+    this.compaction = detail.compaction;
   }
 }
 

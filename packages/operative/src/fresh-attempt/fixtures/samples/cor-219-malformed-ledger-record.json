@@ -1,0 +1,62 @@
+{
+  "artifactId": "handoff:cor-219-ledger",
+  "revision": 1,
+  "objective": "Reject a malformed remote-activity ledger record instead of silently overwriting it in EngineOwnedRemoteActivityBroker.enqueue.",
+  "successRevision": "COR-219#acceptance-2026-09-26",
+  "constraints": [
+    "Absence and decode failure must stay distinguishable.",
+    "A malformed record must never be silently overwritten; surface a typed error and a diagnostic instead.",
+    "The activity attempt must fail visibly with PersistedDataCorruptError."
+  ],
+  "completedWork": [
+    "Showed decodeRemoteTaskRecord collapses no existing record and an undecodable record into the same null."
+  ],
+  "validatedFacts": [
+    "The idempotent-replay guard and commitTaskLedgerTransition both treat current === null as license to create."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-219",
+      "uri": "linear:COR-219"
+    },
+    {
+      "kind": "file",
+      "id": "packages/weft/src/core/engine/remote-activity-broker.ts"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "contract",
+      "summary": "A malformed existing ledger record is indistinguishable from no record, so a replayed enqueue silently overwrites it.",
+      "occurredAt": "2026-09-25T19:19:37.903Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Add a private readExistingOrThrowIfMalformed that distinguishes absence from decode failure, logs a diagnostic, and throws PersistedDataCorruptError.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-219-attempt-1:0",
+    "sessionId": "cor-219-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-219-attempt-1",
+    "runId": "cor-219-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T17:21:50.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T17:21:50.000Z",
+    "producingActor": "workflow:linear-implementation"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-219-attempt-1",
+    "sourceRevision": 140
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "aa4153c538752208a30bead23d7b13ea9455d91727da7e3c8dc8f8049aa01059"
+  }
+}

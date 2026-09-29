@@ -1,0 +1,71 @@
+{
+  "artifactId": "handoff:cor-1332",
+  "revision": 1,
+  "objective": "Make the bureau.eventHistory per-run authorization test finish well inside its budget without changing an assertion.",
+  "successRevision": "COR-1332#acceptance-2026-09-26",
+  "constraints": [
+    "Change no assertion, raise no timeout, and add no retry.",
+    "Revert any temporary storage instrumentation before committing."
+  ],
+  "completedWork": [
+    "Added temporary per-call storage timing and attributed the cost.",
+    "Found each run reached the default 25-step budget because the mock generate never returns a tool call."
+  ],
+  "validatedFacts": [
+    "Isolated under load, the test took 3.32 to 4.61s on f9154d11 and 2.74 to 3.49s on main at 72a51a74.",
+    "Each SQLite session-persistence write completed in well under a millisecond.",
+    "The two-run test performed up to 50 disk-backed checkpoint, transcript, and cursor writes.",
+    "Other tests in the same describe block already pass stopWhen.noToolCalls()."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-1332",
+      "uri": "linear:COR-1332"
+    },
+    {
+      "kind": "file",
+      "id": "packages/bureau/src/create-bureau.test.ts"
+    },
+    {
+      "kind": "commit",
+      "id": "f9154d11",
+      "digest": "f9154d1157850790e61488d8a12f1b78adc8fd21",
+      "uri": "git:f9154d11"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "bun run validate on weft candidate f9154d11 timed out the per-run authorization test after 5000ms (observed 9304.70ms).",
+      "occurredAt": "2026-09-26T16:40:49.000Z"
+    }
+  ],
+  "unresolvedQuestions": ["Which other tests in the describe block share the missing stopWhen?"],
+  "nextRequestedAction": "Add stopWhen.noToolCalls() to the named test and each sibling with the same cause, and record before and after isolated runtimes.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox", "selection-plan"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-1332-attempt-1:0",
+    "sessionId": "cor-1332-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-1332-attempt-1",
+    "runId": "cor-1332-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T18:04:04.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T18:04:04.000Z",
+    "producingActor": "workflow:linear-implementation"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-1332-attempt-1",
+    "sourceRevision": 77
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "196cbc86adc852b1c7c6836cfa7c7b60b88d128856919c1d1f7fcdf954da5a16"
+  }
+}

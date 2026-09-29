@@ -19,7 +19,11 @@ import { createConversationChangeContext } from './history-messages';
 import { createPluginOwner } from './history-plugins';
 import { createConversationFromProvider } from './history-provider-factories';
 import { restoreWithController } from './history-restore';
-import { type ConversationLifecycle, HistoryTransaction } from './history-transaction';
+import {
+  type ConversationLifecycle,
+  HistoryTransaction,
+  type HistoryTransactionHooks,
+} from './history-transaction';
 import type { HistoryNode } from './history-tree';
 import type {
   ConversationHistory,
@@ -88,17 +92,11 @@ export class Conversation {
   private get currentNode(): HistoryNode {
     return this.transaction.node;
   }
-  private set currentNode(node: HistoryNode) {
-    this.transaction.setCurrentNode(node);
-  }
   private get controllerRevision(): number {
     return this.transaction.revision;
   }
   private get lifecycleState(): ConversationLifecycle {
     return this.lifecycleController.state;
-  }
-  private set controllerRevision(revision: number) {
-    this.transaction.setRevision(revision);
   }
 
   constructor(initial?: ConversationHistory, environment?: Partial<ConversationEnvironment>) {
@@ -133,6 +131,8 @@ export class Conversation {
         sourcePlugins: this.sourcePlugins,
         assertOpen: () => this.assertOpen(),
         commit: (next, action, events, context) => this.commit(next, action, events, context),
+        commitAtRevision: (expectedRevision, next, action, events, context) =>
+          this.commitAtRevision(expectedRevision, next, action, events, context),
         changeContext: (previous, next, action) => this.createChangeContext(previous, next, action),
         detail: (action, previous, context) => this.buildEventDetail(action, previous, context),
         emit: (type, detail) => this.emitConversationEvent(type, detail),
@@ -182,11 +182,40 @@ export class Conversation {
     emittedEvents: readonly ConversationActionType[],
     context?: ConversationChangeContext,
   ): void {
-    this.transaction.commit(next, changeAction, emittedEvents, context, this.lifecycleState, {
+    this.transaction.commit(
+      next,
+      changeAction,
+      emittedEvents,
+      context,
+      this.lifecycleState,
+      this.transactionHooks(),
+    );
+  }
+
+  private commitAtRevision(
+    expectedRevision: number,
+    next: ConversationHistory,
+    changeAction: ConversationActionType,
+    emittedEvents: readonly ConversationActionType[],
+    context?: ConversationChangeContext,
+  ): boolean {
+    return this.transaction.commitAtRevision(
+      expectedRevision,
+      next,
+      changeAction,
+      emittedEvents,
+      context,
+      this.lifecycleState,
+      this.transactionHooks(),
+    );
+  }
+
+  private transactionHooks(): HistoryTransactionHooks {
+    return {
       environment: this.environment,
       takePendingPluginActivations: this.takePendingPluginActivations,
       emit: (type, detail) => this.emitConversationEvent(type, detail),
-    });
+    };
   }
 
   get completed(): boolean {

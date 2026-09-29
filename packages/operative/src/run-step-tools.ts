@@ -136,13 +136,14 @@ export async function executeTools(
       let executedResults: ToolExecutionResult[] = [];
 
       try {
-        // AB-233/AB-300 — thread the active trace context and a
+        // AB-233/AB-300/COR-814 — thread the active trace context and a
         // per-execution `executionContext` (this run's child registry, its
-        // own run id, and its own delegated-authority grant) through to
-        // every tool call. `executionContext` merges the caller's own
-        // `deps.executeOptions.executionContext` (if any) under the
-        // run-derived fields, so a caller-supplied key survives unless it
-        // collides with `childRegistry`/`parentRunId`/`delegatedAuthority`.
+        // own run id, its own delegated-authority grant, and its own parent
+        // signal port) through to every tool call. `executionContext`
+        // merges the caller's own `deps.executeOptions.executionContext` (if
+        // any) under the run-derived fields, so a caller-supplied key
+        // survives unless it collides with `childRegistry`/`parentRunId`/
+        // `delegatedAuthority`/`parentSignals`.
         const { concurrency, mode, errorMode, ...baseExecuteOptions } = deps.executeOptions ?? {};
         const toolboxExecuteOptions = {
           ...baseExecuteOptions,
@@ -163,7 +164,8 @@ export async function executeTools(
           ...(deps.parentContext !== undefined ? { traceContext: deps.parentContext } : {}),
           ...(deps.childRegistry !== undefined ||
           deps.runId !== undefined ||
-          deps.delegatedAuthority !== undefined
+          deps.delegatedAuthority !== undefined ||
+          deps.parentSignals !== undefined
             ? {
                 executionContext: {
                   ...deps.executeOptions?.executionContext,
@@ -173,6 +175,11 @@ export async function executeTools(
                   ...(deps.runId !== undefined ? { parentRunId: deps.runId } : {}),
                   ...(deps.delegatedAuthority !== undefined
                     ? { delegatedAuthority: deps.delegatedAuthority }
+                    : {}),
+                  // COR-814 — this run's own port to its parent, replacing any
+                  // `parentSignals` key a caller put in `executeOptions`.
+                  ...(deps.parentSignals !== undefined
+                    ? { parentSignals: deps.parentSignals }
                     : {}),
                 },
               }

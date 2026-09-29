@@ -1,0 +1,73 @@
+{
+  "artifactId": "handoff:cor-1327",
+  "revision": 1,
+  "objective": "Make revision-realm-execution-strategy.test.ts deterministic under host load without raising any timeout.",
+  "successRevision": "COR-1327#acceptance-2026-09-26",
+  "constraints": [
+    "Never raise a test timeout, weaken an assertion, or add a retry to get green.",
+    "Change only the test file; no production code changes.",
+    "Every wait must resolve on an observed event, not a wall-clock budget."
+  ],
+  "completedWork": [
+    "Confirmed each of the file's nine waits used waitForCondition with its default 500ms budget.",
+    "Reproduced the failure by injecting a 700ms synchronous boot delay into both Worker fixtures."
+  ],
+  "validatedFacts": [
+    "With the injected delay the file fails 4 of 7 tests on every run.",
+    "The defect is already on main: control runs on 63788ddf failed 4, 2 and 0 of 7.",
+    "The first wait in each test covers a real Bun Worker booting, importing its fixture, and answering.",
+    "releaseAfterExecution drops the realm synchronously, so post-cancel release checks can assert directly."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-1327",
+      "uri": "linear:COR-1327"
+    },
+    {
+      "kind": "linear-issue",
+      "id": "COR-235",
+      "uri": "linear:COR-235"
+    },
+    {
+      "kind": "commit",
+      "id": "c32f390b",
+      "digest": "c32f390bc8310dcae1ede66aef2e6bab5947d24b",
+      "uri": "git:c32f390b"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "The full weft test run on the combined tree c32f390b failed 2 of 11946 tests, both in this file, each after a 500ms wait.",
+      "occurredAt": "2026-09-26T15:14:24.000Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Add a collectMessages helper that resolves when the Nth outbound message arrives, and convert every wait to it.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-1327-attempt-1:0",
+    "sessionId": "cor-1327-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-1327-attempt-1",
+    "runId": "cor-1327-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T15:55:39.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T15:55:39.000Z",
+    "producingActor": "workflow:linear-implementation"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-1327-attempt-1",
+    "sourceRevision": 42
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "643c83f8c8a8a589d2900014d3f99f7e7917b33fb5a8a716f83efdcb322f3d47"
+  }
+}

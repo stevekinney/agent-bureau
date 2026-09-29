@@ -1,5 +1,4 @@
-import type { Message } from 'conversationalist';
-import { Conversation } from 'conversationalist';
+import type { Conversation, ConversationHistory, Message, Summarizer } from 'conversationalist';
 
 import type { GenerateContext } from '../types';
 import type { RetryMutator } from './types';
@@ -43,69 +42,85 @@ function defaultClassifyError(error: unknown): string {
   return 'unknown';
 }
 
+/** The durable messages a recovery saw, as one comparable value. */
+function durableBoundary(conversation: Conversation): string {
+  return JSON.stringify(conversation.ids);
+}
+
 /**
- * Creates a retry mutator that compacts the conversation when an
- * overflow error is detected.
+ * Whether the conversation was rewritten, not merely extended, since it held
+ * `sentIds`. A committed compaction always rewrites it: the summary and every
+ * retained message carry new ids.
+ */
+function rewrittenSince(sentIds: ReadonlyArray<string>, conversation: Conversation): boolean {
+  const ids = conversation.ids;
+  return sentIds.some((id, index) => ids[index] !== id);
+}
+
+/**
+ * Creates a retry mutator that recovers from a provider context overflow
+ * by compacting the run's conversation once.
  *
- * Older messages are replaced with a system-level summary while
- * recent messages are retained verbatim, giving the model a shorter
- * context window for the retry attempt.
+ * Retry mutators run inside the step's provider-retry loop, before the step
+ * appends assistant output or executes a tool, so recovery always happens
+ * before this step's durable effects. Within that window it is bounded:
+ *
+ * - It compacts through `Conversation.compact()`, the revisioned
+ *   compare-and-swap, so the summary replaces the history the next attempt
+ *   and every later step read. It never builds a throwaway copy.
+ * - It does not wait for other compactions, such as a background candidate
+ *   from `contextManagement.background`. It compares the history the failed
+ *   request was sent with (the retry loop's `sentHistory`) against the
+ *   current one. When another writer rewrote it in between, as a committed
+ *   compaction always does — whether while the provider was still answering
+ *   or while this mutator's own summary was being written — the history that
+ *   overflowed is already gone. Recovery then retries once against the
+ *   rewritten history instead of compacting it again; the compare-and-swap
+ *   has already discarded this mutator's summary if one was running.
+ * - It compacts, or adopts another writer's compaction, at most once per
+ *   durable boundary. When the retry overflows again before any new message
+ *   has landed, it rethrows that provider error, ending the retry loop
+ *   instead of compacting or retrying again.
+ * - It never compacts over an open stream: partial streamed output is not
+ *   durable, so it rethrows rather than summarize or replay it.
+ * - When there is nothing to compact, or a concurrent write that only
+ *   extended the history made the compaction stale, it rethrows too: the
+ *   history the request overflowed on is still there, so retrying would
+ *   only overflow again.
  */
 export function createOverflowMutator(options: OverflowMutatorOptions): RetryMutator {
   const { summarize, retainRecentMessages = 4, classifyError = defaultClassifyError } = options;
+  const summarizer: Summarizer = async (messages) =>
+    `Previous conversation summary: ${await summarize(messages)}`;
+  // Per conversation: the durable boundary this mutator's last recovery left.
+  const compactedAt = new WeakMap<Conversation, string>();
 
-  return async (context: GenerateContext, error: unknown, _attempt: number) => {
-    const classification = classifyError(error);
-    if (classification !== 'overflow') return undefined;
+  return async (
+    context: GenerateContext,
+    error: unknown,
+    _attempt: number,
+    sentHistory?: ConversationHistory,
+  ): Promise<GenerateContext | undefined> => {
+    if (classifyError(error) !== 'overflow') return undefined;
 
-    const messages = context.conversation.getMessages();
-    if (messages.length <= retainRecentMessages) {
-      // Not enough messages to compact — nothing useful we can do
-      return undefined;
+    const { conversation } = context;
+    if (conversation.getStreamingMessage() !== undefined) throw error;
+    if (compactedAt.get(conversation) === durableBoundary(conversation)) throw error;
+
+    // Called outside the retry loop, the history now is the one that overflowed.
+    const sentIds = sentHistory?.ids ?? conversation.ids;
+    if (!rewrittenSince(sentIds, conversation)) {
+      const result = await conversation.compact(summarizer, {
+        preserveRecentCount: retainRecentMessages,
+        signal: context.signal,
+      });
+      if (result.outcome === 'no-op') throw error;
+      if (result.outcome === 'discarded' && !rewrittenSince(sentIds, conversation)) throw error;
     }
+    compactedAt.set(conversation, durableBoundary(conversation));
 
-    const cutoff = messages.length - retainRecentMessages;
-    const olderMessages = messages.slice(0, cutoff);
-    const recentMessages = messages.slice(cutoff);
-
-    const summary = await summarize(olderMessages);
-
-    // Build a fresh conversation with the summary and retained messages.
-    // AB-321: forwards the source conversation's own environment (carrying
-    // its resolved runtime), so this compaction output's id/timestamps mint
-    // through the same seam as the rest of the run.
-    const compacted = new Conversation(undefined, context.conversation.env);
-    compacted.appendSystemMessage(`Previous conversation summary: ${summary}`);
-
-    for (const message of recentMessages) {
-      const content =
-        typeof message.content === 'string'
-          ? message.content
-          : message.content
-              .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-              .map((c) => c.text)
-              .join('');
-
-      switch (message.role) {
-        case 'user':
-          compacted.appendUserMessage(content, { ...message.metadata });
-          break;
-        case 'assistant':
-          compacted.appendAssistantMessage(content, { ...message.metadata });
-          break;
-        case 'system':
-          compacted.appendSystemMessage(content, { ...message.metadata });
-          break;
-        default:
-          // tool-call, tool-result, etc. — re-append as user context
-          compacted.appendUserMessage(content, { ...message.metadata });
-          break;
-      }
-    }
-
-    return {
-      ...context,
-      conversation: compacted,
-    };
+    // A new context object marks the retry as mutated, so it seals a
+    // successor effective-context epoch for the compacted request.
+    return { ...context };
   };
 }

@@ -13,6 +13,7 @@ import type { ConversationHistory } from 'conversationalist';
 
 import type { AgentRun, RunEvent } from './agent-run';
 import type { ChildRunRegistry } from './child-run';
+import type { ChildSignalPort } from './child-signals';
 import type { AgentGenerationProfile } from './generation-profile';
 import type { OperativeHookMap } from './hooks';
 import type { DelegatedAuthority } from './providers/policy.ts';
@@ -83,6 +84,15 @@ export interface AgentRunContext {
    * `hooks` field here and that is unchanged.
    */
   childCorrelation?: HookObservationCorrelation | undefined;
+  /**
+   * COR-814 — this run's own end of the typed signal channel its parent
+   * opened by passing `signals` to `dispatchChildRun`. Absent when this run
+   * is not a child or its parent supplied no contract. `createAgent`'s run
+   * path forwards it into `RunOptions.parentSignals`, which every tool call
+   * receives as `ToolContext.executionContext.parentSignals`. Read it typed
+   * with `readParentSignals(context, contract)`.
+   */
+  parentSignals?: ChildSignalPort | undefined;
 }
 
 /**

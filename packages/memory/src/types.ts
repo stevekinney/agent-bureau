@@ -4,8 +4,10 @@ import type { RuntimeServices } from '@lostgradient/lifecycle';
 import type {
   MemoryRecord,
   MemoryRecordPutOnceResult,
+  MemoryRecordReference,
   MemoryRecordScope,
   MemoryRecordStorage,
+  MemoryRecordUpdateOptions,
   MemoryVectorSearchResult,
 } from './memory-record-storage';
 
@@ -14,8 +16,10 @@ export type {
   EmbeddingVector,
   MemoryRecord,
   MemoryRecordPutOnceResult,
+  MemoryRecordReference,
   MemoryRecordScope,
   MemoryRecordStorage,
+  MemoryRecordUpdateOptions,
   MemoryVectorSearchResult,
 };
 

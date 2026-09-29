@@ -1,0 +1,89 @@
+{
+  "artifactId": "handoff:cor-1329",
+  "revision": 1,
+  "objective": "Keep the weft coverage diagnosis intact when check-coverage runs under turbo with stderr piped.",
+  "successRevision": "COR-1329#acceptance-2026-09-26",
+  "constraints": [
+    "Keep the signal handler explicit exit unchanged.",
+    "Prove the fix with a child Bun process whose stderr is a pipe, not with a mock.",
+    "Change no threshold, allowance, timeout, or retry."
+  ],
+  "completedWork": [
+    "Traced the truncated output to process.exit() discarding unflushed process.stderr writes.",
+    "Observed that a console.error issued behind a large queued stderr write can be dropped or interleaved."
+  ],
+  "validatedFacts": [
+    "Each failing run under turbo showed only about 74KB of the child's output tail, cut mid-line at the same text.",
+    "Two direct runs of check-coverage.ts at the same revision, writing to a file instead of a pipe, both exited 0.",
+    "COR-1326 prints a stage reason on every failing exit, but its observed-working case had a tail small enough to fit in the pipe."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-1329",
+      "uri": "linear:COR-1329"
+    },
+    {
+      "kind": "linear-issue",
+      "id": "COR-1326",
+      "uri": "linear:COR-1326"
+    },
+    {
+      "kind": "file",
+      "id": "packages/weft/scripts/check-coverage.ts"
+    },
+    {
+      "kind": "commit",
+      "id": "c32f390b",
+      "digest": "c32f390bc8310dcae1ede66aef2e6bab5947d24b",
+      "uri": "git:c32f390b"
+    },
+    {
+      "kind": "commit",
+      "id": "0910f949",
+      "digest": "0910f94928db064a19bccd677a7717c485271c94",
+      "uri": "git:0910f949"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "bunx turbo run test:coverage on c32f390b printed a truncated output tail and no stage reason.",
+      "occurredAt": "2026-09-26T15:14:24.000Z"
+    },
+    {
+      "kind": "tool",
+      "summary": "The same command on 0910f949 failed the same way, cut at the same text.",
+      "occurredAt": "2026-09-26T15:55:39.000Z"
+    }
+  ],
+  "unresolvedQuestions": [
+    "Why does the coverage shard exit 1 intermittently? This defect has hidden the reason every time."
+  ],
+  "nextRequestedAction": "Set process.exitCode from a new runCheckCoverageCli entry and write the trailing lines through process.stderr on the same ordered stream.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox", "hook-plan"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-1329-attempt-1:0",
+    "sessionId": "cor-1329-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-1329-attempt-1",
+    "runId": "cor-1329-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T16:48:18.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T16:48:18.000Z",
+    "producingActor": "workflow:linear-implementation"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-1329-attempt-1",
+    "sourceRevision": 61
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "995c4f4606eb30f1b90eea09bd854bb618c1aabe920157093bf4a6ddd2a6bbe5"
+  }
+}

@@ -11,6 +11,7 @@ export {
   deriveRunId,
 } from './session-handle';
 export type {
+  ForkThroughRunErrorReason,
   MonitorOptions,
   SessionHandle,
   SessionHandleContext,

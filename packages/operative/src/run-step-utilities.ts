@@ -173,6 +173,10 @@ export async function callGenerateWithRetry(
   let currentContext = context;
   let lastError: unknown;
   for (let attempt = 1; attempt <= retry.attempts; attempt++) {
+    // COR-808: what this attempt is sent with, so a mutator can tell whether
+    // another writer — a background compaction, say — changed the history
+    // while the request was in flight.
+    const sentHistory = currentContext.conversation.current;
     try {
       return await generate(currentContext);
     } catch (error) {
@@ -189,7 +193,7 @@ export async function callGenerateWithRetry(
       let mutated = false;
       let mutationDescription: string | undefined;
       if (retry.mutate) {
-        const mutatedContext = await retry.mutate(currentContext, error, attempt);
+        const mutatedContext = await retry.mutate(currentContext, error, attempt, sentHistory);
         if (mutatedContext !== undefined) {
           // AB-67: steering desired-configuration is not mutator-overridable,
           // the same rule `beforeGenerate` follows — reapply the value this

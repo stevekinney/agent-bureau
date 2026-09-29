@@ -58,6 +58,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     runId: options.runId,
     childRegistry: options.childRegistry,
     delegatedAuthority: options.delegatedAuthority,
+    parentSignals: options.parentSignals,
     durableOperationKeys: options.durableOperationKeys ?? false,
     defaultToolChoice: options.toolChoice,
     steering: options.steering,

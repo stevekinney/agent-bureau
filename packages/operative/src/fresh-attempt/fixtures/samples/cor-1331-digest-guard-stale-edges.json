@@ -1,0 +1,76 @@
+{
+  "artifactId": "handoff:cor-1331",
+  "revision": 1,
+  "objective": "Stop scripts/mirror/source-digest.test.ts from crossing the five-second per-test clock inside a loaded test:self run.",
+  "successRevision": "COR-1331#acceptance-2026-09-26",
+  "constraints": [
+    "No timeout may change.",
+    "A plan that resolves where a refusal is expected must still fail the test."
+  ],
+  "completedWork": [
+    "Confirmed COR-1316 moved the current-digest map and both committed plans to module scope.",
+    "Ran the file alone: 24 of 24 passed on three consecutive runs at load 44 to 58."
+  ],
+  "validatedFacts": [
+    "Each stale-edge case still awaits two full planSurface refusal plans in its own body.",
+    "The refusal must be a StaleCrossTargetEdgeError naming the dependency."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-1331",
+      "uri": "linear:COR-1331"
+    },
+    {
+      "kind": "linear-issue",
+      "id": "COR-1316",
+      "uri": "linear:COR-1316"
+    },
+    {
+      "kind": "commit",
+      "id": "633aa6d7",
+      "digest": "633aa6d7345c0fb81c9efa66e7bfb23be349e190",
+      "uri": "git:633aa6d7"
+    },
+    {
+      "kind": "commit",
+      "id": "b8d0e857",
+      "digest": "b8d0e85748f9751b32d4304823dba47c5f884cd4",
+      "uri": "git:b8d0e857"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "bun run validate on b8d0e857 failed in test:self when two stale-edge cases crossed the 5000ms limit at 6912ms and 6488ms.",
+      "occurredAt": "2026-09-26T16:59:00.000Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Plan both refusals per stale edge once at module scope, capture each rejection, and assert on the captured errors.",
+  "allowedCarryForwardContext": ["agent-instructions"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-1331-attempt-1:0",
+    "sessionId": "cor-1331-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-1331-attempt-1",
+    "runId": "cor-1331-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T17:17:08.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T17:17:08.000Z",
+    "producingActor": "operator:steve-kinney"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-1331-attempt-1",
+    "sourceRevision": 18
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "96d33a5aad39d7ef443038f21be6ab8e708eb38c85a6a108abcaa590064ecc9c"
+  }
+}

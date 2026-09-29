@@ -293,7 +293,12 @@ export function sealContextEpoch(input: SealContextEpochInput): EffectiveContext
       availability: 'required',
       redaction: 'reference-only',
       disposition: INCLUDED,
-      revision: messages.length,
+      // The controller revision, which the contract names as this source's
+      // version. Every committed history replacement moves it — a
+      // compaction commit included, even one whose summary renders exactly
+      // like the messages it replaced — so a commit always seals a
+      // successor, and an attempt that published nothing never does.
+      revision: input.conversation.revision,
       digest: conversationTrustVector(input.conversation),
     },
     {
