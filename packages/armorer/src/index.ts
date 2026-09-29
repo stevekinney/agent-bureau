@@ -261,7 +261,6 @@ export type { Embedder, EmbeddingEntry, EmbeddingVector } from './core/registry/
 // Types
 export * from './adapters/anthropic';
 export * from './adapters/gemini';
-export * from './adapters/open-ai/agents';
 export * from './adapters/openai';
 export * from './coding';
 export * from './inspect';

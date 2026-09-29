@@ -1,4 +1,8 @@
-import type { ContentBlockParam, MessageParam } from '@anthropic-ai/sdk/resources/messages';
+import type {
+  ContentBlockParam,
+  MessageParam,
+  TextBlockParam,
+} from '@anthropic-ai/sdk/resources/messages';
 import type { ConversationHistory as Conversation } from '../../types';
 import { toAnthropicMessages } from './outbound';
 import {
@@ -9,9 +13,13 @@ import {
 import type {
   AnthropicCacheControl,
   AnthropicContentBlock,
-  AnthropicSdkConversation,
   ToAnthropicMessagesOptions,
 } from './types';
+
+export interface AnthropicSdkConversation {
+  system?: string | TextBlockParam[];
+  messages: MessageParam[];
+}
 
 /** Converts a neutral Anthropic conversation to the official SDK request shapes. */
 export function toAnthropicMessagesForSdk(
