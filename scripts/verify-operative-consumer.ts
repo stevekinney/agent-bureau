@@ -629,6 +629,7 @@ import type {
   LeakedResource,
   ManualRuntimeServices,
   QuiescenceReport,
+  ReactiveSourceConformanceTestRunner,
   ReactiveSourceSubject,
 } from '@lostgradient/operative/test';
 import {
@@ -715,7 +716,10 @@ function createTerminalCounterSubject(): ReactiveSourceSubject<CounterSnapshot> 
   };
 }
 
-export function registerKitProbeReactiveSuite(runtime: ManualRuntimeServices): void {
+export function registerKitProbeReactiveSuite(
+  runtime: ManualRuntimeServices,
+  testRunner: ReactiveSourceConformanceTestRunner,
+): void {
   runReactiveSourceConformanceSuite({
     label: 'kit probe in-memory counter',
     createSubject: () => createCounterSubject(runtime),
@@ -728,7 +732,7 @@ export function registerKitProbeReactiveSuite(runtime: ManualRuntimeServices): v
       await done;
     },
     createAlreadyTerminalSubject: createTerminalCounterSubject,
-  });
+  }, testRunner);
 }
 
 // ---------------------------------------------------------------------------
@@ -828,7 +832,11 @@ describe('operative test-kit probe (AB-259)', () => {
   });
 });
 
-registerKitProbeReactiveSuite(createManualRuntimeServices());
+registerKitProbeReactiveSuite(createManualRuntimeServices(), {
+  describe,
+  it,
+  equal: Bun.deepEquals,
+});
 `;
 
 // AB-259: a negative probe naming an export the kit has never had. Kept

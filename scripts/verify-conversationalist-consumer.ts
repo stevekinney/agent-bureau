@@ -283,7 +283,7 @@ async function verifyRuntimeConsumer(directory: string, tarballPath: string): Pr
 
   await runStep(consumer, 'npm install', directory, ['npm', 'install', '--no-audit', '--no-fund']);
   await runStep(consumer, 'node run.mjs', directory, [NODE_BINARY, 'run.mjs'], REAL_NODE_ENV);
-  for (const nodeVersion of ['20.19.0', '22.12.0', '24.0.0']) {
+  for (const nodeVersion of ['22.0.0', '22.12.0', '24.0.0']) {
     await runStep(consumer, `Node ${nodeVersion} run.mjs`, directory, [
       'npx',
       '--yes',
@@ -397,11 +397,12 @@ async function verifyManifestConsumer(directory: string, tarballPath: string): P
   }
   for (const [version, expected] of new Map([
     ['20.18.9', false],
-    ['20.19.0', true],
+    ['20.19.0', false],
     ['21.7.3', false],
-    ['22.11.0', false],
+    ['22.0.0', true],
+    ['22.11.0', true],
     ['22.12.0', true],
-    ['23.11.1', false],
+    ['23.11.1', true],
     ['24.0.0', true],
   ])) {
     if (Bun.semver.satisfies(version, manifest.engines.node) !== expected) {

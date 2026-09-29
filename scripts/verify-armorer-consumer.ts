@@ -95,6 +95,7 @@ async function installConsumer(
 async function verifyTypeSurface(directory: string, tarball: string): Promise<void> {
   await installConsumer(directory, tarball, {
     typescript: '6.0.3',
+    '@types/node': '22.19.15',
     '@opentelemetry/api': '1.9.1',
   });
   await Bun.write(
@@ -106,6 +107,7 @@ async function verifyTypeSurface(directory: string, tarball: string): Promise<vo
         module: 'Preserve',
         moduleResolution: 'bundler',
         target: 'ESNext',
+        types: ['node'],
         noEmit: true,
       },
       include: ['index.ts'],
@@ -295,7 +297,16 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
   const manifest = JSON.parse(
     await Bun.file(join(directory, 'node_modules', 'armorer', 'package.json')).text(),
   ) as {
-    exports: Record<string, Record<string, string>>;
+    exports: Record<
+      string,
+      {
+        bun?: string;
+        browser?: string;
+        import?: { types?: string; default?: string };
+        require?: { types?: string; default?: string };
+        default?: string;
+      }
+    >;
     engines: Record<string, string>;
   };
   for (const subpath of browserSubpaths)
@@ -310,9 +321,17 @@ async function verifyManifest(directory: string, tarball: string): Promise<void>
   const installedPackage = join(directory, 'node_modules', 'armorer');
   for (const subpath of allSubpaths) {
     const conditions = manifest.exports[subpath];
-    for (const condition of ['bun', 'import', 'require', 'default', 'types']) {
-      const target = conditions?.[condition];
-      if (!target) throw new Error(`${subpath} must declare ${condition} support`);
+    const targets = [
+      ['bun', conditions?.bun],
+      ['import.types', conditions?.import?.types],
+      ['import.default', conditions?.import?.default],
+      ['require.types', conditions?.require?.types],
+      ['require.default', conditions?.require?.default],
+      ['default', conditions?.default],
+    ] as const;
+    for (const [condition, target] of targets) {
+      if (typeof target !== 'string')
+        throw new Error(`${subpath} must declare ${condition} support`);
       if (!(await Bun.file(join(installedPackage, target)).exists()))
         throw new Error(`${subpath} ${condition} target ${target} is missing from the tarball`);
     }
