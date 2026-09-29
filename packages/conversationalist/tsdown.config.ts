@@ -29,6 +29,7 @@ const entry = {
   schemas: './src/schemas.ts',
   'adapters/openai/index': './src/adapters/openai/index.ts',
   'adapters/anthropic/index': './src/adapters/anthropic/index.ts',
+  'adapters/anthropic/sdk': './src/adapters/anthropic/sdk.ts',
   'adapters/gemini/index': './src/adapters/gemini/index.ts',
   'plugins/pii-redaction': './src/plugins/pii-redaction.ts',
   'versioning/index': './src/versioning/index.ts',
