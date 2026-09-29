@@ -12,6 +12,7 @@ import {
 import { createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { BureauShutdownReport } from '../types';
 import type { BureauTestHarness } from './harness';
 import { createBureauTestHarness } from './harness';
@@ -259,11 +260,13 @@ describe('assembleReproductionArtifact', () => {
     const recorder = createEventRecorder(harness.runtime);
 
     expect(
-      assembleReproductionArtifact(harness, recorder, {
-        terminalResult: undefined,
-        cleanupReport: { status: 'completed' },
-      }),
-    ).rejects.toThrow(/no configured `provider`/);
+      await throwingRejectionOf(
+        assembleReproductionArtifact(harness, recorder, {
+          terminalResult: undefined,
+          cleanupReport: { status: 'completed' },
+        }),
+      ),
+    ).toThrow(/no configured `provider`/);
   });
 
   it('sets causalTrace to exactly EventRecorder.normalize() output and nothing else', async () => {
@@ -365,7 +368,9 @@ describe('locateWorkspaceRoot', () => {
     expect(await Bun.file(`${root}/turbo.json`).exists()).toBe(true);
   });
 
-  it('throws when no turbo.json exists anywhere above the starting directory', () => {
-    expect(locateWorkspaceRoot(tmpdir())).rejects.toThrow(/could not locate the workspace root/);
+  it('throws when no turbo.json exists anywhere above the starting directory', async () => {
+    expect(await throwingRejectionOf(locateWorkspaceRoot(tmpdir()))).toThrow(
+      /could not locate the workspace root/,
+    );
   });
 });

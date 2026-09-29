@@ -8,6 +8,7 @@ import { createCheckpointStore } from '../durable/checkpoint-store';
 import { createRunEngine } from '../durable/create-run-engine';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow-result';
 import type { OperativeEventMap, SessionRecoverEvent } from '../events';
+import { rejectionOf } from '../testing/promise-outcome.test-support.ts';
 import { createSessionStore } from './create-session-store';
 import { createSessionEngine } from './session-engine-test-fixture';
 import { createSessionHandle } from './session-handle';
@@ -217,7 +218,7 @@ describe('recover() — successful reattach events', () => {
 
       terminalCommit.resolve();
       if (failCommit) {
-        expect(result).rejects.toBe(commitFailure);
+        expect(await rejectionOf(result)).toBe(commitFailure);
         expect(await closed).toEqual({ status: 'failed', error: commitFailure });
         expect(events).not.toContain('run.completed');
       } else {

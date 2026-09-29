@@ -148,6 +148,7 @@ describe('projectWorkerLivenessSnapshot', () => {
     const worker: WorkerDiagnosticsResult['worker'] = {
       instance: {
         workerId: 'worker-1',
+        transport: 'websocket',
         queue: 'default',
         health: 'active',
         connectedAt: 0,
@@ -187,6 +188,7 @@ describe('projectWorkerLivenessSnapshot', () => {
     const worker: WorkerDiagnosticsResult['worker'] = {
       instance: {
         workerId: 'worker-1',
+        transport: 'websocket',
         queue: 'default',
         health: 'draining',
         connectedAt: 0,
@@ -220,6 +222,7 @@ describe('projectWorkerLivenessSnapshot', () => {
     const worker: WorkerDiagnosticsResult['worker'] = {
       instance: {
         workerId: 'worker-1',
+        transport: 'websocket',
         queue: 'default',
         health: 'drained',
         connectedAt: 0,
@@ -266,6 +269,7 @@ describe('projectStreamLivenessSnapshot', () => {
     const worker: WorkerDiagnosticsResult['worker'] = {
       instance: {
         workerId: 'worker-1',
+        transport: 'websocket',
         queue: 'default',
         health: 'active',
         connectedAt: 0,

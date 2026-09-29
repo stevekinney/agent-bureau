@@ -52,6 +52,7 @@ import { UnsupportedRunResultVersionError } from '../run-envelope';
 import type { RunnableAgent } from '../runnable-agent';
 import { createManualDurableEngine, spyEngine } from '../test/durable-engine';
 import { createManualCheckpointStore, createMockGenerate, waitForCondition } from '../test/index';
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { RunOptions, RunResult } from '../types';
 import { createDurableActiveRun } from './active-run-create';
 import { createRecoveredRunEventSurface } from './active-run-event-surface';
@@ -3305,7 +3306,9 @@ describe('reattachDurableActiveRun', () => {
         { runId: 'reattach-unsupported-version', handle },
       );
 
-      expect(recoveredRun.result).rejects.toThrow(UnsupportedRunResultVersionError);
+      expect(await throwingRejectionOf(recoveredRun.result)).toThrow(
+        UnsupportedRunResultVersionError,
+      );
     } finally {
       context.engine[Symbol.dispose]();
     }
@@ -4541,7 +4544,7 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
     const completed: unknown[] = [];
     activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
 
-    expect(activeRun.durablyStarted).rejects.toThrow('sqlite: disk full');
+    expect(await throwingRejectionOf(activeRun.durablyStarted)).toThrow('sqlite: disk full');
     // `result` no longer rejects raw (PRRT_kwDORvupsc6gWc39/PRRT_kwDORvupsc6gWb3a
     // review): a bare rethrow here would leave bureau's `createRunFromRequest`
     // — which awaits `durablyStarted`, catches its rejection, and relies on
@@ -4585,7 +4588,7 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
     const completed: unknown[] = [];
     activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
 
-    expect(activeRun.durablyStarted).rejects.toThrow(
+    expect(await throwingRejectionOf(activeRun.durablyStarted)).toThrow(
       'onServices: caller-supplied callback exploded',
     );
     const result = await activeRun.result;
@@ -4652,7 +4655,7 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
       );
 
       expect(recoveredRun.durablyStarted).toBeInstanceOf(Promise);
-      expect(recoveredRun.durablyStarted).resolves.toBeUndefined();
+      expect(await recoveredRun.durablyStarted).toBeUndefined();
       await recoveredRun.result;
     } finally {
       context.engine[Symbol.dispose]();
@@ -4695,7 +4698,7 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
     const completed: unknown[] = [];
     activeRun.addEventListener('run.completed', (event) => completed.push(event.result));
 
-    expect(activeRun.durablyStarted).rejects.toThrow(
+    expect(await throwingRejectionOf(activeRun.durablyStarted)).toThrow(
       'observable subscriber exploded on run.started',
     );
     const result = await activeRun.result;
@@ -4742,7 +4745,7 @@ describe('AB-361: ActiveRun.durablyStarted settles with the initial workflow rec
     // `undefined` identically to a plain no-argument success call, so this
     // assertion is exactly the one that used to fail: `durablyStarted`
     // resolved instead of rejecting even though no durable write happened.
-    expect(activeRun.durablyStarted).rejects.toThrow();
+    expect(await throwingRejectionOf(activeRun.durablyStarted)).toThrow();
     const result = await activeRun.result;
     expect(result.finishReason).toBe('error');
     expect(result.error).toBeInstanceOf(Error);

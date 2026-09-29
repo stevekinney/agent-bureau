@@ -5,6 +5,7 @@ import { describe, expect, it } from 'bun:test';
 import { createMcpElicitationResponder } from './create-mcp-elicitation-responder';
 import type { CombinedOperativeEventMap } from './events';
 import { ElicitationRequestedEvent, ElicitationResolvedEvent } from './events';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 import type { ElicitationRequest, StepContext } from './types';
 
 function makeContext(): StepContext {
@@ -175,9 +176,11 @@ describe('createMcpElicitationResponder', () => {
           data: request.schema.parse({ approved: true }),
         }),
       });
-      await expect(
-        responder({ message: 'Approve?', mode: 'form', schema: { type: 'object' } }),
-      ).rejects.toThrow('Elicitation response did not match its request.');
+      expect(
+        await throwingRejectionOf(
+          responder({ message: 'Approve?', mode: 'form', schema: { type: 'object' } }),
+        ),
+      ).toThrow('Elicitation response did not match its request.');
       expect(resolved).toHaveLength(0);
     },
   );

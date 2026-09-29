@@ -20,7 +20,7 @@ import {
   type SummarizeOptions,
   type ToolFrameStatus,
 } from '@lostgradient/operative';
-import { Conversation } from 'conversationalist';
+import { currentConversationFromSnapshot } from 'conversationalist';
 
 import { serializeUnknownError } from './serialization';
 
@@ -366,5 +366,5 @@ function extractLastCompletedTranscript(
   runState: Pick<RunState, 'snapshots'>,
 ): BuildRunReportInput['transcript'] | undefined {
   const lastSnapshot = runState.snapshots[runState.snapshots.length - 1];
-  return lastSnapshot ? Conversation.from(lastSnapshot).current : undefined;
+  return lastSnapshot ? currentConversationFromSnapshot(lastSnapshot) : undefined;
 }

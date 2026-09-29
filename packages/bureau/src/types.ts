@@ -64,7 +64,7 @@ import type {
   SignedPendingToolApproval,
   ToolRequestContext,
 } from 'armorer';
-import type { ConversationSnapshot } from 'conversationalist';
+import type { ConversationHistory } from 'conversationalist';
 
 import type {
   AgentDefinitions,
@@ -1829,7 +1829,13 @@ export interface RunEventRecord {
 export interface RunDetail extends RunSummary {
   events: RunEventRecord[];
   stepDetails: RunStepDetail[];
-  latestSnapshot: ConversationSnapshot | undefined;
+  /**
+   * The current branch's conversation as of the last completed step or run
+   * completion, or `undefined` before any step completes. This is the
+   * transcript only: the full undo/branch history stays in the operative
+   * store's `RunState.snapshots`.
+   */
+  transcript: ConversationHistory | undefined;
   /**
    * The run's current liveness snapshot (AB-88/AB-214), plain-data and
    * JSON-safe. `getRun(id)` carries the value observed at call time; a

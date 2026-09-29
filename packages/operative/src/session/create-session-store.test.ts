@@ -5,6 +5,7 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 
 import { createAgentSession } from '../agent-session';
 import { SessionOutboxAppendedEvent } from '../events';
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { JSONValue } from '../types';
 import {
   createSessionStore,
@@ -1139,9 +1140,11 @@ describe('createSessionStore', () => {
       .join('')}`;
     await rawStore.set(occupiedKey, 'client-owned-value');
 
-    expect(store.save(session)).rejects.toThrow(/occupied by unrelated data/);
+    expect(await throwingRejectionOf(store.save(session))).toThrow(/occupied by unrelated data/);
     expect(await rawStore.get(occupiedKey)).toBe('client-owned-value');
-    expect(store.delete(session.id)).rejects.toThrow(/occupied by unrelated data/);
+    expect(await throwingRejectionOf(store.delete(session.id))).toThrow(
+      /occupied by unrelated data/,
+    );
     expect(await rawStore.get(occupiedKey)).toBe('client-owned-value');
   });
 
@@ -1302,10 +1305,12 @@ describe('createSessionStore', () => {
     await store.save(session);
 
     expect(
-      store.update(session.id, (current) =>
-        current ? { ...current, id: 'different-id' } : undefined,
+      await throwingRejectionOf(
+        store.update(session.id, (current) =>
+          current ? { ...current, id: 'different-id' } : undefined,
+        ),
       ),
-    ).rejects.toThrow(/returned id "different-id"/);
+    ).toThrow(/returned id "different-id"/);
     const loaded = await store.load(session.id);
     expect(loaded?.id).toBe(session.id);
     expect(await store.load('different-id')).toBeUndefined();
@@ -1518,7 +1523,7 @@ describe('AgentSession.incarnation (AB-384)', () => {
       runtime: faultyRuntime,
     });
 
-    expect(store.save(makeSession({ id: 'empty-incarnation' }))).rejects.toThrow(
+    expect(await throwingRejectionOf(store.save(makeSession({ id: 'empty-incarnation' })))).toThrow(
       /must never return ''/,
     );
   });
@@ -1595,7 +1600,9 @@ describe('AgentSession.incarnation (AB-384)', () => {
     // `staleWriter` still names its own (now-deleted) incarnation — writing
     // it back must fail rather than silently relabel its stale content
     // under the RECREATED session's current incarnation.
-    expect(store.save(staleWriter)).rejects.toThrow(StaleSessionIncarnationError);
+    expect(await throwingRejectionOf(store.save(staleWriter))).toThrow(
+      StaleSessionIncarnationError,
+    );
     // The recreated session's live body is untouched by the rejected write.
     expect((await store.load(session.id))!.incarnation).toBe(recreated.incarnation);
   });
@@ -1610,7 +1617,7 @@ describe('AgentSession.incarnation (AB-384)', () => {
     expect(await store.delete(session.id)).toBe(true);
     await store.save(makeSession({ id: session.id }));
 
-    expect(store.update(session.id, () => staleWriter)).rejects.toThrow(
+    expect(await throwingRejectionOf(store.update(session.id, () => staleWriter))).toThrow(
       StaleSessionIncarnationError,
     );
   });
@@ -1757,9 +1764,9 @@ describe('SessionStore commit outbox (AB-389)', () => {
     // Corrupt the counter directly — not a value any commit here ever writes.
     await rawStore.set('agent-session-outbox:v1:ordinal', 'not-a-number');
 
-    expect(store.save(makeSession({ id: 'corrupted-ordinal-next' }))).rejects.toThrow(
-      /outbox ordinal counter is corrupted/,
-    );
+    expect(
+      await throwingRejectionOf(store.save(makeSession({ id: 'corrupted-ordinal-next' }))),
+    ).toThrow(/outbox ordinal counter is corrupted/);
   });
 
   it('fails loudly, rather than silently treating it as absent, when a stored outbox entry is malformed (Codex P2 review finding, PR #598)', async () => {
@@ -1776,7 +1783,7 @@ describe('SessionStore commit outbox (AB-389)', () => {
       JSON.stringify({ ordinal: entry!.ordinal, kind: 'session.created', sessionId: 'x' }),
     );
 
-    expect(store.outbox.pending()).rejects.toThrow(/outbox entry is corrupted/);
+    expect(await throwingRejectionOf(store.outbox.pending())).toThrow(/outbox entry is corrupted/);
   });
 
   it('rejects a caller-supplied SessionStore contract where a discriminated-union outbox entry requires agentName for created/saved kinds (AB-389)', async () => {
@@ -1901,7 +1908,9 @@ describe('SessionStore outbox attachments (AB-391)', () => {
         committedAtMs: 0,
       }),
     );
-    expect(store.outbox.pending()).rejects.toThrow(/expected a string "namespace"/);
+    expect(await throwingRejectionOf(store.outbox.pending())).toThrow(
+      /expected a string "namespace"/,
+    );
 
     await rawStore.set(
       `agent-session-outbox:v1:entry:${String(attachment!.ordinal).padStart(20, '0')}`,
@@ -1914,7 +1923,7 @@ describe('SessionStore outbox attachments (AB-391)', () => {
         committedAtMs: 0,
       }),
     );
-    expect(store.outbox.pending()).rejects.toThrow(/expected a "payload"/);
+    expect(await throwingRejectionOf(store.outbox.pending())).toThrow(/expected a "payload"/);
   });
 
   it('rejects update() synchronously when an outbox attachment has an undefined payload, before anything commits (Codex P2 review finding, PR #601, "Validate attachments before committing malformed outbox entries")', async () => {
@@ -1924,15 +1933,17 @@ describe('SessionStore outbox attachments (AB-391)', () => {
     // throw on it forever (the malformed-entry test above, but self-
     // inflicted at write time instead of injected by hand afterward).
     const store = createSessionStore(textValueStore(new MemoryStorage()));
-    await expect(
-      store.update(
-        'undefined-payload-attachment',
-        (existing) => existing ?? makeSession({ id: 'undefined-payload-attachment' }),
-        {
-          outbox: [{ namespace: 'audit-record', payload: undefined as unknown as JSONValue }],
-        },
+    expect(
+      await throwingRejectionOf(
+        store.update(
+          'undefined-payload-attachment',
+          (existing) => existing ?? makeSession({ id: 'undefined-payload-attachment' }),
+          {
+            outbox: [{ namespace: 'audit-record', payload: undefined as unknown as JSONValue }],
+          },
+        ),
       ),
-    ).rejects.toThrow(TypeError);
+    ).toThrow(TypeError);
 
     // Nothing committed — not the session body, not the outbox ordinal.
     expect(await store.load('undefined-payload-attachment')).toBeUndefined();
@@ -1941,13 +1952,15 @@ describe('SessionStore outbox attachments (AB-391)', () => {
 
   it('rejects update() synchronously when an outbox attachment has an empty namespace', async () => {
     const store = createSessionStore(textValueStore(new MemoryStorage()));
-    await expect(
-      store.update(
-        'empty-namespace-attachment',
-        (existing) => existing ?? makeSession({ id: 'empty-namespace-attachment' }),
-        { outbox: [{ namespace: '', payload: { n: 1 } }] },
+    expect(
+      await throwingRejectionOf(
+        store.update(
+          'empty-namespace-attachment',
+          (existing) => existing ?? makeSession({ id: 'empty-namespace-attachment' }),
+          { outbox: [{ namespace: '', payload: { n: 1 } }] },
+        ),
       ),
-    ).rejects.toThrow(TypeError);
+    ).toThrow(TypeError);
     expect(await store.load('empty-namespace-attachment')).toBeUndefined();
   });
 
@@ -2107,9 +2120,11 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
       const store = createSessionStore(textValueStore(new MemoryStorage()), { runtime });
       await store.save(makeSession({ id: `claim-non-finite-${until}` }));
       const [entry] = await store.outbox.pending();
-      await expect(
-        store.outbox.claim(entry!.ordinal, { owner: 'drainer-a', until }),
-      ).rejects.toThrow(TypeError);
+      expect(
+        await throwingRejectionOf(
+          store.outbox.claim(entry!.ordinal, { owner: 'drainer-a', until }),
+        ),
+      ).toThrow(TypeError);
       // Rejected before any store mutation — the entry is still pending
       // and unclaimed, not wedged behind a corrupted `claim` field.
       expect(await store.outbox.pending()).toHaveLength(1);

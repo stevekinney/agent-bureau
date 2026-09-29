@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 
 import { type AuditRecord, computeInitialAuditSequence, createAuditTrail } from './audit-trail';
 import { ActionEvent, type BureauEventMap } from './events';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 import type { Bureau } from './types';
 
 // ── Minimal Bureau stub ──────────────────────────────────────────────
@@ -627,15 +628,17 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
 
-      await expect(
-        trail.record({
-          runId: 'run-exhausted',
-          type: 'review.tool-approval.approved',
-          detail: {},
-          timestampMs: 1000,
-          dedupeKey: 'session.attachment:session-exhausted:1',
-        }),
-      ).rejects.toThrow('Exhausted retries resolving an audit-record key collision');
+      expect(
+        await throwingRejectionOf(
+          trail.record({
+            runId: 'run-exhausted',
+            type: 'review.tool-approval.approved',
+            detail: {},
+            timestampMs: 1000,
+            dedupeKey: 'session.attachment:session-exhausted:1',
+          }),
+        ),
+      ).toThrow('Exhausted retries resolving an audit-record key collision');
 
       trail.dispose();
     });
@@ -693,14 +696,14 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, kv, undefined, { initialSequence: 0 });
 
-      await expect(
-        trail.record({
+      expect(
+        await trail.record({
           runId: 'run-ordinary-exhausted',
           type: 'review.tool-approval.approved',
           detail: {},
           timestampMs: 1000,
         }),
-      ).resolves.toBeUndefined();
+      ).toBeUndefined();
 
       // The 4 seeded records survive untouched; the ordinary write itself
       // was dropped (diagnosed) after exhausting its retries, never
@@ -743,14 +746,16 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, failingKv);
 
-      await expect(
-        trail.record({
-          runId: 'run-dedupe-failure',
-          type: 'review.tool-approval.approved',
-          detail: {},
-          dedupeKey: 'session.attachment:session-failure:1',
-        }),
-      ).rejects.toThrow('storage unavailable');
+      expect(
+        await throwingRejectionOf(
+          trail.record({
+            runId: 'run-dedupe-failure',
+            type: 'review.tool-approval.approved',
+            detail: {},
+            dedupeKey: 'session.attachment:session-failure:1',
+          }),
+        ),
+      ).toThrow('storage unavailable');
       trail.dispose();
     });
 
@@ -1153,14 +1158,16 @@ describe('createAuditTrail', () => {
       const trail = createAuditTrail(bureau, kv, undefined, { signal: controller.signal });
 
       controller.abort();
-      await expect(
-        trail.record({
-          runId: 'run-dedupe-after-abort',
-          type: 'review.tool-approval.approved',
-          detail: null,
-          dedupeKey: 'session.attachment:session-after-abort:1',
-        }),
-      ).rejects.toThrow(/shutdown signal is already aborted/);
+      expect(
+        await throwingRejectionOf(
+          trail.record({
+            runId: 'run-dedupe-after-abort',
+            type: 'review.tool-approval.approved',
+            detail: null,
+            dedupeKey: 'session.attachment:session-after-abort:1',
+          }),
+        ),
+      ).toThrow(/shutdown signal is already aborted/);
 
       const records = await trail.query({ runId: 'run-dedupe-after-abort' });
       expect(records).toHaveLength(0);
@@ -1179,14 +1186,14 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);
 
-      await expect(
-        trail.record({
+      expect(
+        await trail.record({
           runId: 'run-invalid-timestamp',
           type: 'review.tool-approval.approved',
           detail: null,
           timestampMs: Number.NaN,
         }),
-      ).resolves.toBeUndefined();
+      ).toBeUndefined();
 
       const records = await trail.query({ runId: 'run-invalid-timestamp' });
       expect(records).toHaveLength(0);
@@ -1203,15 +1210,17 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, kv);
 
-      await expect(
-        trail.record({
-          runId: 'run-invalid-timestamp-dedupe',
-          type: 'review.tool-approval.approved',
-          detail: null,
-          timestampMs: Number.POSITIVE_INFINITY,
-          dedupeKey: 'session.attachment:invalid-timestamp-session:1',
-        }),
-      ).rejects.toThrow(/invalid timestampMs/);
+      expect(
+        await throwingRejectionOf(
+          trail.record({
+            runId: 'run-invalid-timestamp-dedupe',
+            type: 'review.tool-approval.approved',
+            detail: null,
+            timestampMs: Number.POSITIVE_INFINITY,
+            dedupeKey: 'session.attachment:invalid-timestamp-session:1',
+          }),
+        ),
+      ).toThrow(/invalid timestampMs/);
 
       const records = await trail.query({ runId: 'run-invalid-timestamp-dedupe' });
       expect(records).toHaveLength(0);
@@ -2150,7 +2159,9 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
 
-      await expect(trail.prune(5000)).rejects.toThrow('backend rejected the summary write');
+      expect(await throwingRejectionOf(trail.prune(5000))).toThrow(
+        'backend rejected the summary write',
+      );
 
       // The deletion itself still happened — this is exactly why the
       // failure must propagate rather than be swallowed: the caller needs
@@ -2430,7 +2441,7 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
 
-      await expect(trail.prune(5000)).rejects.toThrow(
+      expect(await throwingRejectionOf(trail.prune(5000))).toThrow(
         'lost the prune lease before the delete phase',
       );
 
@@ -2543,7 +2554,7 @@ describe('createAuditTrail', () => {
         },
       });
 
-      await expect(result).rejects.toThrow('lost the prune lease mid-delete');
+      expect(await throwingRejectionOf(result)).toThrow('lost the prune lease mid-delete');
       // Aborted on the SECOND candidate's own renewal check — proof the
       // check runs per candidate, driven by elapsed time, not a fixed
       // count.
@@ -2582,7 +2593,7 @@ describe('createAuditTrail', () => {
         },
       });
 
-      await expect(result).rejects.toThrow('lost the prune lease mid-delete');
+      expect(await throwingRejectionOf(result)).toThrow('lost the prune lease mid-delete');
 
       // The record survives — the abort happened BEFORE its delete, not
       // after.
@@ -2614,7 +2625,9 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 2 });
 
-      await expect(trail.prune(5000)).rejects.toThrow('backend rejected the second delete');
+      expect(await throwingRejectionOf(trail.prune(5000))).toThrow(
+        'backend rejected the second delete',
+      );
 
       const prunedRecords = await trail.query({ type: 'audit.pruned' });
       expect(prunedRecords).toHaveLength(1);
@@ -2781,7 +2794,7 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 });
 
-      await expect(trail.prune(5000)).rejects.toThrow(
+      expect(await throwingRejectionOf(trail.prune(5000))).toThrow(
         'lost the prune lease before the delete phase',
       );
 
@@ -2843,7 +2856,9 @@ describe('createAuditTrail', () => {
         runtime,
       );
 
-      await expect(trail.prune(5000)).rejects.toThrow('lost the prune lease mid-delete');
+      expect(await throwingRejectionOf(trail.prune(5000))).toThrow(
+        'lost the prune lease mid-delete',
+      );
 
       // Only the FIRST candidate — deleted BEFORE the failed renewal
       // check — stays deleted; the abort happened before the second
@@ -2908,7 +2923,9 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 2 }, runtime);
 
-      await expect(trail.prune(5000)).rejects.toThrow('lost the prune lease mid-delete');
+      expect(await throwingRejectionOf(trail.prune(5000))).toThrow(
+        'lost the prune lease mid-delete',
+      );
 
       // The successor's own intent survives completely untouched — this
       // pass never calls `kv.delete(PRUNE_INTENT_KEY)` once it knows it
@@ -2969,7 +2986,7 @@ describe('createAuditTrail', () => {
       const { bureau } = createStubBureau();
       const trail = createAuditTrail(bureau, trackedKv, undefined, { initialSequence: 1 }, runtime);
 
-      await expect(trail.prune(5000)).rejects.toThrow(
+      expect(await throwingRejectionOf(trail.prune(5000))).toThrow(
         'lost the prune lease during dedupe-marker reconciliation',
       );
 

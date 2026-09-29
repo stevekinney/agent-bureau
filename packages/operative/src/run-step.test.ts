@@ -35,6 +35,7 @@ import type { OperativeHookMap } from './hooks';
 import { buildStepDeps, executeLoop } from './loop';
 import { awaitResumeOrAbort, type EventDispatcher, type RunState, runStep } from './run-step';
 import { createElicit } from './run-step-support';
+import { rejectionOf } from './testing/promise-outcome.test-support.ts';
 import type { GenerateContext, GenerateResponse, RunOptions, SteeringGate } from './types';
 
 /** A minimal {@link EventDispatcher} test double that records every dispatched event. */
@@ -68,7 +69,7 @@ describe('createElicit callback failures', () => {
       undefined,
     );
 
-    await expect(elicit('Confirm?', z.object({ confirmed: z.boolean() }))).resolves.toBeNull();
+    expect(await elicit('Confirm?', z.object({ confirmed: z.boolean() }))).toBeNull();
   });
 
   it('propagates a callback rejection while the signal remains active', async () => {
@@ -84,7 +85,7 @@ describe('createElicit callback failures', () => {
       undefined,
     );
 
-    await expect(elicit('Confirm?', z.object({ confirmed: z.boolean() }))).rejects.toBe(error);
+    expect(await rejectionOf(elicit('Confirm?', z.object({ confirmed: z.boolean() })))).toBe(error);
   });
 });
 

@@ -16,6 +16,7 @@ import { resolveStorage, type Storage } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 
 import { createDurableEventHistory } from '../durable-event-history';
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import {
   createDurableEventHistoryFixture,
   DURABLE_EVENT_HISTORY_FIXTURE_SEQUENCE,
@@ -111,17 +112,19 @@ describe('createDurableEventHistoryFixture', () => {
       { owner: { kind: 'run' as const, id: 'run-1' }, kind: 'run.started', payload: {} },
     ];
     expect(
-      createDurableEventHistoryFixture({
-        backend: 'sqlite',
-        runtime,
-        // An invalid path (a directory that cannot be created as a sqlite
-        // file — a null byte is rejected by every OS filesystem) forces
-        // `resolveStorage` itself to reject, exercising the catch branch's
-        // fixture cleanup without needing a second seam.
-        path: '/nonexistent-fixture-dir-\u0000/fixture.sqlite',
-        sequence: badSequence,
-      }),
-    ).rejects.toThrow();
+      await throwingRejectionOf(
+        createDurableEventHistoryFixture({
+          backend: 'sqlite',
+          runtime,
+          // An invalid path (a directory that cannot be created as a sqlite
+          // file — a null byte is rejected by every OS filesystem) forces
+          // `resolveStorage` itself to reject, exercising the catch branch's
+          // fixture cleanup without needing a second seam.
+          path: '/nonexistent-fixture-dir-\u0000/fixture.sqlite',
+          sequence: badSequence,
+        }),
+      ),
+    ).toThrow();
   });
 });
 

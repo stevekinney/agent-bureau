@@ -1,5 +1,6 @@
 import type { RunState } from '@lostgradient/operative';
 import { AgentRunError } from '@lostgradient/operative';
+import { Conversation, currentConversationFromSnapshot } from 'conversationalist';
 import { safeStringify, serializeAgentRunErrorForBureau, toJsonSafe } from './serialization-json';
 import { serializeLivenessSnapshot } from './serialization-liveness';
 
@@ -70,6 +71,20 @@ function stripConversation(record: object): object {
   return rest;
 }
 
+/**
+ * Drops a top-level `conversation` that is a live `Conversation` controller,
+ * whatever the event type. Operative events such as `run.started` and
+ * `step.started` carry the run's shared controller; walking it with
+ * `toJsonSafe` serializes its internal transaction graph and bound methods,
+ * which grows with the conversation on every event and is never transcript
+ * data (that lives in `latestSnapshot`).
+ */
+function stripLiveConversation(record: object): object {
+  return Reflect.get(record, 'conversation') instanceof Conversation
+    ? stripConversation(record)
+    : record;
+}
+
 function stripStepConversation(step: unknown): object {
   if (step === null || (typeof step !== 'object' && typeof step !== 'function')) {
     throw new TypeError('A run completion step must be an object');
@@ -112,8 +127,10 @@ function serializeError(record: object): object {
  * Strips non-serializable properties (e.g. Conversation instances, Error
  * objects) from action detail objects before they are sent over WebSocket.
  *
- * For `step.completed` and `run.aborted`, this strips the top-level
- * `conversation` field.
+ * For every event type, a top-level `conversation` holding a live
+ * `Conversation` controller is dropped. For `step.completed` and
+ * `run.aborted`, the top-level `conversation` field is stripped whatever it
+ * holds.
  *
  * For `run.completed`, this strips the top-level `conversation` as well as
  * the nested `conversation` inside each element of the `steps` array
@@ -126,7 +143,7 @@ function serializeError(record: object): object {
 export function serializeActionDetail(eventType: string, detail: unknown): unknown {
   if (!detail || typeof detail !== 'object') return detail;
 
-  const record = detail;
+  const record = stripLiveConversation(detail);
 
   if (eventType === 'step.completed' || eventType === 'run.aborted') {
     return toJsonSafe(stripConversation(record));
@@ -144,7 +161,7 @@ export function serializeActionDetail(eventType: string, detail: unknown): unkno
     return toJsonSafe(serializeError(record));
   }
 
-  return toJsonSafe(detail);
+  return toJsonSafe(record);
 }
 
 /**
@@ -220,6 +237,11 @@ export function serializeRunState(
   };
 }
 
+function latestTranscript(runState: RunState): RunDetail['transcript'] {
+  const latest = runState.snapshots.at(-1);
+  return latest === undefined ? undefined : currentConversationFromSnapshot(latest);
+}
+
 export function serializeRunDetail(
   runState: RunState,
   sessionId?: string,
@@ -252,6 +274,6 @@ export function serializeRunDetail(
           result.error?.message ?? (typeof result.error === 'string' ? result.error : undefined),
       })),
     })),
-    latestSnapshot: runState.snapshots.at(-1),
+    transcript: latestTranscript(runState),
   };
 }

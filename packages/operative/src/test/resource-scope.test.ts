@@ -7,6 +7,7 @@ import { Conversation } from 'conversationalist';
 import { createChildRunRegistry } from '../child-run';
 import { noToolCalls } from '../conditions/predicates';
 import { createActiveRun } from '../create-run';
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import { createMockGenerate } from './index';
 import type { ClosableRun } from './resource-scope';
 import { createResourceScope, QuiescenceError } from './resource-scope';
@@ -221,10 +222,10 @@ describe('createResourceScope', () => {
     const handle = runtime.timers.setTimeout(() => {}, 5000);
     scope.register({ kind: 'timer', identifier: 'render-timer', handle, owner: 'test-owner' });
 
-    expect(scope.close()).rejects.toThrow(QuiescenceError);
-    expect(scope.close()).rejects.toThrow(/render-timer/);
-    expect(scope.close()).rejects.toThrow(/test-owner/);
-    expect(scope.close()).rejects.toThrow(/runtime-services-timers/);
+    expect(await throwingRejectionOf(scope.close())).toThrow(QuiescenceError);
+    expect(await throwingRejectionOf(scope.close())).toThrow(/render-timer/);
+    expect(await throwingRejectionOf(scope.close())).toThrow(/test-owner/);
+    expect(await throwingRejectionOf(scope.close())).toThrow(/runtime-services-timers/);
   });
 
   it('marks a deliberately detached resource as detached, never as a leak', async () => {
@@ -253,9 +254,9 @@ describe('createResourceScope', () => {
       detached: true,
     });
 
-    expect(scope.close()).rejects.toThrow(/still-leaked/);
-    expect(scope.close()).rejects.toThrow(/intentionally-detached/);
-    expect(scope.close()).rejects.toThrow(/Detached \(not counted as leaks\)/);
+    expect(await throwingRejectionOf(scope.close())).toThrow(/still-leaked/);
+    expect(await throwingRejectionOf(scope.close())).toThrow(/intentionally-detached/);
+    expect(await throwingRejectionOf(scope.close())).toThrow(/Detached \(not counted as leaks\)/);
   });
 
   it('close() is idempotent: a second call returns the identical report and aborts nothing again', async () => {
@@ -309,7 +310,7 @@ describe('createResourceScope', () => {
     expect(probe.quiescent).toBe(false);
     expect(run.abortCalls).toBe(0);
 
-    expect(scope.close()).rejects.toThrow(QuiescenceError);
+    expect(await throwingRejectionOf(scope.close())).toThrow(QuiescenceError);
     expect(run.abortCalls).toBe(1);
   });
 

@@ -277,6 +277,21 @@ jobs:
         run: |
           bunx --bun @arethetypeswrong/cli@0.18.5 ${{ runner.temp }}/mirror-verify/tarballs/lostgradient-operative.tgz --no-definitely-typed --format ascii --ignore-rules cjs-resolves-to-esm no-resolution
 
+      - name: build @lostgradient/memory
+        working-directory: packages/memory
+        run: |
+          bun run build
+
+      - name: build @lostgradient/skills
+        working-directory: packages/skills
+        run: |
+          bun run build
+
+      - name: build @lostgradient/bureau
+        working-directory: packages/bureau
+        run: |
+          bun run build
+
       - name: typecheck @lostgradient/bureau
         working-directory: packages/bureau
         run: |

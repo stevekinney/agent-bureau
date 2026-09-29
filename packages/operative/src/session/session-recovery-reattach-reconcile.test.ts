@@ -4,6 +4,7 @@ import { createConversationHistory } from 'conversationalist';
 
 import { createAgentSession } from '../agent-session';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow-result';
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import { createSessionStore } from './create-session-store';
 import { createSessionEngine } from './session-engine-test-fixture';
 import { createSessionHandle } from './session-handle';
@@ -75,7 +76,7 @@ describe('recover() — concurrent terminal reconciliation', () => {
     });
     const recovered = await handle.recover();
     expect(recovered).not.toBeNull();
-    expect(recovered!.result()).rejects.toThrow('disappeared');
+    expect(await throwingRejectionOf(recovered!.result())).toThrow('disappeared');
   });
 
   it('does not recreate a recovered RunRef removed by a concurrent terminal update', async () => {
@@ -135,7 +136,7 @@ describe('recover() — concurrent terminal reconciliation', () => {
 
     const recovered = await handle.recover();
     expect(recovered).not.toBeNull();
-    expect(recovered!.result()).rejects.toThrow('disappeared');
+    expect(await throwingRejectionOf(recovered!.result())).toThrow('disappeared');
     const persisted = await baseStore.load(sessionId);
     expect(persisted?.runs).toHaveLength(0);
   });

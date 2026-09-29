@@ -19,6 +19,7 @@ import {
   recoverSteeringCommands,
 } from './steering-durability';
 import { createSqliteStorageFixture } from './test/storage-fixtures';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 
 function steeringCommand(
   overrides: Partial<ImplementedSteeringCommand> = {},
@@ -187,11 +188,13 @@ describe('durable steering crash safety', () => {
       const mailbox = createSteeringMailbox(storage, 'session-1');
       await persistSteeringCommand(mailbox, steeringCommand());
 
-      await expect(
-        recoverSteeringCommands(mailbox, () => {
-          throw new Error('replay failed');
-        }),
-      ).rejects.toThrow('replay failed');
+      expect(
+        await throwingRejectionOf(
+          recoverSteeringCommands(mailbox, () => {
+            throw new Error('replay failed');
+          }),
+        ),
+      ).toThrow('replay failed');
 
       // Not acknowledged, so still durably present. `claim()` reports the
       // command as held rather than gone — the record survived the failed

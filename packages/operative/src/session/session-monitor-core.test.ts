@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 
 import type { OperativeEventMap } from '../events';
 import { SessionMonitorDoneEvent, SessionMonitorTickEvent } from '../events';
+import { rejectionOf, throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
 import { createSessionHandle } from './session-handle';
@@ -69,9 +70,9 @@ describe('session.monitor() — process-local watch loop', () => {
       events.push('done');
       done.push(event);
     });
-    expect(handle.monitor({ every: 1, input: 'check', until: () => false })).rejects.toBeInstanceOf(
-      MissingRunOptionsError,
-    );
+    expect(
+      await rejectionOf(handle.monitor({ every: 1, input: 'check', until: () => false })),
+    ).toBeInstanceOf(MissingRunOptionsError);
     expect(events).toEqual(['tick', 'done']);
     expect(done).toHaveLength(1);
     expect(done[0]).toMatchObject({ met: false, ticks: 1 });
@@ -82,7 +83,9 @@ describe('session.monitor() — process-local watch loop', () => {
     const error = new Error('infrastructure failure');
     const monitor = createMonitorForRun(createMonitorRun(Promise.reject(error)));
 
-    expect(monitor({ every: 1, input: 'check', until: () => false })).rejects.toBe(error);
+    expect(await rejectionOf(monitor({ every: 1, input: 'check', until: () => false }))).toBe(
+      error,
+    );
   });
 
   it('synthesizes an error when a monitored run reports a failed finish reason without one', async () => {
@@ -90,9 +93,9 @@ describe('session.monitor() — process-local watch loop', () => {
       createMonitorRun(Promise.resolve(createMonitorResult('error'))),
     );
 
-    expect(monitor({ every: 1, input: 'check', until: () => false })).rejects.toThrow(
-      "monitor tick ended with finishReason 'error'",
-    );
+    expect(
+      await throwingRejectionOf(monitor({ every: 1, input: 'check', until: () => false })),
+    ).toThrow("monitor tick ended with finishReason 'error'");
   });
 
   it('propagates a rejected run result and emits a failed monitor completion', async () => {
@@ -111,8 +114,8 @@ describe('session.monitor() — process-local watch loop', () => {
     });
 
     expect(
-      handle.monitor({ every: 'PT1H', input: 'check', until: () => false }),
-    ).rejects.toMatchObject({ message: error.message, kind: 'generate' });
+      await rejectionOf(handle.monitor({ every: 'PT1H', input: 'check', until: () => false })),
+    ).toMatchObject({ message: error.message, kind: 'generate' });
     expect(doneEvents.at(-1)?.met).toBe(false);
   });
 

@@ -55,6 +55,7 @@ import {
   ReviewSupersededEvent,
 } from './events';
 import { createLmdbStorageFixture, createSqliteStorageFixture } from './test/storage-fixtures';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 import type { Bureau, BureauDiagnostic } from './types';
 
 async function createMemoryStorage(): Promise<Storage> {
@@ -502,9 +503,9 @@ describe('createDurableEventHistory', () => {
       const history = createDurableEventHistory(storage, runtime);
       const owner = { kind: 'run' as const, id: 'run-1' };
 
-      expect(history.page(owner, { limit: 0 })).rejects.toThrow(RangeError);
-      expect(history.page(owner, { limit: -1 })).rejects.toThrow(RangeError);
-      expect(history.page(owner, { limit: 1.5 })).rejects.toThrow(RangeError);
+      expect(await throwingRejectionOf(history.page(owner, { limit: 0 }))).toThrow(RangeError);
+      expect(await throwingRejectionOf(history.page(owner, { limit: -1 }))).toThrow(RangeError);
+      expect(await throwingRejectionOf(history.page(owner, { limit: 1.5 }))).toThrow(RangeError);
 
       await history.dispose();
     });
@@ -515,7 +516,7 @@ describe('createDurableEventHistory', () => {
       const history = createDurableEventHistory(storage, runtime);
       const owner = { kind: 'run' as const, id: 'run-1' };
 
-      expect(history.page(owner, { since: 'not-a-cursor' })).rejects.toThrow();
+      expect(await throwingRejectionOf(history.page(owner, { since: 'not-a-cursor' }))).toThrow();
 
       await history.dispose();
     });
@@ -526,9 +527,9 @@ describe('createDurableEventHistory', () => {
       const history = createDurableEventHistory(storage, runtime);
       const owner = { kind: 'run' as const, id: 'run-1' };
 
-      expect(history.page(owner, { since: '99999999999999999999' })).rejects.toThrow(
-        /invalid cursor/,
-      );
+      expect(
+        await throwingRejectionOf(history.page(owner, { since: '99999999999999999999' })),
+      ).toThrow(/invalid cursor/);
 
       await history.dispose();
     });
@@ -3347,7 +3348,7 @@ describe('createDurableEventProducer()', () => {
       const { history } = createRecordingHistory();
       const producer = createDurableEventProducer(bureau, history, runtime);
 
-      await expect(producer.waitForAllActiveWrites()).resolves.toBeUndefined();
+      expect(await producer.waitForAllActiveWrites()).toBeUndefined();
 
       await producer.dispose();
     });

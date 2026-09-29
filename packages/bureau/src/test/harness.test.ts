@@ -6,6 +6,7 @@ import { createProcessLocalApprovalStateStore, createTool, createToolbox } from 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { RunSummary } from '../types';
 import {
   BureauHarnessUnsupportedError,
@@ -200,7 +201,7 @@ describe('createBureauTestHarness', () => {
       const summary = await harness.startSession({ message: 'no durable engine here' });
       await waitForRunState(harness.bureau, summary.id);
 
-      expect(harness.reattachDurable(summary.id)).resolves.toBeUndefined();
+      expect(await harness.reattachDurable(summary.id)).toBeUndefined();
     });
   });
 
@@ -211,7 +212,9 @@ describe('createBureauTestHarness', () => {
       const summary = await harness.startSession({ message: 'no durable engine here' });
       await waitForRunState(harness.bureau, summary.id);
 
-      expect(harness.deliverSignal(summary.sessionId, 'wake', {})).rejects.toThrow(/durable/i);
+      expect(
+        await throwingRejectionOf(harness.deliverSignal(summary.sessionId, 'wake', {})),
+      ).toThrow(/durable/i);
     });
   });
 

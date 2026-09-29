@@ -126,6 +126,7 @@ import {
   createWakeupContext,
 } from './runtime-composition';
 import { waitForCondition, waitForRunState } from './test';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 import {
   type Bureau,
   type BureauDiagnostic,
@@ -673,13 +674,15 @@ describe('createBureau', () => {
     // rejection of createBureau's own returned promise, not just of
     // createRuntimeComposition called directly.
     expect(
-      createBureau({
-        agents: {},
-        generate: createMockGenerate(),
-        durableExecution: true,
-        persistence: textValueStore(new MemoryStorage()),
-      }),
-    ).rejects.toThrow(/durableExecution: true is incompatible/);
+      await throwingRejectionOf(
+        createBureau({
+          agents: {},
+          generate: createMockGenerate(),
+          durableExecution: true,
+          persistence: textValueStore(new MemoryStorage()),
+        }),
+      ),
+    ).toThrow(/durableExecution: true is incompatible/);
   });
 
   it('uses a provided store when one is supplied', async () => {
@@ -856,6 +859,33 @@ describe('createBureau', () => {
     expect(() => JSON.stringify(detail)).not.toThrow();
     const parsed = JSON.parse(JSON.stringify(detail));
     expect(parsed.liveness.id).toBe(summary.id);
+  });
+
+  it('getRun(id).transcript is the current conversation, not the snapshot history tree', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate('All done.'),
+      toolbox: createEmptyToolbox(),
+    });
+
+    try {
+      const summary = await bureau.createRun({ message: 'Hello' });
+      await waitForRunCompletion(bureau, summary.id);
+      const detail = bureau.getRun(summary.id);
+      const transcript = detail?.transcript;
+
+      expect(transcript).toBeDefined();
+      expect(transcript).not.toHaveProperty('root');
+      const contents = (transcript?.ids ?? []).map((id) => transcript?.messages[id]?.content);
+      expect(contents[0]).toBe('Hello');
+      expect(contents.at(-1)).toBe('All done.');
+      expect(transcript).toEqual(
+        bureau.store.getRun(summary.id)?.steps.at(-1)?.conversation.current,
+      );
+      expect(JSON.parse(JSON.stringify(detail)).transcript).toEqual(transcript);
+    } finally {
+      await bureau.dispose();
+    }
   });
 
   it('AB-88/AB-214 review (PRRT_kwDORvupsc6esZTF): getRun(id).liveness.owner carries the authenticated principal that started the run', async () => {
@@ -4555,19 +4585,27 @@ describe('createBureau', () => {
       // default step cap, exercising the exact seam that diverged.
     });
 
-    const run = await bureau.createRun({ message: 'Never settles' });
-    await waitForRunCompletion(bureau, run.id);
+    try {
+      const run = await bureau.createRun({ message: 'Never settles' });
+      await waitForRunCompletion(bureau, run.id);
 
-    const detail = bureau.getRun(run.id);
-    expect(detail?.finishReason).toBe('maximum-steps');
-    expect(detail?.steps).toBe(DEFAULT_MAXIMUM_STEPS);
+      const detail = bureau.getRun(run.id);
+      expect(detail?.finishReason).toBe('maximum-steps');
+      expect(detail?.steps).toBe(DEFAULT_MAXIMUM_STEPS);
+      // `run.started`/`step.started` carry the live Conversation controller;
+      // serializing it put the controller's internals (and its bound methods)
+      // into every event and made each getRun() grow with the conversation.
+      expect(JSON.stringify(detail?.events)).not.toContain('[Function');
 
-    const session = await bureau.getSession(run.sessionId);
-    expect(session?.metadata['lastRunStatus']).toBe('error');
-    expect(session?.metadata['lastFinishReason']).toBe('maximum-steps');
-    expect(session?.metadata['lastError']).toContain(
-      `Agent run exceeded maximumSteps (${DEFAULT_MAXIMUM_STEPS}).`,
-    );
+      const session = await bureau.getSession(run.sessionId);
+      expect(session?.metadata['lastRunStatus']).toBe('error');
+      expect(session?.metadata['lastFinishReason']).toBe('maximum-steps');
+      expect(session?.metadata['lastError']).toContain(
+        `Agent run exceeded maximumSteps (${DEFAULT_MAXIMUM_STEPS}).`,
+      );
+    } finally {
+      await bureau.dispose();
+    }
   });
 
   it('configures a scheduler for routed multi-provider runtimes', async () => {
@@ -8096,8 +8134,10 @@ describe('createBureau review queue (AB-20)', () => {
       await bureau.deleteSession(sessionId);
       expect(bureau.listPendingReviews()).toHaveLength(0);
       expect(
-        bureau.resolveReview({ id: olderReviewId, decision: 'approve', principal: 'operator-a' }),
-      ).rejects.toThrow(`No pending review with id "${olderReviewId}"`);
+        await throwingRejectionOf(
+          bureau.resolveReview({ id: olderReviewId, decision: 'approve', principal: 'operator-a' }),
+        ),
+      ).toThrow(`No pending review with id "${olderReviewId}"`);
     } finally {
       await bureau.dispose();
     }
@@ -8424,7 +8464,7 @@ describe('createBureau review queue (AB-20)', () => {
       decision: 'approve',
       principal: 'api-key:reviewer',
     });
-    expect(resolution).rejects.toThrow('no longer current');
+    expect(await throwingRejectionOf(resolution)).toThrow('no longer current');
     expect(charges).toEqual([]);
     expect(bureau.listPendingReviews()).toHaveLength(1);
     bureau.dispose();
@@ -9624,12 +9664,14 @@ describe('createBureau review queue (AB-20)', () => {
     expect(review).toBeDefined();
 
     expect(
-      bureau.resolveReview({
-        id: review!.id,
-        decision: 'approve',
-        principal: 'api-key:reviewer-denied',
-      }),
-    ).rejects.toThrow('Cannot approve: Current policy denies this charge');
+      await throwingRejectionOf(
+        bureau.resolveReview({
+          id: review!.id,
+          decision: 'approve',
+          principal: 'api-key:reviewer-denied',
+        }),
+      ),
+    ).toThrow('Cannot approve: Current policy denies this charge');
 
     expect(charges).toEqual([]);
     expect(bureau.listPendingReviews().map(({ id }) => id)).toEqual([review!.id]);
@@ -11870,12 +11912,14 @@ describe('createBureau human input wiring — real durable park (F3)', () => {
       const [review] = bureau.listPendingReviews();
       authorityCurrent = false;
       expect(
-        bureau.resolveReview({
-          id: review!.id,
-          decision: 'approve',
-          principal: 'test-operator',
-        }),
-      ).rejects.toThrow('no longer current');
+        await throwingRejectionOf(
+          bureau.resolveReview({
+            id: review!.id,
+            decision: 'approve',
+            principal: 'test-operator',
+          }),
+        ),
+      ).toThrow('no longer current');
       expect(signalSpy).not.toHaveBeenCalled();
       expect(bureau.listPendingReviews()).toHaveLength(1);
     } finally {
@@ -16796,7 +16840,7 @@ describe('Bureau durable audit trail retention (AB-388)', () => {
         await runtime.advance(1_000_000);
 
         // The engine failure still surfaces to the caller...
-        await expect(bureau.runDurableMaintenance()).rejects.toThrow(
+        expect(await throwingRejectionOf(bureau.runDurableMaintenance())).toThrow(
           'engine maintenance backend unavailable',
         );
 
@@ -16846,7 +16890,7 @@ describe('Bureau durable audit trail retention (AB-388)', () => {
       // shutdown() resolving proves it waited for the in-flight pass —
       // if it had disposed storage first, this pass's own delete/summary
       // write would throw against a closed backend instead of resolving.
-      await expect(maintenance).resolves.toBe(true);
+      expect(await maintenance).toBe(true);
     } finally {
       await rm(databasePath, { force: true });
       await rm(`${databasePath}-wal`, { force: true });
@@ -16883,7 +16927,7 @@ describe('Bureau durable audit trail retention (AB-388)', () => {
       // be rejected outright rather than racing backend disposal.
       await bureau.shutdown();
 
-      await expect(bureau.runDurableMaintenance()).rejects.toThrow(
+      expect(await throwingRejectionOf(bureau.runDurableMaintenance())).toThrow(
         'Cannot run durable maintenance: bureau is shutting down',
       );
     } finally {
@@ -17238,18 +17282,20 @@ describe('Bureau.issueGrant / revokeGrant / listGrants (AB-46, AB-346)', () => {
 
     try {
       expect(
-        bureau.issueGrant({
-          principalId: 'principal-1',
-          tenantId: 'tenant-1',
-          ownerId: 'owner-1',
-          agentId: 'agent-1',
-          toolName: 'read-file',
-          scope: 'session',
-          expiresAt: Number.MAX_SAFE_INTEGER,
-          maxUses: 1,
-          delegationBehavior: 'does-not-propagate',
-        }),
-      ).rejects.toThrow('approvalSecret is required');
+        await throwingRejectionOf(
+          bureau.issueGrant({
+            principalId: 'principal-1',
+            tenantId: 'tenant-1',
+            ownerId: 'owner-1',
+            agentId: 'agent-1',
+            toolName: 'read-file',
+            scope: 'session',
+            expiresAt: Number.MAX_SAFE_INTEGER,
+            maxUses: 1,
+            delegationBehavior: 'does-not-propagate',
+          }),
+        ),
+      ).toThrow('approvalSecret is required');
     } finally {
       await bureau.dispose();
     }
@@ -20399,17 +20445,19 @@ describe('COR-625: terminal-run checkpoint retention and cleanup', () => {
     // nothing discards the newest checkpoint a postmortem needs, which is
     // never what an operator configuring RETENTION is asking for.
     for (const keepLast of [0, -1, 1.5, Number.NaN]) {
-      await expect(createRetentionBureau({ checkpointRetention: { keepLast } })).rejects.toThrow(
-        /"options\.checkpointRetention\.keepLast" must be a positive integer/,
-      );
+      expect(
+        await throwingRejectionOf(createRetentionBureau({ checkpointRetention: { keepLast } })),
+      ).toThrow(/"options\.checkpointRetention\.keepLast" must be a positive integer/);
     }
   });
 
   it('rejects a non-finite or negative timeoutMilliseconds at construction', async () => {
     for (const timeoutMilliseconds of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      await expect(
-        createRetentionBureau({ checkpointRetention: { keepLast: 1, timeoutMilliseconds } }),
-      ).rejects.toThrow(
+      expect(
+        await throwingRejectionOf(
+          createRetentionBureau({ checkpointRetention: { keepLast: 1, timeoutMilliseconds } }),
+        ),
+      ).toThrow(
         /"options\.checkpointRetention\.timeoutMilliseconds" must be a finite, non-negative number/,
       );
     }
@@ -20686,7 +20734,7 @@ describe('COR-625: terminal-run checkpoint retention and cleanup', () => {
 
       // And `cancelDurableRun`, which awaits the step, keeps its own
       // documented "never rejects" contract.
-      await expect(bureau.cancelDurableRun(run.id)).resolves.toBeDefined();
+      expect(await bureau.cancelDurableRun(run.id)).toBeDefined();
     } finally {
       releasePrune?.();
       pruneSpy.mockRestore();

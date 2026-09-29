@@ -2,6 +2,7 @@ import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 
 import { sha256Hex } from '@lostgradient/cryptography';
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 import type { TextValueStore } from '@lostgradient/weft';
 
 import {
@@ -43,6 +44,8 @@ export interface DiscoverSkillsOptions {
   readonly revision?: number;
   /** Timestamp for the revision. Injectable so a test need not read a real clock. */
   readonly now?: () => string;
+  /** Production clock by default; tests may supply a manual runtime. */
+  readonly runtime?: RuntimeServices;
   /** Most skill directories to consider per source. Default 512. */
   readonly maximumSkillsPerSource?: number;
   /**
@@ -800,7 +803,8 @@ export async function discoverSkills(
   // in exactly the shape of its intended use.
   return deepCloneAndFreeze({
     revision: options.revision ?? 1,
-    createdAt: options.now?.() ?? new Date().toISOString(),
+    createdAt:
+      options.now?.() ?? (options.runtime ?? createDefaultRuntimeServices()).clock.nowISO(),
     outcome,
     records,
     sourceDiagnostics,

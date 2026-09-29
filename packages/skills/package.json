@@ -49,7 +49,7 @@
     "@lostgradient/cryptography": "workspace:*",
     "@lostgradient/lifecycle": "workspace:*",
     "@lostgradient/tool-protocol": "workspace:*",
-    "@lostgradient/weft": "^0.26.1",
+    "@lostgradient/weft": "^0.27.1",
     "armorer": "workspace:*",
     "gray-matter": "^4.0.3",
     "js-yaml": "^4.1.0",

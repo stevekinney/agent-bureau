@@ -1,5 +1,5 @@
-import { deserializeConversationHistory } from './conversation/index';
-import type { ConversationHistory, ConversationNodeSnapshot } from './types';
+import type { DecodedSnapshotNode } from './conversation/snapshot-v2';
+import type { ConversationHistory } from './types';
 
 export interface HistoryNode {
   id: string;
@@ -19,29 +19,20 @@ export function getHistoryNodePath(node: HistoryNode): number[] {
   return path;
 }
 
-export function serializeHistoryNode(node: HistoryNode): ConversationNodeSnapshot {
-  return {
-    id: node.id,
-    revision: node.revision,
-    parentId: node.parent?.id ?? null,
-    conversation: node.conversation,
-    children: node.children.map(serializeHistoryNode),
-  };
-}
-
-export function restoreHistoryChildren(
-  snapshots: readonly ConversationNodeSnapshot[],
+/** Rebuild live history nodes from a decoded snapshot; conversations are already validated and frozen. */
+export function buildHistoryChildren(
+  decoded: readonly DecodedSnapshotNode[],
   parent: HistoryNode,
 ): HistoryNode[] {
-  return snapshots.map((snapshot) => {
+  return decoded.map((child) => {
     const node: HistoryNode = {
-      id: snapshot.id,
-      revision: snapshot.revision,
-      conversation: deserializeConversationHistory(snapshot.conversation),
+      id: child.id,
+      revision: child.revision,
+      conversation: child.conversation,
       parent,
       children: [],
     };
-    node.children = restoreHistoryChildren(snapshot.children, node);
+    node.children = buildHistoryChildren(child.children, node);
     return node;
   });
 }

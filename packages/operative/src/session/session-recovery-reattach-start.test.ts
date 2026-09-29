@@ -5,6 +5,7 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 import { createAgentSession } from '../agent-session';
 import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflow-result';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
+import { rejectionOf, throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import { createSessionStore } from './create-session-store';
 import { createSessionEngine } from './session-engine-test-fixture';
 import { createSessionHandle } from './session-handle';
@@ -67,7 +68,7 @@ describe('recover() — reattach failure and initial state', () => {
 
     const recovered = await handle.recover();
     expect(recovered).not.toBeNull();
-    expect(recovered!.result()).rejects.toBeInstanceOf(UnsupportedRunResultVersionError);
+    expect(await rejectionOf(recovered!.result())).toBeInstanceOf(UnsupportedRunResultVersionError);
 
     const persisted = await store.load(sessionId);
     const run = persisted?.runs[0];
@@ -146,7 +147,7 @@ describe('recover() — reattach failure and initial state', () => {
     });
     const recovered = await handle.recover();
     expect(recovered).not.toBeNull();
-    expect(recovered!.result()).rejects.toThrow('conflicting terminal');
+    expect(await throwingRejectionOf(recovered!.result())).toThrow('conflicting terminal');
     const conflictedSession = await baseStore.load(sessionId);
     expect(conflictedSession?.runs[0]?.status).toBe('aborted');
   });
@@ -258,7 +259,7 @@ describe('recover() — reattach failure and initial state', () => {
       });
       const recovered = await handle.recover();
       expect(recovered).not.toBeNull();
-      expect(recovered!.result()).resolves.toMatchObject({
+      expect(await recovered!.result()).toMatchObject({
         finishReason: 'stop-condition',
       });
       const closedAfterCommit = await recovered!.closed();

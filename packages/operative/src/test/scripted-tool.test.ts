@@ -7,6 +7,7 @@ import { noToolCalls } from '../conditions/predicates';
 import { createActiveRun } from '../create-run';
 import type { CombinedOperativeEventClassMap } from '../events';
 import type { OperativeHookMap } from '../hooks';
+import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { GenerateResponse } from '../types';
 import { createEventRecorder } from './event-recorder';
 import { createScriptedGenerate } from './scripted-generate';
@@ -149,8 +150,10 @@ describe('createScriptedHook', () => {
     const hook = createScriptedHook('after-tool', [{ kind: 'reject', error: new Error('denied') }]);
 
     expect(
-      hook({ conversation: new Conversation(), step: 0, toolCalls: [], results: [] }),
-    ).rejects.toThrow('denied');
+      await throwingRejectionOf(
+        hook({ conversation: new Conversation(), step: 0, toolCalls: [], results: [] }),
+      ),
+    ).toThrow('denied');
   });
 
   it('maps each phase to its OperativeHookMap key', () => {

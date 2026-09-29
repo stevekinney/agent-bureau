@@ -7,8 +7,8 @@ import {
   parseAllowedTools,
   PORTABLE_FRONTMATTER_FIELDS,
   serializeAllowedTools,
-  validatePortableFrontmatter,
   type SkillConformanceDiagnostic,
+  validatePortableFrontmatter,
 } from './conformance';
 import type { SkillContent, SkillMetadata } from './types';
 

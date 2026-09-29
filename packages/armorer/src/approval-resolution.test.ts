@@ -13,6 +13,7 @@ import {
 import { createTool, createToolCall } from './create-tool';
 import { createToolbox } from './create-toolbox';
 import { createToolResultCache, withToolboxIdempotency } from './idempotency';
+import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 import type { ToolApprovalAction, ToolApprovalResolution } from './types';
 
 describe('approval resolution foundation metadata', () => {
@@ -309,11 +310,13 @@ describe('approval resolution foundation metadata', () => {
           ? { decision, editedArgs: { value: 'after' }, remember: false }
           : { decision, remember: false };
 
-      await expect(
-        toolbox.resolveApproval(signedInputAction, resolution, {
-          requestContext: createRequestContext(),
-        }),
-      ).rejects.toThrow('Approval resolution requires an approval action.');
+      expect(
+        await throwingRejectionOf(
+          toolbox.resolveApproval(signedInputAction, resolution, {
+            requestContext: createRequestContext(),
+          }),
+        ),
+      ).toThrow('Approval resolution requires an approval action.');
 
       expect(executedCount).toBe(0);
       expect(approvalStateCounts).toEqual({ reserve: 0, revoke: 0, consume: 0, commit: 0 });

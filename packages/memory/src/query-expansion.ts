@@ -5,7 +5,6 @@ import {
   STOP_WORDS_ZH,
 } from './stop-words-east-asian';
 import { STOP_WORDS_EN, STOP_WORDS_ES, STOP_WORDS_PT } from './stop-words-latin';
-
 /**
  * Query expansion utilities for improving BM25 keyword search.
  *
@@ -13,7 +12,6 @@ import { STOP_WORDS_EN, STOP_WORDS_ES, STOP_WORDS_PT } from './stop-words-latin'
  * words, short tokens, pure numbers, and punctuation-only tokens. Supports
  * English, Spanish, Portuguese, Chinese, Korean, and Japanese.
  */
-
 import { expandCJKUnigrams } from './text-search';
 
 // ---------------------------------------------------------------------------

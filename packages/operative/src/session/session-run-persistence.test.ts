@@ -5,6 +5,7 @@ import { Conversation, createConversationHistory } from 'conversationalist';
 
 import { createAgentSession } from '../agent-session';
 import { GuardrailTripwireError } from '../errors';
+import { rejectionOf } from '../testing/promise-outcome.test-support.ts';
 import type { GenerateFunction } from '../types';
 import { createSessionStore } from './create-session-store';
 import { createSessionHandle } from './session-handle';
@@ -144,9 +145,9 @@ describe('session.run() — persistence and history', () => {
       expect(events).not.toContain('run.completed');
       releaseCommit.resolve();
       if (failCommit) {
-        expect(result).rejects.toBe(persistenceFailure);
+        expect(await rejectionOf(result)).toBe(persistenceFailure);
       } else {
-        expect(result).resolves.toMatchObject({ finishReason: 'tripwire' });
+        expect(await result).toMatchObject({ finishReason: 'tripwire' });
       }
       await consuming;
       expect(events.filter((type) => type === 'run.tripwire')).toHaveLength(failCommit ? 0 : 1);

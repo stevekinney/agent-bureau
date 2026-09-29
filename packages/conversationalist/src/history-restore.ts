@@ -1,10 +1,9 @@
-import { deserializeConversationHistory } from './conversation/index';
-import { validateSnapshot } from './conversation/snapshot-integrity';
+import { decodeSnapshot } from './conversation/snapshot-format';
 import type { ConversationEnvironment } from './environment';
 import { createSerializationError } from './errors';
 import type { HistoryNode } from './history-tree';
-import { restoreHistoryChildren } from './history-tree';
-import type { ConversationHistory, ConversationSnapshot } from './types';
+import { buildHistoryChildren } from './history-tree';
+import type { ConversationHistory, ConversationSnapshot, ConversationSnapshotV1 } from './types';
 
 type RestoreTarget<T> = {
   readonly currentNode: () => HistoryNode;
@@ -25,15 +24,12 @@ type RestoreTarget<T> = {
 };
 
 export function restoreConversation<T>(
-  json: ConversationSnapshot,
+  json: ConversationSnapshot | ConversationSnapshotV1,
   environment: Partial<ConversationEnvironment> | undefined,
   target: RestoreTarget<T>,
 ): T {
-  const snapshot = validateSnapshot(json);
-  const conversation = target.create(
-    deserializeConversationHistory(snapshot.root.conversation),
-    environment,
-  );
+  const snapshot = decodeSnapshot(json);
+  const conversation = target.create(snapshot.root.conversation, environment);
   if (snapshot.lineage.parentConversationId && snapshot.lineage.sourceRevision !== undefined) {
     target.setLineage({
       parentConversationId: snapshot.lineage.parentConversationId,
@@ -48,7 +44,7 @@ export function restoreConversation<T>(
   rootNode.id = snapshot.root.id;
   rootNode.revision = snapshot.root.revision;
   target.setRemovedNodeIds(snapshot.lineage.removedNodeIds);
-  rootNode.children = restoreHistoryChildren(snapshot.root.children, rootNode);
+  rootNode.children = buildHistoryChildren(snapshot.root.children, rootNode);
   let current = rootNode;
   for (const index of snapshot.currentPath) {
     const next = current.children[index];
@@ -63,7 +59,7 @@ export function restoreConversation<T>(
 }
 
 export function restoreWithController<T>(
-  json: ConversationSnapshot,
+  json: ConversationSnapshot | ConversationSnapshotV1,
   environment: Partial<ConversationEnvironment> | undefined,
   create: (history: ConversationHistory, environment?: Partial<ConversationEnvironment>) => T,
   controller: (getConversation: () => T) => Omit<RestoreTarget<T>, 'create'>,
