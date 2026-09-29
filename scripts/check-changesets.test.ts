@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 
-import { findChangesetTargetErrors } from './check-changesets';
+import {
+  findChangesetTargetErrors,
+  findWorkspaceLockVersionErrors,
+  synchronizeWorkspaceLockVersions,
+} from './check-changesets';
 
 const workspacePackages = new Map([
   ['armorer', { private: false }],
@@ -123,5 +127,99 @@ describe('findChangesetTargetErrors', () => {
     expect(errors).toEqual([
       'no-version-bump targets "armorer", which is configured with no version bump',
     ]);
+  });
+});
+
+describe('findWorkspaceLockVersionErrors', () => {
+  const manifests = new Map([
+    ['packages/conversationalist', { name: 'conversationalist', version: '2.1.0' }],
+    ['packages/operative', { name: '@lostgradient/operative', version: '0.13.0' }],
+  ]);
+
+  test('accepts lockfile workspace labels matching both manifests', () => {
+    expect(
+      findWorkspaceLockVersionErrors(manifests, {
+        workspaces: {
+          '': { name: 'agent-bureau' },
+          'packages/conversationalist': { name: 'conversationalist', version: '2.1.0' },
+          'packages/operative': { name: '@lostgradient/operative', version: '0.13.0' },
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  test('rejects the stale version labels that Changesets left in bun.lock', () => {
+    expect(
+      findWorkspaceLockVersionErrors(manifests, {
+        workspaces: {
+          'packages/conversationalist': { name: 'conversationalist', version: '2.0.0' },
+          'packages/operative': { name: '@lostgradient/operative', version: '0.12.3' },
+        },
+      }),
+    ).toEqual([
+      'bun.lock packages/conversationalist version 2.0.0 does not match package.json 2.1.0',
+      'bun.lock packages/operative version 0.12.3 does not match package.json 0.13.0',
+    ]);
+  });
+
+  test('rejects missing and orphaned workspace records', () => {
+    expect(
+      findWorkspaceLockVersionErrors(manifests, {
+        workspaces: {
+          'packages/conversationalist': { name: 'conversationalist', version: '2.1.0' },
+          'packages/retired': { name: 'retired', version: '1.0.0' },
+        },
+      }),
+    ).toEqual([
+      'bun.lock is missing packages/operative',
+      'bun.lock has orphaned workspace packages/retired',
+    ]);
+  });
+});
+
+describe('synchronizeWorkspaceLockVersions', () => {
+  const manifests = new Map([
+    ['packages/conversationalist', { name: 'conversationalist', version: '2.1.1' }],
+    ['packages/operative', { name: '@lostgradient/operative', version: '0.13.1' }],
+  ]);
+  const lockfile = `{
+  "workspaces": {
+    "": {
+      "name": "agent-bureau",
+    },
+    "packages/conversationalist": {
+      "name": "conversationalist",
+      "version": "2.1.0",
+      "dependencies": {
+        "@lostgradient/operative": "workspace:*",
+      },
+    },
+    "packages/operative": {
+      "name": "@lostgradient/operative",
+      "version": "0.13.0",
+    },
+  },
+  "packages": {
+    "other": ["other@1.0.0"],
+  },
+}\n`;
+
+  test('updates only stale workspace labels and preserves the rest of the lockfile', () => {
+    const updated = synchronizeWorkspaceLockVersions(lockfile, manifests);
+    expect(updated).toBe(
+      lockfile
+        .replace('"version": "2.1.0"', '"version": "2.1.1"')
+        .replace('"version": "0.13.0"', '"version": "0.13.1"'),
+    );
+    expect(findWorkspaceLockVersionErrors(manifests, Bun.JSONC.parse(updated))).toEqual([]);
+  });
+
+  test('rejects a missing workspace version line instead of reporting success', () => {
+    expect(() =>
+      synchronizeWorkspaceLockVersions(
+        lockfile.replace('      "version": "0.13.0",\n', ''),
+        manifests,
+      ),
+    ).toThrow('bun.lock packages/operative has no version line to update');
   });
 });

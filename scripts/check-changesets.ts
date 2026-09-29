@@ -31,6 +31,93 @@ type PackageManifest = {
   private?: boolean;
 };
 
+type VersionedManifest = {
+  name: string;
+  version: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function findWorkspaceLockVersionErrors(
+  manifests: ReadonlyMap<string, VersionedManifest>,
+  lockfile: unknown,
+): string[] {
+  if (!isRecord(lockfile) || !isRecord(lockfile['workspaces'])) {
+    return ['bun.lock has no workspace records'];
+  }
+
+  const workspaces = lockfile['workspaces'];
+  const errors: string[] = [];
+  for (const [path, manifest] of manifests) {
+    const locked = workspaces[path];
+    if (!isRecord(locked)) {
+      errors.push(`bun.lock is missing ${path}`);
+      continue;
+    }
+    if (locked['name'] !== manifest.name) {
+      errors.push(
+        `bun.lock ${path} name ${String(locked['name'])} does not match package.json ${manifest.name}`,
+      );
+    }
+    if (locked['version'] !== manifest.version) {
+      errors.push(
+        `bun.lock ${path} version ${String(locked['version'])} does not match package.json ${manifest.version}`,
+      );
+    }
+  }
+  for (const path of Object.keys(workspaces)) {
+    if (path !== '' && !manifests.has(path)) errors.push(`bun.lock has orphaned workspace ${path}`);
+  }
+  return errors;
+}
+
+export function synchronizeWorkspaceLockVersions(
+  lockfileText: string,
+  manifests: ReadonlyMap<string, VersionedManifest>,
+): string {
+  const lines = lockfileText.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const updatedPaths = new Set<string>();
+  let inWorkspaces = false;
+  let workspacePath = '';
+
+  const updated = lines.map((line) => {
+    if (line === '  "workspaces": {\n') {
+      inWorkspaces = true;
+      return line;
+    }
+    if (inWorkspaces && /^  },?\r?\n$/.test(line)) {
+      inWorkspaces = false;
+      workspacePath = '';
+      return line;
+    }
+    if (!inWorkspaces) return line;
+
+    const heading = /^    "([^"]+)": \{\r?\n$/.exec(line);
+    if (heading) {
+      workspacePath = heading[1] ?? '';
+      return line;
+    }
+    const manifest = manifests.get(workspacePath);
+    const versionLine = /^(      "version": )"[^"]*"(,?\r?\n)$/.exec(line);
+    if (!manifest || !versionLine) return line;
+    updatedPaths.add(workspacePath);
+    return `${versionLine[1]}${JSON.stringify(manifest.version)}${versionLine[2]}`;
+  });
+
+  for (const path of manifests.keys()) {
+    if (!updatedPaths.has(path)) {
+      throw new Error(`bun.lock ${path} has no version line to update`);
+    }
+  }
+
+  const result = updated.join('');
+  const errors = findWorkspaceLockVersionErrors(manifests, Bun.JSONC.parse(result));
+  if (errors.length > 0) throw new Error(errors.join('\n'));
+  return result;
+}
+
 export function findChangesetTargetErrors(
   changesets: readonly PendingChangeset[],
   policy: ChangesetPolicy,
@@ -118,16 +205,43 @@ async function readChangesetPolicy(repositoryRoot: string): Promise<ChangesetPol
   };
 }
 
+async function readWorkspaceManifests(
+  repositoryRoot: string,
+): Promise<Map<string, VersionedManifest>> {
+  const manifests = new Map<string, VersionedManifest>();
+  const packageManifestGlob = new Bun.Glob('packages/*/package.json');
+  for await (const path of packageManifestGlob.scan({ cwd: repositoryRoot, onlyFiles: true })) {
+    const manifest: unknown = await Bun.file(resolve(repositoryRoot, path)).json();
+    if (
+      !isRecord(manifest) ||
+      typeof manifest['name'] !== 'string' ||
+      typeof manifest['version'] !== 'string'
+    ) {
+      throw new Error(`${path} needs a package name and version`);
+    }
+    manifests.set(path.replace(/\/package\.json$/, ''), {
+      name: manifest['name'],
+      version: manifest['version'],
+    });
+  }
+  return manifests;
+}
+
 async function checkChangesets(repositoryRoot: string): Promise<number> {
-  const [changesets, policy] = await Promise.all([
+  const [changesets, policy, manifests, lockfileText] = await Promise.all([
     readPendingChangesets(repositoryRoot),
     readChangesetPolicy(repositoryRoot),
+    readWorkspaceManifests(repositoryRoot),
+    Bun.file(resolve(repositoryRoot, 'bun.lock')).text(),
   ]);
-  const errors = findChangesetTargetErrors(changesets, policy);
+  const errors = [
+    ...findChangesetTargetErrors(changesets, policy),
+    ...findWorkspaceLockVersionErrors(manifests, Bun.JSONC.parse(lockfileText)),
+  ];
 
   if (errors.length > 0) {
     throw new Error(
-      `Changesets must target versioned, publishable workspace packages:\n${errors
+      `Release metadata must match versioned, publishable workspace packages:\n${errors
         .map((error) => `- ${error}`)
         .join('\n')}`,
     );
@@ -138,8 +252,18 @@ async function checkChangesets(repositoryRoot: string): Promise<number> {
 
 if (import.meta.main) {
   try {
-    const changesetCount = await checkChangesets(resolve(import.meta.dir, '..'));
-    console.log(`✓ ${changesetCount} pending changeset(s) target publishable packages.`);
+    const repositoryRoot = resolve(import.meta.dir, '..');
+    if (process.argv.includes('--synchronize-lockfile')) {
+      const lockfilePath = resolve(repositoryRoot, 'bun.lock');
+      const original = await Bun.file(lockfilePath).text();
+      const manifests = await readWorkspaceManifests(repositoryRoot);
+      const updated = synchronizeWorkspaceLockVersions(original, manifests);
+      if (updated !== original) await Bun.write(lockfilePath, updated);
+      console.log('✓ bun.lock workspace versions match package manifests.');
+    } else {
+      const changesetCount = await checkChangesets(repositoryRoot);
+      console.log(`✓ ${changesetCount} pending changeset(s) target publishable packages.`);
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`✖ ${message}`);

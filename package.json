@@ -8,7 +8,7 @@
     "check-types": "turbo run check-types",
     "verify:armorer:consumer": "bun run scripts/verify-armorer-consumer.ts --mode local",
     "changeset": "changeset",
-    "version": "changeset version",
+    "version": "changeset version && bun run scripts/check-changesets.ts --synchronize-lockfile && bun install --frozen-lockfile && bun run check-changesets",
     "release": "bun run scripts/release.ts",
     "check-package-shape": "bun run scripts/check-package-shape.ts cryptography embeddings lifecycle tool-protocol armorer conversationalist operative"
   },
