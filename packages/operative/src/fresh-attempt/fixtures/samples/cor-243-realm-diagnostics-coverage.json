@@ -1,0 +1,68 @@
+{
+  "artifactId": "handoff:cor-243-coverage",
+  "revision": 1,
+  "objective": "Close the two real coverage gaps bun run test:coverage reports for get-realm-diagnostics.ts.",
+  "successRevision": "COR-243#acceptance-2026-09-26",
+  "constraints": [
+    "Do not add a coverage allowance for either gap.",
+    "Reach the non-empty pool transform without Engine internals."
+  ],
+  "completedWork": [
+    "Confirmed the defensive engine instanceof Engine guard throw is never exercised.",
+    "Confirmed the per-pool map callback never runs because the only operation-level test drives empty pools."
+  ],
+  "validatedFacts": [
+    "get-catalog-diagnostics.test.ts already covers its identical guard with a direct-invoke test."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-243",
+      "uri": "linear:COR-243"
+    },
+    {
+      "kind": "commit",
+      "id": "2f370574",
+      "digest": "2f3705747695cf041831854411433f960c2add43",
+      "uri": "git:2f370574"
+    },
+    {
+      "kind": "file",
+      "id": "packages/weft/src/server/operations/get-realm-diagnostics.ts"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "bun run test:coverage flagged two uncovered gaps in get-realm-diagnostics.ts.",
+      "occurredAt": "2026-09-26T15:10:04.000Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Extract the per-pool transform into an exported toGetRealmDiagnosticsOutput and unit-test it with a literal array.",
+  "allowedCarryForwardContext": ["agent-instructions"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-243-attempt-1:0",
+    "sessionId": "cor-243-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-243-attempt-1",
+    "runId": "cor-243-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T15:42:31.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T15:42:31.000Z",
+    "producingActor": "workflow:linear-implementation"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-243-attempt-1",
+    "sourceRevision": 55
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "27f202808e6792619a8d9afdedb12c696a9c8235891dc3fbe662d79ae7d8574a"
+  }
+}

@@ -7,7 +7,14 @@ import {
   HookRegistry,
   TypedEventTarget,
 } from '@lostgradient/lifecycle';
-import type { Memory } from '@lostgradient/memory';
+import {
+  createGovernedMemory,
+  createInMemoryMemoryRecordStorage,
+  createMemoryAuthority,
+  createMemoryGovernanceLedger,
+  createMemoryGovernancePolicy,
+  createMockEmbedder,
+} from '@lostgradient/memory';
 import {
   createAgentSession,
   createDurableActiveRun,
@@ -56,8 +63,8 @@ import {
   CATALOG_RUN_RECOVERY_KEY_PREFIX,
   compositionReadyGuardResult,
   createMemoryPersistHook,
-  createMemoryRecallHook,
   createRoutingStrategy,
+  createRunMemoryAuthority,
   createRuntimeComposition,
   createSchedulerServiceRequestContext,
   decodeScheduleRunMarker,
@@ -1035,109 +1042,75 @@ describe('decodeScheduleRunMarker', () => {
   });
 });
 
-function createMemoryDouble(options: {
-  recalls?: Array<{ content: string }>;
-  remember?: (content: string, metadata: unknown) => Promise<void>;
-  rememberOnce?: (content: string, metadata: unknown) => Promise<void>;
-}): Memory {
-  return {
-    // `createRuntimeComposition` awaits `init()` on a supplied Memory
-    // instance, so a double handed to it needs one. Harmless for the callers
-    // that use this double against a hook factory directly.
-    init: async () => {},
-    recall: async () => options.recalls ?? [],
-    remember: options.remember ?? (async () => {}),
-    rememberOnce: options.rememberOnce ?? (async () => {}),
-  } as unknown as Memory;
+/**
+ * A governed memory over in-memory record storage, plus an inspecting authority
+ * that can read back everything the Bureau hooks wrote, with its attribution.
+ */
+function createGovernedMemoryFixture() {
+  const memory = createGovernedMemory({
+    storage: createInMemoryMemoryRecordStorage(),
+    ledger: createMemoryGovernanceLedger(new MemoryStorage()),
+    embedder: createMockEmbedder(64),
+    policy: createMemoryGovernancePolicy({ revision: 'governance:runtime-test' }),
+    runtime: createManualRuntimeServices({ identifierSeed: 'runtime-composition-memory' }),
+  });
+  const inspector = createMemoryAuthority({
+    principal: { kind: 'governance', id: 'governance:test' },
+    tenantId: 'bureau',
+    ownerId: 'bureau',
+    purpose: 'test-inspection',
+    capabilities: ['memory:list', 'memory:inspect'],
+    policyRevision: 'bureau:1',
+    projection: 'audit',
+  });
+  return { memory, inspector };
 }
 
-describe('memory hook coverage', () => {
-  it('skips memory recall after step 0, without a latest text user message, and without recalls', async () => {
-    const memory = createMemoryDouble({ recalls: [] });
-    const hook = createMemoryRecallHook(memory, 'session-memory');
+const defaultRunRequestContext: ToolRequestContext = {
+  authority: {
+    principalId: 'run:hook-run',
+    tenantId: 'bureau',
+    ownerId: 'bureau',
+    capabilities: ['tools:execute'],
+    authorizationRevision: 'bureau:1',
+  },
+};
 
-    const stepOneConversation = new Conversation();
-    stepOneConversation.appendUserMessage('remember this later');
-    await hook({ step: 1, conversation: stepOneConversation });
-    expect(
-      stepOneConversation.getMessages().filter((message) => message.role === 'system'),
-    ).toEqual([]);
-
-    const noUserConversation = new Conversation();
-    await hook({ step: 0, conversation: noUserConversation });
-    expect(noUserConversation.getMessages()).toEqual([]);
-
-    const noRecallConversation = new Conversation();
-    noRecallConversation.appendUserMessage('nothing relevant');
-    await hook({ step: 0, conversation: noRecallConversation });
-    expect(
-      noRecallConversation.getMessages().filter((message) => message.role === 'system'),
-    ).toEqual([]);
+describe('memory hook registration (COR-41)', () => {
+  it('registers no memory hooks for a run without a persisted request authority', async () => {
+    const { memory } = createGovernedMemoryFixture();
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      memory,
+    });
+    const runRuntime = await runtime.createRunRuntime({
+      message: 'test',
+      sessionId: 'no-authority',
+    });
+    const ids = runRuntime.hooks.describePlan().entries.map((entry) => entry.id);
+    expect(ids).not.toContain('bureau:memory-recall');
+    expect(ids).not.toContain('bureau:memory-persist');
   });
 
-  it('injects recalled memories as one system message on step 0', async () => {
-    const memory = createMemoryDouble({
-      recalls: [{ content: 'first fact' }, { content: 'second fact' }],
-    });
-    const hook = createMemoryRecallHook(memory, 'session-memory');
-    const conversation = new Conversation();
-    conversation.appendUserMessage('what do you know?');
-
-    await hook({ step: 0, conversation });
-
-    const systemMessages = conversation
-      .getMessages()
-      .filter((message) => message.role === 'system');
-    expect(systemMessages).toHaveLength(1);
-    expect(extractMessageText(systemMessages[0]!.content)).toContain('1. first fact');
-    expect(extractMessageText(systemMessages[0]!.content)).toContain('2. second fact');
-    expect(systemMessages[0]!.metadata).toMatchObject({
-      _memoryInjected: true,
-      _memorySessionId: 'session-memory',
-    });
-  });
-
-  it('skips blank or non-final memory persistence and uses remember when no run id is present', async () => {
-    const remembered: Array<{ content: string; metadata: unknown }> = [];
-    const rememberedOnce: Array<{ content: string; metadata: unknown }> = [];
-    const memory = createMemoryDouble({
-      remember: async (content, metadata) => {
-        remembered.push({ content, metadata });
-      },
-      rememberOnce: async (content, metadata) => {
-        rememberedOnce.push({ content, metadata });
-      },
-    });
-    const hook = createMemoryPersistHook(memory, 'session-memory');
-    const conversation = new Conversation();
-
-    await hook({
-      step: 0,
-      conversation,
-      content: 'not final',
-      toolCalls: [],
-      results: [],
-      final: false,
-    });
-    await hook({ step: 1, conversation, content: '   ', toolCalls: [], results: [], final: true });
+  it('writes non-deduplicated conversation memory for a run without a run id', async () => {
+    const { memory, inspector } = createGovernedMemoryFixture();
+    const authority = createRunMemoryAuthority(defaultRunRequestContext, { runId: 'hook-run' });
+    const hook = createMemoryPersistHook(memory, authority, 'session-memory');
     await hook({
       step: 2,
-      conversation,
+      conversation: new Conversation(),
       content: 'remember this',
       toolCalls: [],
       results: [],
       final: true,
     });
-
-    expect(remembered).toHaveLength(1);
-    expect(remembered[0]!.content).toBe('remember this');
-    expect(remembered[0]!.metadata).toMatchObject({
-      namespace: 'session-memory',
-      source: 'experiential',
-      step: 2,
-      replay: 'effectful',
+    const [record] = await memory.list(inspector, { collection: 'session-memory' });
+    expect(record).toMatchObject({
+      content: 'remember this',
+      source: 'conversation',
+      metadata: { step: 2, replay: 'effectful' },
     });
-    expect(rememberedOnce).toEqual([]);
+    expect(record?.metadata['dedupeKey']).toBeUndefined();
   });
 });
 
@@ -1407,16 +1380,7 @@ describe('effectful hook idempotency under crash replay (COR-1267)', () => {
   }
 
   it('bureau:memory-persist writes one memory when the same step replays', async () => {
-    const rememberedOnce: Array<{ content: string; metadata: Record<string, unknown> }> = [];
-    const remembered: Array<{ content: string }> = [];
-    const memory = createMemoryDouble({
-      remember: async (content) => {
-        remembered.push({ content });
-      },
-      rememberOnce: async (content, metadata) => {
-        rememberedOnce.push({ content, metadata: metadata as Record<string, unknown> });
-      },
-    });
+    const { memory, inspector } = createGovernedMemoryFixture();
 
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
@@ -1426,6 +1390,7 @@ describe('effectful hook idempotency under crash replay (COR-1267)', () => {
       message: 'test',
       sessionId: 'idempotency-session',
       runId: 'idempotency-run',
+      requestContext: defaultRunRequestContext,
     });
 
     const entry = handlerById(runRuntime.hooks, 'onStep', 'bureau:memory-persist');
@@ -1433,27 +1398,21 @@ describe('effectful hook idempotency under crash replay (COR-1267)', () => {
 
     const conversation = new Conversation();
     // The same step, twice — a crashed in-flight step re-running from its
-    // boundary, which is exactly what the durable driver does on recovery.
+    // boundary, which is exactly what the durable driver does on recovery —
+    // and the replay regenerates different content.
     await entry.handler(stepContext(3, 'a durable thought', conversation));
-    await entry.handler(stepContext(3, 'a durable thought', conversation));
+    await entry.handler(stepContext(3, 'a regenerated durable thought', conversation));
 
-    // Two invocations, one dedupe key. `rememberOnce` collapses them at the
-    // store, and the key is derived from run + step rather than content, so a
-    // divergent regenerate on replay cannot mint a second record either.
-    expect(rememberedOnce).toHaveLength(2);
-    expect(rememberedOnce[0]!.metadata['dedupeKey']).toBe('idempotency-run:3');
-    expect(rememberedOnce[1]!.metadata['dedupeKey']).toBe('idempotency-run:3');
-    // Never the non-deduped path when a run id is present.
-    expect(remembered).toEqual([]);
+    // One dedupe key derived from run + step, not content, so the replay is a
+    // no-op at the store and the original write survives.
+    const records = await memory.list(inspector, { collection: 'idempotency-session' });
+    expect(records.map((record) => [record.content, record.metadata['dedupeKey']])).toEqual([
+      ['a durable thought', 'idempotency-run:3'],
+    ]);
   });
 
   it('bureau:memory-persist keys by step, so two different steps are two records', async () => {
-    const rememberedOnce: Array<{ metadata: Record<string, unknown> }> = [];
-    const memory = createMemoryDouble({
-      rememberOnce: async (_content, metadata) => {
-        rememberedOnce.push({ metadata: metadata as Record<string, unknown> });
-      },
-    });
+    const { memory, inspector } = createGovernedMemoryFixture();
 
     const runtime = await createRuntimeComposition({
       generate: async () => ({ content: 'x', toolCalls: [] }),
@@ -1463,17 +1422,20 @@ describe('effectful hook idempotency under crash replay (COR-1267)', () => {
       message: 'test',
       sessionId: 'idempotency-session',
       runId: 'idempotency-run',
+      requestContext: defaultRunRequestContext,
     });
     const entry = handlerById(runRuntime.hooks, 'onStep', 'bureau:memory-persist');
 
     const conversation = new Conversation();
-    await entry.handler(stepContext(0, 'first', conversation));
-    await entry.handler(stepContext(1, 'second', conversation));
+    await entry.handler(stepContext(0, 'first distinct fact', conversation));
+    await entry.handler(stepContext(1, 'second distinct fact', conversation));
 
     // The control for the test above: the key collapses a REPLAY, not two
     // genuinely distinct steps. Without this, a hook that returned one
     // constant key would pass the idempotency test and silently lose writes.
-    expect(rememberedOnce.map((entry) => entry.metadata['dedupeKey'])).toEqual([
+    const records = await memory.list(inspector, { collection: 'idempotency-session' });
+    const keys = records.map((record) => String(record.metadata['dedupeKey']));
+    expect(keys.toSorted((left, right) => left.localeCompare(right))).toEqual([
       'idempotency-run:0',
       'idempotency-run:1',
     ]);
@@ -5096,9 +5058,9 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
 
     try {
       const catalogOptions = fakeRunOptions();
-      const resolverCalls: Array<{ agentName: string; input: unknown }> = [];
-      runtime.setCatalogAgentRunOptionsResolver(async (agentName, input) => {
-        resolverCalls.push({ agentName, input });
+      const resolverCalls: Array<{ agentName: string; input: unknown; runId: string }> = [];
+      runtime.setCatalogAgentRunOptionsResolver(async (agentName, input, _context, runId) => {
+        resolverCalls.push({ agentName, input, runId });
         return { status: 'resolved', options: catalogOptions, definitionRevision: 1 };
       });
 
@@ -5120,7 +5082,11 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
         status: 'available',
         services: { options: catalogOptions, toolbox: catalogOptions.toolbox },
       });
-      expect(resolverCalls).toEqual([{ agentName: 'echo', input: 'hello' }]);
+      // COR-772: the recovered run's own id travels with the call, so the
+      // resolver can restore run-scoped context the record does not carry.
+      expect(resolverCalls).toEqual([
+        { agentName: 'echo', input: 'hello', runId: 'catalog-run-1' },
+      ]);
       expect(await runtime.isCatalogRecoveredRun('catalog-run-1')).toBe(true);
       expect(await runtime.isCatalogRecoveredRun('some-other-run')).toBe(false);
     } finally {
@@ -5530,6 +5496,65 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
+  });
+
+  it('claimCatalogRunRecoveryRecord writes a record only where none exists (COR-772)', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      await runtime.persistCatalogRunRecoveryRecord('catalog-run-owned', {
+        agentName: 'worker',
+        definitionRevision: 1,
+        input: 'alice’s work',
+        principal: 'alice',
+      });
+
+      expect(
+        await runtime.claimCatalogRunRecoveryRecord('catalog-run-owned', {
+          agentName: 'worker',
+          definitionRevision: 1,
+          input: 'mallory’s work',
+          principal: 'mallory',
+        }),
+      ).toBe(false);
+      expect(
+        await runtime.claimCatalogRunRecoveryRecord('catalog-run-fresh', {
+          agentName: 'worker',
+          definitionRevision: 2,
+          input: 'fresh work',
+        }),
+      ).toBe(true);
+
+      expect(await runtime.classifyCatalogRecoveredRun('catalog-run-owned')).toEqual({
+        isCatalogRun: true,
+        attribution: { agentName: 'worker', principal: 'alice' },
+      });
+      expect(await runtime.classifyCatalogRecoveredRun('catalog-run-fresh')).toEqual({
+        isCatalogRun: true,
+        attribution: { agentName: 'worker' },
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('claimCatalogRunRecoveryRecord has nothing to claim against with no durable storage', async () => {
+    const runtime = await createRuntimeComposition({
+      generate: async () => ({ content: 'x', toolCalls: [] }),
+      toolbox: createToolbox([], { context: {} }),
+    });
+
+    expect(
+      await runtime.claimCatalogRunRecoveryRecord('no-storage-run', {
+        agentName: 'echo',
+        definitionRevision: 1,
+        input: 'hello',
+      }),
+    ).toBe(true);
+    expect(await runtime.isCatalogRecoveredRun('no-storage-run')).toBe(false);
   });
 
   it('persistCatalogRunRecoveryRecord is a no-op with no durable storage configured', async () => {

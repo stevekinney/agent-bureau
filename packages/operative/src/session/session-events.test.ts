@@ -80,7 +80,9 @@ describe('session verb event dispatch (C3 completeness rule)', () => {
       emitter,
       runOptions: createTestRunOptions(),
     });
-    await h.getSession(); // ensure source session exists
+    // COR-816: throughRun 0 must name a terminal run, so complete one first.
+    await h.run('first run').result();
+    await yieldToPortableEventLoop();
 
     const events = collectEvents(emitter, 'session.fork');
     const forked = await h.fork({ throughRun: 0 });

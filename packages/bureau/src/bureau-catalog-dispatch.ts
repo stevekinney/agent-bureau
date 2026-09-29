@@ -19,6 +19,7 @@ import {
   readGenerationProfile,
 } from '@lostgradient/operative';
 import type { AgentDefinitions, AnyRunnableAgent, BureauAgentCatalog } from './agent-catalog';
+import type { ChildTopologyStart } from './child-topology';
 import type { RuntimeComposition } from './runtime-composition';
 import type { RunAttribution } from './serialization';
 import type { BureauRunOptions } from './types';
@@ -39,6 +40,13 @@ export interface CatalogDispatcherDependencies {
     options: BureauRunOptions | undefined,
     principal: unknown,
   ) => void;
+  /**
+   * COR-772 — called once a durable catalog run settles as aborted, however
+   * the abort arrived (its own handle, `dispose`, or the engine cancelling
+   * it), so Bureau can apply that run's children's parent-cancellation
+   * policy exactly as boot recovery would for the same cancelled workflow.
+   */
+  readonly onDurableRunAborted: (runId: string, reason: string) => void;
 }
 
 export function createCatalogDispatcher({
@@ -52,12 +60,17 @@ export function createCatalogDispatcher({
   createBureauError,
   validateAgentRunInput,
   validateBureauRunOptions,
+  onDurableRunAborted,
 }: CatalogDispatcherDependencies): {
   runAgent: (
     name: string,
     input: AgentInput,
     runOptions?: BureauRunOptions,
   ) => AgentRun<unknown, boolean>;
+  planChildRun: (
+    name: string,
+  ) => { readonly durable: boolean; readonly agentVersion: string } | undefined;
+  startChildRun: (start: ChildTopologyStart) => AgentRun<unknown, boolean>;
 } {
   function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
     catalogRuns.add(handle);
@@ -83,12 +96,23 @@ export function createCatalogDispatcher({
     context: AgentRunContext,
     principal: string | undefined,
     agent: AnyRunnableAgent & DefinitionResolvingAgentWithResolver,
+    /**
+     * COR-772 — a child dispatch supplies its own stable run id, recorded in
+     * Bureau's topology before this starts, so the durable workflow's id is
+     * the child's id and recovery can find it by that id alone. Unlike a
+     * minted id, its caller chose it, so it claims its attribution and
+     * recovery record only where no other run already holds them.
+     */
+    runIdOverride?: string,
   ): AgentRun<unknown, boolean> {
     const durable = runtime.durable;
     if (!durable) {
       throw createBureauError('Durable runtime unavailable', 'CONFLICT');
     }
-    const runId = runtimeServices.identifiers.next('agent-run');
+    const runId = runIdOverride ?? runtimeServices.identifiers.next('agent-run');
+    if (runIdOverride !== undefined && runAttribution.has(runId)) {
+      throw createBureauError(`Run "${runId}" already exists`, 'CONFLICT');
+    }
     // AB-241 — recorded BEFORE any async work, mirroring
     // `createRunFromRequest`'s own `runAttribution.set` (it writes before
     // `store.register` so it's in place before any observer can see this
@@ -221,7 +245,7 @@ export function createCatalogDispatcher({
       // propagates uncaught, same as every other resolver failure in this
       // function — better to fail this run's start than dispatch a durable
       // run with no way to reattach it later.
-      await runtime.persistCatalogRunRecoveryRecord(runId, {
+      const recoveryRecord = {
         agentName: name,
         // Type-level-only correction (mirrors `agent-catalog.ts`'s own
         // `buildCatalogGenerationProfile` cast): `readGenerationProfile`
@@ -237,7 +261,12 @@ export function createCatalogDispatcher({
         // `principal`, and `runAttribution` (in-memory only) started
         // empty on the new process.
         ...(principal !== undefined ? { principal } : {}),
-      });
+      };
+      if (runIdOverride === undefined) {
+        await runtime.persistCatalogRunRecoveryRecord(runId, recoveryRecord);
+      } else if (!(await runtime.claimCatalogRunRecoveryRecord(runId, recoveryRecord))) {
+        throw createBureauError(`Run "${runId}" already exists`, 'CONFLICT');
+      }
       const activeRun = createActiveRun(
         resolvedOptions,
         {
@@ -315,6 +344,9 @@ export function createCatalogDispatcher({
     // `unresolved`/`timed-out` result for a signal that arrived too late
     // to mean anything.
     let cachedAcknowledgement: Awaited<ReturnType<ActiveRun['closed']>> | undefined;
+    // COR-772 — the reason the first `abort()` on this handle carried, for
+    // the parent-cancellation policy applied once the run settles aborted.
+    let abortReason: string | undefined;
     void closedSettlement.then((acknowledgement) => {
       cachedAcknowledgement = acknowledgement;
       return acknowledgement;
@@ -322,6 +354,7 @@ export function createCatalogDispatcher({
     const guardedRun: AgentRun<unknown, boolean> = {
       ...deferredRun,
       abort(reason?: string): void {
+        abortReason ??= reason;
         deferredRun.abort(reason);
         if (dispatchedActiveRun) {
           // No-op if `activeRun.abort()` already ran via the normal
@@ -378,6 +411,12 @@ export function createCatalogDispatcher({
         });
       },
     };
+    detachBestEffortPromise(
+      guardedRun.result().then((result) => {
+        if (result.finishReason === 'aborted') onDurableRunAborted(runId, abortReason ?? 'Aborted');
+        return undefined;
+      }),
+    );
     return trackCatalogRun(guardedRun);
   }
 
@@ -437,6 +476,71 @@ export function createCatalogDispatcher({
         input,
         context,
         name,
+      ),
+    );
+  }
+
+  /**
+   * COR-772 — what dispatching `name` as a child would look like, read before
+   * anything starts so Bureau can record the child's workflow identity
+   * first. `undefined` for an agent the catalog does not have.
+   */
+  function planChildRun(
+    name: string,
+  ): { readonly durable: boolean; readonly agentVersion: string } | undefined {
+    const agent = agentCatalog.find(name);
+    if (!agent) return undefined;
+    return {
+      durable: runtime.durable !== undefined && hasDefinitionResolver(agent),
+      agentVersion: String(readGenerationProfile(agent).revision),
+    };
+  }
+
+  /**
+   * COR-772 — starts a catalog agent as the child Bureau's topology has
+   * already recorded. Identical to `runAgent` except that the durable
+   * workflow takes the child's recorded id, and the child's context carries
+   * its correlation and signal port — never its parent's abort signal.
+   */
+  function startChildRun(start: ChildTopologyStart): AgentRun<unknown, boolean> {
+    if (getShutdownPromise()) {
+      throw createBureauError('Cannot start a child run: bureau is disposed', 'CONFLICT');
+    }
+    const agent = agentCatalog.find(start.agentName);
+    if (!agent) {
+      throw createBureauError(`Unknown agent "${start.agentName}"`, 'NOT_FOUND');
+    }
+    const context: AgentRunContext = {
+      agentName: start.agentName,
+      ...start.context,
+      ...(start.principal === undefined ? {} : { principal: start.principal }),
+    };
+    const hasResolver = hasDefinitionResolver(agent);
+    if (runtime.durable && hasResolver) {
+      return runDurableCatalogAgent(
+        start.agentName,
+        start.input,
+        undefined,
+        context,
+        start.principal,
+        agent,
+        start.childRunId,
+      );
+    }
+    return trackCatalogRun(
+      createDeferredAgentRun(
+        () =>
+          resolveInvariantComposedAgent(
+            start.agentName,
+            start.input,
+            context,
+            start.principal,
+            agent,
+            hasResolver,
+          ),
+        start.input,
+        context,
+        start.agentName,
       ),
     );
   }
@@ -555,5 +659,5 @@ export function createCatalogDispatcher({
     };
   }
 
-  return { runAgent };
+  return { runAgent, planChildRun, startChildRun };
 }

@@ -1,0 +1,71 @@
+{
+  "artifactId": "handoff:cor-1333",
+  "revision": 1,
+  "objective": "Wait for revision-realm signal parks as events in revision-realm-execution.test.ts and its child-process sibling.",
+  "successRevision": "COR-1333#acceptance-2026-09-26",
+  "constraints": [
+    "Build on the COR-1330 ENGINE_WAIT_FOR_SIGNAL_WAITER_FOR_TESTING seam; do not add another.",
+    "Never use withTimeout or .resolves for a Worker-settled result."
+  ],
+  "completedWork": [
+    "Found three polls on waitForCondition's 500ms default: waitForSignalWaiters, the recovery test's completion poll, and the child-process activeRealmCount poll.",
+    "Ran the 700ms busy-wait control against the unchanged files."
+  ],
+  "validatedFacts": [
+    "The seam resolves per workflow while the old helper waited for an engine-wide total.",
+    "The strategy calls releaseAfterExecution before emitting the completed message.",
+    "The two sentinel tests never wait for a park."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-1333",
+      "uri": "linear:COR-1333"
+    },
+    {
+      "kind": "linear-issue",
+      "id": "COR-1330",
+      "uri": "linear:COR-1330"
+    },
+    {
+      "kind": "commit",
+      "id": "0d477a3e",
+      "digest": "0d477a3ed8f98eee973ccfaa5377809f91803f2c",
+      "uri": "git:0d477a3e"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "With a 700ms busy-wait before each fixture's init call, the unchanged files failed 7 of 9 on each of three runs.",
+      "occurredAt": "2026-09-26T17:55:08.841Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Await the seam for each workflow expected to park, attach to the recovery handle's result before signalling, and assert activeRealmCount directly.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox", "skill-activation"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-1333-attempt-1:0",
+    "sessionId": "cor-1333-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-1333-attempt-1",
+    "runId": "cor-1333-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-26T18:06:43.000Z",
+  "provenance": {
+    "producedAt": "2026-09-26T18:06:43.000Z",
+    "producingActor": "workflow:linear-implementation"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-1333-attempt-1",
+    "sourceRevision": 93
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "a0ce815e083b5f07170f13ed2f5f0f30163d8b488da9fcad602005ffbaf33edb"
+  }
+}

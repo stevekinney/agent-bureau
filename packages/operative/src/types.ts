@@ -5,11 +5,17 @@ import type {
 } from '@lostgradient/lifecycle';
 import type { JSONValue, ToolCall, ToolCallInput } from '@lostgradient/tool-protocol';
 import type { AnyToolbox, ToolExecuteOptions, ToolExecutionResult } from 'armorer';
-import type { Conversation, ConversationHistory, TokenUsage } from 'conversationalist';
+import type {
+  CompactionScheduler,
+  Conversation,
+  ConversationHistory,
+  TokenUsage,
+} from 'conversationalist';
 import type { ZodType } from 'zod';
 
 import type { BackpressureStrategy } from './backpressure';
 import type { ChildRunRegistry } from './child-run';
+import type { ChildSignalPort } from './child-signals';
 import type { ContextEpochSealer } from './context-epoch';
 import type { CostEstimate, CostEstimationOptions } from './cost-estimation';
 import type { SteeringDesiredState } from './durable/types';
@@ -83,6 +89,50 @@ export interface RetryOptions {
 }
 
 /**
+ * Optimistic background compaction for {@link ContextManagementOptions}
+ * (COR-808).
+ *
+ * A step whose estimated tokens exceed `threshold`, but not the synchronous
+ * compaction threshold, asks `scheduler` to prepare a compaction and
+ * generates without waiting for it. The candidate publishes only through
+ * `Conversation.compact()`'s revision compare-and-swap, so a step reads
+ * either the whole history before the commit or the whole compacted
+ * history after it; a write that lands while the summary is being written
+ * makes the candidate stale, and the scheduler's bounded stale policy
+ * decides whether it is tried again. A candidate starts only at a durable
+ * boundary, so a window that opens while the step streams or runs tools
+ * waits for the stream to close or the tool results to land.
+ *
+ * The run's abort signal travels with every request, so cancelling the run
+ * withdraws queued work and aborts a running summary. A step at the
+ * synchronous threshold cancels background work, and waits for an aborted
+ * summary to return, before its own `onCompact` runs, so the synchronous
+ * summary never overlaps a background one. A starved scheduler window
+ * therefore never blocks generation or growth control.
+ *
+ * Overflow recovery through `createOverflowMutator` does not wait for
+ * background work; the retry loop hands it the history the failed request
+ * was sent with. A candidate that committed after that request was sent,
+ * during the provider's network wait say, means recovery retries once
+ * against that compaction without summarizing. A candidate still running
+ * when the overflow arrives overlaps recovery's own summary, and the
+ * compare-and-swap publishes whichever commits first; when the candidate
+ * wins, recovery retries once against it. A second overflow against the
+ * same compacted history rethrows the provider error.
+ */
+export interface BackgroundCompactionOptions {
+  /** Estimated tokens above which a step requests background compaction. */
+  threshold: number;
+  /**
+   * The scheduler for this run's conversation, from conversationalist's
+   * `createCompactionScheduler`. The caller owns it: it outlives the run,
+   * and the caller disposes it. A scheduler bound to another conversation
+   * fails the step with a policy error.
+   */
+  scheduler: CompactionScheduler;
+}
+
+/**
  * Options for automatic context window management.
  */
 export interface ContextManagementOptions {
@@ -95,6 +145,8 @@ export interface ContextManagementOptions {
   warningThreshold?: number | undefined;
   /** Compaction triggered when used tokens reach this level. Default: 80% of `maxTokens`. */
   compactionThreshold?: number | undefined;
+  /** Prepares compaction off the critical path below the synchronous threshold. */
+  background?: BackgroundCompactionOptions | undefined;
 }
 
 /**
@@ -638,6 +690,17 @@ export interface RunOptionsBase {
    * inherits no delegated-authority narrowing from a dispatching parent.
    */
   delegatedAuthority?: DelegatedAuthority | undefined;
+  /**
+   * COR-814 — this run's own end of the typed signal channel its parent
+   * opened through `dispatchChildRun` (forwarded from
+   * `AgentRunContext.parentSignals` by `createAgent`'s run path), threaded
+   * into every tool call's per-execution
+   * `ToolContext.executionContext.parentSignals`, matching the AB-300
+   * `delegatedAuthority` pattern. Tools read it with `readParentSignals`.
+   * In-memory only: a port is a live object, never persisted or replayed.
+   * `undefined` — the default — means this run has no parent channel.
+   */
+  parentSignals?: ChildSignalPort | undefined;
   /**
    * AB-241 — the authenticated principal attributed with this run, forwarded
    * unchanged from `AgentRunContext.principal` by `createAgent`'s run path,

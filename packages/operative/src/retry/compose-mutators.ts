@@ -1,10 +1,13 @@
+import type { ConversationHistory } from 'conversationalist';
+
 import type { GenerateContext } from '../types';
 import type { RetryMutator } from './types';
 
 /**
  * Chains multiple retry mutators into a single mutator.
  *
- * Each mutator receives the context produced by the previous one.
+ * Each mutator receives the context produced by the previous one, and the
+ * history the failed attempt was sent with.
  * When a mutator returns void, the current context passes through
  * unchanged. Returns void only when every mutator returns void.
  */
@@ -13,12 +16,13 @@ export function composeMutators(...mutators: RetryMutator[]): RetryMutator {
     context: GenerateContext,
     error: unknown,
     attempt: number,
+    sentHistory?: ConversationHistory,
   ): Promise<GenerateContext | void> => {
     let current = context;
     let anyMutated = false;
 
     for (const mutator of mutators) {
-      const result = await mutator(current, error, attempt);
+      const result = await mutator(current, error, attempt, sentHistory);
       if (result !== undefined) {
         current = result;
         anyMutated = true;

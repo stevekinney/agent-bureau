@@ -1,4 +1,8 @@
-import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
+import {
+  createDefaultRuntimeServices,
+  type RuntimeServices,
+  type RuntimeTimers,
+} from '@lostgradient/lifecycle';
 
 import type {
   ConversationHistory,
@@ -164,7 +168,16 @@ export function simpleTokenEstimator(message: Message): number {
  * every other real-implementation default in this package already follows
  * (one shared instance, not a fresh one per resolution).
  */
-export const defaultConversationRuntime: ConversationRuntime = createDefaultRuntimeServices();
+const defaultRuntimeServices = createDefaultRuntimeServices();
+export const defaultConversationRuntime: ConversationRuntime = defaultRuntimeServices;
+
+/**
+ * The real-globals timers from the same runtime instance as
+ * {@link defaultConversationRuntime}. A conversation's own environment reads
+ * no timers; only background compaction scheduling does, and it falls back
+ * to these when a caller injects none.
+ */
+export const defaultConversationTimers: RuntimeTimers = defaultRuntimeServices.timers;
 
 /**
  * Default environment reading through {@link defaultConversationRuntime}

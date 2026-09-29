@@ -298,6 +298,101 @@ describe('createContextEpochSealer', () => {
   });
 });
 
+describe('compaction commits (COR-810)', () => {
+  const conversationSource = (epoch: ReturnType<typeof sealContextEpoch>) =>
+    epoch.sources.find((source) => source.sourceId === 'conversation');
+
+  function longConversation(): Conversation {
+    const pairs: Array<['user' | 'assistant', string]> = [];
+    for (let index = 0; index < 6; index++) {
+      pairs.push(['user', `question ${index}`], ['assistant', `answer ${index}`]);
+    }
+    return conversationWith(pairs);
+  }
+
+  it('versions the conversation source by the controller revision', () => {
+    const conversation = conversationWith([['user', 'my secret is hunter2']]);
+    conversation.redactMessageAtPosition(0, 'my secret is [redacted]');
+    // Two commits, one message: a revision, not a message count.
+    expect(conversation.revision).toBe(2);
+
+    const epoch = sealContextEpoch({ epochId: 'epoch-1', conversation, consumer: CONSUMER });
+
+    expect(conversationSource(epoch)?.revision).toBe(conversation.revision);
+  });
+
+  it('replaces the epoch when a compaction commit publishes a new boundary', async () => {
+    const sealer = createContextEpochSealer({ newEpochId: sequentialEpochIds() });
+    const conversation = longConversation();
+    const before = sealer.seal({ conversation, consumer: { runId: 'r', step: 0, attempt: 0 } });
+
+    const result = await conversation.compact(async () => 'summary', { preserveRecentCount: 2 });
+    const after = sealer.seal({ conversation, consumer: { runId: 'r', step: 1, attempt: 0 } });
+
+    expect(result.outcome).toBe('committed');
+    expect(after.epochId).not.toBe(before.epochId);
+    expect(after.supersedes).toBe(before.epochId);
+    expect(conversationSource(after)?.revision).toBe(result.revision);
+  });
+
+  it('replaces the epoch even when the committed transcript renders identically', async () => {
+    // A summary that reproduces the one system message it replaces leaves
+    // the message count, the rendered baseline, and the trust vector all as
+    // they were. The commit still published a new boundary, and the
+    // contract says a completed compaction replaces the epoch.
+    const sealer = createContextEpochSealer({ newEpochId: sequentialEpochIds() });
+    const conversation = new Conversation();
+    conversation.appendSystemMessage('Earlier turns, summarized');
+    conversation.appendUserMessage('pinned question', { pinned: true });
+    conversation.appendUserMessage('question');
+    conversation.appendAssistantMessage('answer');
+    const before = sealer.seal({ conversation, consumer: { runId: 'r', step: 0, attempt: 0 } });
+
+    const result = await conversation.compact(async () => 'Earlier turns, summarized', {
+      preserveRecentCount: 2,
+      preserveSystemMessages: false,
+    });
+    const after = sealer.seal({ conversation, consumer: { runId: 'r', step: 0, attempt: 1 } });
+
+    expect(result.outcome).toBe('committed');
+    expect(after.baselineDigest).toBe(before.baselineDigest);
+    expect(conversationSource(after)?.digest).toBe(conversationSource(before)?.digest);
+    expect(after.epochId).not.toBe(before.epochId);
+    expect(after.supersedes).toBe(before.epochId);
+  });
+
+  it('keeps the epoch when a stale compaction candidate is discarded', async () => {
+    const sealer = createContextEpochSealer({ newEpochId: sequentialEpochIds() });
+    const conversation = longConversation();
+    let release!: () => void;
+    const summarizing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const compacting = conversation.compact(
+      async () => {
+        await summarizing;
+        return 'stale summary';
+      },
+      { preserveRecentCount: 2 },
+    );
+    conversation.appendUserMessage('arrived mid-summary');
+    const beforeDiscard = sealer.seal({
+      conversation,
+      consumer: { runId: 'r', step: 0, attempt: 0 },
+    });
+    release();
+    const result = await compacting;
+    const afterDiscard = sealer.seal({
+      conversation,
+      consumer: { runId: 'r', step: 0, attempt: 1 },
+    });
+
+    expect(result.outcome).toBe('discarded');
+    expect(afterDiscard.epochId).toBe(beforeDiscard.epochId);
+  });
+});
+
 describe('epochSourcesUnchanged', () => {
   it('ignores epochId and firstConsumedBy when comparing', () => {
     const conversation = conversationWith([['user', 'hi']]);

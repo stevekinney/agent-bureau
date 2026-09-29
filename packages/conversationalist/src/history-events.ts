@@ -1,3 +1,4 @@
+import type { CompactionAttempt } from './compaction/types';
 import type { ConversationActionType, ConversationEventDetail } from './events';
 import type { ConversationHistory, MessagePluginIdentity } from './types';
 
@@ -12,6 +13,7 @@ export type ConversationChangeContext = {
   reason?: string;
   childConversationId?: string;
   plugin?: MessagePluginIdentity;
+  compaction?: CompactionAttempt;
 };
 
 function buildEventContextFields(
@@ -25,6 +27,7 @@ function buildEventContextFields(
   | 'childConversationId'
   | 'plugin'
   | 'reason'
+  | 'compaction'
 > {
   return {
     ...(context.messageIds && context.messageIds.length > 0
@@ -38,6 +41,7 @@ function buildEventContextFields(
     ...(context.childConversationId ? { childConversationId: context.childConversationId } : {}),
     ...(context.plugin ? { plugin: context.plugin } : {}),
     ...(context.reason ? { reason: context.reason } : {}),
+    ...(context.compaction ? { compaction: context.compaction } : {}),
   };
 }
 

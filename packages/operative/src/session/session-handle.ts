@@ -14,8 +14,10 @@ import {
   SessionSleepEvent,
   SessionUpdateEvent,
 } from '../events';
+import { createFreshAttemptSession } from '../fresh-attempt/start-fresh-attempt';
 import type { Subscription } from '../liveness';
 import type { CleanupAcknowledgement, ClosedOptions } from '../types';
+import { conversationThroughRun } from './run-conversation-boundary';
 import {
   historyOrEmpty,
   newestRunningRunRef,
@@ -26,11 +28,7 @@ import type {
   SessionHandleContext,
   SessionLivenessSnapshot,
 } from './session-handle-types';
-import {
-  ForkThroughRunError,
-  NoDurableEngineError,
-  NoRunningRunError,
-} from './session-handle-types';
+import { NoDurableEngineError, NoRunningRunError } from './session-handle-types';
 import { createSessionLiveness, type LivenessSubscriberRecord } from './session-liveness';
 import { createSessionMonitor } from './session-monitor';
 import { createSessionRecovery } from './session-recovery';
@@ -296,26 +294,14 @@ export function createSessionHandle(
     async fork(options?: { throughRun?: number }): Promise<SessionHandle> {
       const session = await loadOrCreate();
 
-      // Default: fork through the last run.
-      const lastRunIndex = session.runs.length - 1;
-      const throughSequence = options?.throughRun ?? lastRunIndex;
-
-      // Guard: without per-run conversation snapshots, forking before the last
-      // run would copy the FULL stored conversationHistory (which reflects all
-      // completed runs), contaminating the branch with messages after the
-      // requested fork point. Reject non-default throughRun values that point
-      // before the last run until Phase D lands per-run snapshots.
-      if (options?.throughRun !== undefined && options.throughRun < lastRunIndex) {
-        throw new ForkThroughRunError(options.throughRun, lastRunIndex);
-      }
-
-      // Copy the conversation history. The session's stored conversationHistory
-      // is the authoritative snapshot of all completed runs. When throughRun is
-      // at (or after) the last run, this is exactly the right history to copy.
-      const forkedHistory: ConversationHistory = historyOrEmpty(
-        session.conversationHistory,
-        runtime,
-      );
+      // Without a fork point, copy the latest stored history. With one, copy
+      // that terminal run's immutable boundary (COR-816), which never holds a
+      // message from a later run; an unusable fork point throws a typed
+      // ForkThroughRunError before anything is persisted.
+      const forkedHistory: ConversationHistory =
+        options?.throughRun === undefined
+          ? historyOrEmpty(session.conversationHistory, runtime)
+          : conversationThroughRun(session, options.throughRun);
 
       // Create the forked session with a new id and empty runs[].
       const newSessionId = runtime.identifiers.next('session');
@@ -328,15 +314,22 @@ export function createSessionHandle(
       });
       await store.save(forkedSession);
 
-      // throughSequence is used conceptually to bound the fork point; full
-      // per-run snapshot support (Phase D) will use it to reconstruct history
-      // at exactly that boundary. For now it is always === lastRunIndex.
-      void throughSequence;
-
       // Emit after the forked session is persisted so the id is stable.
       emitter.dispatchEvent(new SessionForkEvent(sessionId, newSessionId, options?.throughRun));
 
       return createSessionHandle(newSessionId, context);
+    },
+
+    async startFreshAttempt({ artifact, instructions }): Promise<SessionHandle> {
+      const freshSession = await createFreshAttemptSession({
+        artifact,
+        instructions,
+        agentName,
+        runtime,
+        resolveSource: context.resolveFreshAttemptSource ?? (() => undefined),
+      });
+      await store.save(freshSession);
+      return createSessionHandle(freshSession.id, context);
     },
 
     async sleep(duration: number | string, options?: { signal?: AbortSignal }): Promise<void> {

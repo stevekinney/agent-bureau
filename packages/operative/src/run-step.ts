@@ -90,6 +90,12 @@ export interface StepDeps {
    * pattern.
    */
   readonly delegatedAuthority: RunOptions['delegatedAuthority'];
+  /**
+   * COR-814 — this run's own end of its parent's typed signal channel,
+   * passed to every tool call as `ToolContext.executionContext.parentSignals`
+   * (see the toolbox execute call site), matching `delegatedAuthority`.
+   */
+  readonly parentSignals: RunOptions['parentSignals'];
   readonly durableOperationKeys: boolean;
   readonly defaultToolChoice: ToolChoice | undefined;
   /**

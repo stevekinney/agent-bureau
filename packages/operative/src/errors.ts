@@ -5,8 +5,22 @@ import { isToolCallParseError } from './providers/errors.ts';
 import type { SelectionPlan } from './providers/selection.ts';
 import type { RunResult } from './types';
 
-export type AgentRunErrorKind =
-  'load' | 'contract' | 'generate' | 'tool' | 'abort' | 'output' | 'policy';
+/**
+ * The closed `AgentRunErrorKind` set (COR-843) as a runtime list, so a schema
+ * that stores a kind (COR-1354's fresh-attempt `FailureRecord`) validates
+ * against the same members the type names instead of restating them.
+ */
+export const AGENT_RUN_ERROR_KINDS = [
+  'load',
+  'contract',
+  'generate',
+  'tool',
+  'abort',
+  'output',
+  'policy',
+] as const;
+
+export type AgentRunErrorKind = (typeof AGENT_RUN_ERROR_KINDS)[number];
 
 export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
 

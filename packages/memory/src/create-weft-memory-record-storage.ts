@@ -18,11 +18,14 @@ import {
   scopePrefix,
   validateMemoryKeyPrefix,
 } from './create-weft-memory-record-storage-helpers';
-import type {
-  MemoryRecord,
-  MemoryRecordScope,
-  MemoryRecordStorage,
-  MemoryVectorSearchResult,
+import {
+  type MemoryRecord,
+  type MemoryRecordReference,
+  type MemoryRecordScope,
+  type MemoryRecordStorage,
+  type MemoryRecordUpdateOptions,
+  MemoryRecordVersionConflictError,
+  type MemoryVectorSearchResult,
 } from './memory-record-storage';
 
 /**
@@ -329,15 +332,20 @@ export function createWeftMemoryRecordStorage(
       id: string,
       scope: MemoryRecordScope,
       patch: { content?: string; vector?: Float32Array; metadata?: Record<string, unknown> },
+      updateOptions: MemoryRecordUpdateOptions = {},
     ): Promise<MemoryRecord | undefined> {
-      // Read-modify-write without compare-and-swap. `version` is a monotonic
-      // change marker, NOT a concurrency guard: two interleaved updates to the
-      // same id can both read version N and write N+1, losing one write. That is
-      // acceptable for the single-process local backend; a multi-writer backend
-      // would need conditional writes keyed on the prior version.
+      // Without `expectedVersion` this is a read-modify-write without
+      // compare-and-swap: two interleaved updates to the same id can both read
+      // version N and write N+1, losing one write. With it, the batch commits
+      // only if the stored bytes are still exactly the ones read here.
       const key = recordKey(keyPrefix, scope, id);
-      const existing = await readActive(key);
-      if (!existing) return undefined;
+      const bytes = await storage.get(key);
+      const existing = bytes === null ? undefined : decodeRecord(bytes);
+      if (existing?.status !== 'active') return undefined;
+      const { expectedVersion } = updateOptions;
+      if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+        throw new MemoryRecordVersionConflictError([id]);
+      }
 
       const updated: MemoryRecord = {
         ...existing,
@@ -365,7 +373,10 @@ export function createWeftMemoryRecordStorage(
           value: textEncoder.encode(updated.id),
         });
       }
-      await storageConditionalBatch(storage, [], mutations);
+      const conditions = expectedVersion === undefined ? [] : [{ key, expectedValue: bytes }];
+      if (!(await storageConditionalBatch(storage, conditions, mutations))) {
+        throw new MemoryRecordVersionConflictError([id]);
+      }
       return updated;
     },
 
@@ -387,6 +398,44 @@ export function createWeftMemoryRecordStorage(
         await storage.delete(key);
       }
       return true;
+    },
+
+    async deleteMany(references: readonly MemoryRecordReference[]): Promise<number> {
+      const conditions: Parameters<typeof storageConditionalBatch>[1] = [];
+      const conditioned: string[] = [];
+      const mutations: Parameters<typeof storageConditionalBatch>[2] = [];
+      let removed = 0;
+      for (const reference of references) {
+        const key = recordKey(keyPrefix, reference.scope, reference.id);
+        const bytes = await storage.get(key);
+        const existing = bytes === null ? undefined : decodeRecord(bytes);
+        if (existing?.status !== 'active') continue;
+        if (reference.expectedVersion !== undefined) {
+          if (existing.version !== reference.expectedVersion) {
+            throw new MemoryRecordVersionConflictError([reference.id]);
+          }
+          conditions.push({ key, expectedValue: bytes });
+          conditioned.push(reference.id);
+        }
+        removed++;
+        mutations.push({ type: 'delete', key });
+        const dedupeKey = recordDedupeKey(existing);
+        if (dedupeKey !== undefined) {
+          mutations.push({
+            type: 'delete',
+            key: dedupeIndexKey(keyPrefix, reference.scope, dedupeKey),
+          });
+        }
+      }
+      // One batch: every record (and its dedupe index entry) goes, or none does,
+      // and none goes if a version-conditioned record changed after it was read.
+      if (
+        mutations.length > 0 &&
+        !(await storageConditionalBatch(storage, conditions, mutations))
+      ) {
+        throw new MemoryRecordVersionConflictError(conditioned);
+      }
+      return removed;
     },
 
     async deleteNamespace(scope: MemoryRecordScope): Promise<number> {

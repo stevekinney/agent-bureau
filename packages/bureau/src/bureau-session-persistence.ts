@@ -232,11 +232,18 @@ export function createSessionPersistence(dependencies: SessionPersistenceDepende
     });
   }
 
+  const inFlight = new Set<Promise<void>>();
+
+  /**
+   * Starts a terminal session save without holding up the run's terminal
+   * event. The save is tracked so `drain()` can land it before shutdown stops
+   * the producers its outbox entry is replayed through.
+   */
   function persistSessionUpdate(
     saveSessionUpdate: () => Promise<void>,
     context: { runId: string; sessionId: string; status: 'completed' | 'error' | 'aborted' },
   ): void {
-    void (async () => {
+    const persisting = (async () => {
       let lastError: unknown;
       for (let attempt = 1; attempt <= SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS; attempt += 1) {
         try {
@@ -260,7 +267,20 @@ export function createSessionPersistence(dependencies: SessionPersistenceDepende
         message: `[bureau] Failed to persist ${context.status} session state for run ${context.runId} in session ${context.sessionId}: ${serializeError(lastError)}`,
       });
     })();
+    inFlight.add(persisting);
+    void persisting.finally(() => inFlight.delete(persisting));
   }
 
-  return { loadConversation, saveSession, persistSessionUpdate };
+  /**
+   * Resolves once every terminal session save already started has settled.
+   * Only saves are awaited, never the runs that start them, so a run that
+   * ignores its abort cannot hold shutdown open.
+   */
+  async function drain(): Promise<void> {
+    while (inFlight.size > 0) {
+      await Promise.allSettled(inFlight);
+    }
+  }
+
+  return { loadConversation, saveSession, persistSessionUpdate, drain };
 }

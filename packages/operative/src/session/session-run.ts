@@ -22,6 +22,7 @@ import type {
 } from '../liveness';
 import { LIVENESS_POLICY_VERSION } from '../liveness';
 import type { RunResult } from '../types';
+import { createRunConversationBoundary } from './run-conversation-boundary';
 import {
   appendConversationMessages,
   finishReasonToStatus,
@@ -290,7 +291,16 @@ export function createSessionRun(
             }
             const errorRef: RunRef =
               currentRef.status === 'running'
-                ? { ...currentRef, status: 'error', outcome: { finishReason: 'error' } }
+                ? {
+                    ...currentRef,
+                    status: 'error',
+                    outcome: { finishReason: 'error' },
+                    conversationBoundary: createRunConversationBoundary(
+                      freshSession.runs,
+                      currentRef.sequence,
+                      seededConversation.current,
+                    ),
+                  }
                 : currentRef;
             return {
               ...freshSession,
@@ -343,6 +353,11 @@ export function createSessionRun(
               status: finishReasonToStatus(innerResult.finishReason),
               userMessageId,
               outcome: runOutcomeFromResult(innerResult),
+              conversationBoundary: createRunConversationBoundary(
+                freshSession.runs,
+                currentRef.sequence,
+                innerResult.conversation.current,
+              ),
             };
         return {
           ...freshSession,

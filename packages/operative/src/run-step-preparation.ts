@@ -184,6 +184,14 @@ export async function prepareStep(
     // Determine compaction threshold (new field or legacy maxTokens)
     const compactionThreshold =
       contextManagement.compactionThreshold ?? contextManagement.maxTokens;
+    const background = contextManagement.background;
+    if (background && background.scheduler.conversation !== conversation) {
+      const error = new TypeError(
+        'contextManagement.background.scheduler compacts a different conversation than this run',
+      );
+      emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+      return { kind: 'error', error, errorKind: 'policy' };
+    }
     if (tokensBefore > compactionThreshold) {
       // Run beforeCompaction hook if registered
       let shouldCompact = true;
@@ -221,6 +229,10 @@ export async function prepareStep(
       }
 
       if (shouldCompact) {
+        // COR-808: the synchronous compaction supersedes queued or running
+        // background work. Waiting for an aborted background summary to
+        // return means this summary never overlaps a background one.
+        await background?.scheduler.cancel();
         try {
           const messagesBefore = conversation.getMessages().length;
           await contextManagement.onCompact(conversation, {
@@ -255,6 +267,12 @@ export async function prepareStep(
           return { kind: 'error', error, errorKind: 'policy' };
         }
       }
+    } else if (background && tokensBefore > background.threshold) {
+      // COR-808: prepare compaction off the critical path. Deliberately not
+      // awaited — this step generates against whatever history is current,
+      // and a candidate publishes only by compare-and-swap. The request
+      // never rejects, and the run's signal withdraws it on cancellation.
+      void background.scheduler.request({ signal: deps.signal });
     }
   }
 

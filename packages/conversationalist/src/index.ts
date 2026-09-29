@@ -10,12 +10,33 @@ export { openAIConversationAdapter } from './adapters/openai';
 export { appendOpenAIMessages, fromOpenAIMessages } from './adapters/openai/inbound';
 export { toOpenAIMessages, toOpenAIMessagesGrouped } from './adapters/openai/outbound';
 export type * from './adapters/openai/types';
+export { createIdleCompactionSchedule, createTimerCompactionSchedule } from './compaction-schedule';
+export type {
+  CompactionScheduleAdapter,
+  CompactionScheduleCancel,
+  IdleCallbackHost,
+  IdleCompactionScheduleOptions,
+  TimerCompactionScheduleOptions,
+} from './compaction-schedule';
+export { DEFAULT_MAX_STALE_RETRIES, createCompactionScheduler } from './compaction-scheduler';
+export type {
+  CompactionCancelReason,
+  CompactionRequestOptions,
+  CompactionScheduler,
+  CompactionSchedulerCounts,
+  CompactionSchedulerOptions,
+  CompactionSchedulerOutcome,
+  CompactionSchedulerPhase,
+  CompactionSchedulerState,
+} from './compaction-scheduler';
 export { compactConversation } from './compaction/compact';
 export { stripToolResultDetails } from './compaction/stripping';
 export type {
+  CompactionAttempt,
   CompactionOptions,
   CompactionPreservePolicy,
   CompactionResult,
+  ConversationCompactionResult,
   Summarizer,
 } from './compaction/types';
 export {

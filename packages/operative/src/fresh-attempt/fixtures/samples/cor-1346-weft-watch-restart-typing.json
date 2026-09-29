@@ -1,0 +1,81 @@
+{
+  "artifactId": "handoff:cor-1346",
+  "revision": 1,
+  "objective": "Fix the Weft watch restart stream typing that breaks the public mirror typecheck.",
+  "successRevision": "COR-1346#acceptance-2026-09-28",
+  "constraints": [
+    "Do not loosen types, disable assertions, raise timeouts, or change restart and cleanup behavior.",
+    "The public mirror verification must pass after the change."
+  ],
+  "completedWork": [
+    "Committed 4413c854, which reads stdout through watchProcess.stdout.getReader() instead of async iteration.",
+    "Opened pull request 5 with that commit."
+  ],
+  "validatedFacts": [
+    "Under the target's TypeScript 5.8.3 and @types/bun 1.3.13 the stdout ReadableStream has no Symbol.asyncIterator.",
+    "The clean target release branch without the emitted test passes bun run typecheck.",
+    "After the typing fix the real watch test passed 1 of 1."
+  ],
+  "evidenceReferences": [
+    {
+      "kind": "linear-issue",
+      "id": "COR-1346",
+      "uri": "linear:COR-1346"
+    },
+    {
+      "kind": "pull-request",
+      "id": "5"
+    },
+    {
+      "kind": "commit",
+      "id": "41257994",
+      "digest": "412579946b61852e1d76f63449986cd1b3caa634",
+      "uri": "git:41257994"
+    },
+    {
+      "kind": "commit",
+      "id": "4413c854",
+      "digest": "4413c854910b9ad63c314b207dc9780545101b6b",
+      "uri": "git:4413c854"
+    }
+  ],
+  "knownFailures": [
+    {
+      "kind": "tool",
+      "summary": "The first mirror sync from 41257994 exited 1 in target typecheck with TS2504 in bun-watch-restart.test.ts.",
+      "occurredAt": "2026-09-28T15:53:15.000Z"
+    },
+    {
+      "kind": "output",
+      "summary": "Review found the background stdout reader task unawaited, so a read rejected during teardown can surface as an unhandled rejection.",
+      "occurredAt": "2026-09-28T16:28:12.000Z"
+    }
+  ],
+  "unresolvedQuestions": [],
+  "nextRequestedAction": "Await the Weft watch test stdout cleanup and rerun mirror verification.",
+  "allowedCarryForwardContext": ["agent-instructions", "toolbox"],
+  "producer": {
+    "agentName": "implementer",
+    "runId": "cor-1346-attempt-1:0",
+    "sessionId": "cor-1346-attempt-1"
+  },
+  "sourceRunOrAttempt": {
+    "sessionId": "cor-1346-attempt-1",
+    "runId": "cor-1346-attempt-1:0",
+    "sequence": 0
+  },
+  "timestamp": "2026-09-28T16:31:51.000Z",
+  "provenance": {
+    "producedAt": "2026-09-28T16:31:51.000Z",
+    "producingActor": "workflow:linear-implementation"
+  },
+  "lineage": {
+    "parentConversationId": "conversation:cor-1346-attempt-1",
+    "sourceRevision": 31
+  },
+  "schemaVersion": 1,
+  "digest": {
+    "algorithm": "sha-256",
+    "value": "6c326260f23b5482a37456a493e24019fe5d7b9537ff3c6c81683709199fb2fe"
+  }
+}

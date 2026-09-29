@@ -9,10 +9,15 @@ import {
   TypedEventTarget,
 } from '@lostgradient/lifecycle';
 import {
+  createGovernedMemory,
   createInMemoryMemoryRecordStorage,
-  createMemory,
+  createMemoryAuthority,
+  createMemoryGovernanceLedger,
+  createMemoryGovernancePolicy,
   createMockEmbedder,
-  type Memory,
+  type GovernedMemory,
+  type GovernedMemoryRecord,
+  type MemoryAuthority,
 } from '@lostgradient/memory';
 import {
   AbortAgentRunError,
@@ -122,6 +127,7 @@ import { createModelCatalogService } from './model-catalog-refresh';
 import {
   createHumanWaitContext,
   createMemoryPersistHook,
+  createRunMemoryAuthority,
   createRuntimeComposition,
   createWakeupContext,
 } from './runtime-composition';
@@ -5628,27 +5634,60 @@ describe('createBureau scheduler-origin crash semantics (#25)', () => {
 });
 
 describe('createBureau effectful hook idempotency (#27)', () => {
-  // List only the experiential memories in a namespace (avoids the lint against
-  // accessing a member directly off an await expression at each call site).
-  // Pages the whole namespace — memory.list's 100-record default page would
-  // under-count a long namespace (the same trap the production dedup guard pages
-  // around), which the >1-page pagination test below depends on.
-  async function listExperiential(memory: Memory, namespace: string) {
-    const all: Awaited<ReturnType<Memory['list']>> = [];
+  // A governed memory plus an inspecting authority that reads back every
+  // record the Bureau hooks wrote, whatever its state.
+  function governedMemory() {
+    const memory = createGovernedMemory({
+      storage: createInMemoryMemoryRecordStorage(),
+      ledger: createMemoryGovernanceLedger(new MemoryStorage()),
+      embedder: createMockEmbedder(128),
+      policy: createMemoryGovernancePolicy({ revision: 'governance:idempotency' }),
+    });
+    const inspector = createMemoryAuthority({
+      principal: { kind: 'governance', id: 'governance:test' },
+      tenantId: 'bureau',
+      ownerId: 'bureau',
+      purpose: 'test-inspection',
+      capabilities: ['memory:list', 'memory:inspect', 'memory:write'],
+      policyRevision: 'bureau:1',
+      projection: 'audit',
+    });
+    return { memory, inspector };
+  }
+
+  // Pages the whole collection so a long collection is never under-counted by
+  // list's 100-record default page.
+  async function listConversation(
+    memory: GovernedMemory,
+    inspector: MemoryAuthority,
+    collection: string,
+  ) {
+    const all: GovernedMemoryRecord[] = [];
     const pageSize = 200;
     for (let offset = 0; ; offset += pageSize) {
-      const page = await memory.list({ namespace, limit: pageSize, offset });
+      const page = await memory.list(inspector, { collection, limit: pageSize, offset });
       all.push(...page);
       if (page.length < pageSize) break;
     }
-    return all.filter((entry) => entry.metadata['source'] === 'experiential');
+    return all.filter((record) => record.source === 'conversation');
   }
 
-  it('persists an experiential memory tagged with a deterministic (runId:step) dedupeKey + effectful replay', async () => {
-    const memory = createMemory({
-      embedder: createMockEmbedder(128),
-      storage: createInMemoryMemoryRecordStorage(),
-    });
+  const runAuthority = (runId: string) =>
+    createRunMemoryAuthority(
+      {
+        authority: {
+          principalId: `run:${runId}`,
+          tenantId: 'bureau',
+          ownerId: 'bureau',
+          capabilities: ['tools:execute'],
+          authorizationRevision: 'bureau:1',
+        },
+      },
+      { runId },
+    );
+
+  it('persists conversation memory tagged with a deterministic (runId:step) dedupeKey + effectful replay', async () => {
+    const { memory, inspector } = governedMemory();
     await memory.init();
 
     const sessionId = 'memory-idempotency-session';
@@ -5664,12 +5703,13 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     try {
       const run = await bureau.createRun({ message: 'remember this', sessionId });
       await waitForRunCompletion(bureau, run.id);
-      const persisted = await listExperiential(memory, sessionId);
+      const persisted = await listConversation(memory, inspector, sessionId);
       expect(persisted.length).toBe(1);
       // The dedupeKey is the durable operation's identity — runId:step — NOT a
       // content hash, so a divergent regenerate on replay still maps to one record.
       expect(persisted[0]!.metadata['dedupeKey']).toBe(`${run.id}:0`);
       expect(persisted[0]!.metadata['replay']).toBe('effectful');
+      expect(persisted[0]!.governance?.attribution.principal).toEqual({ kind: 'run', id: run.id });
     } finally {
       bureau.dispose();
     }
@@ -5684,22 +5724,19 @@ describe('createBureau effectful hook idempotency (#27)', () => {
     // deterministic way to exercise the re-fire without racing a real mid-memo
     // crash. (Skip-on-replay would instead DROP the write; this proves we dedup,
     // not drop, AND that a divergent regenerate does not slip a duplicate through.)
-    const memory = createMemory({
-      embedder: createMockEmbedder(128),
-      storage: createInMemoryMemoryRecordStorage(),
-    });
+    const { memory, inspector } = governedMemory();
     await memory.init();
 
-    const namespace = 'hook-idempotency-ns';
+    const collection = 'hook-idempotency-collection';
     const runId = 'run-fixed-id';
-    const hook = createMemoryPersistHook(memory, namespace, runId);
+    const hook = createMemoryPersistHook(memory, runAuthority(runId), collection, runId);
     for (let i = 0; i < 125; i++) {
-      await memory.remember(`seed memory ${i} with unique content ${i * 7919}`, {
-        namespace,
-        source: 'manual',
+      await memory.write(inspector, `seed memory ${i} with unique content ${i * 7919}`, {
+        collection,
+        source: 'derived',
       });
     }
-    expect(await memory.count(namespace)).toBe(125);
+    expect(await memory.list(inspector, { collection, limit: 500 })).toHaveLength(125);
 
     // A minimal final StepResult for step 0; only final/content/step are read.
     const stepResult = (content: string) => ({
@@ -5711,35 +5748,29 @@ describe('createBureau effectful hook idempotency (#27)', () => {
       final: true,
     });
 
-    // First fire (pre-crash execution): persists one experiential memory.
+    // First fire (pre-crash execution): persists one conversation memory.
     await hook(stepResult('original content'));
-    const afterFirst = await listExperiential(memory, namespace);
+    const afterFirst = await listConversation(memory, inspector, collection);
     expect(afterFirst.length).toBe(1);
     expect(afterFirst[0]!.metadata['dedupeKey']).toBe(`${runId}:0`);
 
     // Re-fire (recovery replay) for the SAME (runId, step) but DIVERGENT content.
-    // The dedupeKey guard skips the write — count stays 1, not 2.
+    // The dedupeKey guard skips the write — one record, not two.
     await hook(stepResult('different regenerated content'));
-    const afterRefire = await listExperiential(memory, namespace);
+    const afterRefire = await listConversation(memory, inspector, collection);
     expect(afterRefire.length).toBe(1);
-    expect(await memory.count(namespace)).toBe(126);
+    expect(await memory.list(inspector, { collection, limit: 500 })).toHaveLength(126);
     // The original write survived (not overwritten/dropped) — at-least-once is safe.
     expect(afterRefire[0]!.content).toBe('original content');
   });
 
   it('persists distinct memories for different (runId, step) pairs', async () => {
     // Idempotency must not OVER-dedup: distinct durable operations (a different run
-    // or a different step) are different memories. Use distinct content per write
-    // so the memory store's own near-identical vector dedup does not merge them —
-    // the point here is that the per-(runId,step) key guard does not wrongly skip a
-    // genuinely-different operation.
-    const memory = createMemory({
-      embedder: createMockEmbedder(128),
-      storage: createInMemoryMemoryRecordStorage(),
-    });
+    // or a different step) are different memories.
+    const { memory, inspector } = governedMemory();
     await memory.init();
 
-    const namespace = 'hook-distinct-ns';
+    const collection = 'hook-distinct-collection';
     const stepResult = (step: number, content: string) => ({
       step,
       conversation: new Conversation(),
@@ -5749,14 +5780,20 @@ describe('createBureau effectful hook idempotency (#27)', () => {
       final: true,
     });
 
-    await createMemoryPersistHook(memory, namespace, 'run-A')(stepResult(0, 'fact from run A'));
     await createMemoryPersistHook(
       memory,
-      namespace,
+      runAuthority('run-A'),
+      collection,
+      'run-A',
+    )(stepResult(0, 'fact from run A'));
+    await createMemoryPersistHook(
+      memory,
+      runAuthority('run-B'),
+      collection,
       'run-B',
     )(stepResult(0, 'a wholly separate fact from run B'));
 
-    const persisted = await listExperiential(memory, namespace);
+    const persisted = await listConversation(memory, inspector, collection);
     const keys = persisted
       .map((e) => e.metadata['dedupeKey'])
       .toSorted((a, b) => String(a).localeCompare(String(b)));
@@ -12646,6 +12683,62 @@ describe('Bureau.shutdown() (AB-207)', () => {
     }
   });
 
+  it("lands a run's terminal session save when dispose() follows its run.completed action immediately", async () => {
+    // The README's Quick Start sequence: wait for the terminal action, then
+    // dispose at once. The terminal session save starts from the
+    // `run.completed` listener, so shutdown has to wait for it — otherwise
+    // the save commits after the durable event producer stops, and its
+    // `session.saved` outbox entry is left pending with a diagnostic.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-dispose-after-completion-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const diagnostics: string[] = [];
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate(),
+        storage: { type: 'sqlite', path: databasePath },
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      const run = await bureau.createRun({ message: 'Dispose the moment this finishes' });
+      await new Promise<void>((resolve) => {
+        const subscription = bureau.subscribe('action', ({ action }) => {
+          if (action.runId === run.id && action.type === 'run.completed') {
+            subscription.unsubscribe();
+            resolve();
+          }
+        });
+      });
+      await bureau.dispose();
+
+      expect(diagnostics.filter((message) => message.includes('was not durably recorded'))).toEqual(
+        [],
+      );
+
+      const verifyStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const verifySessionStore = createSessionStore(
+        textValueStore(verifyStorage, { disposeUnderlyingStorage: false }),
+      );
+      const session = await verifySessionStore.load(run.sessionId);
+      // No stop condition, as in the README, so the run steps to its limit,
+      // which Bureau records as an `error` status.
+      expect(session?.metadata).toMatchObject({
+        lastRunId: run.id,
+        lastRunStatus: 'error',
+        lastFinishReason: 'maximum-steps',
+      });
+      expect(await verifySessionStore.outbox.pending()).toEqual([]);
+      verifyStorage[Symbol.dispose]();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('reports a webhook-notifier owner, awaited to completion, for a bureau configured with a webhook target', async () => {
     const bureau = await createBureau({
       agents: {},
@@ -12798,6 +12891,58 @@ describe('Bureau.shutdown() (AB-207)', () => {
       () => bureau.getRun(run.id)?.status === 'completed',
       'drained run never reached its own natural terminal result',
     );
+  });
+
+  it("policy: 'drain' lands the drained run's terminal session save before closing SQLite storage", async () => {
+    // The drained run settles while shutdown is under way, so its terminal
+    // session save starts mid-shutdown and has to land before storage closes.
+    const databasePath = join(
+      tmpdir(),
+      `bureau-drain-terminal-save-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const diagnostics: string[] = [];
+    let releaseGenerate!: () => void;
+    const generateGate = new Promise<void>((resolve) => {
+      releaseGenerate = resolve;
+    });
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: async () => {
+          await generateGate;
+          return { content: 'Drained to completion', toolCalls: [] };
+        },
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        stopWhen: stopWhen.noToolCalls(),
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+      });
+
+      const run = await bureau.createRun({ message: 'Save me while draining' });
+      await waitForCondition(
+        () => bureau.getRun(run.id)?.status === 'running',
+        'run never reached running before shutdown() was called',
+      );
+      const shutdownPromise = bureau.shutdown({ policy: 'drain' });
+      releaseGenerate();
+      await shutdownPromise;
+
+      expect(diagnostics).toEqual([]);
+
+      const verifyStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+      const verifySessionStore = createSessionStore(
+        textValueStore(verifyStorage, { disposeUnderlyingStorage: false }),
+      );
+      const session = await verifySessionStore.load(run.sessionId);
+      expect(session?.metadata).toMatchObject({ lastRunId: run.id, lastRunStatus: 'completed' });
+      expect(await verifySessionStore.outbox.pending()).toEqual([]);
+      verifyStorage[Symbol.dispose]();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
   });
 
   it('shutdown({ timeoutMilliseconds }) resolves within a bounded margin of N, reporting a still-unresolved owner "unresolved" and every other owner its real outcome — the underlying drain keeps running rather than being abandoned', async () => {
