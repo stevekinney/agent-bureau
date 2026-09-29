@@ -1,5 +1,14 @@
 # @lostgradient/operative
 
+## 0.12.2
+
+### Patch Changes
+
+- ad47b46: Keep optional provider SDK integrations on explicit adapter subpaths and the Armorer root safe for browser consumers. Publish Operative with the resulting sibling versions and its `@lostgradient/weft@0.27.1` requirement.
+- Updated dependencies [ad47b46]
+  - armorer@2.4.2
+  - conversationalist@1.3.1
+
 ## 0.12.1
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1
+
+### Patch Changes
+
+- ad47b46: Keep optional provider SDK integrations on explicit adapter subpaths and the Armorer root safe for browser consumers. Publish Operative with the resulting sibling versions and its `@lostgradient/weft@0.27.1` requirement.
+
 ## 1.3.0
 
 ### Minor Changes
