@@ -31,6 +31,48 @@ type PackageManifest = {
   private?: boolean;
 };
 
+type VersionedManifest = {
+  name: string;
+  version: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function findWorkspaceLockVersionErrors(
+  manifests: ReadonlyMap<string, VersionedManifest>,
+  lockfile: unknown,
+): string[] {
+  if (!isRecord(lockfile) || !isRecord(lockfile['workspaces'])) {
+    return ['bun.lock has no workspace records'];
+  }
+
+  const workspaces = lockfile['workspaces'];
+  const errors: string[] = [];
+  for (const [path, manifest] of manifests) {
+    const locked = workspaces[path];
+    if (!isRecord(locked)) {
+      errors.push(`bun.lock is missing ${path}`);
+      continue;
+    }
+    if (locked['name'] !== manifest.name) {
+      errors.push(
+        `bun.lock ${path} name ${String(locked['name'])} does not match package.json ${manifest.name}`,
+      );
+    }
+    if (locked['version'] !== manifest.version) {
+      errors.push(
+        `bun.lock ${path} version ${String(locked['version'])} does not match package.json ${manifest.version}`,
+      );
+    }
+  }
+  for (const path of Object.keys(workspaces)) {
+    if (path !== '' && !manifests.has(path)) errors.push(`bun.lock has orphaned workspace ${path}`);
+  }
+  return errors;
+}
+
 export function findChangesetTargetErrors(
   changesets: readonly PendingChangeset[],
   policy: ChangesetPolicy,
@@ -118,16 +160,43 @@ async function readChangesetPolicy(repositoryRoot: string): Promise<ChangesetPol
   };
 }
 
+async function readWorkspaceManifests(
+  repositoryRoot: string,
+): Promise<Map<string, VersionedManifest>> {
+  const manifests = new Map<string, VersionedManifest>();
+  const packageManifestGlob = new Bun.Glob('packages/*/package.json');
+  for await (const path of packageManifestGlob.scan({ cwd: repositoryRoot, onlyFiles: true })) {
+    const manifest: unknown = await Bun.file(resolve(repositoryRoot, path)).json();
+    if (
+      !isRecord(manifest) ||
+      typeof manifest['name'] !== 'string' ||
+      typeof manifest['version'] !== 'string'
+    ) {
+      throw new Error(`${path} needs a package name and version`);
+    }
+    manifests.set(path.replace(/\/package\.json$/, ''), {
+      name: manifest['name'],
+      version: manifest['version'],
+    });
+  }
+  return manifests;
+}
+
 async function checkChangesets(repositoryRoot: string): Promise<number> {
-  const [changesets, policy] = await Promise.all([
+  const [changesets, policy, manifests, lockfileText] = await Promise.all([
     readPendingChangesets(repositoryRoot),
     readChangesetPolicy(repositoryRoot),
+    readWorkspaceManifests(repositoryRoot),
+    Bun.file(resolve(repositoryRoot, 'bun.lock')).text(),
   ]);
-  const errors = findChangesetTargetErrors(changesets, policy);
+  const errors = [
+    ...findChangesetTargetErrors(changesets, policy),
+    ...findWorkspaceLockVersionErrors(manifests, Bun.JSONC.parse(lockfileText)),
+  ];
 
   if (errors.length > 0) {
     throw new Error(
-      `Changesets must target versioned, publishable workspace packages:\n${errors
+      `Release metadata must match versioned, publishable workspace packages:\n${errors
         .map((error) => `- ${error}`)
         .join('\n')}`,
     );
