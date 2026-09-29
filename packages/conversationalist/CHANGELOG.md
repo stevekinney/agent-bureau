@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.0
+
+### Major Changes
+
+- d53e1db: Restore snapshots written by Conversationalist 1.3.1 while retaining the current flat version-2 format and selected-path reads.
+
 ## 1.3.1
 
 ### Patch Changes
