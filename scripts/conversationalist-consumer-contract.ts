@@ -24,14 +24,15 @@ export const PUBLIC_SUBPATHS = [
   './schemas',
   './adapters/openai',
   './adapters/anthropic',
+  './adapters/anthropic/sdk',
   './adapters/gemini',
   './redaction',
   './versioning',
   './sort',
   './composition',
 ] as const;
-export const SERVER_ONLY_SUBPATHS = ['./markdown', './export'] as const;
-export const NODE_RANGE = '^20.19.0 || ^22.12.0 || >=24';
+export const SERVER_ONLY_SUBPATHS = ['./markdown', './export', './adapters/anthropic/sdk'] as const;
+export const NODE_RANGE = '>=22';
 export const BROWSER_SUBPATHS = PUBLIC_SUBPATHS.filter(
   (subpath) => !SERVER_ONLY_SUBPATHS.some((serverOnly) => serverOnly === subpath),
 );

@@ -25,7 +25,14 @@ history = appendToolResult(history, {
   callId: 'external-call',
   outcome: 'action_required',
   content: { pending: true },
-  action: { type: 'approval', message: 'Approve?' },
+  action: {
+    type: 'approval',
+    message: 'Approve?',
+    risk: 'low',
+    operation: { kind: 'other' },
+    policyVersion: 'consumer-v1',
+    idempotencyKey: 'consumer-approval',
+  },
 });
 
 assert.equal(history.ids.length, 3, 'expected one user, one tool-call, one tool-result message');

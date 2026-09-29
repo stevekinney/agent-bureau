@@ -329,6 +329,12 @@
         "bun": true,
         "ssr": true
       },
+      "./adapters/anthropic/sdk": {
+        "browser": false,
+        "node": true,
+        "bun": true,
+        "ssr": true
+      },
       "./adapters/gemini": {
         "browser": true,
         "node": true,
