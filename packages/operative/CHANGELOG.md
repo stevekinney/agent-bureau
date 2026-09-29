@@ -1,5 +1,16 @@
 # @lostgradient/operative
 
+## 0.13.0
+
+### Minor Changes
+
+- d294192: Publish the idle and timer compaction scheduler APIs and revisioned compaction outcomes from Conversationalist. Publish Operative's child signaling, delegation grants, fresh-attempt handoff artifacts, and run conversation boundary APIs from the current Corvidae source.
+
+### Patch Changes
+
+- Updated dependencies [d294192]
+  - conversationalist@2.1.0
+
 ## 0.12.3
 
 ### Patch Changes
