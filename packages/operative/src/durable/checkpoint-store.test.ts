@@ -75,7 +75,7 @@ describe('createCheckpointStore', () => {
       // a new envelope gets its own creation time and integrity digest.
       const rehydrated = Conversation.from(loaded!);
       const restored = rehydrated.snapshot();
-      expect(restored.root).toEqual(original.root);
+      expect(restored.nodes).toEqual(original.nodes);
       expect(restored.currentPath).toEqual(original.currentPath);
       expect(restored.controllerRevision).toBe(original.controllerRevision);
       expect(restored.lineage).toEqual(original.lineage);

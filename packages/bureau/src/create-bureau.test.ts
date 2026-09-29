@@ -875,7 +875,7 @@ describe('createBureau', () => {
       const transcript = detail?.transcript;
 
       expect(transcript).toBeDefined();
-      expect(transcript).not.toHaveProperty('root');
+      expect(transcript).not.toHaveProperty('nodes');
       const contents = (transcript?.ids ?? []).map((id) => transcript?.messages[id]?.content);
       expect(contents[0]).toBe('Hello');
       expect(contents.at(-1)).toBe('All done.');

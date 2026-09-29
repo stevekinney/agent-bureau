@@ -19,22 +19,31 @@ export function getHistoryNodePath(node: HistoryNode): number[] {
   return path;
 }
 
-/** Rebuild live history nodes from a decoded snapshot; conversations are already validated and frozen. */
+/**
+ * Rebuild live history nodes from a decoded snapshot; conversations are
+ * already validated and frozen. Iterative, because history is one level per
+ * commit and a long conversation's tree is too deep to recurse through.
+ */
 export function buildHistoryChildren(
   decoded: readonly DecodedSnapshotNode[],
   parent: HistoryNode,
 ): HistoryNode[] {
-  return decoded.map((child) => {
-    const node: HistoryNode = {
-      id: child.id,
-      revision: child.revision,
-      conversation: child.conversation,
-      parent,
-      children: [],
-    };
-    node.children = buildHistoryChildren(child.children, node);
-    return node;
-  });
+  const pending: Array<[readonly DecodedSnapshotNode[], HistoryNode]> = [[decoded, parent]];
+  for (let entry = pending.pop(); entry !== undefined; entry = pending.pop()) {
+    const [children, owner] = entry;
+    owner.children = children.map((child) => {
+      const node: HistoryNode = {
+        id: child.id,
+        revision: child.revision,
+        conversation: child.conversation,
+        parent: owner,
+        children: [],
+      };
+      pending.push([child.children, node]);
+      return node;
+    });
+  }
+  return parent.children;
 }
 
 export function pruneHistoryToDepth(
