@@ -65,7 +65,12 @@ export function partitionMessages(
   const preserveToolPairs = options?.preserveToolPairs ?? true;
   const preservePolicy = resolvePolicy(options);
 
-  const allMessages = getMessages(conversation);
+  // Hidden messages are not model-visible, so the recency window and the
+  // summarizer never see them. They are not disposable either: every hidden
+  // message is kept, so nothing leaves history without being summarized.
+  const everyMessage = getMessages(conversation, { includeHidden: true });
+  const hiddenMessages = everyMessage.filter((m) => m.hidden);
+  const allMessages = everyMessage.filter((m) => !m.hidden);
 
   // Separate system messages, streaming messages, and policy-preserved
   // messages (pinned / decision / error annotations) — these are preserved
@@ -78,7 +83,7 @@ export function partitionMessages(
   const nonSystem = allMessages.filter((m) => m.role !== 'system');
 
   if (nonSystem.length <= preserveRecent) {
-    return { compactable: [], preserved: [...allMessages] };
+    return { compactable: [], preserved: [...everyMessage] };
   }
 
   // Recent N messages
@@ -94,13 +99,14 @@ export function partitionMessages(
   // Streaming / policy-preserved messages (pinned, decision, error) must
   // ALWAYS keep their tool-call/tool-result partner together, regardless of
   // `preserveToolPairs`. compactConversation rebuilds the transcript by
-  // re-appending `preserved` messages through `appendMessages`, which
-  // rejects a tool-result whose tool-call isn't already present — orphaning
-  // half of a policy-preserved pair (e.g. an error tool-result whose
-  // tool-call gets compacted away) would make compaction throw.
+  // carrying `preserved` messages over, and the rebuilt history is validated:
+  // a tool-result whose tool-call isn't present is rejected. Orphaning half
+  // of a preserved pair (e.g. an error tool-result whose tool-call gets
+  // compacted away, or a hidden call whose visible result is kept) would make
+  // compaction throw. Hidden messages ride along the same way.
   const alwaysPreserved: Message[] = expandToolPairs(
-    [...streamingMessages, ...policyPreservedMessages],
-    allMessages,
+    [...streamingMessages, ...policyPreservedMessages, ...hiddenMessages],
+    everyMessage,
   );
 
   const preservedSet = new Set([
@@ -108,8 +114,8 @@ export function partitionMessages(
     ...recentMessages.map((m) => m.id),
     ...alwaysPreserved.map((m) => m.id),
   ]);
-  const compactable = allMessages.filter((m) => !preservedSet.has(m.id));
-  const preserved = allMessages.filter((m) => preservedSet.has(m.id));
+  const compactable = everyMessage.filter((m) => !preservedSet.has(m.id));
+  const preserved = everyMessage.filter((m) => preservedSet.has(m.id));
 
   return { compactable, preserved };
 }

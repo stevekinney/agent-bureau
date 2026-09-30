@@ -48,6 +48,7 @@ import {
   // genuinely different values and must not shadow each other here.
   type CleanupAcknowledgement as RunCleanupAcknowledgement,
   type RunReport,
+  type RunResult,
   ScheduleAttemptedEvent,
   ScheduleCancelledEvent,
   ScheduleCompletedEvent,
@@ -58,6 +59,7 @@ import {
   ScheduleResumedEvent,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  type SchedulerTaskLocation,
   ScheduleSkippedEvent,
   SessionCreatedEvent,
   SessionDeletedEvent,
@@ -255,6 +257,13 @@ import { streamEventToFrame } from './websocket-frames';
 const BUREAU_AGENT_NAME = 'bureau';
 const SESSION_PERSISTENCE_MAXIMUM_ATTEMPTS = 3;
 const SESSION_PERSISTENCE_RETRY_DELAY_MILLISECONDS = 10;
+/**
+ * How long `shutdown({ policy: 'abort' })` waits for the runs it aborted to
+ * reach a terminal event before it stops waiting and tears storage down. A
+ * run that honors its `AbortSignal` settles within a few ticks; this bound
+ * exists only so a run that ignores it cannot hold shutdown open.
+ */
+export const ABORTED_RUN_TERMINAL_GRACE_MILLISECONDS = 1_000;
 const SCHEDULER_PRIORITIES = ['immediate', 'scheduled', 'background', 'ambient'] as const;
 
 /**
@@ -4547,6 +4556,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             maximumSteps: request.maximumSteps,
             systemPrompt: request.systemPrompt,
             sessionId: taskId,
+            // The task id is the run identity for the same reason it is the
+            // flow-control identity above: it survives preemption. A requeued
+            // task resumes from its last completed step (durable engine) or
+            // starts again (no engine), so a step that wrote memory can run
+            // twice, and the memory write deduplicates on `<taskId>:<step>`.
+            runId: taskId,
             requestContext: createSchedulerServiceRequestContext(taskId, agentName, taskId),
           },
           { liveStreaming: false },
@@ -4582,6 +4597,20 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       priority,
       status: 'queued',
     });
+  }
+
+  function locateSchedulerTask(taskId: string): SchedulerTaskLocation {
+    if (!runtime.scheduler) {
+      throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED', 'scheduler');
+    }
+    return runtime.scheduler.locateTask(taskId);
+  }
+
+  function awaitSchedulerTask(taskId: string): Promise<RunResult | null> {
+    if (!runtime.scheduler) {
+      throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED', 'scheduler');
+    }
+    return runtime.scheduler.awaitTask(taskId);
   }
 
   function listRuns(status?: string): RunSummary[] {
@@ -8174,6 +8203,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
 
+    // Resolves once every run in `terminals` has reached a terminal event,
+    // or once `ABORTED_RUN_TERMINAL_GRACE_MILLISECONDS` has passed, whichever
+    // comes first. The timer is cleared either way so it never outlives the
+    // wait.
+    async function awaitAbortedRunTerminals(terminals: Array<Promise<void>>): Promise<void> {
+      if (terminals.length === 0) return;
+      let graceTimer: RuntimeTimeoutHandle;
+      const grace = new Promise<void>((resolve) => {
+        graceTimer = runtimeServices.timers.setTimeout(
+          resolve,
+          ABORTED_RUN_TERMINAL_GRACE_MILLISECONDS,
+        );
+      });
+      try {
+        await Promise.race([Promise.all(terminals), grace]);
+      } finally {
+        runtimeServices.timers.clearTimeout(graceTimer);
+      }
+    }
+
     const chain = (async (): Promise<BureauShutdownReport> => {
       // Stop admission before touching runs. The canonical toolbox is the
       // owner of local execution lifecycle; await its shutdown as the
@@ -8182,6 +8231,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       for (const toolbox of runToolboxes) toolbox.closeAdmission();
 
       const runTerminals: Array<Promise<unknown>> = [];
+      // Terminal events of the runs 'abort' aborts. Awaited, under a bound,
+      // before the session-persistence drain below — see that await.
+      const abortedRunTerminals: Array<Promise<void>> = [];
       if (policy === 'abort') {
         // Deliberately NOT awaited here (or anywhere gating the
         // unconditional engine/storage teardown below): a caller-owned
@@ -8197,7 +8249,16 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // work the toolbox-shutdown await below already does, well before
         // the owner drains further down snapshot each subsystem's in-flight
         // writes.
-        for (const activeRun of activeRuns) activeRun.abort('Bureau disposed');
+        //
+        // Each run's terminal listener is registered BEFORE its `abort()`,
+        // which may dispatch `run.aborted` synchronously, and a member of
+        // `activeRuns` has not dispatched a terminal event yet (its own
+        // terminal listeners remove it first), as `whenActiveRunTerminal`
+        // requires.
+        for (const activeRun of activeRuns) {
+          abortedRunTerminals.push(whenActiveRunTerminal(activeRun));
+          activeRun.abort('Bureau disposed');
+        }
         // AB-22 review fix: `bureau.run(...)` dispatches are tracked
         // separately (see `trackCatalogRun`) since a catalog `RunnableAgent`'s
         // returned handle is not necessarily backed by a bureau-owned
@@ -8295,6 +8356,15 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // unrecorded. Its commit triggers the drain synchronously, so the
       // `outboxDrainInFlight` await then covers it. See `drain()` for why
       // this cannot wedge on a run; `timeoutMilliseconds` bounds a hung store.
+      //
+      // An aborted run's save starts later than that: its `run.aborted`
+      // listener runs only once the run has unwound, which is usually after
+      // the waits above have passed. So first give the runs 'abort' aborted
+      // a bounded chance to reach their terminal event — each one's save
+      // has started by the time it resolves, because its own terminal
+      // listener was registered first — and a run that never honors its
+      // abort only costs this bound, never a wedged shutdown.
+      await awaitAbortedRunTerminals(abortedRunTerminals);
       await sessionPersistence.drain();
       if (automaticRunOwnershipPruneTimerStarted) {
         runtimeServices.timers.clearInterval(automaticRunOwnershipPruneTimer);
@@ -9060,6 +9130,8 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     },
     createRun: createRunFromRequest,
     submitSchedulerTask,
+    locateSchedulerTask,
+    awaitSchedulerTask,
     listRuns,
     getRun,
     subscribeRunSnapshot,
@@ -9259,9 +9331,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     );
   }
 
-  // A standard `createBureau()` then `createGateway()` boot has no validator
-  // until the Gateway is constructed. Defer recovery when persisted sessions
-  // contain gateway-issued authority so those runs cannot execute unvalidated.
+  // A host that calls `createBureau()` without `requestAuthorityValidator` has
+  // no validator until it calls `bureau.setRequestAuthorityValidator()`. Defer
+  // recovery when a persisted session's in-flight run carries transport-issued
+  // authority, so that run cannot execute unvalidated.
   let hasDeferredGatewayAuthority = false;
   if (runtime.durable && runtime.sessionStore) {
     try {

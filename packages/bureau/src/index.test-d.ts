@@ -9,9 +9,12 @@
 // this file, which imports both ONLY from the barrel (`./index`), is the
 // actual tripwire: it fails to compile if either re-export regresses.
 
+import type { RunResult, SchedulerTaskLocation } from '@lostgradient/operative';
+
 import type {
   AgentRunForName,
   AssembleReproductionArtifactOptions,
+  Bureau,
   BureauFaultOperation,
   BureauFaultPlan,
   BureauFaultPlanEntry,
@@ -106,3 +109,16 @@ void historyFixture;
 void historyOptions;
 void historyRecord;
 void runRegistration;
+
+// COR-636: the scheduler task locator surface returns operative's types
+// unchanged, so each side is assignable to the other.
+type LocateReturn = ReturnType<Bureau['locateSchedulerTask']>;
+type AwaitReturn = ReturnType<Bureau['awaitSchedulerTask']>;
+declare const locateFromBureau: LocateReturn;
+declare const awaitFromBureau: AwaitReturn;
+declare const locationFromOperative: SchedulerTaskLocation;
+declare const awaitFromOperative: Promise<RunResult | null>;
+export const locateToOperative: SchedulerTaskLocation = locateFromBureau;
+export const locateFromOperative: LocateReturn = locationFromOperative;
+export const awaitToOperative: Promise<RunResult | null> = awaitFromBureau;
+export const awaitFromOperativeToBureau: AwaitReturn = awaitFromOperative;

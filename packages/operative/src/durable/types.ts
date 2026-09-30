@@ -152,6 +152,12 @@ export interface DurableRunDeps {
    */
   emitter?: EventDispatcher | undefined;
   /**
+   * Set only by `createRecoveredRunEventSurface`: this run was reattached in
+   * this process, so replay may hide its park (COR-121). Gates the human-wait
+   * park marker.
+   */
+  recoveredRun?: boolean | undefined;
+  /**
    * AB-239 — invoked twice per step (via `StepDeps.onStepToolbox`, which
    * `runStep` calls at step start and `run-workflow.ts` calls again at step
    * end): with that step's resolved toolbox at start, with the base

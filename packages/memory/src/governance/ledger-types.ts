@@ -102,7 +102,7 @@ export interface MemoryDeletionReceipt {
   readonly requestedBy: MemoryAttribution;
   readonly requestedAt: number;
   readonly boundMilliseconds: number;
-  /** True when a legal hold made every target exempt; deletion re-queues on release. */
+  /** True when a legal hold stopped the deletion, exempting every target not yet settled; it re-queues on release. */
   readonly awaitingHoldRelease: boolean;
   readonly targets: readonly MemoryDeletionTargetReceipt[];
   /** True while any target is still pending. */

@@ -347,13 +347,70 @@ export interface OpenAIRequestOptions {
 }
 
 /**
+ * Minimal shape of an OpenAI `chat.completions.create` request body.
+ *
+ * Mirrors `ChatCompletionCreateParamsBase` in the installed `openai` SDK
+ * (7.15.0): `model` and `messages` are required, everything else is optional.
+ * Shared by {@link OpenAIClient} and {@link OpenAIStreamingClient}, so
+ * `stream` is `unknown` rather than a literal. There is deliberately no
+ * `signal` field: the abort signal travels in {@link OpenAIRequestOptions}.
+ *
+ * Bodies are widened to `unknown` rather than `Record<string, unknown>`. The
+ * SDK's parameter types are `interface`s with no implicit index signature, so
+ * `Record<string, unknown>` fails the bivariant method check in both
+ * directions and makes a real `OpenAI` un-injectable without a cast.
+ * `openai-client-assignability.test-d.ts` asserts every SDK field is named.
+ */
+export interface OpenAIChatCompletionCreateRequest {
+  /** Provider-native model id. */
+  model: string;
+  /** `Array<ChatCompletionMessageParam>` in the SDK; widened so fakes need not model it. */
+  messages: unknown;
+  audio?: unknown;
+  frequency_penalty?: unknown;
+  function_call?: unknown;
+  functions?: unknown;
+  logit_bias?: unknown;
+  logprobs?: unknown;
+  max_completion_tokens?: unknown;
+  max_tokens?: unknown;
+  metadata?: unknown;
+  modalities?: unknown;
+  moderation?: unknown;
+  n?: unknown;
+  parallel_tool_calls?: unknown;
+  prediction?: unknown;
+  presence_penalty?: unknown;
+  prompt_cache_key?: unknown;
+  prompt_cache_options?: unknown;
+  prompt_cache_retention?: unknown;
+  reasoning_effort?: unknown;
+  response_format?: unknown;
+  safety_identifier?: unknown;
+  seed?: unknown;
+  service_tier?: unknown;
+  stop?: unknown;
+  store?: unknown;
+  stream?: unknown;
+  stream_options?: unknown;
+  temperature?: unknown;
+  tool_choice?: unknown;
+  tools?: unknown;
+  top_logprobs?: unknown;
+  top_p?: unknown;
+  user?: unknown;
+  verbosity?: unknown;
+  web_search_options?: unknown;
+}
+
+/**
  * Structural interface for the OpenAI SDK client surface the provider uses.
  */
 export interface OpenAIClient {
   chat: {
     completions: {
       create(
-        params: Record<string, unknown>,
+        params: OpenAIChatCompletionCreateRequest,
         options?: OpenAIRequestOptions,
       ): Promise<OpenAIChatCompletion>;
     };
@@ -368,11 +425,18 @@ export interface OpenAIChatCompletion {
     message: {
       content?: (string | null) | undefined;
       tool_calls?:
-        | Array<{
-            id: string;
-            type: 'function';
-            function: { name: string; arguments: string };
-          }>
+        | Array<
+            | {
+                id: string;
+                type: 'function';
+                function: { name: string; arguments: string };
+              }
+            | {
+                id: string;
+                type: 'custom';
+                custom: { name: string; input: string };
+              }
+          >
         | undefined;
     };
     finish_reason?: string | undefined;
@@ -808,7 +872,7 @@ export interface OpenAIChatCompletionChunk {
         | Array<{
             index: number;
             id?: string;
-            type?: 'function';
+            type?: 'function' | 'custom';
             function?: { name?: string; arguments?: string };
           }>
         | undefined;
@@ -867,9 +931,11 @@ export interface OpenAIStreamingClient {
   chat: {
     completions: {
       create(
-        params: Record<string, unknown>,
+        params: OpenAIChatCompletionCreateRequest,
         options?: OpenAIRequestOptions,
-      ): AsyncIterable<OpenAIChatCompletionChunk>;
+      ):
+        | AsyncIterable<OpenAIChatCompletionChunk>
+        | Promise<AsyncIterable<OpenAIChatCompletionChunk>>;
     };
   };
 }

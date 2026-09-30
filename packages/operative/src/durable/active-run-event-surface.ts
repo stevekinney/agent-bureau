@@ -80,6 +80,8 @@ export function createRecoveredRunEventSurface(
       : abortController.signal,
   };
   services.emitter = emitter;
+  // COR-121: enables the replay-aware human-wait park marker for this run.
+  services.recoveredRun = true;
   const cleanups: Array<(() => void) | undefined> = [];
 
   let currentStep = 0;

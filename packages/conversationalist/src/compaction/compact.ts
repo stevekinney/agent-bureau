@@ -1,10 +1,12 @@
-import { appendMessages } from '../conversation/append';
+import { assertToolReference, type ToolUseIndex } from '../conversation/tool-tracking';
 import { ensureConversationSafe } from '../conversation/validation';
 import type { ConversationEnvironment } from '../environment';
 import { resolveConversationEnvironment, simpleTokenEstimator } from '../environment';
-import type { ConversationHistory, MessageInput } from '../types';
+import type { ConversationHistory } from '../types';
 import { CURRENT_SCHEMA_VERSION } from '../types';
 import { toReadonly } from '../utilities';
+import { buildMessageFromInput, repositionMessage } from '../utilities/message';
+import { toIdRecord } from '../utilities/message-store';
 import { calculateChunkSize, chunkMessages } from './chunking';
 import { partitionMessages } from './preservation';
 import { stripToolResultDetails } from './stripping';
@@ -55,46 +57,53 @@ export async function compactConversation(
   // Merge summaries
   const summaryContent = summaries.length === 1 ? summaries[0]! : summaries.join('\n\n---\n\n');
 
-  // Rebuild conversation: start fresh, add summary system message, then preserved messages
-  let compacted: ConversationHistory = {
-    schemaVersion: CURRENT_SCHEMA_VERSION,
-    id: conversation.id,
-    title: conversation.title,
-    status: conversation.status,
-    metadata: { ...conversation.metadata },
-    ids: [],
-    messages: {},
-    createdAt: conversation.createdAt,
-    updatedAt: env.now(),
-  };
-
-  compacted = ensureConversationSafe(toReadonly(compacted));
-
-  // Add the summary as a system message
-  compacted = appendMessages(
-    compacted,
+  // The summary is minted here, not by the conversation's message plugins:
+  // `result.summaryContent` is exactly what the summarizer produced, and the
+  // stored summary must match it.
+  const summary = buildMessageFromInput(
     {
       role: 'system' as const,
       content: summaryContent,
       metadata: { compactionSummary: true as const },
     },
+    0,
+    env.now(),
     env,
   );
 
-  // Re-add preserved messages in order
-  if (preserved.length > 0) {
-    const preservedInputs: MessageInput[] = preserved.map((m) => ({
-      role: m.role,
-      content: typeof m.content === 'string' ? m.content : [...m.content],
-      metadata: { ...m.metadata },
-      hidden: m.hidden,
-      toolCall: m.toolCall ? { ...m.toolCall } : undefined,
-      toolResult: m.toolResult ? { ...m.toolResult } : undefined,
-      tokenUsage: m.tokenUsage ? { ...m.tokenUsage } : undefined,
-      cacheBoundary: m.cacheBoundary,
-    }));
-    compacted = appendMessages(compacted, ...preservedInputs, env);
+  // Kept messages are carried over as the very messages they were: same id,
+  // `createdAt`, `goalCompleted`, and content, with no second plugin pass.
+  // Only `position` changes, because the kept messages now follow the summary.
+  const carried = preserved.map((message, index) => repositionMessage(message, index + 1));
+  const kept = [summary, ...carried];
+
+  // Compaction never publishes a tool result without its call. Carrying
+  // messages over skips the check `appendMessages` used to make, so make it
+  // here: this is what rejects a `preserveToolPairs: false` window that
+  // strands a result whose call was summarized.
+  const toolUses: ToolUseIndex = new Map();
+  for (const message of carried) {
+    if (message.role === 'tool-result' && message.toolResult) {
+      assertToolReference(toolUses, message.toolResult.callId);
+    }
+    if (message.role === 'tool-call' && message.toolCall) {
+      toolUses.set(message.toolCall.id, { name: message.toolCall.name });
+    }
   }
+
+  const compacted = ensureConversationSafe(
+    toReadonly({
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      id: conversation.id,
+      title: conversation.title,
+      status: conversation.status,
+      metadata: { ...conversation.metadata },
+      ids: kept.map((message) => message.id),
+      messages: toIdRecord(kept),
+      createdAt: conversation.createdAt,
+      updatedAt: env.now(),
+    }),
+  );
 
   return {
     conversation: compacted,
