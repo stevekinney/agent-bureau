@@ -16,6 +16,7 @@ import {
   type MemoryDeletionReceipt,
   type MemoryDeletionTarget,
   type MemoryDeletionTargetReceipt,
+  type MemoryDeletionTargetStatus,
   type MemoryLineageLink,
   SYNCHRONOUS_DELETION_TARGETS,
   type SynchronousDeletionTarget,
@@ -36,21 +37,31 @@ export interface DeletionRequest {
 
 /**
  * Executes COR-806's deletion plan. Before planning, the deletion claims the
- * record and everything its lineage reaches (each envelope's
- * `deletionRequestedAt`), reading the lineage again after each round of claims
- * until a read finds nothing new, so the plan also reaches whatever a promotion
- * or derived write running alongside published. A receipt is persisted before
+ * record and, for a source deletion, everything its lineage reaches (each
+ * envelope's `deletionRequestedAt`), reading the lineage again after each round
+ * of claims until a read finds nothing new, so the plan also reaches whatever a
+ * promotion or derived write running alongside published. A projection
+ * deletion's plan is its own record alone. A receipt is persisted before
  * anything is deleted; the synchronous lane then removes source evidence, canonical
  * projections, identity views, and the managed-asset canonical record in one
  * storage transaction; and each bounded-async target settles against its own
  * deadline. Every step is idempotent, so {@link DeletionEngine.processOpen}
  * resumes an interrupted deletion after a restart.
  *
- * A legal hold is checked again before the synchronous lane and before each
+ * A legal hold on the record or on anything its plan reaches holds the
+ * deletion. It is checked again before the synchronous lane and before each
  * bounded-async target, and every record deletion is conditioned on the
- * versions that check read, so a hold placed at any point while the deletion
- * is in flight leaves the held record, and every target not yet settled, alone
- * until the hold is released.
+ * versions that check read, so a hold placed on one of those records at any
+ * point while the deletion is in flight leaves the held record, and every
+ * target not yet settled, alone until the hold is released. A projection
+ * deletion never sees a hold on its source or on a record derived from it.
+ *
+ * No row reports a target clean while a record the deletion names is still
+ * stored: until every row that removes records (the named record's own row
+ * and, for a source deletion, the `summaries` row) completes, the other rows
+ * wait (and fail at their deadline). A failed synchronous lane is retried by
+ * every pass over its open receipt and by a new request to delete the same
+ * record, which reruns the failed receipt instead of opening another.
  */
 export interface DeletionEngine {
   requestDeletion(request: DeletionRequest): Promise<MemoryDeletionReceipt>;
@@ -74,9 +85,20 @@ const TARGET_FOR_KIND: Readonly<Record<DerivedRecordKind, MemoryDeletionTarget>>
 const PROJECTION_TARGETS: readonly MemoryDeletionTarget[] = ['indexes', 'caches', 'exports'];
 
 /**
+ * The targets whose rows remove stored records: the source and each kind of
+ * derived record. Until every such row in a receipt completes, some record the
+ * deletion names is still stored, readable, and recallable, so no other row
+ * can be clean of it.
+ */
+const RECORD_TARGETS: ReadonlySet<MemoryDeletionTarget> = new Set([
+  'source-evidence',
+  ...Object.values(TARGET_FOR_KIND),
+]);
+
+/**
  * How many times the synchronous lane re-checks holds and retries its storage
  * transaction after a record it names changed underneath it. Past this, the
- * lane stays pending and the next propagation pass tries again.
+ * lane fails and the next propagation pass tries again.
  */
 const SYNCHRONOUS_DELETION_ATTEMPTS = 3;
 
@@ -138,6 +160,45 @@ export function planReferences(plan: MemoryDeletionPlan): MemoryRecordSourceRefe
     ...plan.managedAssetRecords,
     ...plan.summaries,
   ];
+}
+
+/**
+ * The status of the row that removes the record a deletion names, which is
+ * always a receipt's first row: `source-evidence` for a source deletion, and
+ * the derived record's own target for a projection deletion. It is what the
+ * deletion did to that record's content, whatever the other rows say.
+ */
+export function deletionOutcome(receipt: MemoryDeletionReceipt): MemoryDeletionTargetStatus {
+  return receipt.targets[0]!.status;
+}
+
+/**
+ * Whether `row` must wait: while any other row that removes records has not
+ * completed, a record the deletion names is still stored. So a source
+ * deletion's `summaries` row waits for its synchronous lane, and every row
+ * that removes no records waits for all of them.
+ */
+function awaitsRecordRemoval(
+  receipt: MemoryDeletionReceipt,
+  row: MemoryDeletionTargetReceipt,
+): boolean {
+  return receipt.targets.some(
+    (other) =>
+      other.target !== row.target &&
+      RECORD_TARGETS.has(other.target) &&
+      other.status !== 'completed',
+  );
+}
+
+/** A pending row whose deadline has passed fails, per COR-806; any other row is returned as is. */
+function overdue(target: MemoryDeletionTargetReceipt, now: number): MemoryDeletionTargetReceipt {
+  if (target.deadline === undefined || now < target.deadline) return target;
+  return {
+    ...target,
+    status: 'failed',
+    settledAt: now,
+    detail: 'deadline passed before propagation completed',
+  };
 }
 
 function referenceKey(reference: MemoryRecordSourceReference): string {
@@ -306,13 +367,14 @@ export function createDeletionEngine(context: GovernanceContext): DeletionEngine
   async function persist(
     receipt: MemoryDeletionReceipt,
     type: string,
+    attribution: MemoryAttribution = receipt.requestedBy,
   ): Promise<MemoryDeletionReceipt> {
     await context.ledger.putReceipt(receipt);
     await context.recordEvent({
       tenantId: receipt.tenantId,
       type,
       outcome: receipt.open ? 'pending' : 'settled',
-      attribution: receipt.requestedBy,
+      attribution,
       recordIds: [receipt.record.id],
       details: {
         deletionId: receipt.deletionId,
@@ -342,11 +404,16 @@ export function createDeletionEngine(context: GovernanceContext): DeletionEngine
     }
   }
 
+  /**
+   * Settles the synchronous rows: `completed` when the transaction removed
+   * their records, or `failed` with `failure` as the detail when it did not.
+   */
   async function settleSynchronous(
     receipt: MemoryDeletionReceipt,
-    succeeded: boolean,
+    failure: string | undefined,
     inspection: Inspection,
   ): Promise<MemoryDeletionReceipt> {
+    const succeeded = failure === undefined;
     const now = context.now();
     const { plan } = receipt;
     const details: Record<SynchronousDeletionTarget, string> = {
@@ -364,7 +431,7 @@ export function createDeletionEngine(context: GovernanceContext): DeletionEngine
             settledAt: now,
             detail: details[target.target as SynchronousDeletionTarget],
           }
-        : { ...target, status: 'failed', settledAt: now, detail: 'storage transaction failed' };
+        : { ...target, status: 'failed', settledAt: now, detail: failure };
     });
     // A source deletion removes everything its lineage reaches, so those links
     // are spent. A projection deletion removes one derived record while records
@@ -381,27 +448,37 @@ export function createDeletionEngine(context: GovernanceContext): DeletionEngine
   async function executeSynchronous(
     receipt: MemoryDeletionReceipt,
   ): Promise<MemoryDeletionReceipt> {
-    const pending = receipt.targets.some(
+    // A failed synchronous lane left its records stored, so it runs again:
+    // its rows are pending once more until this attempt settles them.
+    const retried: MemoryDeletionReceipt = {
+      ...receipt,
+      targets: receipt.targets.map((target): MemoryDeletionTargetReceipt => {
+        if (target.lane !== 'synchronous' || target.status !== 'failed') return target;
+        const { settledAt: _settledAt, detail: _detail, ...row } = target;
+        return { ...row, status: 'pending' };
+      }),
+    };
+    const pending = retried.targets.some(
       (target) => target.lane === 'synchronous' && target.status === 'pending',
     );
     if (!pending) return receipt;
+    let inspection: Inspection | undefined;
     for (let attempt = 0; attempt < SYNCHRONOUS_DELETION_ATTEMPTS; attempt++) {
       // A hold placed after the deletion was requested (before a restart, say)
       // is honored here; one placed after this check changes the held record's
       // version, which aborts the conditioned transaction and brings us back.
-      const inspection = await inspectReferences(receipt.tenantId, receiptReferences(receipt));
-      if (inspection.held) return holdRemaining(receipt, context.now());
-      const outcome = await deleteSynchronous(receipt, inspection);
+      inspection = await inspectReferences(retried.tenantId, receiptReferences(retried));
+      if (inspection.held) return holdRemaining(retried, context.now());
+      const outcome = await deleteSynchronous(retried, inspection);
       if (outcome !== 'conflict') {
-        return settleSynchronous(receipt, outcome === 'deleted', inspection);
+        return settleSynchronous(
+          retried,
+          outcome === 'deleted' ? undefined : 'storage transaction failed',
+          inspection,
+        );
       }
     }
-    const targets = receipt.targets.map((target): MemoryDeletionTargetReceipt =>
-      target.lane === 'synchronous' && target.status === 'pending'
-        ? { ...target, detail: 'records changed during deletion; will retry' }
-        : target,
-    );
-    return withOpen({ ...receipt, targets }, context.now());
+    return settleSynchronous(retried, 'records changed during deletion', inspection!);
   }
 
   async function builtIn(
@@ -505,28 +582,33 @@ export function createDeletionEngine(context: GovernanceContext): DeletionEngine
     if (result.status !== 'pending') {
       return { ...target, status: result.status, settledAt: now, ...detail };
     }
-    if (target.deadline !== undefined && now >= target.deadline) {
-      return {
-        ...target,
-        status: 'failed',
-        settledAt: now,
-        detail: 'deadline passed before propagation completed',
-      };
-    }
-    return { ...target, ...detail };
+    return overdue({ ...target, ...detail }, now);
   }
 
   async function advanceAsynchronous(
     receipt: MemoryDeletionReceipt,
   ): Promise<MemoryDeletionReceipt> {
     let current = receipt;
-    for (const [index, target] of receipt.targets.entries()) {
+    // Rows that remove records settle first, so the rows waiting on them can
+    // follow in the same pass.
+    const indices = [...receipt.targets.keys()];
+    const removesRecords = (index: number) => RECORD_TARGETS.has(receipt.targets[index]!.target);
+    const order = [
+      ...indices.filter(removesRecords),
+      ...indices.filter((index) => !removesRecords(index)),
+    ];
+    for (const index of order) {
+      const target = receipt.targets[index]!;
       if (target.lane !== 'bounded-async' || target.status !== 'pending') continue;
       // Each target first re-checks every record the deletion names: a hold
       // placed since the last step leaves this target and the rest alone.
       const inspection = await inspectReferences(receipt.tenantId, receiptReferences(receipt));
       if (inspection.held) return holdRemaining(current, context.now());
-      const settled = await settleAsynchronous(target, current, inspection);
+      // While a record the deletion names is still stored, no other target can
+      // be clean of it: the row waits for its removal, failing at its deadline.
+      const settled = awaitsRecordRemoval(current, target)
+        ? overdue(target, context.now())
+        : await settleAsynchronous(target, current, inspection);
       current = { ...current, targets: current.targets.with(index, settled) };
     }
     return withOpen(current, context.now());
@@ -540,11 +622,62 @@ export function createDeletionEngine(context: GovernanceContext): DeletionEngine
     return persist(settled, 'memory.deletion.propagated');
   }
 
+  /**
+   * The receipt of an earlier deletion of the same record whose row removing
+   * it failed, leaving it stored. A held deletion is not one: its release
+   * re-queues it.
+   */
+  async function failedDeletion(
+    request: DeletionRequest,
+    reference: MemoryRecordSourceReference,
+  ): Promise<MemoryDeletionReceipt | undefined> {
+    const receipts = await context.ledger.listReceipts({
+      tenantId: request.resolved.scope.tenantId,
+    });
+    return receipts.find(
+      (receipt) =>
+        receipt.scope === request.scope &&
+        receipt.record.id === reference.id &&
+        receipt.record.namespace === reference.namespace &&
+        !receipt.awaitingHoldRelease &&
+        deletionOutcome(receipt) === 'failed',
+    );
+  }
+
+  /**
+   * Runs a failed deletion again under its own receipt: every failed row is
+   * pending once more against a fresh deadline, so a retry that removes the
+   * record closes the receipt its failure left, and the ledger records who
+   * asked. Its plan still covers everything derived from the record, because
+   * the first request's claims stop anything new from being derived from it.
+   */
+  async function retryDeletion(
+    failed: MemoryDeletionReceipt,
+    attribution: MemoryAttribution,
+  ): Promise<MemoryDeletionReceipt> {
+    const now = context.now();
+    const bound = resolveTenantPolicy(context.policy(), failed.tenantId).deletionBoundMilliseconds;
+    const receipt = withOpen(
+      {
+        ...failed,
+        boundMilliseconds: bound,
+        targets: failed.targets.map((target) =>
+          target.status === 'failed' ? targetRow(target.target, false, now, bound) : target,
+        ),
+      },
+      now,
+    );
+    await persist(receipt, 'memory.deletion.requested', attribution);
+    return run(receipt);
+  }
+
   async function requestDeletion(request: DeletionRequest): Promise<MemoryDeletionReceipt> {
     const { resolved } = request;
     const { governance } = resolved.read;
     const tenantId = resolved.scope.tenantId;
     const reference = { id: resolved.record.id, namespace: resolved.scope.namespace };
+    const failed = await failedDeletion(request, reference);
+    if (failed !== undefined) return retryDeletion(failed, request.attribution);
     const requestedAt = context.now();
     const bound = resolveTenantPolicy(context.policy(), tenantId).deletionBoundMilliseconds;
     const plan = await claimPlan(request, reference);
@@ -552,9 +685,10 @@ export function createDeletionEngine(context: GovernanceContext): DeletionEngine
       request.scope === 'source'
         ? [...SYNCHRONOUS_DELETION_TARGETS, ...ASYNCHRONOUS_DELETION_TARGETS]
         : [TARGET_FOR_KIND[governance.lineage!.kind], ...PROJECTION_TARGETS];
-    // A hold on the record or on anything derived from it holds the whole
+    // A hold on the record, or on anything its plan reaches, holds the whole
     // deletion: the synchronous lane is one transaction and cannot remove the
-    // source while leaving a held projection pointing at nothing.
+    // source while leaving a held projection pointing at nothing. A projection
+    // deletion's plan is its own record, so only a hold on that record holds it.
     const derived = await inspectReferences(tenantId, planReferences(plan));
     const held = governance.legalHold === 'held' || derived.held;
     const receipt: MemoryDeletionReceipt = withOpen(

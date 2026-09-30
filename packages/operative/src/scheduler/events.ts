@@ -1,5 +1,5 @@
 import type { RunResult } from '../types';
-import type { SchedulerPriority, SchedulerTaskSummary } from './types';
+import type { RetentionCleanupOutcome, SchedulerPriority, SchedulerTaskSummary } from './types';
 
 /**
  * Emitted when a task is added to the scheduler queue.
@@ -121,6 +121,21 @@ export class SchedulerStoppedEvent extends Event {
 }
 
 /**
+ * Emitted when a retained terminal task outcome ages out of the retention
+ * window. Tombstone eviction and the purge performed by `stop()` emit nothing.
+ */
+export class TaskRetentionCleanedEvent extends Event {
+  static readonly type = 'task.retention-cleaned' as const;
+
+  constructor(
+    readonly taskId: string,
+    readonly outcome: RetentionCleanupOutcome,
+  ) {
+    super(TaskRetentionCleanedEvent.type);
+  }
+}
+
+/**
  * Map of scheduler event types to their event classes.
  */
 export interface SchedulerEventMap {
@@ -133,6 +148,7 @@ export interface SchedulerEventMap {
   [SchedulerIdleEvent.type]: SchedulerIdleEvent;
   [SchedulerStartedEvent.type]: SchedulerStartedEvent;
   [SchedulerStoppedEvent.type]: SchedulerStoppedEvent;
+  [TaskRetentionCleanedEvent.type]: TaskRetentionCleanedEvent;
 }
 
 /**

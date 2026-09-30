@@ -14,6 +14,7 @@ export { createOpenAIProvider, createOpenAIProviderStream } from './providers/op
 export type {
   OpenAIChatCompletion,
   OpenAIChatCompletionChunk,
+  OpenAIChatCompletionCreateRequest,
   OpenAIClient,
   OpenAIProviderOptions,
   OpenAIStreamingClient,

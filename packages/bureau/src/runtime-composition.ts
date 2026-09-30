@@ -1000,20 +1000,25 @@ export function createMemoryRecallHook(
  * attribution. A refused or quarantined write is recorded in the governance
  * ledger, not surfaced to the run.
  *
- * EFFECTFUL hook (seam #11): on a durable recovery the crashed in-flight step
- * re-runs from its boundary, so this hook can fire AGAIN for the same step. The
+ * EFFECTFUL hook (seam #11): a step can run more than once, so this hook can
+ * fire AGAIN for the same step. A durable recovery re-runs the crashed in-flight
+ * step from its boundary, and a requeued scheduler task either resumes from its
+ * last completed step (durable engine) or starts again (no engine). The
  * mitigation is IDEMPOTENCY, not suppression-on-replay — suppressing the hook
  * would drop the write for a step whose work (generate + tools) did re-execute,
  * leaving memory out of sync with a step that ran.
  *
  * Idempotency is enforced by a DETERMINISTIC operation key, not by content: a
  * replayed step may produce non-byte-identical content (its `generate` re-runs).
- * The write uses a stable `dedupeKey` of `${runId}:${step}` (the durable
- * operation's identity — same run, same step index across a replay), so a
- * re-fire is an atomic no-op regardless of content drift.
+ * The write uses a stable `dedupeKey` of `${runId}:${step}` (the operation's
+ * identity — same run, same step index across a replay), so a re-fire is an
+ * atomic no-op regardless of content drift.
  *
- * When no `runId` is available (a non-durable run, where there is no replay and
- * therefore no re-fire hazard), the write carries no dedupe key.
+ * Every run Bureau composes passes a `runId`: the run id for `createRun` runs,
+ * schedule fires, and recovered runs, and the task id for a
+ * `submitSchedulerTask` task, which stays the same across preemption and
+ * requeue. Without a `runId` the write carries no dedupe key and a repeated step
+ * stores its answer again, so omit it only for a step that cannot run twice.
  *
  * `replay: 'effectful'` ({@link HookReplayPolicy}) is recorded on the write for
  * diagnostics; it documents the contract and never gates execution.
@@ -2280,6 +2285,10 @@ export async function createRuntimeComposition(
           generate: schedulerGenerate,
           toolbox: fallbackToolbox,
           idleDelay: options.scheduler?.idleDelay ?? 1000,
+          retentionWindowMs: options.scheduler?.retentionWindowMs,
+          // The composed runtime, so idle/wake and retention timers are
+          // deterministic under a manual runtime.
+          runtime: runtimeServices,
           // When a durable engine is composed, preemptable scheduler tasks run as
           // durable workflows and a preemption SUSPENDS the run (preserving its
           // checkpoint) rather than aborting it — a requeue resumes from the last
@@ -2734,7 +2743,7 @@ export async function createRuntimeComposition(
         sessionId: session.id,
         // Thread the recovered run's id so the memory-persist hook's idempotency
         // key (`${runId}:${step}`) matches the pre-crash execution — the durable
-        // recovery path is exactly where the at-least-once re-fire happens.
+        // recovery path is one place the at-least-once re-fire happens.
         ...(runId !== undefined ? { runId } : {}),
         ...(agentName !== undefined ? { agentName } : {}),
         ...(requestContext ? { requestContext } : {}),

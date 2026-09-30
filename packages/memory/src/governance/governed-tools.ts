@@ -53,11 +53,26 @@ const forgetInput = z.object({
 });
 
 /**
+ * Why `memory_forget` deleted nothing, in terms safe to show a model: `held`
+ * (a legal hold keeps the record), `failed` (storage did not remove it; the
+ * call can be retried), or `refused` (no authority, no such record the caller
+ * may delete, or a record that is not source evidence, told apart no further).
+ * None of them carries a diagnostic, a policy detail, or another principal's
+ * data.
+ */
+export type MemoryForgetToolReason = 'held' | 'failed' | 'refused';
+
+/** `deleted` is true only once the record is no longer stored, readable, or recallable. */
+export type MemoryForgetToolOutput =
+  { readonly deleted: true } | { readonly deleted: false; readonly reason: MemoryForgetToolReason };
+
+/**
  * Model-facing memory tools over governed memory. They are untrusted
  * interfaces: every call runs under the caller's persisted request authority,
  * writes enter as `model-tool` content through full admission, recall returns
  * only labeled evidence that passed recall admission, and a refused call tells
- * the model nothing about why.
+ * the model nothing about why. `memory_forget` reports a deletion only once its
+ * record is gone; otherwise it gives a {@link MemoryForgetToolReason}.
  */
 export function createGovernedMemoryTools(
   memory: GovernedMemory,
@@ -117,17 +132,21 @@ export function createGovernedMemoryTools(
     name: 'memory_forget',
     description: 'Delete a memory record you stored',
     input: forgetInput,
-    async execute(params, context) {
+    async execute(params, context): Promise<MemoryForgetToolOutput> {
       const authority = resolve({
         toolName: 'memory_forget',
         requestContext: context.requestContext,
       });
-      if (authority === undefined) return { deleted: false };
+      if (authority === undefined) return { deleted: false, reason: 'refused' };
       const result = await memory.forget(authority, {
         mode: 'source-deletion',
         locator: { id: params.id, collection },
       });
-      return { deleted: result.status === 'applied' };
+      if (result.deletion === undefined) return { deleted: false, reason: 'refused' };
+      if (result.deletion === 'completed') return { deleted: true };
+      // A source deletion removes its record in the synchronous lane, which
+      // ends completed, exempt under a legal hold, or failed.
+      return { deleted: false, reason: result.deletion === 'exempt' ? 'held' : 'failed' };
     },
   });
 

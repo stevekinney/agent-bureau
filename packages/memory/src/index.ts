@@ -59,6 +59,8 @@ export type {
 export type {
   CreateGovernedMemoryToolsOptions,
   GovernedMemoryToolAuthorityInput,
+  MemoryForgetToolOutput,
+  MemoryForgetToolReason,
 } from './governance/governed-tools';
 export type {
   CreateMemoryGovernanceLedgerOptions,

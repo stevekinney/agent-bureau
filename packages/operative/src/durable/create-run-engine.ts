@@ -24,6 +24,7 @@ import {
   DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
   resolveDurableHeartbeatTickServices,
 } from './durable-heartbeat-tick-workflow';
+import { createHumanWaitMarkerSink } from './human-wait-park-marker';
 import { createStorageActivities } from './storage-activities';
 
 /**
@@ -100,6 +101,15 @@ export interface CreateRunEngineOptions {
   workflowClaimRenewIntervalMs?: number | undefined;
 
   /**
+   * Clock the engine reads for time-dependent decisions, including workflow
+   * claim expiry, renewal, and takeover under `ownership: 'workflow-lease'`
+   * (default `Date.now`, Weft's own default). Inject a manually advanced clock
+   * to drive claim expiry deterministically, then call
+   * `engine.runMaintenance(now)` with the advanced value.
+   */
+  getNow?: (() => number) | undefined;
+
+  /**
    * Select how Weft's periodic maintenance is driven. The default
    * `'automatic'` profile uses in-process intervals. Use `'manual'` in
    * serverless hosts such as Cloudflare Durable Objects, then call
@@ -156,7 +166,8 @@ export interface CreateRunEngineOptions {
    * Host sink for `ctx.log` records emitted by durable workflows (Weft 0.4.0
    * structured logging). Receives every replay-safe log record from inline and
    * worker execution. A throwing sink falls back to console without failing the
-   * workflow. Omit to leave logs going to the host console.
+   * workflow. Omit to leave logs going to the host console. The replay-aware
+   * human-wait park marker (COR-121) is withheld from this sink and the console.
    */
   onLog?: ((record: WorkflowLogRecord) => void) | undefined;
 
@@ -369,13 +380,14 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
     ...(options.workflowClaimRenewIntervalMs !== undefined
       ? { workflowClaimRenewInterval: options.workflowClaimRenewIntervalMs }
       : {}),
+    ...(options.getNow !== undefined ? { getNow: options.getNow } : {}),
     ...(options.backgroundTasks !== undefined ? { backgroundTasks: options.backgroundTasks } : {}),
     ...(startScheduler !== undefined ? { startScheduler } : {}),
     ...(options.schedulerPollIntervalMs !== undefined
       ? { schedulerPollIntervalMs: options.schedulerPollIntervalMs }
       : {}),
     resolveWorkflowServices,
-    ...(options.onLog ? { onLog: options.onLog } : {}),
+    onLog: createHumanWaitMarkerSink(options.onLog),
     ...(options.history ? { history: options.history } : {}),
     ...(options.checkpointSizeWarningThreshold !== undefined
       ? { checkpointSizeWarningThreshold: options.checkpointSizeWarningThreshold }

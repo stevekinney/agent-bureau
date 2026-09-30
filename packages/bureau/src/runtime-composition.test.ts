@@ -1092,6 +1092,31 @@ describe('memory hook registration (COR-41)', () => {
     expect(ids).not.toContain('bureau:memory-persist');
   });
 
+  it('registers both memory hooks under an empty grant, and none when memory is unset', async () => {
+    const { memory } = createGovernedMemoryFixture();
+    async function memoryHookIds(options: { memory?: typeof memory }) {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        ...options,
+        memoryAuthority: { runCapabilities: [] },
+      });
+      const runRuntime = await runtime.createRunRuntime({
+        message: 'test',
+        sessionId: 'empty-grant',
+        runId: 'empty-grant-run',
+        requestContext: defaultRunRequestContext,
+      });
+      return runRuntime.hooks
+        .describePlan()
+        .entries.map((entry) => entry.id)
+        .filter((id) => id.startsWith('bureau:memory-'));
+    }
+    // `runCapabilities: []` refuses every call; it does not detach the hooks.
+    const attached = await memoryHookIds({ memory });
+    expect(attached.toSorted()).toEqual(['bureau:memory-persist', 'bureau:memory-recall']);
+    expect(await memoryHookIds({})).toEqual([]);
+  });
+
   it('writes non-deduplicated conversation memory for a run without a run id', async () => {
     const { memory, inspector } = createGovernedMemoryFixture();
     const authority = createRunMemoryAuthority(defaultRunRequestContext, { runId: 'hook-run' });

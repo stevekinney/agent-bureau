@@ -9,13 +9,14 @@ import {
   renderSignalContinuation,
   renderWakeupContinuation,
 } from './continuation-input';
+import { HUMAN_WAIT_PARKED_LOG_MARKER } from './human-wait-park-marker';
 import { runDepsFrom } from './run-workflow-input';
 import type { createStorageActivities } from './storage-activities';
 import type { PendingHumanWait, PendingWakeup, RunCursor } from './types';
 
 export type WorkflowParkContext = Pick<
   WorkflowContext<NormalizeActivities<ReturnType<typeof createStorageActivities>>>,
-  'services' | 'sleep' | 'waitForSignal' | 'memo' | 'run'
+  'services' | 'sleep' | 'waitForSignal' | 'memo' | 'run' | 'log'
 >;
 
 export interface WorkflowParkState {
@@ -84,6 +85,19 @@ export function* runWorkflowPark(
 
   if (!isFailureOutcome && state.pendingHumanWait !== undefined) {
     const signalName = state.pendingHumanWait.signalName;
+    // COR-121: on a run reattached in this process, replay can hide the
+    // `requestHumanInput` tool dispatch. weft suppresses `ctx.log` when this
+    // position is cached (a park whose signal was already delivered), so the
+    // marker fires only for the pending park.
+    const deps = runDepsFrom(ctx.services);
+    if (deps.recoveredRun === true && deps.emitter !== undefined) {
+      ctx.log?.info(HUMAN_WAIT_PARKED_LOG_MARKER, {
+        runId: state.runId,
+        signalName,
+        prompt: state.pendingHumanWait.prompt,
+        emitter: deps.emitter,
+      });
+    }
     const payload = yield* ctx.waitForSignal(signalName);
     state.pendingHumanWait = undefined;
     state.lastHumanWaitSignal = signalName;

@@ -11,6 +11,7 @@ import type {
   GeminiStreamingModel,
   OpenAIChatCompletion,
   OpenAIChatCompletionChunk,
+  OpenAIChatCompletionCreateRequest,
   OpenAIClient,
   OpenAIRequestOptions,
   OpenAIStreamingClient,
@@ -67,7 +68,7 @@ export function createMockAnthropicClient(
 }
 
 export interface MockOpenAIClient extends OpenAIClient {
-  _calls: Array<Record<string, unknown>>;
+  _calls: OpenAIChatCompletionCreateRequest[];
   /** The request options (second `create` argument) recorded per call. */
   _requestOptions: Array<OpenAIRequestOptions | undefined>;
   _responses: OpenAIChatCompletion[];
@@ -81,7 +82,7 @@ export function createMockOpenAIClient(
   responses: OpenAIChatCompletion[],
   errors: Error[] = [],
 ): MockOpenAIClient {
-  const calls: Array<Record<string, unknown>> = [];
+  const calls: OpenAIChatCompletionCreateRequest[] = [];
   const requestOptions: Array<OpenAIRequestOptions | undefined> = [];
   let responseIndex = 0;
   let errorIndex = 0;
@@ -94,7 +95,7 @@ export function createMockOpenAIClient(
     chat: {
       completions: {
         async create(
-          params: Record<string, unknown>,
+          params: OpenAIChatCompletionCreateRequest,
           options?: OpenAIRequestOptions,
         ): Promise<OpenAIChatCompletion> {
           calls.push(params);
@@ -240,7 +241,7 @@ export function createMockAnthropicStreamingClient(
 }
 
 export interface MockOpenAIStreamingClient extends OpenAIStreamingClient {
-  _calls: Array<Record<string, unknown>>;
+  _calls: OpenAIChatCompletionCreateRequest[];
   /** The request options (second `create` argument) recorded per call. */
   _requestOptions: Array<OpenAIRequestOptions | undefined>;
   _chunkSequences: OpenAIChatCompletionChunk[][];
@@ -258,7 +259,7 @@ export function createMockOpenAIStreamingClient(
   errors: Error[] = [],
   options?: { errorAfterEvents?: number },
 ): MockOpenAIStreamingClient {
-  const calls: Array<Record<string, unknown>> = [];
+  const calls: OpenAIChatCompletionCreateRequest[] = [];
   const requestOptions: Array<OpenAIRequestOptions | undefined> = [];
   let sequenceIndex = 0;
   let errorIndex = 0;
@@ -272,7 +273,7 @@ export function createMockOpenAIStreamingClient(
     chat: {
       completions: {
         create(
-          params: Record<string, unknown>,
+          params: OpenAIChatCompletionCreateRequest,
           createOptions?: OpenAIRequestOptions,
         ): AsyncIterable<OpenAIChatCompletionChunk> {
           calls.push(params);

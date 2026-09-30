@@ -205,6 +205,7 @@ export type {
   OpenAIBatchRequestCounts,
   OpenAIChatCompletion,
   OpenAIChatCompletionChunk,
+  OpenAIChatCompletionCreateRequest,
   OpenAIClient,
   OpenAIProviderOptions,
   OpenAIRequestOptions,

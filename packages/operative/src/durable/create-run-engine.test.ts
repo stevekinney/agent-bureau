@@ -815,11 +815,7 @@ describe('createRunEngine ownership (AB-178)', () => {
     }
   });
 
-  // AB-330: the crash-and-adopt test (waits out a real workflow-lease claim
-  // TTL — weft's getNow is not injectable, so this needs a genuine
-  // real-clock wait) moved to `create-run-engine-crash-and-adopt.test.ts`,
-  // isolating the real-runtime exemption from this otherwise-deterministic
-  // file.
+  // The crash-and-adopt test lives in `create-run-engine-crash-and-adopt.test.ts`.
 
   it('resumes on the same workflow-lease engine and retains exclusivity', async () => {
     const storage = new MemoryStorage();

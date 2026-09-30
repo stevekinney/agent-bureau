@@ -338,10 +338,10 @@ class BackgroundCompactionScheduler implements CompactionScheduler {
 
   /**
    * Whether a candidate may start now: no stream is open and no tool call
-   * waits for its result. A commit rebuilds every retained message, so one
-   * that lands mid-stream would re-identify the reply the stream still
-   * writes to, and one that lands mid-tool-execution could summarize away a
-   * call whose result has yet to arrive. Checking at candidate start is
+   * waits for its result. Every streamed token moves the revision, so a
+   * candidate started mid-stream would be discarded as stale, and one
+   * started mid-tool-execution could summarize away a call whose result has
+   * yet to arrive. Checking at candidate start is
    * enough: a stream or tool call that opens after the base revision is
    * captured moves the revision and makes the candidate stale.
    */

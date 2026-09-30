@@ -32,16 +32,20 @@ export {
   TaskDispatchedEvent,
   TaskPreemptedEvent,
   TaskQueuedEvent,
+  TaskRetentionCleanedEvent,
 } from './events';
 export type { SchedulerEventMap, SchedulerEventType } from './events';
 export { createPriorityQueue } from './priority-queue';
 export type { PriorityQueue } from './priority-queue';
 export { sleep } from './sleep';
+export { SchedulerTaskLookupError } from './task-lookup-error';
 export { PRIORITY_WEIGHT, isHigherPriority } from './types';
 export type {
+  RetentionCleanupOutcome,
   SchedulerPriority,
   SchedulerRunOptions,
   SchedulerState,
   SchedulerTask,
+  SchedulerTaskLocation,
   SchedulerTaskSummary,
 } from './types';

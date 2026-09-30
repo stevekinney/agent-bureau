@@ -23,13 +23,17 @@ import {
   TaskDispatchedEvent,
   TaskPreemptedEvent,
   TaskQueuedEvent,
+  TaskRetentionCleanedEvent,
 } from './events';
 import { createPriorityQueue } from './priority-queue';
+import { SchedulerTaskLookupError } from './task-lookup-error';
+import { createTaskRetention } from './task-retention';
 import type {
   SchedulerPriority,
   SchedulerRunOptions,
   SchedulerState,
   SchedulerTask,
+  SchedulerTaskLocation,
   SchedulerTaskSummary,
 } from './types';
 
@@ -74,10 +78,17 @@ export interface CreateSchedulerOptions {
    * tracking. Resolved exactly once at construction — omitted, this
    * scheduler reads the real globals via `createDefaultRuntimeServices()`;
    * a test composes its own deterministic instance with
-   * `createManualRuntimeServices()` from `@lostgradient/operative` so
+   * `createManualRuntimeServices()` from `@lostgradient/lifecycle` so
    * `sleep()`/idle-delay timing and task ids are fully time-controlled.
    */
   runtime?: RuntimeServices | undefined;
+  /**
+   * How long a settled task's outcome stays resolvable through `locateTask` /
+   * `awaitTask` before it expires (and, one window later, is forgotten). Timed on
+   * `runtime.timers`. Must be a finite number greater than zero; omit for
+   * indefinite retention.
+   */
+  retentionWindowMs?: number | undefined;
 }
 
 /** The durable-engine wiring a scheduler needs to suspend/resume preempted tasks. */
@@ -107,6 +118,18 @@ export interface Scheduler {
   getState(): SchedulerState;
   /** Cancel a queued or running task by id. Returns true when a task was found. */
   cancel(taskId: string): boolean;
+  /**
+   * Resolve a task id (from `submit()` / `submitImmediate()`) to where it stands:
+   * `in-progress`, `terminal` (with its settled outcome), `expired`, or
+   * `not-found`. Synchronous; never throws. `dispatch()` ids are `not-found`.
+   */
+  locateTask(taskId: string): SchedulerTaskLocation;
+  /**
+   * Await a task's settlement through its id alone. Mirrors `submit()`: fulfils
+   * with the `RunResult` or `null`, or rejects with the original error. An
+   * `expired` or `not-found` id rejects with `SchedulerTaskLookupError`.
+   */
+  awaitTask(taskId: string): Promise<RunResult | null>;
   /** Start the scheduler loop. */
   start(): void;
   /** Stop the scheduler. Completes active immediate tasks, aborts active background tasks,
@@ -171,7 +194,17 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     signal: externalSignal,
     durable,
     runtime = createDefaultRuntimeServices(),
+    retentionWindowMs,
   } = options;
+
+  if (
+    retentionWindowMs !== undefined &&
+    !(Number.isFinite(retentionWindowMs) && retentionWindowMs > 0)
+  ) {
+    throw new Error(
+      `retentionWindowMs must be a finite number greater than zero (received ${String(retentionWindowMs)}); omit it for indefinite retention`,
+    );
+  }
 
   // Monotonic suffix for synthetic durable scheduler-run ids, so each fresh
   // dispatch of a task gets a distinct workflow id (a requeued resume reuses the
@@ -210,6 +243,34 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     string,
     { resolve: (result: RunResult | null) => void; reject: (error: unknown) => void }
   >();
+
+  // Settled outcomes, retained so an id resolves after its task leaves the
+  // active/queued state. Stores settled values, never promises.
+  const retention = createTaskRetention({
+    runtime,
+    retentionWindowMs,
+    onEntryEvicted: (taskId) => {
+      emitEvent(new TaskRetentionCleanedEvent(taskId, 'completed'));
+    },
+  });
+
+  // `awaitTask` waiters, bound to the id (not a particular submission) and
+  // settled by the same resolver call that settles the registered submit().
+  const taskWaiters = new Map<
+    string,
+    { resolve: (result: RunResult | null) => void; reject: (error: unknown) => void }[]
+  >();
+
+  function settleTask(taskId: string, outcome: PromiseSettledResult<RunResult | null>): void {
+    retention.record(taskId, outcome);
+    const waiters = taskWaiters.get(taskId);
+    if (!waiters) return;
+    taskWaiters.delete(taskId);
+    for (const waiter of waiters) {
+      if (outcome.status === 'fulfilled') waiter.resolve(outcome.value);
+      else waiter.reject(outcome.reason);
+    }
+  }
 
   // Task ids explicitly cancelled while RUNNING via `cancel()`. For a DURABLE run,
   // `engine.cancel` terminalizes the run by REJECTING its `result()` with
@@ -302,11 +363,53 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     }
 
     return new Promise<RunResult | null>((resolve, reject) => {
-      taskResolvers.set(task.id, { resolve, reject });
+      // Last write wins: a resubmitted id drops any retained entry or tombstone.
+      retention.forget(task.id);
+      taskResolvers.set(task.id, {
+        resolve: (result) => {
+          settleTask(task.id, { status: 'fulfilled', value: result });
+          resolve(result);
+        },
+        reject: (error) => {
+          settleTask(task.id, { status: 'rejected', reason: error });
+          reject(error);
+        },
+      });
       queue.enqueue(task);
       emitEvent(new TaskQueuedEvent(task.id, task.priority, task.metadata));
       wakeLoop();
     });
+  }
+
+  function locateTask(taskId: string): SchedulerTaskLocation {
+    if (taskResolvers.has(taskId)) return { status: 'in-progress' };
+    const retained = retention.lookup(taskId);
+    if (retained?.kind === 'terminal') return { status: 'terminal', outcome: retained.outcome };
+    if (retained?.kind === 'expired') return { status: 'expired' };
+    return { status: 'not-found' };
+  }
+
+  function awaitTask(taskId: string): Promise<RunResult | null> {
+    const location = locateTask(taskId);
+    let promise: Promise<RunResult | null>;
+    if (location.status === 'in-progress') {
+      promise = new Promise<RunResult | null>((resolve, reject) => {
+        const waiters = taskWaiters.get(taskId) ?? [];
+        waiters.push({ resolve, reject });
+        taskWaiters.set(taskId, waiters);
+      });
+    } else if (location.status === 'terminal') {
+      promise =
+        location.outcome.status === 'fulfilled'
+          ? Promise.resolve(location.outcome.value)
+          : Promise.reject(location.outcome.reason);
+    } else {
+      promise = Promise.reject(new SchedulerTaskLookupError(taskId, location.status));
+    }
+    // A derived, handled branch keeps an unobserved call from raising
+    // `unhandledRejection`; awaiting the returned promise still rejects.
+    promise.catch(() => undefined);
+    return promise;
   }
 
   function submitImmediate(
@@ -922,7 +1025,12 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
   }
 
   async function stop(): Promise<void> {
-    if (!started) return;
+    if (!started) {
+      // Never started: purge retention state only. Queued tasks, their
+      // resolvers and waiters are left exactly as they were.
+      retention.purge();
+      return;
+    }
     stopping = true;
 
     // Collect every durable cancel so stop() can AWAIT them (committee round-2
@@ -1014,6 +1122,9 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
       await loopPromise;
     }
 
+    // Every resolver has settled and the loop has exited: drop all retained
+    // outcomes, tombstones, and their timers. Emits nothing.
+    retention.purge();
     started = false;
   }
 
@@ -1023,6 +1134,8 @@ export function createScheduler(options: CreateSchedulerOptions): Scheduler {
     dispatch: dispatchMethod,
     getState,
     cancel,
+    locateTask,
+    awaitTask,
     start,
     stop,
     addEventListener: ((type: string, listener: EventListenerOrEventListenerObject) => {

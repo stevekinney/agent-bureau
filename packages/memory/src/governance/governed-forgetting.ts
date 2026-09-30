@@ -1,5 +1,5 @@
 import { type MemoryAuthority, holdsGovernanceAuthority } from './authority';
-import type { DeletionEngine } from './deletion';
+import { type DeletionEngine, deletionOutcome } from './deletion';
 import {
   type GovernanceContext,
   type ResolvedRecord,
@@ -12,7 +12,6 @@ import type {
   MemoryForgetMode,
   MemoryForgetRequest,
   MemoryForgetResult,
-  MemoryOperationResult,
   MemoryRecordLocator,
 } from './governed-memory-types';
 import { evictionContext } from './governed-reads';
@@ -24,7 +23,7 @@ import { retentionExpiry } from './retention';
 
 type ForgetOf<Mode extends MemoryForgetMode> = Extract<MemoryForgetRequest, { mode: Mode }>;
 
-function tagged(mode: MemoryForgetMode, result: MemoryOperationResult): MemoryForgetResult {
+function tagged(mode: MemoryForgetMode, result: MemoryDeletionResult): MemoryForgetResult {
   return { ...result, mode };
 }
 
@@ -204,7 +203,16 @@ export async function deleteLocated(
     trigger: options.trigger ?? 'request',
     scope,
   });
-  return { operationId, status: 'applied', recordIds: [locator.id], receipt };
+  // Only a deletion that removed its record took effect; a held or failed one
+  // left the record stored, and its receipt says which.
+  const outcome = deletionOutcome(receipt);
+  return {
+    operationId,
+    status: outcome === 'completed' ? 'applied' : 'unchanged',
+    recordIds: [locator.id],
+    receipt,
+    deletion: outcome,
+  };
 }
 
 async function revokeExport(

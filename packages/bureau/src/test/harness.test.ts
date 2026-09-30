@@ -273,11 +273,10 @@ describe('createBureauTestHarness', () => {
   });
 
   describe('supports and the unsupported-capability drivers', () => {
-    it('reports false for managed-goal and scheduler-task-result', async () => {
+    it('reports false for managed-goal', async () => {
       const harness = await harnessWithMemoryStorage();
 
       expect(harness.supports('managed-goal')).toBe(false);
-      expect(harness.supports('scheduler-task-result')).toBe(false);
     });
 
     it('startManagedGoal throws a typed BureauHarnessUnsupportedError naming AB-101 and AB-102', async () => {
@@ -293,17 +292,23 @@ describe('createBureauTestHarness', () => {
       }
     });
 
-    it('getSchedulerTaskResult throws a typed BureauHarnessUnsupportedError naming AB-180', async () => {
-      const harness = await harnessWithMemoryStorage();
+    it('getSchedulerTaskResult and awaitSchedulerTask resolve a submitted scheduler task', async () => {
+      const harness = await harnessWithMemoryStorage({
+        scheduler: { enabled: true, idleDelay: 1 },
+      });
 
-      try {
-        harness.getSchedulerTaskResult('task-1');
-        throw new Error('expected getSchedulerTaskResult to throw');
-      } catch (error) {
-        expect(error).toBeInstanceOf(BureauHarnessUnsupportedError);
-        expect((error as BureauHarnessUnsupportedError).capability).toBe('scheduler-task-result');
-        expect((error as BureauHarnessUnsupportedError).owningIssues).toEqual(['AB-180']);
-      }
+      const { taskId } = await harness.submitSchedulerTask({
+        message: 'Harness task',
+        priority: 'background',
+      });
+      const result = await harness.awaitSchedulerTask(taskId);
+
+      expect(result).not.toBeNull();
+      expect(harness.getSchedulerTaskResult(taskId)).toEqual({
+        status: 'terminal',
+        outcome: { status: 'fulfilled', value: result },
+      });
+      expect(harness.getSchedulerTaskResult('unknown')).toEqual({ status: 'not-found' });
     });
   });
 });

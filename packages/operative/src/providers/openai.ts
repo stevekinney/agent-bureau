@@ -15,12 +15,37 @@ import type {
   GenerateFunction,
   GenerateResponse,
   OpenAIChatCompletion,
+  OpenAIChatCompletionCreateRequest,
   OpenAIClient,
   OpenAIProviderOptions,
   OpenAIStreamingClient,
   StreamingGenerateFunction,
   StreamingHandle,
 } from './types.ts';
+
+type OpenAIToolCallEntries = NonNullable<
+  NonNullable<OpenAIChatCompletion['choices'][number]>['message']['tool_calls']
+>;
+
+/**
+ * Narrow a non-streaming response's tool calls to function entries. A
+ * `type: 'custom'` entry has no `function`, which armorer's parser cannot
+ * read, so it is rejected with a clear message rather than an accidental
+ * `TypeError`. Runs inside the caller's `try`, so the `catch` wraps it.
+ */
+function requireFunctionToolCalls(toolCalls: OpenAIToolCallEntries | undefined) {
+  if (!toolCalls) return undefined;
+  const functionCalls: Array<Extract<OpenAIToolCallEntries[number], { type: 'function' }>> = [];
+  for (const call of toolCalls) {
+    if (call.type !== 'function') {
+      throw new Error(
+        `OpenAI returned a custom tool call (id "${call.id}"); only function tool calls are supported`,
+      );
+    }
+    functionCalls.push(call);
+  }
+  return functionCalls;
+}
 
 /**
  * Build a provider-neutral {@link TokenUsage} from an OpenAI `usage` payload.
@@ -95,7 +120,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
         const clientOptions: Record<string, unknown> = {};
         if (options.apiKey) clientOptions['apiKey'] = options.apiKey;
         if (baseURL) clientOptions['baseURL'] = baseURL;
-        return new OpenAI(clientOptions) as unknown as OpenAIClient;
+        return new OpenAI(clientOptions);
       });
     }
     return clientPromise;
@@ -109,7 +134,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
     const tools = await context.toolbox.toOpenAITools();
     const hasTools = tools.length > 0;
 
-    const params: Record<string, unknown> = {
+    const params: OpenAIChatCompletionCreateRequest = {
       model: resolvedModel,
       messages,
     };
@@ -143,7 +168,7 @@ export function createOpenAIProvider(options: OpenAIProviderOptions): GenerateFu
 
       const choice = response.choices[0];
       const content = choice?.message.content ?? '';
-      const toolCalls = parseOpenAIToolCalls(choice?.message.tool_calls);
+      const toolCalls = parseOpenAIToolCalls(requireFunctionToolCalls(choice?.message.tool_calls));
 
       const usage = response.usage ? buildOpenAIUsage(response.usage) : undefined;
 
@@ -194,7 +219,7 @@ export function createOpenAIProviderStream(
         const clientOptions: Record<string, unknown> = {};
         if (options.apiKey) clientOptions['apiKey'] = options.apiKey;
         if (baseURL) clientOptions['baseURL'] = baseURL;
-        return new OpenAI(clientOptions) as unknown as OpenAIStreamingClient;
+        return new OpenAI(clientOptions);
       });
     }
     return clientPromise;
@@ -209,7 +234,7 @@ export function createOpenAIProviderStream(
     const tools = await context.toolbox.toOpenAITools();
     const hasTools = tools.length > 0;
 
-    const params: Record<string, unknown> = {
+    const params: OpenAIChatCompletionCreateRequest = {
       model: resolvedModel,
       messages,
       stream: true,

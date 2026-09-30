@@ -51,6 +51,7 @@ import {
   SCHEDULER_ORIGIN_TAG,
   SchedulerTaskCompletedEvent,
   SchedulerTaskFailedEvent,
+  SchedulerTaskLookupError,
   ScheduleSkippedEvent,
   startDurableRunResult,
   StepCompletedEvent,
@@ -97,6 +98,7 @@ import { z } from 'zod';
 import type { AuditRecord } from './audit-trail';
 import * as auditTrailModule from './audit-trail';
 import {
+  ABORTED_RUN_TERMINAL_GRACE_MILLISECONDS,
   BureauError,
   classifyRecoveredRun,
   classifyRecoveredRunDetailed,
@@ -12945,6 +12947,101 @@ describe('Bureau.shutdown() (AB-207)', () => {
     }
   });
 
+  it.each([
+    ['in-memory', false],
+    ['durable', true],
+  ])(
+    "dispose() lands an aborted run's terminal session save before closing SQLite storage (%s execution)",
+    async (_label, durableExecution) => {
+      // Under 'abort', the run's `run.aborted` listener starts its session
+      // save only after the run unwinds, which is later than the
+      // session-persistence drain alone waits for. Without a wait for the
+      // aborted run, storage closed first and the save failed with
+      // "Statement has finalized", leaving `lastRunStatus: 'running'`.
+      const databasePath = join(
+        tmpdir(),
+        `bureau-dispose-aborted-save-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+      );
+      const diagnostics: string[] = [];
+      let resolveEntered!: () => void;
+      const generateEntered = new Promise<void>((resolve) => {
+        resolveEntered = resolve;
+      });
+
+      try {
+        const bureau = await createBureau({
+          agents: {},
+          generate: (context) => {
+            resolveEntered();
+            return new Promise<GenerateResponse>((resolve) => {
+              context.signal?.addEventListener(
+                'abort',
+                () => resolve({ content: 'aborted', toolCalls: [] }),
+                { once: true },
+              );
+            });
+          },
+          toolbox: createEmptyToolbox(),
+          storage: { type: 'sqlite', path: databasePath },
+          durableExecution,
+          onDiagnostic: (diagnostic) => diagnostics.push(diagnostic.message),
+        });
+
+        const run = await bureau.createRun({ message: 'Abort me on dispose' });
+        await generateEntered;
+        await bureau.dispose();
+
+        expect(diagnostics.filter((message) => message.includes('persist'))).toEqual([]);
+
+        const verifyStorage = await resolveStorage({ type: 'sqlite', path: databasePath });
+        const verifySessionStore = createSessionStore(
+          textValueStore(verifyStorage, { disposeUnderlyingStorage: false }),
+        );
+        const session = await verifySessionStore.load(run.sessionId);
+        expect(session?.metadata).toMatchObject({
+          lastRunId: run.id,
+          lastRunStatus: 'aborted',
+          lastFinishReason: 'aborted',
+        });
+        verifyStorage[Symbol.dispose]();
+      } finally {
+        await rm(databasePath, { force: true });
+        await rm(`${databasePath}-wal`, { force: true });
+        await rm(`${databasePath}-shm`, { force: true });
+      }
+    },
+  );
+
+  it('dispose() still finishes when an aborted run never honors its abort, waiting no longer than the grace bound', async () => {
+    // The wait for aborted runs' terminal events is bounded by a runtime
+    // timer, so a run whose provider ignores its AbortSignal costs that
+    // bound and nothing more.
+    const runtime = createManualRuntimeServices();
+    const { generate, invoked } = createTrulyHungGenerate();
+    const bureau = await createBureau({
+      agents: {},
+      generate,
+      toolbox: createEmptyToolbox(),
+      runtime,
+    });
+
+    const run = await bureau.createRun({ message: 'Ignore the abort' });
+    await invoked;
+
+    let disposed = false;
+    const disposePromise = bureau.dispose().then(() => {
+      disposed = true;
+    });
+    for (let index = 0; index < 20; index++) await Promise.resolve();
+    expect(disposed).toBe(false);
+
+    await runtime.advance(ABORTED_RUN_TERMINAL_GRACE_MILLISECONDS);
+    await disposePromise;
+
+    expect(disposed).toBe(true);
+    expect(bureau.getRun(run.id)?.status).toBe('running');
+  });
+
   it('shutdown({ timeoutMilliseconds }) resolves within a bounded margin of N, reporting a still-unresolved owner "unresolved" and every other owner its real outcome — the underlying drain keeps running rather than being abandoned', async () => {
     // The gated owner here is the durable engine's `[Symbol.asyncDispose]`,
     // not an online-eval judge: `backgroundShutdownController.abort()` fires
@@ -21507,5 +21604,120 @@ describe('bureau:pending-approval-persist idempotency under crash replay (COR-12
 
     expect(overrides.size).toBe(0);
     expect(persistCalls).toBe(0);
+  });
+});
+
+describe('COR-636: scheduler task locator', () => {
+  it('resolves a settled task from its receipt taskId alone', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([{ content: 'located', toolCalls: [] }]),
+      scheduler: { enabled: true, idleDelay: 1 },
+      toolbox: createEmptyToolbox(),
+    });
+
+    try {
+      const { taskId } = await bureau.submitSchedulerTask({
+        message: 'Locate me',
+        priority: 'background',
+      });
+
+      const result = await bureau.awaitSchedulerTask(taskId);
+      expect(result?.content).toBe('located');
+      expect(bureau.locateSchedulerTask(taskId)).toEqual({
+        status: 'terminal',
+        outcome: { status: 'fulfilled', value: result },
+      });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('reports expired and then not-found on a manual runtime with a finite retention window', async () => {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([{ content: 'expiring', toolCalls: [] }]),
+      scheduler: { enabled: true, retentionWindowMs: 50 },
+      toolbox: createEmptyToolbox(),
+      runtime,
+    });
+
+    try {
+      const { taskId } = await bureau.submitSchedulerTask({
+        message: 'Expire me',
+        priority: 'background',
+      });
+      await bureau.awaitSchedulerTask(taskId);
+      expect(bureau.locateSchedulerTask(taskId).status).toBe('terminal');
+
+      await runtime.advance(50);
+      expect(bureau.locateSchedulerTask(taskId)).toEqual({ status: 'expired' });
+      const expired = await bureau.awaitSchedulerTask(taskId).catch((error: unknown) => error);
+      expect(expired).toBeInstanceOf(SchedulerTaskLookupError);
+      expect(expired).toMatchObject({ reason: 'expired' });
+
+      await runtime.advance(50);
+      expect(bureau.locateSchedulerTask(taskId)).toEqual({ status: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('reports not-found for an unknown id and rejects awaitSchedulerTask with a lookup error', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      scheduler: { enabled: true },
+      toolbox: createEmptyToolbox(),
+    });
+
+    try {
+      expect(bureau.locateSchedulerTask('unknown-task')).toEqual({ status: 'not-found' });
+      const rejection = await bureau
+        .awaitSchedulerTask('unknown-task')
+        .catch((error: unknown) => error);
+      expect(rejection).toBeInstanceOf(SchedulerTaskLookupError);
+      expect(rejection).toMatchObject({ taskId: 'unknown-task', reason: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('throws NOT_CONFIGURED synchronously when the scheduler is not enabled', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+
+    try {
+      for (const call of [
+        () => bureau.locateSchedulerTask('any'),
+        () => bureau.awaitSchedulerTask('any'),
+      ]) {
+        try {
+          call();
+          throw new Error('expected a synchronous BureauError');
+        } catch (error) {
+          expect(error).toBeInstanceOf(BureauError);
+          expect((error as BureauError).code).toBe('NOT_CONFIGURED');
+        }
+      }
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('rejects an invalid retentionWindowMs from createBureau, naming the option', async () => {
+    const rejection = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      scheduler: { enabled: true, retentionWindowMs: 0 },
+      toolbox: createEmptyToolbox(),
+    }).catch((error: unknown) => error);
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toContain('retentionWindowMs');
   });
 });

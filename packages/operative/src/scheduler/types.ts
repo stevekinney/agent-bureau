@@ -87,6 +87,28 @@ export interface SchedulerState {
 }
 
 /**
+ * The outcome of releasing a retained scheduler task record. Distinct from
+ * Bureau's `CleanupAcknowledgement` (session/checkpoint cleanup) even though it
+ * shares the same four strings. An in-memory map delete cannot fail, so only
+ * `'completed'` is emitted today.
+ */
+export type RetentionCleanupOutcome = 'not-required' | 'completed' | 'failed' | 'unresolved';
+
+/**
+ * Where a scheduler task id currently stands, resolved from the id alone.
+ * A `null` result is `{ status: 'fulfilled', value: null }`; the absence of any
+ * outcome is a different `status`, never a missing field.
+ */
+export type SchedulerTaskLocation =
+  | { readonly status: 'in-progress' }
+  | {
+      readonly status: 'terminal';
+      readonly outcome: PromiseSettledResult<RunResult | null>;
+    }
+  | { readonly status: 'expired' }
+  | { readonly status: 'not-found' };
+
+/**
  * A lightweight summary of a task for state inspection.
  */
 export interface SchedulerTaskSummary {
