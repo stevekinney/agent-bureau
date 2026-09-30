@@ -246,6 +246,12 @@ export interface ConversationSnapshot {
   currentPath: readonly number[];
   createdAt: string;
   lineage: ConversationSnapshotLineage;
+  /**
+   * Last `streamSequence` stamped per streaming message id. Written only when
+   * at least one counter exists, and optional on read, so snapshots written
+   * before counters were persisted still verify.
+   */
+  streamSequences?: Readonly<Record<string, number>>;
   integrity: ConversationSnapshotIntegrity;
 }
 

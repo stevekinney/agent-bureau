@@ -283,4 +283,62 @@ describe('recover() — reattach failure and initial state', () => {
       expect(persisted!.runs[0]!.outcome).toEqual({ finishReason: 'stop-condition' });
     },
   );
+
+  // COR-66: this run is aborted so `closed()` bypasses the not-required fast
+  // path and reaches `resolveReattachOutcome`'s fold, which now reports a
+  // recovered run's durability as unknown instead of completed.
+  it('COR-66: recover() callers observe unresolved/unknown-effect from closed() once it reaches the fold', async () => {
+    const sessionId = 'recovery-closed-unknown-effect-session';
+    const runId = `${sessionId}:0`;
+    const store = createSessionStore(textValueStore(new MemoryStorage()));
+    await store.save(
+      createAgentSession({
+        agentName: 'agent',
+        conversationHistory: createConversationHistory(),
+        id: sessionId,
+        runs: [
+          {
+            runId,
+            sequence: 0,
+            status: 'running',
+            startedAt: fixtureRuntime.clock.nowISO(),
+            agentName: 'agent',
+            userMessageId: 'originating-user-message',
+          },
+        ],
+      }),
+    );
+    const fakeEngine = createSessionEngine({
+      cancel: async () => {},
+      get: async () => ({ status: 'completed' }),
+      resume: async () => ({
+        id: runId,
+        result: async () => ({
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        }),
+      }),
+    });
+    const fakeCheckpointStore = createCheckpointStoreFixture(async () => ({
+      conversation: null,
+      cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+      steps: [],
+    }));
+
+    const handle = createSessionHandle(sessionId, {
+      store,
+      agentName: 'agent',
+      engine: fakeEngine,
+      checkpointStore: fakeCheckpointStore,
+      runOptions: createTestRunOptions(),
+    });
+    const recovered = await handle.recover();
+    expect(recovered).not.toBeNull();
+    await recovered!.result();
+    recovered!.abort();
+    expect(await recovered!.closed()).toEqual({ status: 'unresolved', reason: 'unknown-effect' });
+  });
 });

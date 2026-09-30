@@ -16,7 +16,9 @@ type RestoreTarget<T> = {
     sourceRevision: number;
   }) => void;
   readonly lifecycle: () => string;
-  readonly emitRestored: () => void;
+  readonly setStreamSequences: (sequences: Readonly<Record<string, number>>) => void;
+  /** Captures the restored state now and returns the dispatch that announces it later. */
+  readonly prepareRestored: () => () => void;
   readonly create: (
     history: ConversationHistory,
     environment?: Partial<ConversationEnvironment>,
@@ -52,8 +54,12 @@ export function restoreConversation<T>(
     current = next;
   }
   target.setCurrentNode(current);
+  target.setStreamSequences(snapshot.streamSequences);
+  // Built here, not in the microtask: a mutation between `from` returning and
+  // the dispatch must not leak into the announced restored state.
+  const emitRestored = target.prepareRestored();
   queueMicrotask(() => {
-    if (target.lifecycle() === 'open') target.emitRestored();
+    if (target.lifecycle() === 'open') emitRestored();
   });
   return conversation;
 }

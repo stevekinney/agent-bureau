@@ -208,14 +208,24 @@ export function reattachDurableActiveRun(
     ? (): Promise<CleanupAcknowledgement> => context.terminalCleanup!(runId)
     : undefined;
 
+  // COR-66: a reattached run cannot vouch for the durable boundary (declared
+  // gap, AB-88), so the outcome it would otherwise report as `completed` is
+  // downgraded here, before `foldTerminalCleanup` runs. The step still runs and
+  // its own non-completed outcome still wins. `createDurableActiveRun`'s
+  // fresh-run fold is deliberately unchanged.
+  const RECOVERED_UNKNOWN_EFFECT_OUTCOME: CleanupAcknowledgement = {
+    status: 'unresolved',
+    reason: 'unknown-effect',
+  };
+
   async function resolveReattachOutcome(): Promise<CleanupAcknowledgement> {
     if (reachability.unreachable) return { status: 'unresolved', reason: 'unreachable' };
     if (abortCancelled === undefined) {
-      // AB-304: matching `createDurableActiveRun`'s identical fold-in — a
-      // registered child's own `closed()` must settle before this
-      // reattached parent reports `completed`, not merely its `result()`.
+      // AB-304: matching `createDurableActiveRun`'s identical ordering — a
+      // registered child's own `closed()` must settle before the terminal
+      // fold runs, not merely its `result()`.
       await (childRegistry?.awaitChildrenClosed() ?? Promise.resolve());
-      return foldTerminalCleanup({ status: 'completed' }, terminalCleanupStep);
+      return foldTerminalCleanup(RECOVERED_UNKNOWN_EFFECT_OUTCOME, terminalCleanupStep);
     }
     // Wait for the SAME cancel attempt abort() fired (never rejects: it is
     // already `.then(cancelSucceeded, cancelFailed)`), then re-read the
@@ -232,7 +242,7 @@ export function reattachDurableActiveRun(
       }
       // AB-304: same children-closed fold-in as the uncancelled branch above.
       await (childRegistry?.awaitChildrenClosed() ?? Promise.resolve());
-      return foldTerminalCleanup({ status: 'completed' }, terminalCleanupStep);
+      return foldTerminalCleanup(RECOVERED_UNKNOWN_EFFECT_OUTCOME, terminalCleanupStep);
     } catch (error) {
       return { status: 'unresolved', reason: 'persistence-failed', error };
     }

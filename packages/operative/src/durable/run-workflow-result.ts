@@ -1,6 +1,7 @@
 import type { AgentRunErrorCode, AgentRunErrorKind } from '../errors';
 import { BudgetExceededError, ElicitationDeniedError, GuardrailTripwireError } from '../errors';
 import {
+  InvalidRunResultError,
   UnsupportedRunResultLegacyFieldError,
   UnsupportedRunResultVersionError,
 } from '../run-envelope';
@@ -105,12 +106,62 @@ export interface AgentRunWorkflowResult {
     | undefined;
 }
 
+const FINISH_REASONS: ReadonlySet<string> = new Set<FinishReason>([
+  'stop-condition',
+  'maximum-steps',
+  'aborted',
+  'error',
+  'elicitation-denied',
+  'budget-exceeded',
+  'tripwire',
+]);
+
+function assertSummaryShape(summary: Record<string, unknown>): void {
+  if (typeof summary['runId'] !== 'string') {
+    throw new InvalidRunResultError('runId must be a string');
+  }
+  if (typeof summary['steps'] !== 'number' || !Number.isFinite(summary['steps'])) {
+    throw new InvalidRunResultError('steps must be a finite number');
+  }
+  if (typeof summary['content'] !== 'string') {
+    throw new InvalidRunResultError('content must be a string');
+  }
+  if (typeof summary['finishReason'] !== 'string' || !FINISH_REASONS.has(summary['finishReason'])) {
+    throw new InvalidRunResultError('finishReason must be a valid finish reason');
+  }
+
+  const validation = summary['schemaValidation'];
+  // A validated-undefined output keeps its key, so presence is key presence.
+  const hasOutput = 'output' in summary;
+  if (validation === undefined) {
+    if (hasOutput) throw new InvalidRunResultError('output requires schemaValidation');
+    return;
+  }
+  if (
+    typeof validation !== 'object' ||
+    validation === null ||
+    typeof (validation as Record<string, unknown>)['success'] !== 'boolean'
+  ) {
+    throw new InvalidRunResultError('schemaValidation.success must be a boolean');
+  }
+  const success = (validation as Record<string, unknown>)['success'] === true;
+  if (success !== hasOutput) {
+    throw new InvalidRunResultError(
+      success
+        ? 'schemaValidation.success is true but output is absent'
+        : 'output is present but schemaValidation.success is false',
+    );
+  }
+}
+
 /**
- * Normalize a workflow summary at the durable trust boundary.
+ * Normalize a workflow summary at the durable trust boundary. Rejects a
+ * current-version summary whose required fields, finish reason, or
+ * output/schemaValidation invariant is malformed.
  */
 export function normalizeAgentRunWorkflowResult(value: unknown): AgentRunWorkflowResult {
   if (typeof value !== 'object' || value === null) {
-    throw new Error('Invalid durable agent run workflow result');
+    throw new InvalidRunResultError('summary must be an object');
   }
 
   const summary = value as Record<string, unknown>;
@@ -120,6 +171,7 @@ export function normalizeAgentRunWorkflowResult(value: unknown): AgentRunWorkflo
   if ('structuredOutput' in summary) {
     throw new UnsupportedRunResultLegacyFieldError('structuredOutput', summary['schemaVersion']);
   }
+  assertSummaryShape(summary);
 
   return value as AgentRunWorkflowResult;
 }

@@ -647,23 +647,15 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
   durableGuardrails?: DurableGuardrailsConfiguration;
   /**
    * Multi-process ownership posture for the durable engine (AB-178). Omit for
-   * the default `ownership: 'none'` — one bureau process per durable store,
-   * enforced by infrastructure convention (one replica, a `Recreate` deploy)
-   * rather than the engine itself, exactly as today. Has effect only when a
-   * durable engine is composed.
+   * the default `ownership: 'workflow-lease'`. Pass `{ ownership: 'none' }` to
+   * opt out — one bureau process per durable store, enforced by infrastructure
+   * convention (one replica, a `Recreate` deploy) rather than the engine
+   * itself. Has effect only when a durable engine is composed.
    *
-   * Passing `{ ownership: 'workflow-lease' }` lets more than one bureau
-   * process safely share a durable store: Weft fences each workflow to
-   * exactly one engine before its generator runs, so a second process racing
-   * to resume the same workflow fails closed instead of double-executing it.
-   *
-   * **Do not enable this if your host relies on the scheduler's preemption
-   * path** (a background task suspended and later resumed via
-   * `submitSchedulerTask`/`createSchedule`'s overlap handling) — a reproduced
-   * weft 0.23.1 defect makes `'workflow-lease'` incompatible with same-engine
-   * `engine.suspend()`/`engine.resume()`, which Bureau's own scheduler uses
-   * internally. See `CreateRunEngineOptions.ownership`'s JSDoc in
-   * `@lostgradient/operative` for the full repro and root cause.
+   * Under `'workflow-lease'` more than one bureau process can safely share a
+   * durable store: Weft fences each workflow to exactly one engine before its
+   * generator runs, so a second process racing to resume the same workflow
+   * fails closed instead of double-executing it.
    */
   durableOwnership?: Pick<
     CreateRunEngineOptions,
@@ -857,7 +849,7 @@ export interface PendingToolApprovalReview {
  */
 export interface PendingHumanWaitReview {
   kind: 'human-wait';
-  /** Stable id for this review, e.g. `human-wait:<runId>:<signalName>`. */
+  /** Id for this review, e.g. `human-wait:<runId>:<signalName>:<parkOrdinal>`; distinct per park, stable across restart. */
   id: string;
   runId: string;
   sessionId: string;

@@ -897,8 +897,41 @@ describe('createWebhookNotifier', () => {
       expect(computeWebhookDeliveryDeadlineMs(3, 2000)).toBe(6000);
     });
 
-    it('computes 0 for a single-attempt delivery (no retries to sum)', () => {
-      expect(computeWebhookDeliveryDeadlineMs(1, 1000)).toBe(0);
+    it('returns undefined (no deadline) when maxAttempts <= 1, not 0', () => {
+      expect(computeWebhookDeliveryDeadlineMs(1, 1000)).toBeUndefined();
+      expect(computeWebhookDeliveryDeadlineMs(0, 1000)).toBeUndefined();
+      expect(computeWebhookDeliveryDeadlineMs(-3, 1000)).toBeUndefined();
+    });
+
+    it('a single-attempt tracked delivery reports no deadline instead of "now"', async () => {
+      const { bureau, emit } = createStubBureau();
+      const { fetch: fetchImpl, started } = hangingFetch();
+      const clock = manualClock();
+      const controller = new AbortController();
+      const notifier = createWebhookNotifier(bureau, undefined, undefined, {
+        targets: [{ url: 'https://example.com/hook' }],
+        fetch: fetchImpl,
+        clock,
+        maxAttempts: 1,
+        signal: controller.signal,
+      });
+
+      emit(
+        makeAction({
+          type: 'elicitation.requested',
+          runId: 'run-1',
+          sequence: 1,
+          detail: { message: 'confirm?' },
+        }),
+      );
+      await started;
+
+      const [snapshot] = notifier.activeDeliverySnapshots();
+      expect(snapshot).toBeDefined();
+      expect(snapshot?.deadline).toBeUndefined();
+
+      controller.abort(new Error('test teardown'));
+      await notifier.dispose();
     });
   });
 
@@ -961,7 +994,7 @@ describe('createWebhookNotifier', () => {
       // and the derived assessment is 'healthy'.
       expect(notifier.activeDeliverySnapshots()[0]?.assessment).toBe('healthy');
 
-      clock.advance(computeWebhookDeliveryDeadlineMs(5, 1000) + 1);
+      clock.advance(15000 + 1);
 
       const [snapshot] = notifier.activeDeliverySnapshots();
       expect(snapshot?.reachability).toBe('unreachable');

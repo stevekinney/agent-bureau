@@ -1,4 +1,8 @@
-import { approvalConsumeSymbol, policyAuthorizationOnlySymbol } from '../internal/approval-resume';
+import {
+  approvalConsumeSymbol,
+  policyAuthorizationOnlySymbol,
+  policyAuthorizationResultSymbol,
+} from '../internal/approval-resume';
 import type { ToolExecutionResult } from '../types';
 import type {
   AdmissionOutcome,
@@ -21,10 +25,11 @@ export async function handleAuthorizationOnly<TInput>(
   if (input.options.signal?.aborted) {
     return cancelAuthorization(input, rollbackApprovalAdmission);
   }
-  input.emit('execute-success', { ...parsedState.parsedDetail, result: undefined });
+  const recordedResult = input.options[policyAuthorizationResultSymbol];
+  input.emit('execute-success', { ...parsedState.parsedDetail, result: recordedResult });
   input.emit('settled', {
     ...parsedState.parsedDetail,
-    result: undefined,
+    result: recordedResult,
     callbackCompletion: input.options.executionHandle?.whenSettled(),
   });
   try {

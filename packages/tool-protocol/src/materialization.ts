@@ -597,6 +597,13 @@ function walkJSONArray(
   if (Object.keys(current).length !== current.length) {
     throw new TypeError(`Sparse array or non-index own property at ${currentPath}`);
   }
+  if (Object.getOwnPropertySymbols(current).length > 0) {
+    throw new TypeError(`Symbol-keyed property at ${currentPath}`);
+  }
+  // Every array carries one non-enumerable own property, `length`.
+  if (Object.getOwnPropertyNames(current).length !== current.length + 1) {
+    throw new TypeError(`Non-enumerable own property at ${currentPath}`);
+  }
 
   stack.add(current);
   for (let index = 0; index < current.length; index += 1) {

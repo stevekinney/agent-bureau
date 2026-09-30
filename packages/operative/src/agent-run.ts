@@ -167,7 +167,10 @@ export interface DiagnosticAgentRun extends AsyncIterable<RunEvent> {
    * assert the durable boundary this handle cannot vouch for — is downgraded
    * to `{ status: 'unresolved', reason: 'unknown-effect' }`. Every other
    * outcome (`not-required`, `failed`, or an already-`unresolved` result)
-   * passes through identically.
+   * passes through identically. An `ActiveRun` produced by
+   * `reattachDurableActiveRun` (COR-66) already arrives pre-downgraded, so
+   * this downgrade is a no-op for it; it stays as defense-in-depth for any
+   * other wrapped `ActiveRun` of unaudited provenance.
    */
   closed(options?: ClosedOptions): Promise<CleanupAcknowledgement>;
   /** See `AgentRun.snapshot()` — AB-88/AB-214 apply the same capability here. */
@@ -610,6 +613,11 @@ export function createDiagnosticAgentRun(
   // per-call `signal` timeout (`{ status: 'unresolved', reason: 'timed-out' }`)
   // is inherently call-scoped, never a genuine settlement, so it passes
   // through uncached, matching the wrapped `ActiveRun.closed()` contract.
+  //
+  // COR-66: an `ActiveRun` from `reattachDurableActiveRun` already reports the
+  // downgraded outcome itself, so this is a no-op for that input. It remains
+  // load-bearing defense-in-depth for any other wrapped `ActiveRun`, whose
+  // durability this function cannot vouch for.
   let cachedDiagnosticAcknowledgement: CleanupAcknowledgement | undefined;
   // The pending TRANSFORM itself is memoized, not just its eventual value —
   // two concurrent calls before the first transformation finishes must

@@ -616,6 +616,59 @@ describe('bureau.children over a durable bureau', () => {
     }
   });
 
+  it('records child.aborted in the audit trail for a running child when the bureau is disposed under the default ownership', async () => {
+    const path = databasePath('disposed-audit');
+    try {
+      const bureau = await createBureau({
+        agents: hangingAgents(),
+        storage: { type: 'sqlite', path },
+        durableExecution: true,
+        onDiagnostic,
+      });
+
+      const parent = bureau.run('planner', 'plan');
+      const parentRunId = await startedDurableRun(bureau);
+      expect(
+        await bureau.children.dispatch({
+          parentRunId,
+          agentName: 'worker',
+          input: 'work',
+          childRunId: 'disposed-child',
+          parentCancellation: 'detach',
+        }),
+      ).toMatchObject({ outcome: 'started' });
+      parent.abort('done');
+      await parent.result();
+
+      await bureau.dispose();
+      await yieldToPortableEventLoop();
+
+      expect(
+        diagnostics.filter((diagnostic) => diagnostic.message.includes('audit trail')),
+      ).toEqual([]);
+      expect(diagnostics.filter((diagnostic) => diagnostic.scope === 'child-topology')).toEqual([]);
+
+      const second = await createBureau({
+        agents: hangingAgents(),
+        storage: { type: 'sqlite', path },
+        durableExecution: true,
+        onDiagnostic,
+      });
+      try {
+        const records = await second.auditTrail?.query({ runId: 'disposed-child' });
+        const aborted = records?.filter((record) => record.type === 'child.aborted');
+        expect(aborted).toHaveLength(1);
+        expect(
+          await second.children.get({ parentRunId, childRunId: 'disposed-child' }),
+        ).toMatchObject({ status: 'aborted' });
+      } finally {
+        await second.dispose();
+      }
+    } finally {
+      await removeDatabase(path);
+    }
+  });
+
   it('runs a createLazyAgent parent and child durably, as it does createAgent ones', async () => {
     const lazyHanging = (name: string) =>
       createLazyAgent(async () =>
@@ -760,6 +813,7 @@ describe('bureau.children across a process restart', () => {
       },
       storage: { type: 'sqlite', path },
       durableExecution: true,
+      durableOwnership: { ownership: 'none' },
       onDiagnostic,
       children: { signals: { worker: proceedSignals }, delegation },
     });
@@ -819,6 +873,7 @@ describe('bureau.children across a process restart', () => {
         },
         storage: { type: 'sqlite', path },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         onDiagnostic,
         children: { signals: { worker: proceedSignals }, delegation },
       });
@@ -861,6 +916,7 @@ describe('bureau.children across a process restart', () => {
         agents: {},
         storage: { type: 'sqlite', path },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         onDiagnostic,
       });
       try {
@@ -900,6 +956,7 @@ describe('bureau.children across a process restart', () => {
         },
         storage: { type: 'sqlite', path },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         onDiagnostic,
         children: { delegation },
       });
@@ -942,6 +999,7 @@ describe('bureau.children across a process restart', () => {
         },
         storage: { type: 'sqlite', path },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         onDiagnostic,
         // A different secret: every grant signed under the old one fails verification.
         children: { delegation: { secret: 'rotated-without-migration' } },

@@ -84,6 +84,8 @@ export interface SnapshotEnvelope {
   readonly createdAt: string;
   readonly currentPath: readonly number[];
   readonly lineage: ConversationSnapshotLineage;
+  /** Per-message stream sequence counters; absent from snapshots written before they were persisted. */
+  readonly streamSequences: Readonly<Record<string, number>>;
   readonly integrity: ConversationSnapshotIntegrity;
 }
 
@@ -121,8 +123,23 @@ export function readSnapshotEnvelope(value: unknown): SnapshotEnvelope {
     createdAt,
     currentPath: readPath(record),
     lineage: readLineage(record),
+    streamSequences: readStreamSequences(record),
     integrity: readIntegrity(record),
   };
+}
+
+function readStreamSequences(record: Record<string, unknown>): Readonly<Record<string, number>> {
+  const value = record['streamSequences'];
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw snapshotError('invalid stream sequences');
+  const sequences: Record<string, number> = {};
+  for (const [messageId, sequence] of Object.entries(value)) {
+    if (typeof sequence !== 'number' || !Number.isSafeInteger(sequence) || sequence < 1) {
+      throw snapshotError(`invalid stream sequences for ${messageId}`);
+    }
+    sequences[messageId] = sequence;
+  }
+  return sequences;
 }
 
 /** Verifies `integrity` against the envelope as received, minus the `integrity` field itself. */

@@ -343,6 +343,14 @@ export interface ChildTopology {
   reconcileRecovery(): Promise<void>;
   /** Resolves once every in-flight settlement write has landed. */
   drain(): Promise<void>;
+  /**
+   * Resolves once every child result already being awaited has been written.
+   * Unlike `drain()` it waits on the children's own results, so a child that
+   * ignores its abort never settles it: callers must bound the wait.
+   */
+  settlementsKnown(): Promise<void>;
+  /** How many child results are still being awaited, so a caller can skip a bounded wait. */
+  awaitingSettlements(): number;
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +543,7 @@ export function createChildTopology(dependencies: ChildTopologyDependencies): Ch
 
   const tracked = new Map<string, TrackedChild>();
   const inFlight = new Set<Promise<unknown>>();
+  const awaitingResult = new Set<Promise<unknown>>();
   const counters = new Map<string, Promise<BudgetCounters>>();
   /** Each child identifier's dispatch in flight in this process, and the parent it is under. */
   const dispatching = new Map<
@@ -970,10 +979,13 @@ export function createChildTopology(dependencies: ChildTopologyDependencies): Ch
    * its abort must not be able to hold Bureau's shutdown open.
    */
   function settleWhenKnown(childRunId: string, known: Promise<Settlement>): void {
-    void known.then(({ status, outcome }) => {
-      trackInFlight(writeSettlement(childRunId, status, outcome));
-      return undefined;
+    const written = known.then(async ({ status, outcome }) => {
+      const writing = writeSettlement(childRunId, status, outcome);
+      trackInFlight(writing);
+      return writing;
     });
+    awaitingResult.add(written);
+    void written.finally(() => awaitingResult.delete(written));
   }
 
   async function writeSettlement(
@@ -1616,6 +1628,12 @@ export function createChildTopology(dependencies: ChildTopologyDependencies): Ch
     return applying;
   }
 
+  async function settlementsKnown(): Promise<void> {
+    while (awaitingResult.size > 0) {
+      await Promise.allSettled(awaitingResult);
+    }
+  }
+
   async function drain(): Promise<void> {
     while (inFlight.size > 0) {
       await Promise.allSettled(inFlight);
@@ -1629,5 +1647,7 @@ export function createChildTopology(dependencies: ChildTopologyDependencies): Ch
     recoveredRunContext,
     reconcileRecovery,
     drain,
+    settlementsKnown,
+    awaitingSettlements: () => awaitingResult.size,
   };
 }

@@ -90,10 +90,92 @@ const ACCOUNTED_STORAGE_VERBS = [
 ] as const;
 
 /**
+ * Arranges for `close` to run when `result`'s lifetime ends: a thenable
+ * (native or not) settling either way, or an `AsyncIterable` finishing by
+ * exhaustion, `return()`, `throw()`, or a rejected `next()`. A value that is
+ * neither never left the call "in flight", so it closes immediately.
+ */
+function trackLifetime(result: unknown, close: () => void): unknown {
+  if (result === null || (typeof result !== 'object' && typeof result !== 'function')) {
+    close();
+    return result;
+  }
+  if (typeof (result as { then?: unknown }).then === 'function') {
+    try {
+      (result as PromiseLike<unknown>).then(close, close);
+    } catch {
+      // A `then` that throws synchronously must not escape the verb call or
+      // leak the handle; awaiting the value surfaces the failure as usual.
+      close();
+    }
+    return result;
+  }
+  if (typeof (result as Partial<AsyncIterable<unknown>>)[Symbol.asyncIterator] !== 'function') {
+    close();
+    return result;
+  }
+  // A fresh wrapper object (never a Proxy over `result`, whose get-trap
+  // invariants break on frozen iterables). Unwrapped properties fall through
+  // the prototype chain.
+  const source = result as AsyncIterable<unknown> & Partial<AsyncIterator<unknown>>;
+  const wrapper = Object.create(source) as Record<PropertyKey, unknown>;
+  Object.defineProperty(wrapper, Symbol.asyncIterator, {
+    value: () => trackIterator(source[Symbol.asyncIterator](), close),
+    configurable: true,
+    writable: true,
+  });
+  for (const method of ['next', 'return', 'throw'] as const) {
+    if (typeof source[method] !== 'function') continue;
+    Object.defineProperty(wrapper, method, {
+      value: trackIteratorMethod(source as AsyncIterator<unknown>, method, close),
+      configurable: true,
+      writable: true,
+    });
+  }
+  return wrapper;
+}
+
+function trackIteratorMethod(
+  iterator: AsyncIterator<unknown>,
+  method: 'next' | 'return' | 'throw',
+  close: () => void,
+): (...args: unknown[]) => Promise<IteratorResult<unknown>> {
+  return async (...args) => {
+    const fn = iterator[method] as
+      ((...callArgs: unknown[]) => Promise<IteratorResult<unknown>>) | undefined;
+    if (fn === undefined) {
+      // An absent `return`/`throw` still ends the consumer's use of it.
+      close();
+      return { done: true, value: undefined };
+    }
+    try {
+      const step = await fn.apply(iterator, args);
+      if (method !== 'next' || step.done === true) close();
+      return step;
+    } catch (error) {
+      close();
+      throw error;
+    }
+  };
+}
+
+function trackIterator(
+  iterator: AsyncIterator<unknown>,
+  close: () => void,
+): AsyncIterator<unknown> {
+  return {
+    next: trackIteratorMethod(iterator, 'next', close),
+    return: trackIteratorMethod(iterator, 'return', close),
+    throw: trackIteratorMethod(iterator, 'throw', close),
+  };
+}
+
+/**
  * Wraps `storage` with public call accounting: every call to one of
  * {@link ACCOUNTED_STORAGE_VERBS} is recorded the instant it is INVOKED
  * (before whatever it delegates to has any chance to resolve or block) and
- * removed the instant its returned `Promise` settles. `openHandles()`
+ * removed once its returned value's lifetime ends (a `Promise` or other
+ * thenable settling, or an `AsyncIterable` finishing). `openHandles()`
  * reads the current set — synchronously, no polling — so a caller that
  * wraps `storage` again underneath (e.g. `createFaultEngine(...).wrapStorage`,
  * to block a specific call deterministically) sees that call recorded as
@@ -128,18 +210,7 @@ function wrapStorageWithHandleAccounting(storage: Storage): {
           target,
           args,
         );
-        if (result instanceof Promise) {
-          void result.then(
-            () => open.delete(label),
-            () => open.delete(label),
-          );
-        } else {
-          // A synchronous return (none of today's `ACCOUNTED_STORAGE_VERBS`
-          // produce one, but the `Storage` interface does not guarantee
-          // it) never left this call "in flight" to begin with.
-          open.delete(label);
-        }
-        return result;
+        return trackLifetime(result, () => open.delete(label));
       };
     },
   };

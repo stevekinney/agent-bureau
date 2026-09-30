@@ -93,7 +93,6 @@ export {
 } from './events';
 export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
 export {
-  buildTaskDiagnosticsInput,
   leaseEvidenceFromLostHealth,
   projectEngineLeaseSnapshot,
   projectStreamLivenessSnapshot,

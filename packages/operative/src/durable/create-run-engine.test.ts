@@ -743,15 +743,10 @@ async function isParkedRunning(handle: { snapshot: () => Promise<{ status: strin
 }
 
 describe('createRunEngine ownership (AB-178)', () => {
-  it('defaults ownership to "none" (unchanged single-writer-by-convention posture)', async () => {
+  it('defaults ownership to "workflow-lease" (fenced multi-process safety without opting in)', async () => {
     // No explicit `ownership` passed — spy on the underlying `Engine.create`
-    // call to prove `createRunEngine` still passes `'none'` by default,
-    // rather than silently changing to `'workflow-lease'`. Asserting the
-    // literal option passed to weft is deterministic; racing two live
-    // engines against the same workflow under the (intentionally
-    // unfenced) default posture is exactly the uncoordinated scenario AB-39
-    // describes as "outside the contract entirely" and is not something a
-    // test should assert a specific outcome for.
+    // call to prove `createRunEngine` passes `'workflow-lease'` by default.
+    // Asserting the literal option passed to weft is deterministic.
     const engineCreateSpy = spyOn(Engine, 'create');
     try {
       const { engine } = await createRunEngine({
@@ -761,7 +756,7 @@ describe('createRunEngine ownership (AB-178)', () => {
       });
       try {
         expect(engineCreateSpy).toHaveBeenCalledTimes(1);
-        expect(engineCreateSpy.mock.calls[0]?.[0]).toMatchObject({ ownership: 'none' });
+        expect(engineCreateSpy.mock.calls[0]?.[0]).toMatchObject({ ownership: 'workflow-lease' });
       } finally {
         engine[Symbol.dispose]();
       }

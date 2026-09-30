@@ -83,6 +83,7 @@ export class Conversation {
     sourceRevision: number;
   };
   private environment: ConversationEnvironment;
+  private readonly streamSequences = new Map<string, number>();
   private readonly emitter = new CompletableEventTarget<ConversationEventMap>();
   private readonly lifecycleController = new HistoryLifecycle();
   private readonly pluginIdentityList: readonly MessagePluginIdentity[];
@@ -126,6 +127,7 @@ export class Conversation {
         node: () => this.currentNode,
         lineage: () => this.forkLineage ?? {},
         removedNodeIds: () => this.transaction.getRemovedNodeIds(),
+        streamSequences: this.streamSequences,
         revision: () => this.controllerRevision,
         environment: this.environment,
         sourcePlugins: this.sourcePlugins,
@@ -341,15 +343,30 @@ export class Conversation {
           };
         },
         lifecycle: () => getConversation().lifecycleState,
-        emitRestored: () => {
+        setStreamSequences: (sequences) => {
+          const { streamSequences } = getConversation();
+          streamSequences.clear();
+          for (const [messageId, sequence] of Object.entries(sequences)) {
+            streamSequences.set(messageId, sequence);
+          }
+        },
+        prepareRestored: () => {
           const conversation = getConversation();
-          conversation.emitConversationEvent(
-            'snapshot.restored',
-            conversation.buildEventDetail('snapshot.restored', conversation.current, {
-              durability: 'snapshot',
-              outcome: 'completed',
-            }),
-          );
+          // Capture only the state; the sequence is assigned at dispatch so
+          // events keep their monotonic order and disposal leaves no gap.
+          const restored = conversation.current;
+          const revision = conversation.transaction.revision;
+          return () =>
+            conversation.emitConversationEvent(
+              'snapshot.restored',
+              conversation.transaction.buildEventDetailFor(
+                'snapshot.restored',
+                restored,
+                revision,
+                restored,
+                { durability: 'snapshot', outcome: 'completed' },
+              ),
+            );
         },
       }),
     );

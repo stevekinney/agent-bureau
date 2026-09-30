@@ -533,6 +533,36 @@ function idForDataKey(key: string): string | undefined {
 }
 
 /**
+ * Rebuilds summaries from body keys. For each id the canonical v2 body is
+ * read first and the legacy body only when no v2 key exists, so the result
+ * never depends on which read resolves last. A body that fails to parse or
+ * whose `session.id` does not match its key is skipped silently.
+ */
+async function summarizeBodies(
+  store: ConditionalTextValueStore,
+  dataKeys: readonly string[],
+  summaries: Map<string, SessionSummary>,
+): Promise<void> {
+  const keysById = new Map<string, { v2?: string; legacy?: string }>();
+  for (const key of dataKeys) {
+    const id = idForDataKey(key);
+    if (id === undefined) continue;
+    const entry = keysById.get(id) ?? {};
+    if (key.startsWith(BODY_PREFIX)) entry.v2 = key;
+    else entry.legacy = key;
+    keysById.set(id, entry);
+  }
+  await Promise.all(
+    [...keysById].map(async ([id, keys]) => {
+      const key = keys.v2 ?? keys.legacy;
+      if (key === undefined) return;
+      const session = parseSession(await store.get(key));
+      if (session && session.id === id) summaries.set(id, toSummary(session));
+    }),
+  );
+}
+
+/**
  * Creates a SessionStore backed by the given ConditionalTextValueStore.
  *
  * Session bodies are stored under the encoded `agent-session-v2:body:` namespace
@@ -641,15 +671,7 @@ export function createSessionStore(
     // the source of truth before applying the requested mutation.
     const summaries = new Map<string, SessionSummary>();
     const dataKeys = await listDataKeys(store);
-    await Promise.all(
-      dataKeys.map(async (key) => {
-        const id = idForDataKey(key);
-        const session = parseSession(await store.get(key));
-        if (id !== undefined && session && session.id === id) {
-          summaries.set(id, toSummary(session));
-        }
-      }),
-    );
+    await summarizeBodies(store, dataKeys, summaries);
     return summaries;
   }
 
@@ -1073,15 +1095,7 @@ export function createSessionStore(
           if (migratesLegacyIndexSession) {
             rebuiltSummaries.set(legacyIndexSession.id, toSummary(legacyIndexSession));
           }
-          await Promise.all(
-            dataKeys.map(async (key) => {
-              const id = idForDataKey(key);
-              const raw = await store.get(key);
-              const session = parseSession(raw);
-              if (id === undefined || !session || session.id !== id) return;
-              rebuiltSummaries.set(id, toSummary(session));
-            }),
-          );
+          await summarizeBodies(store, dataKeys, rebuiltSummaries);
           const rebuilt = await store.conditionalBatch(
             [
               { key: SUMMARY_INDEX_KEY, expectedValue: summaryRaw },

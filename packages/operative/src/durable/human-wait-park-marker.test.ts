@@ -258,6 +258,8 @@ describe('human-wait park marker across a second engine over the same storage (C
     const loggedMessages: string[] = [];
     const first = await createRunEngine({
       storage,
+      // The first engine is a simulated crash and is never released, so the second must not be fenced out.
+      ownership: 'none',
       runWorkflow: makeParkWorkflow(storage, { hangAfterPark: true }),
       recover: false,
       onLog: (record) => {
@@ -289,6 +291,8 @@ describe('human-wait park marker across a second engine over the same storage (C
     const loggedMessages: string[] = [];
     const second = await createRunEngine({
       storage,
+      // The first engine is a simulated crash and is never released, so the second must not be fenced out.
+      ownership: 'none',
       runWorkflow: makeParkWorkflow(storage, { hangAfterPark: true }),
       recover: false,
       onLog: (record) => {

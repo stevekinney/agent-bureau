@@ -11,6 +11,7 @@ export function createSnapshot(
   environment: ConversationEnvironment,
   lineage: { parentConversationId?: string; forkPointMessageId?: string; sourceRevision?: number },
   removedNodeIds: readonly string[],
+  streamSequences: ReadonlyMap<string, number>,
 ): ConversationSnapshot {
   let root = currentNode;
   while (root.parent) root = root.parent;
@@ -21,6 +22,7 @@ export function createSnapshot(
     currentBranchId: currentNode.id,
     root,
     currentPath: getHistoryNodePath(currentNode),
+    streamSequences: Object.fromEntries(streamSequences),
     createdAt: environment.now(),
     lineage: {
       ...lineage,
@@ -44,6 +46,7 @@ export function createSnapshotAction(hooks: {
     sourceRevision?: number;
   };
   readonly removedNodeIds: () => readonly string[];
+  readonly streamSequences: ReadonlyMap<string, number>;
 }): SnapshotAction {
   return {
     snapshot: () =>
@@ -53,6 +56,7 @@ export function createSnapshotAction(hooks: {
         hooks.environment,
         hooks.lineage(),
         hooks.removedNodeIds(),
+        hooks.streamSequences,
       ),
   };
 }

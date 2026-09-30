@@ -123,7 +123,37 @@ function normalizeMessage(message: Message): Message | AssistantMessage {
  * @throws {SerializationError} If validation fails
  */
 export function deserializeConversationHistory(json: unknown): ConversationHistory {
-  const parsed = conversationSchema.safeParse(normalizeLegacyConversationData(json));
+  return parseConversationHistory(normalizeLegacyConversationData(json));
+}
+
+/** Whether a conversation payload uses a shape only `normalizeLegacyConversationData` accepts. */
+function hasLegacyShape(json: unknown): boolean {
+  if (!isRecord(json) || !isRecord(json['messages'])) return false;
+  return Object.values(json['messages']).some((message) => {
+    if (!isRecord(message)) return false;
+    if (message['role'] === 'tool-use') return true;
+    const toolCall = message['toolCall'];
+    if (isRecord(toolCall) && 'args' in toolCall) return true;
+    const toolResult = message['toolResult'];
+    return isRecord(toolResult) && 'result' in toolResult;
+  });
+}
+
+/**
+ * Like {@link deserializeConversationHistory}, but for a payload that claims the
+ * current schema version: a legacy shape is rejected instead of coerced.
+ */
+export function deserializeCurrentConversationHistory(json: unknown): ConversationHistory {
+  if (hasLegacyShape(json)) {
+    throw createSerializationError(
+      'failed to deserialize conversation: legacy payload shape under the current schema version',
+    );
+  }
+  return parseConversationHistory(json);
+}
+
+function parseConversationHistory(json: unknown): ConversationHistory {
+  const parsed = conversationSchema.safeParse(json);
   if (!parsed.success) {
     throw createSerializationError('failed to deserialize conversation: invalid data');
   }

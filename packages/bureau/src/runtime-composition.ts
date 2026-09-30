@@ -1143,7 +1143,9 @@ export function createRoutingStrategy(configuration: RoutingConfiguration): Rout
             if (useSimple) return 'simple';
 
             const useFrontier =
-              configuration.frontier !== undefined && signals.conversationDepth > 20;
+              configuration.frontier !== undefined &&
+              configuration.frontier !== '' &&
+              signals.conversationDepth > 20;
             return useFrontier ? 'frontier' : 'complex';
           },
         }),
@@ -2027,7 +2029,7 @@ export async function createRuntimeComposition(
       // passing `undefined` members is harmless.
       ...options.durableGuardrails,
       // durableOwnership (AB-178) is the same Pick pattern — createRunEngine
-      // defaults `ownership` to 'none' when this is omitted entirely.
+      // defaults `ownership` to 'workflow-lease' when this is omitted entirely.
       ...options.durableOwnership,
       // history from PersistenceOptions takes precedence over durableGuardrails.history
       ...(persistenceHistory !== undefined ? { history: persistenceHistory } : {}),

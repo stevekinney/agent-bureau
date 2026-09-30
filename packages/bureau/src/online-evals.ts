@@ -441,7 +441,12 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
         return noOpSnapshot;
       },
       subscribeSnapshot(observer) {
-        observer(noOpSnapshot);
+        try {
+          observer(noOpSnapshot);
+        } catch {
+          // Same isolation as `notifyAggregate()` below: a throwing observer
+          // must not escape into the subscriber.
+        }
         return { unsubscribe() {}, closed: true };
       },
     };

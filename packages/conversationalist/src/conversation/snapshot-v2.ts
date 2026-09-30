@@ -24,7 +24,7 @@ import type {
   Message,
 } from '../types';
 import { deepFreeze } from '../utilities/type-helpers';
-import { deserializeConversationHistory } from './serialization';
+import { deserializeCurrentConversationHistory } from './serialization';
 import {
   asRecord,
   assertLineageMatchesTree,
@@ -57,6 +57,7 @@ export interface DecodedSnapshot {
   readonly createdAt: string;
   readonly currentPath: readonly number[];
   readonly lineage: ConversationSnapshotLineage;
+  readonly streamSequences: Readonly<Record<string, number>>;
   readonly root: DecodedSnapshotNode;
 }
 
@@ -171,6 +172,10 @@ export function encodeSnapshot(state: EncodableSnapshot): ConversationSnapshot {
     currentPath: state.currentPath,
     createdAt: state.createdAt,
     lineage: state.lineage,
+    // Only when present: a snapshot without counters keeps the digest it always had.
+    ...(Object.keys(state.streamSequences).length > 0
+      ? { streamSequences: state.streamSequences }
+      : {}),
   });
 }
 
@@ -188,8 +193,9 @@ export interface NodeMessages {
   readonly sources: ReadonlyMap<string, number>;
 }
 
-interface ParentContext extends NodeMessages {
+export interface ParentContext extends NodeMessages {
   readonly id: string;
+  readonly revision: number;
 }
 
 export function readNodeFields(
@@ -203,6 +209,9 @@ export function readNodeFields(
   const id = readString(node, 'id', 'node');
   const revision = readRevision(node, 'revision', 'node');
   if (revision > envelope.controllerRevision) throw snapshotError(`invalid node revision ${id}`);
+  if (parent !== null && revision < parent.revision) {
+    throw snapshotError(`node revision ${id} precedes its parent's revision`);
+  }
   const parentId = node['parentId'];
   if (parentId !== null && typeof parentId !== 'string') throw snapshotError('invalid node');
   if (parentId !== (parent?.id ?? null)) throw snapshotError(`inconsistent parent for ${id}`);
@@ -280,7 +289,7 @@ export function deserializeNodeConversation(
   };
   let conversation: ConversationHistory;
   try {
-    conversation = deserializeConversationHistory(raw);
+    conversation = deserializeCurrentConversationHistory(raw);
   } catch (error) {
     throw snapshotError(
       `invalid conversation for ${fields.id}: ${error instanceof Error ? error.message : String(error)}`,
@@ -365,7 +374,12 @@ export function decodeSnapshotV2(value: unknown): DecodedSnapshot {
     };
     decodedById.set(fields.id, {
       node,
-      context: { id: fields.id, ids: fields.ids, sources: fields.sources },
+      context: {
+        id: fields.id,
+        revision: fields.revision,
+        ids: fields.ids,
+        sources: fields.sources,
+      },
     });
     if (parent === undefined) root = node;
     else parent.node.children.push(node);
@@ -395,6 +409,7 @@ export function decodeSnapshotV2(value: unknown): DecodedSnapshot {
     createdAt: envelope.createdAt,
     currentPath: envelope.currentPath,
     lineage: envelope.lineage,
+    streamSequences: envelope.streamSequences,
     root: root!,
   };
 }
@@ -421,6 +436,7 @@ export function currentConversationFromSnapshotV2(value: unknown): ConversationH
     if (child === undefined) throw snapshotError(`current path index ${index} is out of range`);
     fields = readNodeFields(child, envelope, table.length, {
       id: fields.id,
+      revision: fields.revision,
       ids: fields.ids,
       sources: fields.sources,
     });

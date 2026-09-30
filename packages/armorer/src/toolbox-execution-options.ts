@@ -4,6 +4,7 @@ import {
   approvalConsumeSymbol,
   approvalResumeSymbol,
   policyAuthorizationOnlySymbol,
+  policyAuthorizationResultSymbol,
   type ApprovalAdmissionRollback,
 } from './internal/approval-resume';
 import type {
@@ -180,6 +181,9 @@ function copyApprovalOptions(
     ...(consume ? { [approvalConsumeSymbol]: consume } : {}),
     ...(options && policyAuthorizationOnlySymbol in options
       ? { [policyAuthorizationOnlySymbol]: Reflect.get(options, policyAuthorizationOnlySymbol) }
+      : {}),
+    ...(options && policyAuthorizationResultSymbol in options
+      ? { [policyAuthorizationResultSymbol]: Reflect.get(options, policyAuthorizationResultSymbol) }
       : {}),
   };
 }
