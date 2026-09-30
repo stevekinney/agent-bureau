@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.2
+
+### Patch Changes
+
+- 4ea2a5a: Publish the current Corvidae mirror's tool materialization, authorization and idempotency, conversation persistence, and durable agent execution changes.
+- Updated dependencies [4ea2a5a]
+  - @lostgradient/tool-protocol@0.0.2
+
 ## 2.1.1
 
 ### Patch Changes
