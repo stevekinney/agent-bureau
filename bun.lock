@@ -128,7 +128,7 @@
     },
     "packages/conversationalist": {
       "name": "conversationalist",
-      "version": "2.1.0",
+      "version": "2.1.1",
       "dependencies": {
         "@lostgradient/lifecycle": "workspace:*",
         "@lostgradient/tool-protocol": "workspace:*",
@@ -237,7 +237,7 @@
     },
     "packages/operative": {
       "name": "@lostgradient/operative",
-      "version": "0.13.0",
+      "version": "0.14.0",
       "dependencies": {
         "@lostgradient/cryptography": "workspace:*",
         "@lostgradient/embeddings": "workspace:*",

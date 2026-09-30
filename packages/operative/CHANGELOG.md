@@ -1,5 +1,16 @@
 # @lostgradient/operative
 
+## 0.14.0
+
+### Minor Changes
+
+- 186719d: Preserve original message identities, timestamps, and content when compacting conversations, and reject a retained tool result whose call was summarized. Add Operative's task-retention scheduler APIs, durable human-wait park markers, and OpenAI client type support from the current Corvidae source.
+
+### Patch Changes
+
+- Updated dependencies [186719d]
+  - conversationalist@2.1.1
+
 ## 0.13.0
 
 ### Minor Changes
