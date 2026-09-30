@@ -135,6 +135,27 @@ async function buildContextWithHistoryLimit(maxEvents: number) {
   return { engine, checkpointStore };
 }
 
+/**
+ * Build a durable context whose engine schedules nothing for its inline launch
+ * queue (COR-207). A run started on it only begins once the test awaits
+ * `engine.flushInlineLaunches()`, so no real macrotask can starve the launch.
+ * A test using this helper that never flushes hangs by design.
+ */
+async function buildContextWithManualInlineLaunch() {
+  const storage = new MemoryStorage();
+  const checkpointStore = createCheckpointStore(
+    textValueStore(storage, { disposeUnderlyingStorage: false }),
+  );
+  const runWorkflow = createRunWorkflow(checkpointStore);
+  const { engine } = await createRunEngine({
+    storage,
+    runWorkflow,
+    recover: false,
+    inlineLaunchScheduling: 'manual',
+  });
+  return { engine, checkpointStore };
+}
+
 function runOptions(generate: RunOptions['generate']): RunOptions {
   return {
     generate,
@@ -1232,8 +1253,8 @@ describe('createRun with durable routing', () => {
   // assertion could not have been made: both runs would have observed the
   // SAME real clock regardless of what `runtime` either caller supplied.
   it('two durable runs with two manual runtimes (different origins/seeds) carry disjoint ids and origin-derived timestamps', async () => {
-    const contextA = await buildContext();
-    const contextB = await buildContext();
+    const contextA = await buildContextWithManualInlineLaunch();
+    const contextB = await buildContextWithManualInlineLaunch();
     try {
       const runtimeA = createManualRuntimeServices({
         origin: '2021-01-01T00:00:00.000Z',
@@ -1291,6 +1312,15 @@ describe('createRun with durable routing', () => {
       const startedB: ToolStartedBubbleEvent[] = [];
       runA.addEventListener('tool.started', (e) => startedA.push(e));
       runB.addEventListener('tool.started', (e) => startedB.push(e));
+
+      // Both engines are 'manual': the launches only enqueue until drained. Wait
+      // for each initial durable record, then drain each engine's queue once.
+      expect(runA.durablyStarted).toBeDefined();
+      expect(runB.durablyStarted).toBeDefined();
+      await runA.durablyStarted;
+      await runB.durablyStarted;
+      await contextA.engine.flushInlineLaunches();
+      await contextB.engine.flushInlineLaunches();
 
       const [resultA, resultB] = await Promise.all([runA.result, runB.result]);
 
