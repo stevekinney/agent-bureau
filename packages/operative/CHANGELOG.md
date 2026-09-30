@@ -1,5 +1,11 @@
 # @lostgradient/operative
 
+## 0.15.0
+
+### Minor Changes
+
+- a7fb44b: Expose Weft's manual inline-launch scheduling through Operative's durable run-engine options. Callers can explicitly drain queued launches for deterministic tests while the default scheduling behavior remains unchanged.
+
 ## 0.14.0
 
 ### Minor Changes
