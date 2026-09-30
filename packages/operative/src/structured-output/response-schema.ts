@@ -10,7 +10,8 @@ export type ResponseSchemaValidationResult =
 /**
  * Memoizes {@link toOutputJsonSchema} by schema identity. A `ZodType` is an
  * immutable value once constructed, so `z.toJSONSchema` is pure over it —
- * caching is purely an optimization, never a correctness concern. Load-
+ * caching is purely an optimization, never a correctness concern (callers
+ * receive a deep copy of the cached value, so mutating it is safe). Load-
  * bearing for the common per-run path: `createAgent`'s synchronous guard,
  * `createActiveRun`'s synchronous guard, and `buildStepDeps` (called once
  * per run, including every retry) each independently derive the SAME
@@ -30,10 +31,20 @@ const jsonSchemaCache = new WeakMap<ZodType, Record<string, unknown>>();
  * unrepresentable schema (AB-18) — there is no generic-object fallback. A
  * schema that can't become a JSON Schema is an authoring error to fix, not
  * something to silently degrade.
+ *
+ * Strict-mode note: Zod's `io: 'input'` output for `z.object()` omits
+ * `additionalProperties: false`, so ordinary schemas do NOT satisfy
+ * {@link isStrictCompatible}, and `toOpenAIResponseFormat` sends
+ * `strict: false` for them. That is the expected steady state, not a defect:
+ * OpenAI's non-strict `json_schema` mode still constrains the output, and only
+ * a schema meeting OpenAI's strict contract gets `strict: true`.
  */
 export function toOutputJsonSchema(schema: ZodType): Record<string, unknown> {
+  // The cache holds a private master copy; every caller receives a fresh deep
+  // copy so mutating a returned schema (at any depth) can never corrupt the
+  // cache or another caller's schema.
   const cached = jsonSchemaCache.get(schema);
-  if (cached) return cached;
+  if (cached) return structuredClone(cached);
 
   try {
     const converted = z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
@@ -45,10 +56,10 @@ export function toOutputJsonSchema(schema: ZodType): Record<string, unknown> {
       const { type: types, ...withoutType } = rest;
       const normalized = { ...withoutType, anyOf: types.map((type) => ({ type })) };
       jsonSchemaCache.set(schema, normalized);
-      return normalized;
+      return structuredClone(normalized);
     }
     jsonSchemaCache.set(schema, rest);
-    return rest;
+    return structuredClone(rest);
   } catch (error) {
     throw new OutputSchemaConversionError(error);
   }
@@ -144,4 +155,154 @@ export async function validateOutput(
   }
 
   return validateOutputValue(schema, candidate);
+}
+
+const STRICT_FORBIDDEN_KEYWORDS: ReadonlySet<string> = new Set([
+  '$ref',
+  'minLength',
+  'maxLength',
+  'pattern',
+  'format',
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'multipleOf',
+  'minItems',
+  'maxItems',
+  'uniqueItems',
+  'minProperties',
+  'maxProperties',
+  'allOf',
+  'oneOf',
+  'not',
+  'if',
+  'then',
+  'else',
+  'dependentRequired',
+  'dependentSchemas',
+  'patternProperties',
+  'prefixItems',
+  'contains',
+  'propertyNames',
+  'additionalItems',
+  'unevaluatedItems',
+  'unevaluatedProperties',
+  'dependencies',
+  '$dynamicRef',
+  '$recursiveRef',
+]);
+
+/**
+ * Keywords the strict walker understands or that carry inert data (their values
+ * are never schemas). Any other keyword holding an object or an array of
+ * objects may hide a subschema the walker does not visit, so it fails closed.
+ */
+const STRICT_KNOWN_KEYWORDS: ReadonlySet<string> = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'anyOf',
+  '$defs',
+  'definitions',
+  'enum',
+  'const',
+  'default',
+  'examples',
+  'example',
+  'description',
+  'title',
+  'nullable',
+  '$schema',
+  '$id',
+  '$comment',
+]);
+
+/** Keywords whose value is a map of name to subschema. */
+const SUBSCHEMA_MAP_KEYWORDS = ['properties', '$defs', 'definitions'] as const;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStrictNode(node: unknown): boolean {
+  if (!isPlainRecord(node)) return false;
+  for (const keyword of Object.keys(node)) {
+    if (STRICT_FORBIDDEN_KEYWORDS.has(keyword)) return false;
+  }
+
+  for (const [keyword, value] of Object.entries(node)) {
+    if (STRICT_KNOWN_KEYWORDS.has(keyword)) continue;
+    if (isPlainRecord(value)) return false;
+    if (Array.isArray(value) && value.some(isPlainRecord)) return false;
+  }
+
+  if (
+    node['type'] === undefined &&
+    node['anyOf'] === undefined &&
+    node['enum'] === undefined &&
+    node['const'] === undefined
+  ) {
+    return false;
+  }
+
+  if (node['additionalProperties'] !== undefined && node['additionalProperties'] !== false) {
+    return false;
+  }
+
+  const type = node['type'];
+  const isObjectType = type === 'object' || (Array.isArray(type) && type.includes('object'));
+  const properties = node['properties'];
+  if (isObjectType || properties !== undefined) {
+    if (node['additionalProperties'] !== false) return false;
+    const required = node['required'];
+    const requiredNames = Array.isArray(required) ? required : [];
+    if (isPlainRecord(properties)) {
+      for (const name of Object.keys(properties)) {
+        if (!requiredNames.includes(name)) return false;
+      }
+    }
+  }
+
+  for (const keyword of SUBSCHEMA_MAP_KEYWORDS) {
+    const map = node[keyword];
+    if (map === undefined) continue;
+    if (!isPlainRecord(map)) return false;
+    for (const child of Object.values(map)) {
+      if (!isStrictNode(child)) return false;
+    }
+  }
+
+  const items = node['items'];
+  if (items !== undefined && !isStrictNode(items)) return false;
+
+  const anyOf = node['anyOf'];
+  if (anyOf !== undefined) {
+    if (!Array.isArray(anyOf)) return false;
+    for (const child of anyOf) {
+      if (!isStrictNode(child)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Whether a JSON Schema satisfies OpenAI's structured-outputs strict-mode
+ * contract, so `strict: true` can be requested without the API rejecting the
+ * schema: every object sets `additionalProperties: false` and lists every
+ * property in `required`; the root is an object; no per-type validation keywords; only `anyOf`
+ * composition; and no `$ref` (reference resolution is deliberately not
+ * attempted, so a schema containing one is reported incompatible).
+ *
+ * Property NAMES that collide with keywords (a property called `pattern`) are
+ * not violations: only schema positions are inspected.
+ */
+export function isStrictCompatible(schema: Record<string, unknown>): boolean {
+  if (!isPlainRecord(schema)) return false;
+  const type = schema['type'];
+  const rootIsObject = type === 'object' || (Array.isArray(type) && type.includes('object'));
+  if (!rootIsObject) return false;
+  return isStrictNode(schema);
 }

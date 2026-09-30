@@ -40,6 +40,17 @@ export class UnsupportedRunResultVersionError extends Error {
   }
 }
 
+/** A current-version run result summary whose shape or invariants are malformed. */
+export class InvalidRunResultError extends Error {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(`Invalid durable agent run workflow result: ${reason}`);
+    this.name = 'InvalidRunResultError';
+    this.reason = reason;
+  }
+}
+
 export class UnsupportedRunResultLegacyFieldError extends UnsupportedRunResultVersionError {
   readonly field: string;
 

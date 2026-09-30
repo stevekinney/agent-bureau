@@ -116,6 +116,7 @@ export function decodeSnapshotV1(value: unknown): DecodedSnapshot {
     createdAt: snapshot.createdAt,
     currentPath: snapshot.currentPath,
     lineage: snapshot.lineage,
+    streamSequences: {},
     root: decodeNodeV1(snapshot.root, null),
   };
 }

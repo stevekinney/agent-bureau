@@ -515,6 +515,43 @@ describe('runStep: AB-67 steering boundary read', () => {
     expect(gate.pendingWaiterCount()).toBe(0);
   });
 
+  it('COR-104: a cancellation landing between resume and work start ends the run aborted without generating', async () => {
+    const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
+    const controller = new AbortController();
+    let generateCalls = 0;
+
+    const resultPromise = executeLoop({
+      generate: async () => {
+        generateCalls++;
+        return textResponse('unreachable');
+      },
+      toolbox: createTestToolbox([]),
+      conversation: new Conversation(),
+      signal: controller.signal,
+      steering: gate,
+      runId: 'run-1',
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(gate.pendingWaiterCount()).toBe(1);
+
+    // Resume releases the waiter (resume wins the race inside
+    // awaitResumeOrAbort), then the cancel lands before the step transitions into
+    // doing work. The two microtask ticks below position the abort inside that
+    // window; if `awaitResumeOrAbort` changes how many ticks it takes, this must
+    // be retuned (the `generateCalls` assertion fails against the unfixed code).
+    gate.setDesiredState({ paused: false, configVersion: 2 });
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort('cancel after resume');
+
+    const result = await resultPromise;
+    expect(generateCalls).toBe(0);
+    expect(result.finishReason).toBe('aborted');
+  });
+
   it('a pre-aborted signal short-circuits before the pause gate is even consulted', async () => {
     const gate = createTestSteeringGate({ paused: true, configVersion: 1 });
     const controller = new AbortController();

@@ -16,6 +16,11 @@ export type ConversationChangeContext = {
   compaction?: CompactionAttempt;
 };
 
+/** The correlation id every event of one compaction attempt carries. */
+export function compactionCorrelationId(conversationId: string, attemptId: string): string {
+  return `${conversationId}:compaction:${attemptId}`;
+}
+
 function buildEventContextFields(
   context: ConversationChangeContext,
 ): Pick<

@@ -158,10 +158,7 @@ export function createRunWorkflow(
         // instance. The checkpoint-store writes below exist only so the ActiveRun
         // adapter can reconstruct the RunResult post-completion; they are not the
         // workflow's own resume mechanism.
-        let cursor: RunCursor = initialCursor(
-          workflowVersion,
-          runDepsFrom(ctx.services).options.steering?.getAppliedFloor?.() ?? 0,
-        );
+        let cursor: RunCursor = initialCursor(workflowVersion);
         // Seed the conversation on the first run from the run's options + prompt,
         // then persist it so the adapter and any external reader see the transcript.
         const seededConversation = (() => {
@@ -183,7 +180,25 @@ export function createRunWorkflow(
           return seeded.snapshot();
         })();
         let snapshot = seededConversation;
-        yield* ctx.run('saveConversation', { runId, snapshot });
+        // COR-104: the steering floor is captured in the RESULT of this first
+        // `saveConversation` activity, not in a new replay slot: Weft keys
+        // operations by position, so adding a step ahead of this one would shift
+        // every slot of a history recorded before this change. The activity echoes
+        // the floor it was given and Weft caches that result, so on replay the
+        // FIRST run's value is what `capturedFloor` receives. The live gate is
+        // still called on replay, though: the `steeringBoundary` argument below
+        // is evaluated on every run of this generator, and only its value is
+        // discarded in favour of the cached result. Weft exposes no public
+        // replay flag to skip the call, so `getAppliedFloor` must stay safe to
+        // call during replay (a getter that throws after recovery would crash
+        // it). A pre-change history cached `undefined` here, so its floor is
+        // `0`, never a live read.
+        const capturedFloor = yield* ctx.run('saveConversation', {
+          runId,
+          snapshot,
+          steeringBoundary: runDepsFrom(ctx.services).options.steering?.getAppliedFloor?.() ?? 0,
+        });
+        cursor = { ...cursor, lastAppliedConfigVersion: capturedFloor ?? 0 };
         let finishReason: FinishReason = 'maximum-steps';
         let errorMessage: string | undefined;
         let errorKind: AgentRunErrorKind | undefined;

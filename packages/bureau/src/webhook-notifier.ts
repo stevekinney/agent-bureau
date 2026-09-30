@@ -106,7 +106,11 @@ export type WebhookDeliveryLivenessSnapshot = LivenessSnapshot & { kind: 'webhoo
 export function computeWebhookDeliveryDeadlineMs(
   maxAttempts: number,
   backoffBaseMilliseconds: number,
-): number {
+): number | undefined {
+  // A single attempt has no retries to wait out, so there is no deadline:
+  // `undefined` is the "no deadline" sentinel (see `liveness-projection.ts`),
+  // never `0`, which would read as "already expired".
+  if (maxAttempts <= 1) return undefined;
   return backoffBaseMilliseconds * (2 ** (maxAttempts - 1) - 1);
 }
 
@@ -542,7 +546,7 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
     readonly runId: string;
     readonly watchdog: StallWatchdog;
     readonly startedAt: string;
-    readonly deadlineAt: number;
+    readonly deadlineAt?: number | undefined;
   }
 
   const trackedDeliveries = new Map<string, TrackedDelivery>();
@@ -646,7 +650,10 @@ export function createWebhookNotifier<D extends AgentDefinitions = AgentDefiniti
 
   function beginTrackedDelivery(id: string, runId: string): TrackedDelivery {
     const watchdog = createStallWatchdog(deliveryPolicy, clock);
-    const deadlineAt = clock.now() + (deliveryPolicy.absoluteDeadlineMs ?? 0);
+    const deadlineAt =
+      deliveryPolicy.absoluteDeadlineMs === undefined
+        ? undefined
+        : clock.now() + deliveryPolicy.absoluteDeadlineMs;
     const tracked: TrackedDelivery = {
       id,
       runId,

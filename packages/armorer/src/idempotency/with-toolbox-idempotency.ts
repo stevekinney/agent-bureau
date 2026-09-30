@@ -8,6 +8,7 @@ import {
   approvalConsumeSymbol,
   approvalResumeSymbol,
   policyAuthorizationOnlySymbol,
+  policyAuthorizationResultSymbol,
 } from '../internal/approval-resume';
 import type { AnyToolbox } from '../toolbox-interface';
 import type { ToolApprovalAction, ToolCallInput, ToolExecutionResult } from '../types';
@@ -452,7 +453,10 @@ export function withToolboxIdempotency(
     };
   }
 
-  function createPolicyAuthorizationOnlyOptions(executeOptions: unknown): unknown {
+  function createPolicyAuthorizationOnlyOptions(
+    executeOptions: unknown,
+    cachedResult: unknown,
+  ): unknown {
     const hasApprovalResume =
       executeOptions !== undefined &&
       executeOptions !== null &&
@@ -462,6 +466,7 @@ export function withToolboxIdempotency(
       ...(executeOptions as Record<PropertyKey, unknown> | undefined),
     };
     authorizationOnlyOptions[policyAuthorizationOnlySymbol] = true;
+    authorizationOnlyOptions[policyAuthorizationResultSymbol] = cachedResult;
     if (!hasApprovalResume) {
       delete authorizationOnlyOptions[approvalConsumeSymbol];
     }
@@ -493,7 +498,7 @@ export function withToolboxIdempotency(
         ...call,
         arguments: originalArguments,
       },
-      createPolicyAuthorizationOnlyOptions(executeOptions),
+      createPolicyAuthorizationOnlyOptions(executeOptions, cached.result),
     );
     if (authorizationResult.outcome !== 'success' || authorizationResult.error) {
       return authorizationResult;
@@ -1035,6 +1040,16 @@ export function withToolboxIdempotency(
 
           return executeWithCache(input, originalExecute, executeOptions);
         };
+      }
+      if (prop === 'extend') {
+        // `extend()` returns a fresh toolbox built from the raw target, so
+        // without re-wrapping it the clone would silently drop idempotency.
+        // Bureau clones its base toolbox once per run this way (COR-1391).
+        return (...entries: unknown[]) =>
+          withToolboxIdempotency(
+            (target.extend as (...arguments_: unknown[]) => AnyToolbox).apply(target, entries),
+            options,
+          );
       }
       if (prop === 'resumeApproval' || prop === 'resolveApproval') {
         // Keep approval resumption bound to this proxy so the toolbox's

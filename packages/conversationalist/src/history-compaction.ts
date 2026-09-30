@@ -10,7 +10,7 @@ import { estimateConversationTokens } from './context';
 import { defaultConversationRuntime, type ConversationEnvironment } from './environment';
 import { createOperationCancelledError } from './errors';
 import type { ConversationActionType, ConversationEventDetail } from './events';
-import type { ConversationChangeContext } from './history-events';
+import { compactionCorrelationId, type ConversationChangeContext } from './history-events';
 import type { ConversationHistory } from './types';
 
 type CompactionHooks = {
@@ -41,6 +41,8 @@ type CompactionHooks = {
 /** One attempt's fixed identity, and a way to report on it at any later moment. */
 type AttemptTracker = {
   readonly baseRevision: number;
+  /** Shared by every event of this attempt so a concurrent attempt can be paired. */
+  readonly correlationId: string;
   readonly report: (candidate?: ConversationHistory) => CompactionAttempt;
 };
 
@@ -56,6 +58,7 @@ function trackAttempt(
   const baseTokens = estimateConversationTokens(base, undefined, environment);
   return {
     baseRevision,
+    correlationId: compactionCorrelationId(base.id, attemptId),
     report: (candidate) => ({
       attemptId,
       baseRevision,
@@ -102,6 +105,7 @@ export async function compactOwned(
     'compaction.started',
     hooks.detail('compaction.started', previous, {
       outcome: 'started',
+      correlationId: attempt.correlationId,
       compaction: attempt.report(),
     }),
   );
@@ -137,18 +141,20 @@ export async function compactOwned(
       'compaction.completed',
       hooks.detail('compaction.completed', previous, {
         outcome: 'completed',
+        correlationId: attempt.correlationId,
         compaction: settled,
       }),
     );
     return result;
   }
-  return discard(compacted.result, previous, settled, hooks);
+  return discard(compacted.result, previous, settled, attempt.correlationId, hooks);
 }
 
 function discard(
   candidate: CompactionResult,
   previous: ConversationHistory,
   attempt: CompactionAttempt,
+  correlationId: string,
   hooks: CompactionHooks,
 ): ConversationCompactionResult {
   const result: ConversationCompactionResult = {
@@ -166,6 +172,7 @@ function discard(
     hooks.detail('compaction.stale-discarded', previous, {
       outcome: 'discarded',
       reason: 'revision-conflict',
+      correlationId,
       compaction: attempt,
     }),
   );
@@ -187,6 +194,7 @@ function handleCompactionError(
       hooks.detail(type, previous, {
         outcome: cancelled ? 'cancelled' : 'failed',
         reason: String(error),
+        correlationId: attempt.correlationId,
         compaction: attempt.report(),
       }),
     );
@@ -208,6 +216,7 @@ function ensureCompactionActive(
       hooks.detail('compaction.cancelled', previous, {
         outcome: 'cancelled',
         reason: String(signal.reason),
+        correlationId: attempt.correlationId,
         compaction: attempt.report(),
       }),
     );

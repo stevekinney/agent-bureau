@@ -460,7 +460,11 @@ export function classifyError(error: unknown): ClassifiedError {
   }
 
   if (error instanceof Error) {
-    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+    if (
+      error.name === 'AbortError' ||
+      error.name === 'TimeoutError' ||
+      error instanceof AbortAgentRunError
+    ) {
       base.category = 'timeout';
       base.retryable = false;
       return base;

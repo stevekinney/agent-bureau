@@ -3483,6 +3483,55 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   /**
+   * Per run: parks already committed to the durable checkpoint by a previous
+   * process, seeded by `reconstructHumanWaitReviewIfParked` on recovery. The
+   * live action log only holds this process's parks, so the ordinal of the
+   * first live park starts here.
+   */
+  const humanWaitParkBaseline = new Map<string, number>();
+
+  /**
+   * The 0-based ordinal of the LAST distinct park in a run's action log.
+   * `HumanWaitParkedEvent` can be recorded more than once for one park (the
+   * tool's execute and the workflow's replay-aware marker, and the
+   * reconstruction from a checkpoint, and on a recovered run the marker again
+   * after the signal is delivered), so consecutive events on the same signal
+   * with no `step.started` between them count once: a genuine re-park always
+   * happens inside a later step. A reconstructed
+   * park carries its durable ordinal in `detail.parkOrdinal`; otherwise the
+   * count continues from the checkpoint's committed parks.
+   */
+  function humanWaitParkOrdinal(
+    runId: string,
+    actions: readonly { type: string; detail: unknown }[],
+  ): number {
+    let ordinal = (humanWaitParkBaseline.get(runId) ?? 0) - 1;
+    let previous: { index: number; signalName: unknown } | undefined;
+    actions.forEach((action, index) => {
+      if (action.type !== HumanWaitParkedEvent.type) return;
+      const detail =
+        action.detail !== null && typeof action.detail === 'object'
+          ? (action.detail as Record<string, unknown>)
+          : undefined;
+      const seeded = detail?.['parkOrdinal'];
+      const signalName = detail?.['signalName'];
+      if (typeof seeded === 'number') {
+        ordinal = seeded;
+      } else if (
+        previous !== undefined &&
+        previous.signalName === signalName &&
+        !actions.slice(previous.index + 1, index).some((entry) => entry.type === 'step.started')
+      ) {
+        // Duplicate record of the same park: same ordinal.
+      } else {
+        ordinal += 1;
+      }
+      previous = { index, signalName };
+    });
+    return ordinal;
+  }
+
+  /**
    * AB-336 — reconstructs the `human-wait` pending review for a run
    * recovered mid-park.
    *
@@ -3536,12 +3585,38 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     }
     const lastStep = steps[steps.length - 1];
     if (!lastStep) return;
+    // Counts distinct parks in one step the way `humanWaitParkOrdinal` does
+    // live: consecutive parked results on the same signal within a step (for
+    // example parallel `requestHumanInput` calls) are one park.
+    const parksIn = (step: StepRecord): number => {
+      let count = 0;
+      let previousSignal: string | undefined;
+      for (const result of step.results) {
+        if (result.toolName !== 'requestHumanInput') continue;
+        if (!isParkedRequestHumanInputResult(result.result)) continue;
+        if (previousSignal !== result.result.signalName) count += 1;
+        previousSignal = result.result.signalName;
+      }
+      return count;
+    };
+    // Parks committed to the checkpoint before the last step. A reconstructed
+    // park carries the resulting ordinal so the review id matches the one the
+    // pre-crash process minted (and persisted in `resolvedReviewIds`).
+    let priorParks = 0;
+    for (const step of steps) {
+      if (step === lastStep) break;
+      priorParks += parksIn(step);
+    }
+    // Always seed the baseline so a recovery landing mid-step (last step not a
+    // park) still numbers its first live park after every committed one.
+    humanWaitParkBaseline.set(runId, priorParks + parksIn(lastStep));
     for (const result of lastStep.results) {
       if (result.toolName !== 'requestHumanInput') continue;
       if (!isParkedRequestHumanInputResult(result.result)) continue;
       store.recordAction(runId, HumanWaitParkedEvent.type, {
         signalName: result.result.signalName,
         runId,
+        parkOrdinal: priorParks,
         ...(result.result.prompt !== undefined ? { prompt: result.result.prompt } : {}),
       });
       return;
@@ -4860,6 +4935,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       }
     }
     runToolboxesByRunId.delete(id);
+    humanWaitParkBaseline.delete(id);
     store.removeRun(id);
     if (sessionId) {
       await retryRunDeletionPersistenceWrite('pending-approvals', sessionId, `approval:${id}:`);
@@ -7256,7 +7332,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
             : undefined;
         const signalName = detail?.['signalName'];
         if (typeof signalName === 'string' && signalName.length > 0) {
-          const id = `human-wait:${runId}:${signalName}`;
+          // The park ordinal (the nth park of this run, 0-based) differentiates
+          // repeated parks on the same signal, so a re-park after an earlier
+          // park resolved is not suppressed by the earlier park's
+          // `resolvedReviewIds` entry. Unlike a timestamp it is unique under a
+          // frozen clock, and it survives recovery:
+          // `reconstructHumanWaitReviewIfParked` seeds it from the durable
+          // checkpoint's count of prior parks.
+          const id = `human-wait:${runId}:${signalName}:${humanWaitParkOrdinal(runId, runState.actions)}`;
           if (!resolvedReviewIds.has(id)) {
             const promptValue = detail?.['prompt'];
             const prompt = typeof promptValue === 'string' ? promptValue : undefined;
@@ -7922,7 +8005,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (pending) return pending;
     if (!auditTrailInstance) return undefined;
 
-    // Ids are `approval:${runId}:${callId}` / `human-wait:${runId}:${signalName}`
+    // Ids are `approval:${runId}:${callId}` / `human-wait:${runId}:${signalName}:${parkOrdinal}`
     // — the run id is always the second colon-delimited segment.
     const [, runId] = id.split(':');
     if (!runId) return undefined;
@@ -8347,8 +8430,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       maintenanceAdmissionClosed = true;
       // COR-772 — land every child-settlement write the run teardown above
       // produced before the audit trail and storage below go away. Only
-      // writes already under way are awaited, never a child's own result, so
-      // a child that ignores its abort cannot hold shutdown open.
+      // writes already under way are awaited here, not a child's own result.
+      // The bounded wait on child results for 'abort' shutdown comes below, so
+      // a child that ignores its abort costs at most that bound.
       await childTopology.drain();
       // Land terminal session saves already under way before the outbox
       // drain await and `backgroundShutdownController.abort()` below: a save
@@ -8365,6 +8449,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // listener was registered first — and a run that never honors its
       // abort only costs this bound, never a wedged shutdown.
       await awaitAbortedRunTerminals(abortedRunTerminals);
+      // A child aborted by this shutdown records its `aborted` settlement only
+      // once its own result arrives, which a durable child's fenced
+      // cancellation makes later than the drain above looked. Wait for it,
+      // under the same bound, so the audit trail is still open to take it.
+      if (policy === 'abort' && childTopology.awaitingSettlements() > 0) {
+        await awaitAbortedRunTerminals([childTopology.settlementsKnown()]);
+      }
+      await childTopology.drain();
       await sessionPersistence.drain();
       if (automaticRunOwnershipPruneTimerStarted) {
         runtimeServices.timers.clearInterval(automaticRunOwnershipPruneTimer);

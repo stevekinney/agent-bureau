@@ -51,7 +51,7 @@
     "@lostgradient/cryptography": "workspace:*",
     "@lostgradient/embeddings": "workspace:*",
     "@lostgradient/lifecycle": "workspace:*",
-    "@lostgradient/weft": "^0.27.9",
+    "@lostgradient/weft": "^0.27.10",
     "armorer": "workspace:*",
     "zod": "^4.4.3"
   },

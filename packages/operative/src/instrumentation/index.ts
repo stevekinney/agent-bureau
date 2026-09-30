@@ -188,11 +188,13 @@ export function instrumentRun(
       if (generateSpan?.isRecording()) {
         generateSpan.setStatus({
           code: SpanStatusCode.ERROR,
-          message: error instanceof Error ? error.message : String(error),
+          // Fixed message: the provider error text may carry privileged content.
+          message: 'Generate failed',
         });
         generateSpan.setAttribute('error.type', error instanceof Error ? error.name : '_OTHER');
         if (error instanceof Error) {
-          generateSpan.recordException(error);
+          // Name only: `recordException` would serialize the message and stack.
+          generateSpan.recordException({ name: error.name });
         }
         generateSpan.setAttribute('operative.generate.duration_ms', durationMilliseconds);
         generateSpan.end();
@@ -289,9 +291,11 @@ export function instrumentRun(
       const { error } = event;
       const telemetryError = getTelemetryError(error);
       if (runSpan) {
+        // The message can carry tool or provider payload content (COR-96), so
+        // only the closed `kind`/`code` sets reach the status message.
         runSpan.setStatus({
           code: SpanStatusCode.ERROR,
-          message: telemetryError instanceof Error ? telemetryError.message : String(error),
+          message: `Run failed (${error.kind}/${error.code})`,
         });
         runSpan.setAttributes({
           'error.type': telemetryError instanceof Error ? telemetryError.name : '_OTHER',
@@ -299,7 +303,8 @@ export function instrumentRun(
           'operative.error.code': error.code,
         });
         if (telemetryError instanceof Error) {
-          runSpan.recordException(telemetryError);
+          // Name only: `recordException` would serialize the message and stack.
+          runSpan.recordException({ name: telemetryError.name });
         }
       }
       endAllOpenSpans();
@@ -310,18 +315,23 @@ export function instrumentRun(
   activeRun.addEventListener(
     'run.aborted',
     (event) => {
-      const { error, reason } = event;
+      const { error } = event;
       const telemetryError = getTelemetryError(error);
       if (runSpan) {
-        runSpan.setAttribute('operative.abort_reason', reason ?? 'unknown');
+        // `reason` is a caller-supplied string, so it is never attached (COR-96).
+        runSpan.setAttribute('operative.abort_reason', 'aborted');
         runSpan.setAttributes({
           'error.type': error.name,
           'operative.error.kind': error.kind,
           'operative.error.code': error.code,
         });
-        runSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        runSpan.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: `Run aborted (${error.kind}/${error.code})`,
+        });
         if (telemetryError instanceof Error) {
-          runSpan.recordException(telemetryError);
+          // Name only: `recordException` would serialize the message and stack.
+          runSpan.recordException({ name: telemetryError.name });
         }
       }
       endAllOpenSpans();

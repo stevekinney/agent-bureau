@@ -22,6 +22,7 @@ import {
   approvalConsumeSymbol,
   approvalResumeSymbol,
   policyAuthorizationOnlySymbol,
+  policyAuthorizationResultSymbol,
 } from './internal/approval-resume';
 import type {
   MinimalAbortSignal,
@@ -352,6 +353,7 @@ export interface ToolboxExecuteOptions extends Omit<ToolExecuteOptions, 'durable
 export type InternalToolboxExecuteOptions = ToolboxExecuteOptions & {
   [approvalResumeSymbol]?: ApprovalResumeState;
   [policyAuthorizationOnlySymbol]?: boolean;
+  [policyAuthorizationResultSymbol]?: unknown;
   executionHandle?: ExecutionHandle;
 };
 
@@ -359,6 +361,7 @@ export type InternalToolExecuteOptionsWithMirror = ToolboxExecuteOptions & {
   [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
   [approvalResumeSymbol]?: ApprovalResumeState;
   [policyAuthorizationOnlySymbol]?: boolean;
+  [policyAuthorizationResultSymbol]?: unknown;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
   parentCompletionHandle?: ExecutionHandle;

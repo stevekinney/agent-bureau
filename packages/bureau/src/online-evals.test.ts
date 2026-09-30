@@ -967,6 +967,22 @@ describe('createOnlineEvalSampler', () => {
       await sampler.dispose();
     });
 
+    it('the no-op sampler isolates a throwing subscribeSnapshot observer', () => {
+      const { bureau } = createStubBureau();
+      const sampler = createOnlineEvalSampler(bureau, undefined, undefined, {
+        judges: [],
+        sampleRate: 1,
+      });
+
+      let subscription: ReturnType<typeof sampler.subscribeSnapshot> | undefined;
+      expect(() => {
+        subscription = sampler.subscribeSnapshot(() => {
+          throw new Error('observer failure');
+        });
+      }).not.toThrow();
+      expect(subscription?.closed).toBe(true);
+    });
+
     it('the no-op sampler (no judges) reports a terminal aggregate snapshot and no active evaluations', async () => {
       const { bureau } = createStubBureau();
       const sampler = createOnlineEvalSampler(bureau, undefined, undefined, {

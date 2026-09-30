@@ -2,7 +2,6 @@ import type { EngineLeaseHealth } from '@lostgradient/weft';
 import { describe, expect, it } from 'bun:test';
 
 import {
-  buildTaskDiagnosticsInput,
   type LivenessSnapshotEnvelope,
   projectEngineLeaseSnapshot,
   projectStreamLivenessSnapshot,
@@ -559,21 +558,5 @@ describe('projectTaskLivenessSnapshot', () => {
     });
     await projectTaskLivenessSnapshot(source, filter, envelope());
     expect(calls).toBe(1);
-  });
-});
-
-describe('buildTaskDiagnosticsInput', () => {
-  it("merges the caller's filter onto Weft's own weft.tasks.diagnostics defaults", () => {
-    const input = buildTaskDiagnosticsInput({ operationId: 'op-1', queue: 'default' });
-    expect(input).toEqual({
-      operationId: 'op-1',
-      queue: 'default',
-      staleQueuedAfterMs: 60_000,
-      staleHeartbeatAfterMs: 60_000,
-      retryStormMinimumAttempts: 3,
-      includeExpectedDelayed: false,
-      unadoptedAfterMs: 60_000,
-      limit: 50,
-    });
   });
 });

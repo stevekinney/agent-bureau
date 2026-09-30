@@ -14,6 +14,13 @@ export interface SaveCursorInput {
 export interface SaveConversationInput {
   runId: string;
   snapshot: ConversationSnapshot;
+  /**
+   * COR-104 — the steering `getAppliedFloor()` read at the run's first
+   * execution. The activity echoes it back as its result, so Weft's positional
+   * replay cache carries the first run's value; a history recorded before this
+   * field existed cached `undefined` there, which callers read as floor `0`.
+   */
+  steeringBoundary?: number | undefined;
 }
 
 /** Input for the step-record write activity. */
@@ -56,8 +63,10 @@ export function createStorageActivities(checkpointStore: CheckpointStore) {
     saveConversation: activity({
       name: 'saveConversation',
       idempotent: true,
-      execute: async (input: SaveConversationInput): Promise<void> =>
-        checkpointStore.saveConversation(input.runId, input.snapshot),
+      execute: async (input: SaveConversationInput): Promise<number | undefined> => {
+        await checkpointStore.saveConversation(input.runId, input.snapshot);
+        return input.steeringBoundary;
+      },
     }),
 
     recordStep: activity({

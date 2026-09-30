@@ -41,41 +41,14 @@ function abortError(signal: AbortSignal): AbortAgentRunError {
   );
 }
 
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) {
-    throw abortError(signal);
-  }
-}
-
-function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(abortError(signal));
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = (): void => {
-      signal.removeEventListener('abort', onAbort);
-      reject(abortError(signal));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    void promise
-      .then((value) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(value);
-        return undefined;
-      })
-      .catch((error: unknown) => {
-        signal.removeEventListener('abort', onAbort);
-        reject(error instanceof Error ? error : new Error(String(error), { cause: error }));
-      });
-  });
+interface LoadWaiter {
+  resolve: (generate: GenerateFunction) => void;
+  reject: (error: Error) => void;
 }
 
 type LazyGenerateState =
   | { kind: 'unloaded' }
-  | { kind: 'loading'; pending: Promise<GenerateFunction> }
+  | { kind: 'loading'; waiters: Set<LoadWaiter> }
   | { kind: 'loaded'; generate: GenerateFunction };
 
 /** Lazily loads and memoizes a GenerateFunction, sharing its first load across concurrent calls. */
@@ -86,50 +59,85 @@ export function createLazyGenerate(
   const label = options.label ?? 'anonymous';
   let state: LazyGenerateState = { kind: 'unloaded' };
 
-  const resolve = (): Promise<GenerateFunction> => {
-    if (state.kind === 'loaded') return Promise.resolve(state.generate);
-    if (state.kind === 'loading') return state.pending;
+  const load = async (): Promise<GenerateFunction> => {
+    let loaded: GenerateFunction;
+    try {
+      loaded = await loader();
+    } catch (cause) {
+      throw new AsyncDefinitionLoadError(
+        'LOAD_FAILED',
+        `Failed to load lazy generate function "${label}"`,
+        cause,
+      );
+    }
+    return validateGenerateFunction(loaded, label);
+  };
 
-    const pending = (async () => {
-      let loaded: GenerateFunction;
-      try {
-        loaded = await loader();
-      } catch (cause) {
-        throw new AsyncDefinitionLoadError(
-          'LOAD_FAILED',
-          `Failed to load lazy generate function "${label}"`,
-          cause,
-        );
-      }
-
-      return validateGenerateFunction(loaded, label);
-    })();
-
-    state = { kind: 'loading', pending };
-    void pending.then(
+  // Publishes the `loading` state BEFORE `loader` runs, so a reentrant call
+  // made synchronously from inside `loader` joins this load. Callers wait on
+  // per-caller entries in `waiters` rather than on a shared promise, so an
+  // aborted caller removes itself and nothing retains it if the load never
+  // settles.
+  const start = (): Set<LoadWaiter> => {
+    const waiters = new Set<LoadWaiter>();
+    const current: LazyGenerateState = { kind: 'loading', waiters };
+    state = current;
+    void load().then(
       (generate) => {
-        if (state.kind === 'loading' && state.pending === pending) {
-          state = { kind: 'loaded', generate };
-        }
+        if (state === current) state = { kind: 'loaded', generate };
+        for (const waiter of waiters) waiter.resolve(generate);
+        waiters.clear();
         return undefined;
       },
-      () => {
-        if (state.kind === 'loading' && state.pending === pending) {
-          state = { kind: 'unloaded' };
-        }
+      (error: unknown) => {
+        if (state === current) state = { kind: 'unloaded' };
+        const failure = error instanceof Error ? error : new Error(String(error), { cause: error });
+        for (const waiter of waiters) waiter.reject(failure);
+        waiters.clear();
         return undefined;
       },
     );
-    return pending;
+    return waiters;
   };
+
+  const waitForLoad = (
+    waiters: Set<LoadWaiter>,
+    signal: AbortSignal | undefined,
+  ): Promise<GenerateFunction> =>
+    new Promise<GenerateFunction>((resolve, reject) => {
+      const onAbort = (): void => {
+        waiters.delete(waiter);
+        reject(abortError(signal as AbortSignal));
+      };
+      const waiter: LoadWaiter = {
+        resolve: (generate) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(generate);
+        },
+        reject: (error) => {
+          signal?.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      };
+      waiters.add(waiter);
+      if (!signal) return;
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) {
+        signal.removeEventListener('abort', onAbort);
+        onAbort();
+      }
+    });
 
   const wrapper: GenerateFunction = async (context) => {
     const { signal } = context;
-    throwIfAborted(signal);
 
-    const generate = await awaitWithAbort(resolve(), signal);
-    throwIfAborted(signal);
+    // Once loaded, behave exactly like a directly-referenced GenerateFunction:
+    // the loaded function owns the signal.
+    if (state.kind === 'loaded') return state.generate(context);
 
+    if (signal?.aborted) throw abortError(signal);
+    const waiters = state.kind === 'loading' ? state.waiters : start();
+    const generate = await waitForLoad(waiters, signal);
     return generate(context);
   };
 

@@ -56,14 +56,14 @@ export function createPluginOwner(
       try {
         return plugin(inputValue);
       } catch (error) {
-        const pendingIndex = pending.indexOf(identity);
-        if (pendingIndex !== -1) {
-          pending.splice(pendingIndex, 1);
+        // The whole pipeline is failing, so no commit will drain the activations
+        // earlier plugins recorded for this attempt. Account for all of them now.
+        for (const activatedIdentity of pending.splice(0)) {
           hooks.emit(
             'plugin.activated',
             hooks.detail('plugin.activated', hooks.current(), {
               outcome: 'completed',
-              plugin: identity,
+              plugin: activatedIdentity,
             }),
           );
         }

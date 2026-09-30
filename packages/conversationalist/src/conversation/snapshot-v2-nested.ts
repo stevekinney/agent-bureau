@@ -68,7 +68,12 @@ export function decodeNestedSnapshotV2(value: unknown): DecodedSnapshot {
       table.length,
       current.parent === null
         ? null
-        : { id: current.parent.id, ids: current.parent.ids, sources: current.parent.sources },
+        : {
+            id: current.parent.id,
+            revision: current.parent.revision,
+            ids: current.parent.ids,
+            sources: current.parent.sources,
+          },
       'nested',
     );
     if (seenIds.has(fields.id)) throw snapshotError(`duplicate node id ${fields.id}`);
@@ -127,6 +132,7 @@ export function decodeNestedSnapshotV2(value: unknown): DecodedSnapshot {
     createdAt: envelope.createdAt,
     currentPath: envelope.currentPath,
     lineage: envelope.lineage,
+    streamSequences: envelope.streamSequences,
     root,
   };
 }
@@ -141,7 +147,7 @@ export function currentConversationFromNestedSnapshotV2(value: unknown): Convers
       child,
       envelope,
       table.length,
-      { id: fields.id, ids: fields.ids, sources: fields.sources },
+      { id: fields.id, revision: fields.revision, ids: fields.ids, sources: fields.sources },
       'nested',
     );
   }

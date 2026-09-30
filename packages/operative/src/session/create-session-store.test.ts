@@ -64,6 +64,36 @@ async function seedStoredSession(
   await store.set(`agent-session:${session.id}`, JSON.stringify(session));
 }
 
+type BackingStore = ReturnType<typeof textValueStore>;
+
+/**
+ * Wraps a store so the `get()` of `slowKey` resolves only after `get()` of
+ * `fastKey` has resolved (or after a short grace period when `fastKey` is
+ * never read), forcing a known resolution order regardless of scheduling.
+ */
+function withForcedGetOrder(backing: BackingStore, slowKey: string, fastKey: string): BackingStore {
+  let fastResolved: () => void = () => undefined;
+  const fastDone = new Promise<void>((resolve) => {
+    fastResolved = resolve;
+  });
+  return new Proxy(backing, {
+    get(target, property) {
+      if (property === 'get') {
+        return async (key: string) => {
+          const value = await target.get(key);
+          if (key === fastKey) fastResolved();
+          if (key === slowKey) {
+            await Promise.race([fastDone, new Promise((resolve) => setTimeout(resolve, 25))]);
+          }
+          return value;
+        };
+      }
+      const member = Reflect.get(target, property, target);
+      return typeof member === 'function' ? member.bind(target) : member;
+    },
+  });
+}
+
 function summaryIndexPayload(id: string): string {
   return JSON.stringify({
     formatVersion: 1,
@@ -2431,5 +2461,79 @@ describe('SessionStore outbox claim lease (AB-390)', () => {
       until: runtime.clock.now() - 500,
     });
     expect(staleRenewal.claimed).toBe(false);
+  });
+});
+
+function v2KeyFor(id: string): string {
+  let encoded = '';
+  for (let index = 0; index < id.length; index += 1) {
+    encoded += id.charCodeAt(index).toString(16).padStart(4, '0');
+  }
+  return `${BODY_PREFIX}${encoded}`;
+}
+
+describe('duplicate legacy and v2 bodies during summary rebuilds', () => {
+  const duplicateId = 'duplicate';
+  const encodedKey = v2KeyFor(duplicateId);
+  const legacyKey = `agent-session:${duplicateId}`;
+
+  async function seedDuplicate(backing: BackingStore): Promise<void> {
+    await backing.set(
+      legacyKey,
+      JSON.stringify(makeSession({ id: duplicateId, agentName: 'legacy-agent' })),
+    );
+    await backing.set(
+      encodedKey,
+      JSON.stringify(makeSession({ id: duplicateId, agentName: 'canonical-agent' })),
+    );
+    await backing.set(v2KeyFor('other'), JSON.stringify(makeSession({ id: 'other' })));
+    await backing.set(SUMMARY_INDEX_KEY, '[]');
+  }
+
+  const orders = [
+    { name: 'legacy resolves last', slow: legacyKey, fast: encodedKey },
+    { name: 'v2 resolves last', slow: encodedKey, fast: legacyKey },
+  ];
+
+  for (const order of orders) {
+    it(`list() prefers the v2 body when ${order.name}`, async () => {
+      const backing = textValueStore(new MemoryStorage());
+      await seedDuplicate(backing);
+      const store = createSessionStore(withForcedGetOrder(backing, order.slow, order.fast));
+
+      const summaries = await store.list();
+      const duplicate = summaries.filter((summary) => summary.id === duplicateId);
+      expect(duplicate).toHaveLength(1);
+      expect(duplicate[0]?.agentName).toBe('canonical-agent');
+    });
+
+    it(`update() rebuilds with the v2 body when ${order.name}`, async () => {
+      const backing = textValueStore(new MemoryStorage());
+      await seedDuplicate(backing);
+      const store = createSessionStore(withForcedGetOrder(backing, order.slow, order.fast));
+
+      await store.update('other', (session) =>
+        session ? { ...session, agentName: 'changed-agent' } : undefined,
+      );
+
+      const summaries = await store.list();
+      const duplicate = summaries.filter((summary) => summary.id === duplicateId);
+      expect(duplicate).toHaveLength(1);
+      expect(duplicate[0]?.agentName).toBe('canonical-agent');
+    });
+  }
+
+  it('falls back to the legacy body when no v2 key exists and skips a mismatched v2 body', async () => {
+    const backing = textValueStore(new MemoryStorage());
+    await backing.set(legacyKey, JSON.stringify(makeSession({ id: duplicateId })));
+    await backing.set(SUMMARY_INDEX_KEY, '[]');
+    const store = createSessionStore(backing);
+    const listed = await store.list();
+    expect(listed.map((summary) => summary.id)).toEqual([duplicateId]);
+
+    const mismatched = textValueStore(new MemoryStorage());
+    await mismatched.set(encodedKey, JSON.stringify(makeSession({ id: 'someone-else' })));
+    await mismatched.set(SUMMARY_INDEX_KEY, '[]');
+    expect(await createSessionStore(mismatched).list()).toEqual([]);
   });
 });

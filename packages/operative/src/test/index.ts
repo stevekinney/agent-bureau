@@ -41,7 +41,12 @@ export type {
   DurableMultiAgentHarness,
 } from './durable-multi-agent-harness';
 export { createEventRecorder } from './event-recorder';
-export type { CausalTraceEntry, EventRecorder, EventRecorderOwnerIdentity } from './event-recorder';
+export type {
+  CausalTraceEntry,
+  EventListenerSource,
+  EventRecorder,
+  EventRecorderOwnerIdentity,
+} from './event-recorder';
 export {
   createFaultEngine,
   FAULT_BOUNDARY_EFFECT_KINDS,
@@ -184,6 +189,8 @@ export interface RunRecorder {
   }>;
   steps: StepResult[];
   clear: () => void;
+  /** Removes every listener this recorder registered on the run; later events are not recorded. Idempotent. */
+  dispose: () => void;
 }
 
 export function createMockScratchpad(initialValues?: Record<string, unknown>): Scratchpad {
@@ -215,18 +222,24 @@ export function createRunRecorder(
   const steps: StepResult[] = [];
 
   const recorder = createEventRecorder(runtime);
-  recorder.attach<CombinedOperativeEventClassMap>(activeRun, {
+  const detach = recorder.attach<CombinedOperativeEventClassMap>(activeRun, {
     kind: 'run-recorder',
     id: 'legacy-run-recorder',
   });
 
+  const listeners = new Map<CombinedOperativeEventType, (event: Event) => void>();
   for (const type of COMBINED_OPERATIVE_EVENT_TYPES) {
-    activeRun.addEventListener(type, (event) => {
-      events.push({ type, detail: event });
+    const listener = (event: Event) => {
+      events.push({
+        type,
+        detail: event as CombinedOperativeEventMap[CombinedOperativeEventType],
+      });
       if (type === 'step.completed') {
         steps.push(event as unknown as StepResult);
       }
-    });
+    };
+    listeners.set(type, listener);
+    activeRun.addEventListener(type, listener);
   }
 
   return {
@@ -235,6 +248,13 @@ export function createRunRecorder(
     clear() {
       events.length = 0;
       steps.length = 0;
+    },
+    dispose() {
+      detach();
+      for (const [type, listener] of listeners) {
+        activeRun.removeEventListener(type, listener);
+      }
+      listeners.clear();
     },
   };
 }

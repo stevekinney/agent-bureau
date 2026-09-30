@@ -159,6 +159,7 @@ describe('a reattached run whose first park happens after boot-time reconstructi
         toolbox: createEmptyToolbox(),
         storage: intercept.storage,
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         humanInput: true,
         stopWhen: stopWhen.noToolCalls(),
       });
@@ -197,6 +198,7 @@ describe('a reattached run whose first park happens after boot-time reconstructi
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         humanInput: true,
         stopWhen: stopWhen.noToolCalls(),
       });
@@ -275,6 +277,7 @@ describe('a reattached run whose first park happens after boot-time reconstructi
         toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         humanInput: true,
         stopWhen: stopWhen.noToolCalls(),
       });
@@ -302,6 +305,7 @@ describe('a reattached run whose first park happens after boot-time reconstructi
         toolbox: createToolbox([createNextTool()]),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         humanInput: true,
         stopWhen: stopWhen.noToolCalls(),
       });
@@ -364,6 +368,7 @@ describe('bounded duplicate park events (COR-121)', () => {
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         humanInput: true,
         stopWhen: stopWhen.noToolCalls(),
       });
@@ -383,6 +388,7 @@ describe('bounded duplicate park events (COR-121)', () => {
         toolbox: createEmptyToolbox(),
         storage: { type: 'sqlite', path: databasePath },
         durableExecution: true,
+        durableOwnership: { ownership: 'none' },
         humanInput: true,
         stopWhen: stopWhen.noToolCalls(),
       });

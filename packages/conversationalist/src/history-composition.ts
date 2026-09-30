@@ -90,6 +90,7 @@ export type CompositionHooks<T> = {
     sourceRevision?: number;
   };
   readonly removedNodeIds: () => readonly string[];
+  readonly streamSequences: Map<string, number>;
   readonly revision: () => number;
   readonly environment: ConversationEnvironment;
   readonly sourcePlugins: readonly MessagePlugin[];
@@ -134,6 +135,7 @@ export function composeConversationActions<T>(hooks: CompositionHooks<T>): Conve
     environment: hooks.environment,
     lineage: hooks.lineage,
     removedNodeIds: hooks.removedNodeIds,
+    streamSequences: hooks.streamSequences,
   });
   const bind = createBindAction(
     hooks.current,
@@ -147,6 +149,7 @@ export function composeConversationActions<T>(hooks: CompositionHooks<T>): Conve
     hooks.environment,
     hooks.assertOpen,
     hooks.commit,
+    hooks.streamSequences,
   );
   const tools = createToolActions({
     current: hooks.current,

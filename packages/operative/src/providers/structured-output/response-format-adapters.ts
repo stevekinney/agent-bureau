@@ -1,3 +1,4 @@
+import { isStrictCompatible } from '../../structured-output/response-schema.ts';
 import type { ResponseFormat } from '../../structured-output/types.ts';
 
 /**
@@ -22,6 +23,12 @@ type GeminiResponseFormat =
  * Converts a ResponseFormat to the OpenAI API's response_format parameter.
  *
  * Returns `undefined` for text format since OpenAI defaults to text.
+ *
+ * `strict: true` is sent only when the schema passes `isStrictCompatible`;
+ * otherwise the `json_schema` shape is kept with `strict: false`. Schemas
+ * derived from `z.object()` via `toOutputJsonSchema` lack
+ * `additionalProperties: false`, so `strict: false` is their expected steady
+ * state, not a silent downgrade.
  */
 export function toOpenAIResponseFormat(format: ResponseFormat): OpenAIResponseFormat {
   if (format.type === 'text') return undefined;
@@ -31,7 +38,7 @@ export function toOpenAIResponseFormat(format: ResponseFormat): OpenAIResponseFo
     json_schema: {
       name: format.name ?? 'response',
       schema: format.schema,
-      strict: true,
+      strict: isStrictCompatible(format.schema),
     },
   };
 }

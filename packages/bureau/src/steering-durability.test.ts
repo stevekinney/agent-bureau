@@ -54,13 +54,18 @@ describe('durable steering', () => {
       const recovered: PersistedSteeringCommand[] = [];
       await recoverSteeringCommands(mailboxAfter, (command) => recovered.push(command));
 
-      expect(recovered).toHaveLength(1);
-      expect(recovered[0]?.id).toBe('cmd-1');
-      expect(recovered[0]?.principal).toBe('alice');
-      expect(recovered[0]?.requestedValue).toEqual({
-        target: 'model',
-        override: 'claude-sonnet-5',
-      });
+      // The full reconstructed record, not a spot-check of some fields:
+      // optional fields the command never carried must stay absent rather
+      // than being reconstructed as placeholders.
+      expect(recovered).toEqual([
+        {
+          id: 'cmd-1',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'model', override: 'claude-sonnet-5' },
+          requestedAt: '2026-09-19T00:00:00.000Z',
+        },
+      ]);
 
       mailboxAfter.dispose();
       storageAfter[Symbol.dispose]();
@@ -93,7 +98,22 @@ describe('durable steering', () => {
       const recovered: PersistedSteeringCommand[] = [];
       await recoverSteeringCommands(mailboxAfter, (command) => recovered.push(command));
 
-      expect(recovered.map((command) => command.id)).toEqual(['cmd-1', 'cmd-2']);
+      expect(recovered).toEqual([
+        {
+          id: 'cmd-1',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'model', override: 'first' },
+          requestedAt: '2026-09-19T00:00:00.000Z',
+        },
+        {
+          id: 'cmd-2',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'model', override: 'second' },
+          requestedAt: '2026-09-19T00:00:00.000Z',
+        },
+      ]);
 
       mailboxAfter.dispose();
       storageAfter[Symbol.dispose]();
@@ -121,7 +141,15 @@ describe('durable steering', () => {
 
       const recovered: PersistedSteeringCommand[] = [];
       await recoverSteeringCommands(mailbox, (command) => recovered.push(command));
-      expect(recovered).toHaveLength(1);
+      expect(recovered).toEqual([
+        {
+          id: 'cmd-1',
+          sessionId: 'session-1',
+          principal: 'alice',
+          requestedValue: { target: 'model', override: 'claude-sonnet-5' },
+          requestedAt: '2026-09-19T00:00:00.000Z',
+        },
+      ]);
 
       mailbox.dispose();
       storage[Symbol.dispose]();
@@ -173,6 +201,55 @@ describe('durable steering', () => {
   });
 });
 
+describe('durable steering with nothing to reconstruct', () => {
+  it('reports an empty mailbox as empty and recovers nothing', async () => {
+    // The empty case, as this file already defines it: `claim()` answers
+    // `{ status: 'empty' }` and recovery neither applies nor counts anything.
+    const runtime = createManualRuntimeServices();
+    const fixture = createSqliteStorageFixture({ runtime });
+    try {
+      const storage = await resolveStorage(fixture.configuration);
+      const mailbox = createSteeringMailbox(storage, 'session-1');
+      const recovered: PersistedSteeringCommand[] = [];
+
+      expect(await mailbox.claim()).toEqual({ status: 'empty' });
+      expect(await recoverSteeringCommands(mailbox, (command) => recovered.push(command))).toBe(0);
+      expect(recovered).toEqual([]);
+      expect(await mailbox.list()).toEqual([]);
+
+      mailbox.dispose();
+      storage[Symbol.dispose]();
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it('is empty again after a drained recovery, across a restart', async () => {
+    const runtime = createManualRuntimeServices();
+    const fixture = createSqliteStorageFixture({ runtime });
+    try {
+      const storageBefore = await resolveStorage(fixture.configuration);
+      const mailboxBefore = createSteeringMailbox(storageBefore, 'session-1');
+      await persistSteeringCommand(mailboxBefore, steeringCommand());
+      expect(await recoverSteeringCommands(mailboxBefore, () => {})).toBe(1);
+      mailboxBefore.dispose();
+      storageBefore[Symbol.dispose]();
+
+      const storageAfter = await resolveStorage(fixture.configuration);
+      const mailboxAfter = createSteeringMailbox(storageAfter, 'session-1');
+      const recovered: PersistedSteeringCommand[] = [];
+      expect(await mailboxAfter.claim()).toEqual({ status: 'empty' });
+      expect(await recoverSteeringCommands(mailboxAfter, (c) => recovered.push(c))).toBe(0);
+      expect(recovered).toEqual([]);
+
+      mailboxAfter.dispose();
+      storageAfter[Symbol.dispose]();
+    } finally {
+      await fixture.dispose();
+    }
+  });
+});
+
 describe('durable steering crash safety', () => {
   it('leaves a command recoverable when the replay throws before acknowledgement', async () => {
     // The defect this pins: an earlier version acknowledged every command
@@ -186,7 +263,8 @@ describe('durable steering crash safety', () => {
     try {
       const storage = await resolveStorage(fixture.configuration);
       const mailbox = createSteeringMailbox(storage, 'session-1');
-      await persistSteeringCommand(mailbox, steeringCommand());
+      const persisted = await persistSteeringCommand(mailbox, steeringCommand());
+      if (!persisted.persisted) throw new Error('expected the command to persist');
 
       expect(
         await throwingRejectionOf(
@@ -196,12 +274,15 @@ describe('durable steering crash safety', () => {
         ),
       ).toThrow('replay failed');
 
-      // Not acknowledged, so still durably present. `claim()` reports the
-      // command as held rather than gone — the record survived the failed
-      // replay, which is the whole guarantee.
+      // Not acknowledged, so still durably present. The receipt is
+      // still `claimed` (its lease has not expired, so a second `claim()`
+      // sees nothing claimable) rather than gone — the record survived the
+      // failed replay, which is the whole guarantee.
       const receipts = await mailbox.list();
       expect(receipts).toHaveLength(1);
-      expect(receipts[0]?.state).not.toBe('acknowledged');
+      expect(receipts[0]?.commandId).toBe(persisted.commandId);
+      expect(receipts[0]?.state).toBe('claimed');
+      expect(await mailbox.claim()).toEqual({ status: 'empty' });
 
       mailbox.dispose();
       storage[Symbol.dispose]();

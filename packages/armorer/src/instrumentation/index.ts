@@ -206,13 +206,11 @@ export function instrument(
           span.setAttribute('error.type', 'cancelled');
           span.setAttribute('armorer.tool.cancellation_category', 'cancelled');
         } else {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: result.error?.message ?? 'Unknown error',
-          });
-          if (result.error) {
-            span.setAttribute('error.type', result.error.code);
-          }
+          // The result's error message is the tool's own and its error code
+          // is tool-defined and unbounded, so neither is attached (COR-96): a fixed message and the closed
+          // `ToolErrorCategory` name are the only values that reach the span.
+          span.setStatus({ code: SpanStatusCode.ERROR, message: 'Tool call failed' });
+          span.setAttribute('error.type', result.error?.category ?? 'error');
         }
         span.end();
         activeSpans.delete(result.callId);

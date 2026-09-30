@@ -118,6 +118,7 @@ import type {
 } from '@lostgradient/operative';
 import {
   createFleetEventFeed,
+  decodeCursor,
   encode,
   type Cursor,
   type FleetEventEnvelope,
@@ -699,23 +700,16 @@ function toDurableEventEnvelope(
 
 /**
  * Decodes a `since`/cursor string to its numeric sequence position for the
- * retention-floor comparison, mirroring Weft's own cursor format (an
- * unsigned decimal, or the `-1` sentinel for "before the first event") —
- * `@lostgradient/weft` does not export its `decodeCursor`/`encodeCursor`
- * codec publicly, so this is a narrow, LOCAL re-implementation used only
- * for this one comparison; the cursor value itself is always round-
- * tripped verbatim from `FleetEventEnvelope.cursor`, never re-encoded by
- * this function.
+ * retention-floor comparison by delegating to Weft's public `decodeCursor`
+ * (an unsigned decimal, or the `-1` sentinel for "before the first
+ * event"). An absent `since` maps to `-1`; a malformed cursor throws this
+ * module's own error. The cursor value itself is always round-tripped
+ * verbatim from `FleetEventEnvelope.cursor`, never re-encoded here.
  */
-const CURSOR_PATTERN = /^(?:-1|\d+)$/;
-
 function decodeSincePosition(since: string | undefined): number {
   if (since === undefined) return -1;
-  if (!CURSOR_PATTERN.test(since)) {
-    throw new Error(`Durable event history: invalid cursor "${since}".`);
-  }
-  const position = Number(since);
-  if (!Number.isSafeInteger(position) || position < -1) {
+  const position = decodeCursor(since);
+  if (position === null) {
     throw new Error(`Durable event history: invalid cursor "${since}".`);
   }
   return position;

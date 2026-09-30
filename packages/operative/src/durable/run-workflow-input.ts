@@ -74,16 +74,13 @@ export interface CreateRunWorkflowOptions {
   version?: string | undefined;
 }
 /** Build the cloneable cursor for a new workflow run. */
-export function initialCursor(
-  version: string | undefined,
-  initialAppliedConfigVersion = 0,
-): RunCursor {
+export function initialCursor(version: string | undefined): RunCursor {
   return {
     step: 0,
     totalUsage: { prompt: 0, completion: 0, total: 0 },
     lastContent: '',
     schemaAttempts: 0,
-    lastAppliedConfigVersion: initialAppliedConfigVersion,
+    lastAppliedConfigVersion: 0,
     ...(version !== undefined ? { workflowVersion: version } : {}),
   };
 }

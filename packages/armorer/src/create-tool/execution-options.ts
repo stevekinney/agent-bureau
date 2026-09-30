@@ -5,6 +5,7 @@ import {
   approvalResumeSymbol,
   executionCallbackStartSymbol,
   policyAuthorizationOnlySymbol,
+  policyAuthorizationResultSymbol,
 } from '../internal/approval-resume';
 import type { MinimalAbortSignal, ToolExecuteOptions } from '../is-tool';
 
@@ -12,6 +13,7 @@ export type InternalToolExecuteOptions = ToolExecuteOptions & {
   [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
   [approvalResumeSymbol]?: ApprovalResumeState;
   [policyAuthorizationOnlySymbol]?: boolean;
+  [policyAuthorizationResultSymbol]?: unknown;
   executionHandle?: ExecutionHandle;
   privilegedContextMirrorHandle?: ExecutionHandle;
   parentCompletionHandle?: ExecutionHandle;

@@ -37,7 +37,7 @@ export type StreamingActions = {
 
 /** Owns streaming mutation sequencing while the controller owns transactions. */
 export class HistoryStreaming {
-  private readonly streamSequences = new Map<string, number>();
+  constructor(private readonly streamSequences: Map<string, number> = new Map()) {}
 
   append(
     role: 'assistant' | 'user',
@@ -97,8 +97,9 @@ export function createStreamingActions(
   environment: ConversationEnvironment,
   assertOpen: () => void,
   commit: StreamingHooks['commit'],
+  streamSequences: Map<string, number>,
 ): StreamingActions {
-  const owner = new HistoryStreaming();
+  const owner = new HistoryStreaming(streamSequences);
   const hooks = { current, environment, assertOpen, commit };
   return {
     getStreamingMessage: () => getStreamingMessage(current()),
