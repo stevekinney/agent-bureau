@@ -133,7 +133,9 @@ function createCursorSaveSignal(checkpointStore: CheckpointStore) {
  * engine's `getNow` from a {@link createManualClock} instance instead of the
  * real wall clock. Returns `waitForCursorSave` ({@link createCursorSaveSignal})
  * alongside `engine`/`checkpointStore` for tests that need to observe a
- * step's commit without polling.
+ * step's commit without polling. Pass `inlineLaunchScheduling: 'manual'`
+ * (COR-207) to schedule no inline-launch macrotask at all; a run started on
+ * that engine only begins once the test awaits `engine.flushInlineLaunches()`.
  */
 async function buildEngine(
   storage: Storage,
@@ -141,6 +143,7 @@ async function buildEngine(
   resolveWorkflowServices?: ServicesResolver,
   version?: string,
   clock?: ManualClock,
+  inlineLaunchScheduling?: 'manual',
 ) {
   const rawCheckpointStore = createCheckpointStore(
     textValueStore(storage, { disposeUnderlyingStorage: false }),
@@ -152,6 +155,7 @@ async function buildEngine(
     storage,
     recover,
     ...(clock ? { getNow: clock.getNow } : {}),
+    ...(inlineLaunchScheduling ? { inlineLaunchScheduling } : {}),
     ...(resolveWorkflowServices ? { resolveWorkflowServices } : {}),
     workflows: { agentRun: runWorkflow },
     activities: {
@@ -1151,9 +1155,25 @@ describe('durable agentRun workflow', () => {
         return { content: 'final', toolCalls: [] };
       });
 
-      const { engine } = await buildEngine(storage, false);
+      // COR-207: a 'manual'-scheduled engine, so the launch never waits behind a
+      // real macrotask. `runToCompletion` is left alone; this test drives the
+      // start, the single flush, and the result inline.
+      const { engine } = await buildEngine(
+        storage,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'manual',
+      );
       try {
-        await runToCompletion(engine, { runId: 'json-run', prompt: 'Hi' }, services);
+        const handle = await engine.start(
+          'agentRun',
+          { runId: 'json-run', prompt: 'Hi', sessionId: 'json-run', agentName: '' },
+          { id: 'json-run', services },
+        );
+        await engine.flushInlineLaunches();
+        await handle.result();
 
         // Read the raw persisted transcript and assert it is plain JSON with no
         // function/prototype-bearing shape — i.e. no Conversation instance was
