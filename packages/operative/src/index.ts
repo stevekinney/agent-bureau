@@ -240,6 +240,45 @@ export type {
   SkillActivationBinding,
   SkillActivationContext,
 } from './context-epoch';
+// COR-634 — in-memory GoalRun controller
+export { GoalConfigurationError, VALIDATOR_ERROR_KINDS } from './errors';
+export type { GoalConfigurationErrorReason, ValidatorError, ValidatorErrorKind } from './errors';
+export {
+  GoalAttemptStartedEvent,
+  GoalAttemptValidatedEvent,
+  GoalCanceledEvent,
+  GoalCancellationRequestedEvent,
+  GoalExhaustedEvent,
+  GoalFailedEvent,
+  GoalFeedbackRecordedEvent,
+  GoalRetryingEvent,
+  GoalStartedEvent,
+  GoalSucceededEvent,
+} from './events';
+export { GOAL_RUN_TRANSITIONS, canTransitionGoalRun, startGoal } from './goal-run';
+export type {
+  GoalAttemptRecord,
+  GoalAttemptTarget,
+  GoalBudget,
+  GoalConversationPolicy,
+  GoalIdentity,
+  GoalRetryPolicy,
+  GoalRetryableReason,
+  GoalRun,
+  GoalRunEvent,
+  GoalRunResult,
+  GoalRunStatus,
+  GoalRunTerminalReason,
+  GoalRunTerminalStatus,
+  GoalUsage,
+  StartGoalOptions,
+  Validator,
+  ValidatorEvidence,
+  ValidatorIdentity,
+  ValidatorInput,
+  ValidatorOutcome,
+  ValidatorResult,
+} from './goal-run';
 // COR-1354 — fresh-attempt handoff artifacts and conversation policies
 export { createFreshAttemptArtifactStore } from './fresh-attempt/artifact-store';
 export type {
