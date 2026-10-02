@@ -1,5 +1,11 @@
 # @lostgradient/operative
 
+## 0.15.2
+
+### Patch Changes
+
+- c0dd71a: Update Operative's published Weft dependency to 0.27.11.
+
 ## 0.15.1
 
 ### Patch Changes
