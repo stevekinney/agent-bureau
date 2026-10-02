@@ -74,6 +74,41 @@ describe('createFalloverGenerate', () => {
     expect(falloverEvents).toBe(1);
   });
 
+  it('falls over on a sampling-parameter rejection without retrying or cooling down the provider', async () => {
+    // Verbatim message captured from claude-opus-4-8 for `temperature: 0.5` (COR-989).
+    const rejection = Object.assign(
+      new Error(
+        '400 {"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."},"request_id":"req_011CfdsPMwH14uBNi4UpGWt9"}',
+      ),
+      { status: 400 },
+    );
+    let primaryCalls = 0;
+    const primary: FalloverProvider = {
+      name: 'primary',
+      generate: async () => {
+        primaryCalls++;
+        throw rejection;
+      },
+    };
+    const errorTypes: string[] = [];
+    const generate = createFalloverGenerate({
+      providers: [primary, okProvider('secondary')],
+      retriesPerProvider: 2,
+      retryDelay: 0,
+      onFallover: (event) => errorTypes.push(event.errorType),
+    });
+
+    const result = await generate(makeContext());
+
+    expect(result.content).toBe('secondary-response');
+    expect(primaryCalls).toBe(1);
+    expect(errorTypes).toEqual(['sampling-parameter-unsupported']);
+
+    await generate(makeContext());
+
+    expect(primaryCalls).toBe(2);
+  });
+
   it('retries a server-error up to retriesPerProvider, driven entirely by the injected manual runtime', async () => {
     const runtime = createManualRuntimeServices();
     let attempts = 0;

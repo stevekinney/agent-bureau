@@ -6,7 +6,13 @@ import type { GenerateFunction } from '../types.ts';
  * Classification of a provider error for fallover decision-making.
  */
 export type ErrorClassification =
-  'auth' | 'rate-limit' | 'server-error' | 'overflow' | 'network' | 'unknown';
+  | 'auth'
+  | 'rate-limit'
+  | 'server-error'
+  | 'overflow'
+  | 'sampling-parameter-unsupported'
+  | 'network'
+  | 'unknown';
 
 /**
  * A named provider with its generate function.
