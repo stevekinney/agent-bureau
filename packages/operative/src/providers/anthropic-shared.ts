@@ -147,6 +147,13 @@ function describeForcedToolChoice(choice: ToolChoice | undefined): string | unde
  * `GenerateContext` on the way to the request body. (`GenerateContext.toolChoice`
  * exists, but the Anthropic provider lowers `options.toolChoice` only — if that
  * ever changes, this check has to move per request alongside it.)
+ *
+ * A request this guard rejects is never sent, so it and the post-response
+ * sampling-parameter classification in `anthropic.ts` (COR-989), which only
+ * sees a 400 the API actually returned, can never both fire for one request.
+ * That classification still covers what this guard lets through: a request
+ * with no thinking configuration, or a thinking request whose `topP` clears
+ * 0.95 but which a model rejects because it refuses any non-default value.
  */
 export function assertThinkingParametersCompatible(
   thinking: AnthropicThinkingConfig | undefined,
