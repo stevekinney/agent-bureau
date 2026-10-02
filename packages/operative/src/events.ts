@@ -13,7 +13,12 @@ import type { Conversation, ConversationActionType } from 'conversationalist';
 import type { CostBudgetExceededEvent, CostBudgetThresholdEvent } from './cost-budget-monitor';
 import { estimateCacheHitRate } from './cost-estimation';
 import type { SteeringCommandFailure, SteeringEffectiveState } from './durable/types';
-import { type AgentRunError, type AgentRunErrorKind, toAgentRunError } from './errors';
+import {
+  type AgentRunError,
+  type AgentRunErrorKind,
+  toAgentRunError,
+  type ValidatorError,
+} from './errors';
 import type { SemanticProgress } from './liveness';
 import type { SelectionOutcomeKind } from './providers/selection';
 import type { Effort } from './providers/types';
@@ -1894,6 +1899,188 @@ export class HookPlanRemovedEvent extends Event {
 }
 
 // ---------------------------------------------------------------------------
+// GoalRun events (COR-634, COR-638's decision record)
+//
+// Every payload is ids, names, versions, status, reasons, and at most a
+// feedback DIGEST. `ValidatorEvidence` and raw validator feedback are never
+// carried here: they live only on the synchronous `GoalRun.attempts()` read.
+// `goal.recovered` is durable-only and deliberately absent.
+// ---------------------------------------------------------------------------
+
+/** Terminal reasons a goal run can end with (COR-638, plus `attempt-run-failed`). */
+export type GoalEventTerminalReason =
+  | 'validator-passed'
+  | 'attempt-limit-reached'
+  | 'aggregate-budget-exceeded'
+  | 'validator-fail-non-retryable'
+  | 'validator-infrastructure-error'
+  | 'unsupported-validation'
+  | 'attempt-run-failed'
+  | 'goal-canceled';
+
+/**
+ * Emitted when the goal is constructed, so `GoalRun.status()` is still
+ * `'pending'` when it fires. COR-638's table lists `pending -> running` for this
+ * event; the move to `running` happens when the first attempt opens and is
+ * announced by `goal.attempt.started`. It is the first event on every path,
+ * including a goal canceled or rejected before any attempt runs.
+ */
+export class GoalStartedEvent extends Event {
+  static readonly type = 'goal.started' as const;
+  readonly goalRunId: string;
+  readonly goalIdentity: { readonly name: string; readonly version: string };
+  constructor(data: {
+    goalRunId: string;
+    goalIdentity: { readonly name: string; readonly version: string };
+  }) {
+    super(GoalStartedEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.goalIdentity = data.goalIdentity;
+  }
+}
+
+export class GoalAttemptStartedEvent extends Event {
+  static readonly type = 'goal.attempt.started' as const;
+  readonly goalRunId: string;
+  readonly attemptId: string;
+  readonly attemptIndex: number;
+  readonly runId: string | undefined;
+  constructor(data: {
+    goalRunId: string;
+    attemptId: string;
+    attemptIndex: number;
+    runId: string | undefined;
+  }) {
+    super(GoalAttemptStartedEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.attemptId = data.attemptId;
+    this.attemptIndex = data.attemptIndex;
+    this.runId = data.runId;
+  }
+}
+
+export class GoalAttemptValidatedEvent extends Event {
+  static readonly type = 'goal.attempt.validated' as const;
+  readonly goalRunId: string;
+  readonly attemptId: string;
+  readonly validatorIdentity: { readonly name: string; readonly version: string };
+  readonly outcomeKind: 'pass' | 'fail' | 'error' | 'unavailable' | 'canceled' | 'indeterminate';
+  constructor(data: {
+    goalRunId: string;
+    attemptId: string;
+    validatorIdentity: { readonly name: string; readonly version: string };
+    outcomeKind: 'pass' | 'fail' | 'error' | 'unavailable' | 'canceled' | 'indeterminate';
+  }) {
+    super(GoalAttemptValidatedEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.attemptId = data.attemptId;
+    this.validatorIdentity = data.validatorIdentity;
+    this.outcomeKind = data.outcomeKind;
+  }
+}
+
+export class GoalFeedbackRecordedEvent extends Event {
+  static readonly type = 'goal.feedback.recorded' as const;
+  readonly goalRunId: string;
+  readonly attemptId: string;
+  /** A SHA-256 digest of the feedback. The feedback itself is never carried. */
+  readonly feedbackDigest: string;
+  constructor(data: { goalRunId: string; attemptId: string; feedbackDigest: string }) {
+    super(GoalFeedbackRecordedEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.attemptId = data.attemptId;
+    this.feedbackDigest = data.feedbackDigest;
+  }
+}
+
+/**
+ * Emitted once the next attempt's session is resolved and the attempt is open,
+ * so it is always followed by that attempt's `goal.attempt.started`. The only
+ * exception is an explicit goal abort issued from a listener to this event,
+ * which ends the goal as `canceled` first.
+ */
+export class GoalRetryingEvent extends Event {
+  static readonly type = 'goal.retrying' as const;
+  readonly goalRunId: string;
+  readonly priorAttemptId: string;
+  readonly nextAttemptId: string;
+  constructor(data: { goalRunId: string; priorAttemptId: string; nextAttemptId: string }) {
+    super(GoalRetryingEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.priorAttemptId = data.priorAttemptId;
+    this.nextAttemptId = data.nextAttemptId;
+  }
+}
+
+export class GoalSucceededEvent extends Event {
+  static readonly type = 'goal.succeeded' as const;
+  readonly goalRunId: string;
+  readonly terminalReason: 'validator-passed';
+  constructor(data: { goalRunId: string }) {
+    super(GoalSucceededEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.terminalReason = 'validator-passed';
+  }
+}
+
+export class GoalExhaustedEvent extends Event {
+  static readonly type = 'goal.exhausted' as const;
+  readonly goalRunId: string;
+  readonly terminalReason: 'attempt-limit-reached' | 'aggregate-budget-exceeded';
+  constructor(data: {
+    goalRunId: string;
+    terminalReason: 'attempt-limit-reached' | 'aggregate-budget-exceeded';
+  }) {
+    super(GoalExhaustedEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.terminalReason = data.terminalReason;
+  }
+}
+
+export class GoalFailedEvent extends Event {
+  static readonly type = 'goal.failed' as const;
+  readonly goalRunId: string;
+  readonly terminalReason: Exclude<
+    GoalEventTerminalReason,
+    'validator-passed' | 'attempt-limit-reached' | 'aggregate-budget-exceeded' | 'goal-canceled'
+  >;
+  /** Present only when a validator error caused the failure. */
+  readonly validatorError?: ValidatorError | undefined;
+  constructor(data: {
+    goalRunId: string;
+    terminalReason: GoalFailedEvent['terminalReason'];
+    validatorError?: ValidatorError | undefined;
+  }) {
+    super(GoalFailedEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.terminalReason = data.terminalReason;
+    this.validatorError = data.validatorError;
+  }
+}
+
+export class GoalCancellationRequestedEvent extends Event {
+  static readonly type = 'goal.cancellation-requested' as const;
+  readonly goalRunId: string;
+  readonly principal?: string | undefined;
+  constructor(data: { goalRunId: string; principal?: string | undefined }) {
+    super(GoalCancellationRequestedEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.principal = data.principal;
+  }
+}
+
+export class GoalCanceledEvent extends Event {
+  static readonly type = 'goal.canceled' as const;
+  readonly goalRunId: string;
+  readonly terminalReason: 'goal-canceled';
+  constructor(data: { goalRunId: string }) {
+    super(GoalCanceledEvent.type);
+    this.goalRunId = data.goalRunId;
+    this.terminalReason = 'goal-canceled';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event map: maps event type string to the Event subclass instance
 //
 // `OperativeEventClassMap` deliberately does NOT `extends EventMap`
@@ -2005,6 +2192,17 @@ export interface OperativeEventClassMap {
   [HookPlanInvokedEvent.type]: HookPlanInvokedEvent;
   [HookPlanFailedEvent.type]: HookPlanFailedEvent;
   [HookPlanRemovedEvent.type]: HookPlanRemovedEvent;
+  // GoalRun lifecycle (COR-634). No `goal.recovered`: durable-only, out of scope.
+  [GoalStartedEvent.type]: GoalStartedEvent;
+  [GoalAttemptStartedEvent.type]: GoalAttemptStartedEvent;
+  [GoalAttemptValidatedEvent.type]: GoalAttemptValidatedEvent;
+  [GoalFeedbackRecordedEvent.type]: GoalFeedbackRecordedEvent;
+  [GoalRetryingEvent.type]: GoalRetryingEvent;
+  [GoalSucceededEvent.type]: GoalSucceededEvent;
+  [GoalExhaustedEvent.type]: GoalExhaustedEvent;
+  [GoalFailedEvent.type]: GoalFailedEvent;
+  [GoalCancellationRequestedEvent.type]: GoalCancellationRequestedEvent;
+  [GoalCanceledEvent.type]: GoalCanceledEvent;
 }
 
 /** The runtime-usable event map. See the block comment above the class map for why this exists separately. */
@@ -2090,6 +2288,16 @@ export const OPERATIVE_EVENT_TYPES = [
   HookPlanInvokedEvent.type,
   HookPlanFailedEvent.type,
   HookPlanRemovedEvent.type,
+  GoalStartedEvent.type,
+  GoalAttemptStartedEvent.type,
+  GoalAttemptValidatedEvent.type,
+  GoalFeedbackRecordedEvent.type,
+  GoalRetryingEvent.type,
+  GoalSucceededEvent.type,
+  GoalExhaustedEvent.type,
+  GoalFailedEvent.type,
+  GoalCancellationRequestedEvent.type,
+  GoalCanceledEvent.type,
 ] as const satisfies readonly OperativeEventType[];
 
 /**

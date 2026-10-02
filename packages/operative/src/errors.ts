@@ -22,6 +22,63 @@ export const AGENT_RUN_ERROR_KINDS = [
 
 export type AgentRunErrorKind = (typeof AGENT_RUN_ERROR_KINDS)[number];
 
+/**
+ * The closed `ValidatorErrorKind` set (COR-638) as a runtime list. Mirrors
+ * {@link AGENT_RUN_ERROR_KINDS}'s discipline: a stored or serialized kind
+ * validates against the same members the type names.
+ */
+export const VALIDATOR_ERROR_KINDS = ['load', 'contract', 'execute', 'timeout', 'output'] as const;
+
+export type ValidatorErrorKind = (typeof VALIDATOR_ERROR_KINDS)[number];
+
+/**
+ * Plain data describing why a validator could not produce a verdict. Not an
+ * `Error`: it travels inside a `ValidatorOutcome`. The in-memory record keeps
+ * the raw `cause` exactly as thrown, so it is not guaranteed JSON-safe; a
+ * durable layer must project `cause` (and `ValidatorEvidence.detail`) to a
+ * JSON-safe form itself before persisting it.
+ */
+export interface ValidatorError {
+  readonly kind: ValidatorErrorKind;
+  readonly code: string;
+  readonly message: string;
+  readonly cause?: unknown;
+}
+
+/** Wraps a thrown value as a {@link ValidatorError} of the given kind and code. */
+export function toValidatorError(
+  thrown: unknown,
+  options: { kind: ValidatorErrorKind; code: string },
+): ValidatorError {
+  return {
+    kind: options.kind,
+    code: options.code,
+    message: thrown instanceof Error ? thrown.message : String(thrown),
+    cause: thrown,
+  };
+}
+
+/** Why `startGoal()` rejected its configuration before any state or event existed. */
+export type GoalConfigurationErrorReason =
+  | 'missing-validator'
+  | 'invalid-maximum-attempts'
+  | 'missing-aggregate-bound'
+  | 'invalid-aggregate-bound'
+  | 'invalid-retry-policy'
+  | 'invalid-baseline'
+  | 'invalid-conversation-policy'
+  | 'missing-instructions';
+
+export class GoalConfigurationError extends Error {
+  readonly reason: GoalConfigurationErrorReason;
+
+  constructor(reason: GoalConfigurationErrorReason, message: string) {
+    super(message);
+    this.name = 'GoalConfigurationError';
+    this.reason = reason;
+  }
+}
+
 export type AsyncDefinitionLoadCode = 'INVALID_EXPORT' | 'LOAD_FAILED';
 
 export type AgentRunErrorCode =
