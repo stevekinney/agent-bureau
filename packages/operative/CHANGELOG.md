@@ -1,5 +1,11 @@
 # @lostgradient/operative
 
+## 0.15.3
+
+### Patch Changes
+
+- 5d0a008: Publish the GoalRun API and classify unsupported Anthropic sampling parameters so fallover can retry without them.
+
 ## 0.15.2
 
 ### Patch Changes

@@ -237,7 +237,7 @@
     },
     "packages/operative": {
       "name": "@lostgradient/operative",
-      "version": "0.15.2",
+      "version": "0.15.3",
       "dependencies": {
         "@lostgradient/cryptography": "workspace:*",
         "@lostgradient/embeddings": "workspace:*",
