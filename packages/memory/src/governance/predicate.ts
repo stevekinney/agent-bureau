@@ -1,8 +1,8 @@
 import {
-  type MemoryAuthority,
-  type MemoryOperation,
   hasMemoryCapability,
   holdsGovernanceAuthority,
+  type MemoryAuthority,
+  type MemoryOperation,
 } from './authority';
 
 export type MemoryVisibility = 'private' | 'shared';

@@ -5,12 +5,12 @@ import type { MemoryAuthority, MemoryOperation } from './authority';
 import { scanGovernedContent } from './content-scan';
 import { type MemoryEvidence, renderMemoryEvidence } from './evidence';
 import {
-  type GovernanceContext,
-  type ResolvedRecord,
-  type TenantScope,
   authorizeLocated,
+  type GovernanceContext,
   ownPrivateResource,
+  type ResolvedRecord,
   resourceOf,
+  type TenantScope,
 } from './governance-context';
 import type {
   GovernedListOptions,
@@ -23,7 +23,7 @@ import type {
 } from './governed-memory-types';
 import { embedOne } from './governed-writes';
 import { trustAtLeast } from './policy';
-import { type MemoryRedaction, decideMemoryAccess } from './predicate';
+import { decideMemoryAccess, type MemoryRedaction } from './predicate';
 import {
   type GovernedMemoryRecord,
   projectRecord,

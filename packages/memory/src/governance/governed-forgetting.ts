@@ -1,10 +1,10 @@
-import { type MemoryAuthority, holdsGovernanceAuthority } from './authority';
+import { holdsGovernanceAuthority, type MemoryAuthority } from './authority';
 import { type DeletionEngine, deletionOutcome } from './deletion';
 import {
-  type GovernanceContext,
-  type ResolvedRecord,
   authorizeLocated,
+  type GovernanceContext,
   ownPrivateResource,
+  type ResolvedRecord,
   resourceOf,
 } from './governance-context';
 import type {
