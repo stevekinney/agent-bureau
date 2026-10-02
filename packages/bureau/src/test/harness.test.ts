@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
 import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
-import type { RunSummary } from '../types';
+import type { Bureau, RunSummary } from '../types';
 import {
   BureauHarnessUnsupportedError,
   type BureauTestHarness,
@@ -15,12 +15,44 @@ import {
 } from './harness';
 import {
   type BureauStorageFixture,
+  createLmdbStorageFixture,
   createMemoryStorageFixture,
   createSqliteStorageFixture,
 } from './storage-fixtures';
 
 function mockGenerate(content = 'Done.'): GenerateFunction {
   return async () => ({ content, toolCalls: [] });
+}
+
+/**
+ * Resolves once the run's liveness snapshot reports `terminal`. Driven by
+ * `bureau.subscribeRunSnapshot` notifications, which deliver the current
+ * snapshot synchronously on subscribe and then one per revision change, so a
+ * run that has already settled resolves immediately and a still-running one
+ * resolves on the notification that settles it. It never polls and has no
+ * attempt budget to exhaust: `waitForRunState` gives up after 50 zero-delay
+ * yields, which a relaxed-durability LMDB run (a few hundred milliseconds of
+ * real completion work) outlasts.
+ */
+async function waitForTerminalSnapshot(bureau: Bureau, runId: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const controller = new AbortController();
+    try {
+      bureau.subscribeRunSnapshot(
+        runId,
+        (snapshot) => {
+          if (snapshot.status === 'terminal') {
+            controller.abort();
+            resolve();
+          }
+        },
+        { signal: controller.signal },
+      );
+    } catch (error) {
+      controller.abort();
+      reject(error);
+    }
+  });
 }
 
 const disposals: Array<() => Promise<void>> = [];
@@ -354,18 +386,31 @@ describe('two concurrent harnesses are fully isolated', () => {
    * AB-306 split the real-time-consuming steps (fixture creation, Bureau
    * construction, and each run's completion wait) into their own `beforeAll`
    * hooks so a loaded host doesn't stack multiple real waits inside one
-   * test's timeout budget. That restructuring stays for the memory and
-   * sqlite backends below even though AB-332 replaced their completion wait
-   * with `waitForRunState` (event-driven, no real timer): construction cost
-   * and the wait are still independent steps worth their own budget, and
-   * keeping the same shape as the LMDB variant
-   * (`harness-lmdb-isolation.test.ts`, AB-332) keeps the backend isolation
-   * checks directly comparable. WFT-138's relaxed LMDB durability mode now
-   * lets that variant use the same event-driven completion helper.
+   * test's timeout budget: each real step gets its own timeout budget. That
+   * restructuring stays for all three backends (`memory`, `sqlite`, and
+   * `lmdb`), which share this one table and one event-driven completion
+   * helper, `waitForTerminalSnapshot`, so the backend isolation checks stay
+   * directly comparable. The helper resolves from `subscribeRunSnapshot`
+   * notifications rather than `waitForRunState`, because `waitForRunState`
+   * polls at most 50 times with a zero-delay yield between tries and a run on
+   * the relaxed-durability LMDB backend (WFT-138) needs a few hundred
+   * milliseconds of real completion work, so its budget runs out first. The
+   * helper has no attempt budget to exhaust.
    */
   describe.each([
     ['memory', () => createMemoryStorageFixture()],
     ['sqlite', () => createSqliteStorageFixture({ runtime: createManualRuntimeServices() })],
+    // Path allocation draws an identifier from its OWN fresh runtime, not
+    // runtimeA/runtimeB — those are reserved for the harness's own run-id
+    // minting, and the "mints identifiers independently" assertion below
+    // depends on nothing else consuming from that counter first. Relaxed
+    // durability keeps the per-write fsync cost off a loaded host; this is
+    // not a recovery test, so nothing here needs the durable default.
+    [
+      'lmdb',
+      () =>
+        createLmdbStorageFixture({ runtime: createManualRuntimeServices(), durability: 'relaxed' }),
+    ],
   ] as const)(
     '%s: independent storage paths, timers, identifiers, and events',
     (_label, makeStorage) => {
@@ -411,14 +456,13 @@ describe('two concurrent harnesses are fully isolated', () => {
       beforeAll(async () => {
         runA = await harnessA.startSession({ message: 'on A' });
         runB = await harnessB.startSession({ message: 'on B' });
-        await waitForRunState(harnessA.bureau, runA.id);
+        await waitForTerminalSnapshot(harnessA.bureau, runA.id);
       });
 
       // Drained in its own hook (rather than alongside runA's wait above) so
-      // this wait gets its own fresh timeout budget too, matching the shape
-      // of the still-real-waiting lmdb variant this file split off from.
+      // this wait gets its own fresh timeout budget too.
       beforeAll(async () => {
-        await waitForRunState(harnessB.bureau, runB.id);
+        await waitForTerminalSnapshot(harnessB.bureau, runB.id);
       });
 
       // Neither harness observes the other's events. Subscribing and
@@ -430,13 +474,13 @@ describe('two concurrent harnesses are fully isolated', () => {
         const unsubscribeA = harnessA.bureau.subscribeLiveFrames((frame) => {
           eventsSeenByA.push(frame.type);
         });
-        // try/finally: if startSession or waitForRunState throws, this
+        // try/finally: if startSession or waitForTerminalSnapshot throws, this
         // still unsubscribes rather than leaking a live subscription on
         // harnessA into afterAll's teardown, which could mask the real
         // failure behind an unrelated dispose-time symptom.
         try {
           const runOnBOnly = await harnessB.startSession({ message: 'B-only run' });
-          await waitForRunState(harnessB.bureau, runOnBOnly.id);
+          await waitForTerminalSnapshot(harnessB.bureau, runOnBOnly.id);
         } finally {
           unsubscribeA();
         }
@@ -457,9 +501,8 @@ describe('two concurrent harnesses are fully isolated', () => {
       it('has distinct storage paths (when persistent) and distinct clocks', () => {
         // Memory fixtures have no path — this assertion is vacuously
         // satisfied by both being `undefined` only when paths genuinely
-        // can't collide; sqlite always asserts a concrete inequality (the
-        // lmdb variant's own equivalent assertion lives in
-        // harness-lmdb-isolation.test.ts).
+        // can't collide; the sqlite and lmdb fixtures always set a path, so
+        // they always assert a concrete inequality.
         if (storageA.path !== undefined || storageB.path !== undefined) {
           expect(storageA.path).not.toBe(storageB.path);
         }

@@ -3,13 +3,10 @@
  * process restart" (the SQLite variant lives in `create-bureau.test.ts`,
  * alongside the rest of that suite's recovery tests).
  *
- * Split into its own file, rather than living alongside the SQLite variant,
- * so the real per-iteration poll delay it needs (LMDB completion-callback
- * starvation under a zero-delay macrotask loop — the same root cause
- * `src/test/harness-lmdb-isolation.test.ts`'s `waitForRunCompletion`
- * documents at length) scopes a `determinism-manifest.json` exemption to
- * only this one small file, not the whole `create-bureau.test.ts` suite —
- * exactly the split AB-332 already made for the identical LMDB symptom.
+ * It lives in its own file because it needs a real per-iteration poll delay.
+ * A zero-delay macrotask poll (the kind `create-bureau.test.ts` uses) starves
+ * LMDB's async completion callbacks, so this test polls with a tiny real
+ * delay instead (see `pollUntilWithRealDelay` below).
  */
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
