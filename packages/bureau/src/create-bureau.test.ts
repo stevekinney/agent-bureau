@@ -14930,15 +14930,10 @@ describe('two Bureau processes racing deleteSession over one shared persistent s
 });
 
 describe('bureau.eventHistory run ownership survives a process restart (AB-359)', () => {
-  // The LMDB variant of this recovery scenario lives in its own file
-  // (`event-history-run-ownership-recovery-lmdb.test.ts`) — it needs a real
-  // per-iteration poll delay (LMDB completion-callback starvation, the same
-  // root cause `src/test/harness-lmdb-isolation.test.ts` documents at
-  // length), which a zero-delay-macrotask-only file like this one cannot
-  // carry without pulling in a determinism-manifest exemption for the
-  // whole file. Splitting it out scopes that exemption to only the one
-  // real wait it needs, exactly as AB-332 already did for the identical
-  // LMDB starvation symptom.
+  // The LMDB variant of this recovery scenario lives in its own file,
+  // `event-history-run-ownership-recovery-lmdb.test.ts`, because it needs a
+  // real per-iteration poll delay: a zero-delay macrotask poll starves
+  // LMDB's async completion callbacks.
 
   /**
    * The cross-process proof, adapted from "recovers an in-flight durable
