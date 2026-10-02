@@ -21,25 +21,25 @@ import type { MemoryGovernanceLedger } from './ledger';
 import type { MemoryGovernanceEvent } from './ledger-types';
 import type { MemoryGovernancePolicy } from './policy';
 import {
+  decideMemoryAccess,
   type MemoryAccessDecision,
   type MemoryDenialReason,
   type MemoryRecordState,
   type MemoryRedaction,
   type MemoryResourceDescriptor,
   type MemoryVisibility,
-  decideMemoryAccess,
 } from './predicate';
 import {
+  attributionFor,
+  collectionNamespace,
+  describeResource,
   type LegalHoldState,
   MEMORY_GOVERNANCE_METADATA_KEY,
   type MemoryAttribution,
   type MemoryRecordSourceReference,
   type ReadRecordGovernance,
-  type RecordGovernance,
-  attributionFor,
-  collectionNamespace,
-  describeResource,
   readRecordGovernance,
+  type RecordGovernance,
 } from './record-governance';
 
 export type TenantScope = Required<MemoryRecordScope>;

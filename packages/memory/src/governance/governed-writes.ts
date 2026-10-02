@@ -2,19 +2,19 @@ import type { GuardrailProvenance } from 'armorer';
 
 import type { MemoryRecord } from '../memory-record-storage';
 import {
-  type MemoryAuthority,
   delegationChainIncludes,
   holdsGovernanceAuthority,
   holdsServiceAuthority,
+  type MemoryAuthority,
 } from './authority';
 import { type GovernedContentScan, scanGovernedContent } from './content-scan';
 import { type DerivationBlocker, derivationBlocker, settleStoredDerivation } from './derivation';
 import {
+  authorizeLocated,
   type GovernanceContext,
+  ownPrivateResource,
   type ResolvedRecord,
   type TenantScope,
-  authorizeLocated,
-  ownPrivateResource,
 } from './governance-context';
 import type {
   GovernedWriteOptions,
@@ -23,12 +23,12 @@ import type {
   MemoryWriteRejection,
 } from './governed-memory-types';
 import type { MemoryProtectedDiagnostic } from './ledger-types';
-import { type MemorySourceKind, type MemoryTrust, lowestTrust } from './policy';
+import { lowestTrust, type MemorySourceKind, type MemoryTrust } from './policy';
 import {
+  digestContent,
   MEMORY_GOVERNANCE_METADATA_KEY,
   type MemoryRecordLineage,
   type RecordGovernance,
-  digestContent,
   withoutReservedMetadata,
 } from './record-governance';
 

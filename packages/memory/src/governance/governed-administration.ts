@@ -1,8 +1,8 @@
 import {
-  type MemoryAuthority,
   hasMemoryCapability,
   holdsGovernanceAuthority,
   holdsServiceAuthority,
+  type MemoryAuthority,
 } from './authority';
 import type { DeletionEngine } from './deletion';
 import { pruneAbandonedDerivations } from './derivation';

@@ -2,7 +2,7 @@ import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 
 import { createDeletionEngine } from './deletion';
 import { settlePendingDerivations } from './derivation';
-import { type GovernanceContext, createGovernanceContext } from './governance-context';
+import { createGovernanceContext } from './governance-context';
 import {
   createPolicyHistory,
   expireWorkingMemory,
@@ -38,9 +38,8 @@ import { admitWrite } from './governed-writes';
  */
 export function createGovernedMemory(options: CreateGovernedMemoryOptions): GovernedMemory {
   const runtime = options.runtime ?? createDefaultRuntimeServices();
-  let context: GovernanceContext | undefined;
-  const policies = createPolicyHistory(() => context!, options.policy);
-  context = createGovernanceContext({
+  const policies = createPolicyHistory(() => context, options.policy);
+  const context = createGovernanceContext({
     storage: options.storage,
     ledger: options.ledger,
     embedder: options.embedder,

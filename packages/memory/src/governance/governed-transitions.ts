@@ -1,10 +1,10 @@
-import { type MemoryAuthority, hasMemoryCapability, holdsGovernanceAuthority } from './authority';
+import { hasMemoryCapability, holdsGovernanceAuthority, type MemoryAuthority } from './authority';
 import { scanGovernedContent } from './content-scan';
 import { type DeletionEngine, planReferences } from './deletion';
 import {
+  authorizeLocated,
   type GovernanceContext,
   type ResolvedRecord,
-  authorizeLocated,
 } from './governance-context';
 import type {
   MemoryLegalHoldResult,

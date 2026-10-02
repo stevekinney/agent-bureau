@@ -1,4 +1,4 @@
-import { type ToolRequestContext, createTool } from 'armorer';
+import { createTool, type ToolRequestContext } from 'armorer';
 import { z } from 'zod';
 
 import { type MemoryAuthority, memoryAuthorityFromToolRequestContext } from './authority';
