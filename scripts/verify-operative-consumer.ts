@@ -6,7 +6,7 @@
  *   bun run scripts/verify-operative-consumer.ts --mode local [--pack-siblings]
  *   bun run scripts/verify-operative-consumer.ts --mode registry --version <version>
  *
- * Local mode packs `packages/operative` with `npm pack` and installs that
+ * Local mode packs `packages/operative` with `bun pm pack` and installs that
  * tarball by absolute file path. Registry mode installs
  * `@lostgradient/operative@<version>` from the public npm registry instead —
  * everything else about the consumer and its assertions is identical.
@@ -29,7 +29,7 @@
  * ahead of the registry with no version bump yet); OR `--pack-siblings` is
  * passed, which forces every sibling to be packed regardless of the above.
  * A packed sibling is installed into the consumer by absolute tarball path
- * (`npm pack --ignore-scripts`, same as operative itself), and the lockfile
+ * (`bun pm pack --ignore-scripts`, same as operative itself), and the lockfile
  * assertion requires EVERY resolved occurrence of that package name —
  * including a nested, importer-prefixed key Bun did not dedupe — to point at
  * the tarball, not only the first one found. A sibling that needs no packing
@@ -67,7 +67,7 @@
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import { $ } from 'bun';
 
@@ -77,9 +77,17 @@ import { PINNED_TYPE_DEPENDENCIES } from './pinned-type-dependencies';
 const root = join(import.meta.dir, '..');
 const packageDirectory = join(root, 'packages', 'operative');
 
-async function run(command: string[], cwd: string): Promise<string> {
+async function run(
+  command: string[],
+  cwd: string,
+  environment: Record<string, string> = {},
+): Promise<string> {
   const [executable, ...arguments_] = command;
-  const result = await $`${executable} ${arguments_}`.cwd(cwd).nothrow().quiet();
+  const result = await $`${executable} ${arguments_}`
+    .cwd(cwd)
+    .env({ ...process.env, ...environment })
+    .nothrow()
+    .quiet();
   const output = `${result.stdout}${result.stderr}`;
   if (result.exitCode !== 0) throw new Error(`${command.join(' ')} failed:\n${output}`);
   return output;
@@ -123,15 +131,19 @@ async function runExpectingFailure(
   };
 }
 
-/** Packs the package at `directory` with `npm pack --ignore-scripts` and returns the tarball's absolute path. */
+/** Packs the publish-shaped package at `directory` and returns the tarball's absolute path. */
 async function packDirectory(directory: string, staging: string): Promise<string> {
   const stdout = await runForStdout(
-    ['npm', 'pack', '--json', '--ignore-scripts', '--pack-destination', staging],
+    ['bun', 'pm', 'pack', '--quiet', '--ignore-scripts', '--destination', staging],
     directory,
   );
-  const filename = (JSON.parse(stdout) as Array<{ filename: string }>)[0]?.filename;
-  if (!filename) throw new Error(`npm pack produced no tarball for ${directory}`);
-  return join(staging, filename);
+  const filename = stdout.trim();
+  if (!filename) throw new Error(`bun pm pack produced no tarball for ${directory}`);
+  const tarball = isAbsolute(filename) ? filename : join(staging, filename);
+  if (!(await Bun.file(tarball).exists())) {
+    throw new Error(`bun pm pack did not write ${tarball}`);
+  }
+  return tarball;
 }
 
 async function packLocal(staging: string): Promise<string> {
@@ -1401,7 +1413,6 @@ async function main(): Promise<void> {
     // it depends on, so a packed sibling's own `dist/` is guaranteed fresh
     // by the time it is packed below — no separate build step needed.
     await run(['turbo', 'run', 'build', '--filter=@lostgradient/operative'], root);
-    await run(['bun', 'run', 'scripts/check-package-shape.ts', 'operative'], root);
 
     const siblingDecisions = await resolveSiblingDecisions(forcePackSiblings);
 
@@ -1409,16 +1420,24 @@ async function main(): Promise<void> {
     const directory = await mkdtemp(join(tmpdir(), 'operative-consumer-local-'));
     try {
       const tarball = await packLocal(staging);
-      await verifyTarballContainsTestSubpath(tarball);
 
       const siblingSpecifiers: Record<string, string> = {};
       const packedSiblings = new Map<string, string>();
+      const packedSiblingVersions: Record<string, string> = {};
       for (const decision of siblingDecisions) {
         if (!decision.pack) continue;
         const siblingTarball = await packDirectory(decision.directory, staging);
         siblingSpecifiers[decision.name] = `file:${siblingTarball}`;
         packedSiblings.set(decision.name, siblingTarball);
+        packedSiblingVersions[decision.name] = decision.version;
       }
+
+      await run(
+        ['bun', 'run', 'scripts/check-package-shape.ts', 'operative', '--tarball', tarball],
+        root,
+        { RELEASE_KNOWN_VERSIONS: JSON.stringify(packedSiblingVersions) },
+      );
+      await verifyTarballContainsTestSubpath(tarball);
 
       await verifyConsumer(
         directory,

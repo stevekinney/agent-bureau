@@ -1,3 +1,7 @@
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, test } from 'bun:test';
 
 import {
@@ -5,6 +9,93 @@ import {
   findDependencySpecifierErrors,
   type PackageManifest,
 } from './check-package-shape';
+
+test('a supplied publish-shaped tarball passes while its workspace-protocol mutation fails', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'operative-package-shape-'));
+  const packageRoot = join(directory, 'package');
+  const tarball = join(directory, 'operative.tgz');
+  const operativeManifest = (await Bun.file(
+    join(import.meta.dir, '..', 'packages', 'operative', 'package.json'),
+  ).json()) as { name: string; version: string };
+  const armorerManifest = (await Bun.file(
+    join(import.meta.dir, '..', 'packages', 'armorer', 'package.json'),
+  ).json()) as { version: string };
+  const manifest = {
+    name: operativeManifest.name,
+    version: operativeManifest.version,
+    exports: { '.': './dist/index.js' },
+    dependencies: { armorer: armorerManifest.version },
+  };
+
+  const check = () =>
+    Bun.spawnSync(
+      [
+        process.execPath,
+        join(import.meta.dir, 'check-package-shape.ts'),
+        'operative',
+        '--tarball',
+        tarball,
+      ],
+      {
+        cwd: join(import.meta.dir, '..'),
+        env: {
+          ...process.env,
+          RELEASE_KNOWN_VERSIONS: JSON.stringify({ armorer: armorerManifest.version }),
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+  const pack = () => {
+    const result = Bun.spawnSync(['tar', '-czf', tarball, '-C', directory, 'package']);
+    expect(result.exitCode).toBe(0);
+  };
+
+  try {
+    await mkdir(join(packageRoot, 'dist'), { recursive: true });
+    await Promise.all([
+      Bun.write(join(packageRoot, 'README.md'), 'Fixture\n'),
+      Bun.write(join(packageRoot, 'LICENSE'), 'Fixture\n'),
+      Bun.write(join(packageRoot, 'dist/index.js'), 'export const value = true;\n'),
+    ]);
+    await Bun.write(join(packageRoot, 'package.json'), `${JSON.stringify(manifest)}\n`);
+    pack();
+    const valid = check();
+    expect(valid.exitCode).toBe(0);
+    expect(valid.stdout.toString()).toContain('package-shape gate passed for: operative');
+
+    manifest.dependencies.armorer = 'workspace:*';
+    await Bun.write(join(packageRoot, 'package.json'), `${JSON.stringify(manifest)}\n`);
+    pack();
+    const invalid = check();
+    expect(invalid.exitCode).toBe(1);
+    expect(invalid.stderr.toString()).toContain(
+      '[operative] workspace-dependency: dependencies.armorer',
+    );
+
+    manifest.dependencies.armorer = armorerManifest.version;
+    manifest.name = '@lostgradient/another-package';
+    await Bun.write(join(packageRoot, 'package.json'), `${JSON.stringify(manifest)}\n`);
+    pack();
+    const wrongPackage = check();
+    expect(wrongPackage.exitCode).toBe(1);
+    expect(wrongPackage.stderr.toString()).toContain('[operative] tarball-identity:');
+
+    await Bun.write(join(packageRoot, 'package.json'), '{broken json');
+    pack();
+    const malformed = check();
+    expect(malformed.exitCode).toBe(1);
+    expect(malformed.stderr.toString()).toContain('[operative] tarball-manifest:');
+
+    await rm(join(packageRoot, 'package.json'));
+    pack();
+    const missingManifest = check();
+    expect(missingManifest.exitCode).toBe(1);
+    expect(missingManifest.stderr.toString()).toContain('[operative] tarball-manifest:');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 describe('collectManifestFileTargets', () => {
   test('recurses into nested import/require condition objects (the tsdown dual-package shape)', () => {
