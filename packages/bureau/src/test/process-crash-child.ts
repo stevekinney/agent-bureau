@@ -16,7 +16,7 @@
 import { writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { stopWhen } from '@lostgradient/operative';
+import { createCheckpointStore, stopWhen } from '@lostgradient/operative';
 import { createTool, createToolbox } from 'armorer';
 import { z } from 'zod';
 
@@ -24,6 +24,8 @@ import { createBureau } from '../create-bureau';
 import {
   CLAIM_RENEW_MS,
   CLAIM_TTL_MS,
+  HUMAN_WAIT_PROMPT,
+  HUMAN_WAIT_SIGNAL,
   REMEMBERED_ANSWER,
   SESSION_ID,
   chargeStatus,
@@ -258,6 +260,53 @@ async function twoParkedRuns(): Promise<void> {
   writeMarker({ xRunId: x.id, yRunId: y.id });
 }
 
+/**
+ * COR-1409: a run parks on `requestHumanInput`, and the process dies once the
+ * park is durable.
+ *
+ * The review becomes visible as soon as the tool dispatches its park event,
+ * which happens while the step memo carrying the pending wait is still being
+ * committed. A process killed in that window was never durably parked: its
+ * successor rightly re-runs the step. So the child waits until the run's cursor
+ * has advanced past step 0, which the workflow commits only after that memo and
+ * the step record. COR-121's in-process test covers the narrower window where
+ * the memo landed and the step record did not.
+ */
+async function humanWaitParked(): Promise<void> {
+  const bureau = await createHarnessBureau({
+    backend: backend as 'sqlite' | 'lmdb',
+    storagePath: storagePath as string,
+    generate: async () => ({
+      content: '',
+      toolCalls: [
+        {
+          id: 'call-park',
+          name: 'requestHumanInput',
+          arguments: { signalName: HUMAN_WAIT_SIGNAL, prompt: HUMAN_WAIT_PROMPT },
+        },
+      ],
+    }),
+    toolbox: createToolbox([]),
+    humanInput: true,
+  });
+  const run = await bureau.createRun({ message: 'crash harness park', principal: 'alice' });
+  await pollUntil('the run to surface its human-wait review', () =>
+    bureau.listPendingReviews().some((review) => review.runId === run.id),
+  );
+  // Read through the Bureau's own store: a second handle on a live LMDB path
+  // can deadlock against the Bureau's (see `storage-fixtures.ts`).
+  if (bureau.kv === undefined) {
+    process.stderr.write('child: the bureau has no durable key-value store\n');
+    process.exit(4);
+  }
+  const checkpoints = createCheckpointStore(bureau.kv);
+  await pollUntil('the run cursor to advance past the parked step', async () => {
+    const cursor = await checkpoints.loadCursor(run.id);
+    return cursor !== null && cursor.step >= 1;
+  });
+  writeMarker({ runId: run.id });
+}
+
 /** COR-1391: a non-crashing boot over the recovered, shut-down store. */
 async function verify(): Promise<void> {
   const directory = dirname(markerPath as string);
@@ -285,6 +334,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   'charge-then-crash': chargeThenCrash,
   'memory-write-then-crash': memoryWriteThenCrash,
   'two-parked-runs': twoParkedRuns,
+  'human-wait-parked': humanWaitParked,
   verify,
 };
 
