@@ -36,7 +36,7 @@
  * Exit code 0 = all gates pass; 1 = at least one gate failed (fail-closed).
  */
 import { builtinModules } from 'node:module';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { $ } from 'bun';
 
@@ -316,7 +316,7 @@ export function collectManifestFileTargets(manifest: PackageManifest): string[] 
   return [...new Set(targets)];
 }
 
-async function checkPackage(packageName: string): Promise<void> {
+async function checkPackage(packageName: string, suppliedTarball?: string): Promise<void> {
   const packageDirectory = resolve(import.meta.dir, '..', 'packages', packageName);
   const manifestPath = join(packageDirectory, 'package.json');
 
@@ -348,42 +348,71 @@ async function checkPackage(packageName: string): Promise<void> {
   await $`rm -rf ${stagingRoot}`.quiet();
   await $`mkdir -p ${stagingRoot}`.quiet();
 
-  const packResult = await $`npm pack --json --pack-destination ${stagingRoot}`
-    .cwd(packageDirectory)
-    .quiet()
-    .nothrow();
-  if (packResult.exitCode !== 0) {
-    fail(packageName, 'npm-pack', `npm pack failed: ${packResult.stderr.toString().trim()}`);
-    return;
-  }
+  let tarballPath = suppliedTarball;
+  if (!tarballPath) {
+    const packResult = await $`npm pack --json --pack-destination ${stagingRoot}`
+      .cwd(packageDirectory)
+      .quiet()
+      .nothrow();
+    if (packResult.exitCode !== 0) {
+      fail(packageName, 'npm-pack', `npm pack failed: ${packResult.stderr.toString().trim()}`);
+      return;
+    }
 
-  let packedName: string | undefined;
-  try {
-    const parsed = JSON.parse(packResult.stdout.toString()) as Array<{ filename?: string }>;
-    packedName = parsed[0]?.filename;
-  } catch {
-    fail(
-      packageName,
-      'npm-pack',
-      'npm pack --json output was not valid JSON (a lifecycle script may have printed to stdout)',
-    );
-    return;
+    let packedName: string | undefined;
+    try {
+      const parsed = JSON.parse(packResult.stdout.toString()) as Array<{ filename?: string }>;
+      packedName = parsed[0]?.filename;
+    } catch {
+      fail(
+        packageName,
+        'npm-pack',
+        'npm pack --json output was not valid JSON (a lifecycle script may have printed to stdout)',
+      );
+      return;
+    }
+    if (!packedName) {
+      fail(packageName, 'npm-pack', 'npm pack produced no tarball filename');
+      return;
+    }
+    // npm normalizes scoped tarball names; the file on disk replaces the leading `@scope/` form.
+    tarballPath = join(stagingRoot, packedName.replace(/^@/, '').replace(/\//g, '-'));
   }
-  if (!packedName) {
-    fail(packageName, 'npm-pack', 'npm pack produced no tarball filename');
-    return;
-  }
-  // npm normalizes scoped tarball names; the file on disk replaces the leading `@scope/` form.
-  const tarballOnDisk = packedName.replace(/^@/, '').replace(/\//g, '-');
   const extractDirectory = join(stagingRoot, 'extracted');
   await $`mkdir -p ${extractDirectory}`.quiet();
-  await $`tar -xzf ${join(stagingRoot, tarballOnDisk)} -C ${extractDirectory}`.quiet().nothrow();
+  const extractResult = await $`tar -xzf ${tarballPath} -C ${extractDirectory}`.quiet().nothrow();
+  if (extractResult.exitCode !== 0) {
+    fail(packageName, 'tarball', `could not extract ${tarballPath}: ${extractResult.stderr}`);
+    return;
+  }
 
   // npm tarballs extract under a top-level `package/` directory.
   const packageRoot = join(extractDirectory, 'package');
-  const packedManifest = (await Bun.file(
-    join(packageRoot, 'package.json'),
-  ).json()) as PackageManifest;
+  let packedManifest: PackageManifest;
+  try {
+    const value: unknown = await Bun.file(join(packageRoot, 'package.json')).json();
+    if (
+      !value ||
+      typeof value !== 'object' ||
+      !('name' in value) ||
+      typeof value.name !== 'string' ||
+      !('version' in value) ||
+      typeof value.version !== 'string'
+    ) {
+      throw new Error('package.json must contain a name and version');
+    }
+    packedManifest = value as PackageManifest;
+  } catch (error) {
+    fail(packageName, 'tarball-manifest', `could not read packed package.json: ${String(error)}`);
+    return;
+  }
+  if (packedManifest.name !== manifest.name || packedManifest.version !== manifest.version) {
+    fail(
+      packageName,
+      'tarball-identity',
+      `packed package is ${packedManifest.name}@${packedManifest.version}, expected ${manifest.name}@${manifest.version}`,
+    );
+  }
   const shippedFiles = await listFiles(packageRoot);
   const shippedSet = new Set(shippedFiles);
 
@@ -485,6 +514,23 @@ async function checkPackage(packageName: string): Promise<void> {
 // a chance to run.
 if (import.meta.main) {
   const targets = Bun.argv.slice(2);
+  const tarballOptionIndex = targets.indexOf('--tarball');
+  let suppliedTarball: string | undefined;
+  if (tarballOptionIndex !== -1) {
+    suppliedTarball = targets[tarballOptionIndex + 1];
+    if (
+      targets.length !== 3 ||
+      tarballOptionIndex !== 1 ||
+      !suppliedTarball ||
+      !isAbsolute(suppliedTarball)
+    ) {
+      console.error(
+        'Usage: bun run scripts/check-package-shape.ts <packageDirectory> --tarball <absolute path>',
+      );
+      process.exit(1);
+    }
+    targets.splice(tarballOptionIndex, 2);
+  }
   if (targets.length === 0) {
     console.error(
       'Usage: bun run scripts/check-package-shape.ts <packageDirectory> [<packageDirectory> ...]',
@@ -493,7 +539,7 @@ if (import.meta.main) {
   }
 
   for (const packageName of targets) {
-    await checkPackage(packageName);
+    await checkPackage(packageName, suppliedTarball);
   }
 
   if (failures.length > 0) {
