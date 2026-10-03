@@ -14,11 +14,17 @@ test('a supplied publish-shaped tarball passes while its workspace-protocol muta
   const directory = await mkdtemp(join(tmpdir(), 'operative-package-shape-'));
   const packageRoot = join(directory, 'package');
   const tarball = join(directory, 'operative.tgz');
+  const operativeManifest = (await Bun.file(
+    join(import.meta.dir, '..', 'packages', 'operative', 'package.json'),
+  ).json()) as { name: string; version: string };
+  const armorerManifest = (await Bun.file(
+    join(import.meta.dir, '..', 'packages', 'armorer', 'package.json'),
+  ).json()) as { version: string };
   const manifest = {
-    name: '@lostgradient/operative',
-    version: '0.15.3',
+    name: operativeManifest.name,
+    version: operativeManifest.version,
     exports: { '.': './dist/index.js' },
-    dependencies: { armorer: '2.4.3' },
+    dependencies: { armorer: armorerManifest.version },
   };
 
   const check = () =>
@@ -32,7 +38,10 @@ test('a supplied publish-shaped tarball passes while its workspace-protocol muta
       ],
       {
         cwd: join(import.meta.dir, '..'),
-        env: { ...process.env, RELEASE_KNOWN_VERSIONS: JSON.stringify({ armorer: '2.4.3' }) },
+        env: {
+          ...process.env,
+          RELEASE_KNOWN_VERSIONS: JSON.stringify({ armorer: armorerManifest.version }),
+        },
         stdout: 'pipe',
         stderr: 'pipe',
       },
@@ -64,7 +73,7 @@ test('a supplied publish-shaped tarball passes while its workspace-protocol muta
       '[operative] workspace-dependency: dependencies.armorer',
     );
 
-    manifest.dependencies.armorer = '2.4.3';
+    manifest.dependencies.armorer = armorerManifest.version;
     manifest.name = '@lostgradient/another-package';
     await Bun.write(join(packageRoot, 'package.json'), `${JSON.stringify(manifest)}\n`);
     pack();
