@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+
 import { createFanOutRouting, createRoundRobinRouting } from './create-supervisor';
 import type { AgentDescriptor } from './supervisor-contracts';
 

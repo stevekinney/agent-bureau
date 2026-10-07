@@ -183,6 +183,33 @@ describe('the run feeds a bureau owns', () => {
     }
   });
 
+  it('ends a failed run’s history with its terminal event, after the error that led to it', async () => {
+    // `run.error` is not terminal: Operative follows it with `run.completed`,
+    // which carries the finish reason. A feed detached at `run.error` would
+    // end one event early, and a client waiting for the terminal event of a
+    // failed run would wait for one that was never recorded.
+    const bureau = await createBureau({
+      agents: {},
+      generate: async () => {
+        throw new Error('provider unavailable');
+      },
+    });
+    try {
+      const summary = await bureau.createRun({ message: 'hello' });
+      await waitForRunState(bureau, summary.id);
+
+      const runFeed = bureau.runEventFeeds.get(summary.id);
+      expect(runFeed).toBeDefined();
+
+      const replayed = await collect(runFeed!.feed.replay());
+      const kinds = replayed.map((envelope) => envelope.kind);
+      expect(kinds.at(0)).toBe('run.started');
+      expect(kinds.slice(-2)).toEqual(['run.error', 'run.completed']);
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('reaps the feed when the run is deleted, ending a live reader', async () => {
     const bureau = await buildBureau();
     try {

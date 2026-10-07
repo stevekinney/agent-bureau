@@ -18,12 +18,14 @@
  */
 import { writeFileSync } from 'node:fs';
 
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import { createToolbox } from 'armorer';
 
 import { createBureau } from '../create-bureau';
 
 const storagePath = process.argv[2];
 const markerPath = process.argv[3];
+const runtime = createDefaultRuntimeServices();
 
 if (storagePath === undefined || markerPath === undefined) {
   process.stderr.write('usage: steering-crash-child <storagePath> <markerPath>\n');
@@ -45,7 +47,7 @@ const run = await bureau.createRun({ message: 'Wait forever', principal: 'alice'
 for (let attempt = 0; attempt < 200; attempt += 1) {
   const session = await bureau.getSession(run.sessionId);
   if (session?.metadata['lastRunStatus'] === 'running') break;
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise<void>((resolve) => runtime.timers.setTimeout(resolve, 10));
 }
 
 const outcome = await bureau.submitSteeringCommand(run.sessionId, {

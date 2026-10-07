@@ -1,6 +1,6 @@
 import {
-  LIVENESS_POLICY_VERSION,
   type ActiveRun,
+  LIVENESS_POLICY_VERSION,
   type RunState,
   type StepResult,
 } from '@lostgradient/operative';

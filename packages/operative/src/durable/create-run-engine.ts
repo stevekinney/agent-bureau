@@ -24,6 +24,7 @@ import {
   DURABLE_HEARTBEAT_TICK_WORKFLOW_TYPE,
   resolveDurableHeartbeatTickServices,
 } from './durable-heartbeat-tick-workflow';
+import { GOAL_WORKFLOW_TYPE } from './goal-workflow-ports';
 import { createHumanWaitMarkerSink } from './human-wait-park-marker';
 import { createStorageActivities } from './storage-activities';
 
@@ -48,6 +49,16 @@ export interface CreateRunEngineOptions {
    * independently of the workflow body (which depends on the loop refactor).
    */
   runWorkflow: AnyWorkflowDefinition;
+
+  /**
+   * The durable `goalRun` workflow (`goal-workflow.ts`), when the host runs
+   * durable goals. Registered under {@link GOAL_WORKFLOW_TYPE} beside `agentRun`
+   * on the same engine and store, so one Weft engine owns every durable run of a
+   * Bureau. It takes no `services`: it is started without them, so Weft never
+   * writes a services marker for it and never consults
+   * {@link resolveWorkflowServices} when it recovers.
+   */
+  goalWorkflow?: AnyWorkflowDefinition | undefined;
 
   /**
    * Recover in-flight workflows on boot. Defaults to `true` (Weft's default):
@@ -376,6 +387,7 @@ export async function createRunEngine(options: CreateRunEngineOptions): Promise<
   const workflows: Record<string, AnyWorkflowDefinition> = {
     agentRun: options.runWorkflow,
     durableHeartbeatTick: createDurableHeartbeatTickWorkflow(),
+    ...(options.goalWorkflow === undefined ? {} : { [GOAL_WORKFLOW_TYPE]: options.goalWorkflow }),
   };
 
   const engine = await Engine.create({

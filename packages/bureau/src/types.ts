@@ -20,6 +20,7 @@ import type {
   DurableEventPage,
   EnhancedStreamingOptions,
   FlowControlPolicy,
+  FreshAttemptSourceResolver,
   GenerateFunction,
   GuardrailsOptions,
   LivenessSnapshot,
@@ -39,6 +40,7 @@ import type {
   StopCondition,
   Store,
   TokenUsage,
+  Validator,
 } from '@lostgradient/operative';
 import type { SkillActivationRecord, SkillCatalogRevision } from '@lostgradient/skills';
 import type { ToolPolicy } from '@lostgradient/tool-protocol';
@@ -83,6 +85,7 @@ import type {
   DurableEventHistorySubscribeOptions,
 } from './durable-event-history';
 import type { BureauEventMap } from './events';
+import type { BureauGoals } from './goal-types';
 import type { ModelCatalogService } from './model-catalog-refresh';
 import type { BureauModelPolicyOptions, PlanSelectionRequest } from './model-policy';
 import type { OnlineEvalSampler, OnlineEvalSamplerOptions } from './online-evals';
@@ -346,6 +349,25 @@ export interface BureauOptions<D extends AgentDefinitions = AgentDefinitions> {
    * recover; this only adds typed signals and delegation grants.
    */
   children?: BureauChildrenOptions<D>;
+  /**
+   * COR-851 — the validators durable goals may name. A goal persists only a
+   * validator's identity (name and version); the executable is registered here
+   * and resolved by that exact identity every time it runs, including after a
+   * restart. A validator that was removed or re-versioned between restarts is
+   * reported explicitly — `bureau.goals.create` refuses it, and a goal already
+   * running ends its attempt `unavailable` — and is never swapped for another
+   * version. Two validators with the same name and version are a startup error.
+   */
+  validators?: readonly Validator[];
+  /**
+   * COR-851 — resolves the producing run of a `fresh-from-artifact` goal's
+   * handoff artifact: its sealed context epoch and the actors permitted to
+   * publish for it. A goal validates its artifact at `create` and again before
+   * every attempt that consumes it, and an artifact this cannot resolve is
+   * unauthorized. Omitted, no `fresh-from-artifact` goal can be created, because
+   * nothing can vouch for any artifact's source run.
+   */
+  resolveFreshAttemptSource?: FreshAttemptSourceResolver;
   /**
    * AB-64/AB-250 — deployment/Bureau model-policy invariants and the
    * per-principal user configuration `Bureau.planSelection`/a run's
@@ -1188,6 +1210,15 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   readonly children: BureauChildren<AgentNames<D>>;
 
   /**
+   * COR-851 — durable goals: create a goal, read and list it, see what it has
+   * in flight, cancel it, close it once it has ended, and recover every
+   * unfinished one after a restart. A goal's record, its controller, and each
+   * attempt's run all survive the process. Needs a durable engine and the
+   * validators named in {@link BureauOptions.validators}. See `goal-types.ts`.
+   */
+  readonly goals: BureauGoals<AgentNames<D>>;
+
+  /**
    * @deprecated Use {@link Bureau.run} with a catalog `RunnableAgent` instead
    * (per-agent `generate`/tools on `createAgent`). For a call that passes
    * `principal`, `bureau.run` does NOT yet accept it — `BureauRunOptions`
@@ -1787,6 +1818,14 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * for an ephemeral bureau (no persistent storage backend configured) —
    * a caller that must distinguish "unsupported" from "supported but
    * empty" calls `eventHistory()` first.
+   *
+   * COR-851 — `options.principal` applies the same authorization
+   * `eventHistory()` applies to its own `principal`, to the replay and to live
+   * delivery alike: omitted, the caller is trusted; present, each event is
+   * delivered only while the principal may read the owner (checked fresh per
+   * event, so an owner created after the subscription is authorized by its
+   * first event), and an owner it may not read, or that does not exist, yields
+   * silence — never a refusal that would tell the two apart.
    */
   subscribeEventHistory(
     owner: DurableEventOwner,

@@ -35,7 +35,7 @@ import type { FinishReason, RunOptions, RunResult, TokenUsage } from './types';
  * was supplied, or when its model has no resolvable pricing (checked via
  * `getModelPricing` up front so `estimateCost`'s throw is never reached).
  */
-function computeCostEstimate(
+export function computeCostEstimate(
   usage: TokenUsage,
   costEstimation: RunOptions['costEstimation'],
 ): RunResult['costEstimate'] {

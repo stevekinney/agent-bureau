@@ -29,6 +29,13 @@
  * `FleetEventFeed` writer/reader in the package, so there was no existing
  * convention to adopt instead.
  *
+ * One exception to that encoding (COR-851): a `'goal'` owner is encoded as
+ * `bureau-goal-audit:${id}`, not `goal:${id}`. `goal:${id}` is the id of the
+ * goal's controller workflow, and Weft deletes every fleet event carrying a
+ * workflow's id when it purges that workflow, so a controller replaced by a
+ * restart (or retired by retention) would erase the goal's audit history. See
+ * `GOAL_OWNER_WORKFLOW_PREFIX`.
+ *
  * Producer wiring (AB-311's coordinator amendment, 2026-09-03; widened by
  * AB-320, 2026-09-03): `createDurableEventProducer` below sinks the
  * run/session/schedule-fire durability rows AB-87's matrix classifies as
@@ -116,11 +123,12 @@ import type {
   SessionSavedEvent,
   Subscription,
 } from '@lostgradient/operative';
+import { GOAL_AUDIT_WORKFLOW_ID_PREFIX } from '@lostgradient/operative';
 import {
   createFleetEventFeed,
+  type Cursor,
   decodeCursor,
   encode,
-  type Cursor,
   type FleetEventEnvelope,
   type FleetEventFeed,
   type Storage,
@@ -276,6 +284,15 @@ export interface DurableEventHistorySubscribeOptions {
   since?: string | undefined;
   /** Ends the subscription (equivalent to calling `unsubscribe()`) when aborted. */
   signal?: AbortSignal;
+  /**
+   * COR-851 — the authenticated caller's principal, consulted by
+   * `Bureau.subscribeEventHistory` exactly as `Bureau.eventHistory` consults
+   * {@link DurableEventHistoryPageOptions.principal}: omitted, the caller is
+   * trusted and sees everything; present, each event is delivered only while
+   * the principal may read the owner. The store primitive
+   * (`DurableEventHistory.subscribeEventHistory`) does not read this field.
+   */
+  principal?: string | undefined;
 }
 
 /**
@@ -626,8 +643,21 @@ export class UnsupportedDurableEventSchemaVersionError extends Error {
   }
 }
 
-function encodeOwner(owner: DurableEventOwner): string {
-  return `${owner.kind}:${owner.id}`;
+/**
+ * A goal's events are stored under a workflow id of their own, never
+ * `goal:<id>`. That string is the id of the goal's controller workflow, and
+ * Weft deletes every fleet event carrying a workflow's id when it purges that
+ * workflow: replacing a terminal controller (`onTerminalConflict: 'start-new'`
+ * on a restart) or retiring an old one would silently erase the goal's audit
+ * history. Nothing parses the encoded id back into a kind, so this is the one
+ * place the difference lives.
+ */
+const GOAL_OWNER_WORKFLOW_PREFIX = GOAL_AUDIT_WORKFLOW_ID_PREFIX;
+
+export function encodeOwner(owner: DurableEventOwner): string {
+  return owner.kind === 'goal'
+    ? `${GOAL_OWNER_WORKFLOW_PREFIX}${owner.id}`
+    : `${owner.kind}:${owner.id}`;
 }
 
 /**
@@ -648,6 +678,7 @@ export function deletionMarkerKindFor(ownerKind: DurableEventOwner['kind']): str
     case 'run':
       return 'run.removed';
     case 'schedule':
+    case 'goal':
       return undefined;
   }
 }

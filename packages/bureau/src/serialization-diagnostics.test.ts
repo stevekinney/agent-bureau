@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
+
 import { resolveDiagnosticSink } from './serialization';
 import type { BureauDiagnostic } from './types';
 

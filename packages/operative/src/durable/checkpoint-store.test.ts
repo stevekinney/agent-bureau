@@ -130,6 +130,65 @@ describe('createCheckpointStore', () => {
     });
   });
 
+  describe('strict reads of malformed persisted data', () => {
+    const malformedStep = 'durable-run:run-1:step:0000000001';
+
+    async function failure(read: () => Promise<unknown>): Promise<unknown> {
+      try {
+        await read();
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    }
+
+    it('rejects a malformed cursor in strict mode and reads it as absent otherwise', async () => {
+      const underlying = createStore();
+      await underlying.set('durable-run:run-1:cursor', '{not json');
+      const store = createCheckpointStore(underlying);
+
+      expect(await failure(() => store.loadCursor('run-1', { strict: true }))).toBeInstanceOf(
+        Error,
+      );
+      expect(await failure(() => store.loadCheckpoint('run-1', { strict: true }))).toBeInstanceOf(
+        Error,
+      );
+      expect(await store.loadCursor('run-1')).toBeNull();
+      const tolerant = await store.loadCheckpoint('run-1');
+      expect(tolerant.cursor.step).toBe(0);
+    });
+
+    it('rejects a malformed step record in strict mode and skips it otherwise', async () => {
+      const underlying = createStore();
+      await underlying.set('durable-run:run-1:step:0000000000', JSON.stringify({ step: 0 }));
+      await underlying.set(malformedStep, '{not json');
+      const store = createCheckpointStore(underlying);
+
+      expect(await failure(() => store.loadSteps('run-1', { strict: true }))).toBeInstanceOf(Error);
+      const tolerant = await store.loadSteps('run-1');
+      expect(tolerant.map((record) => record.step)).toEqual([0]);
+    });
+
+    it('rejects a malformed transcript in strict mode and reads it as absent otherwise', async () => {
+      const underlying = createStore();
+      await underlying.set('durable-run:run-1:transcript', '{not json');
+      const store = createCheckpointStore(underlying);
+
+      expect(await failure(() => store.loadConversation('run-1', { strict: true }))).toBeInstanceOf(
+        Error,
+      );
+      expect(await store.loadConversation('run-1')).toBeNull();
+    });
+
+    it('keeps a genuinely absent checkpoint a zeroed cursor in strict mode', async () => {
+      const store = createCheckpointStore(createStore());
+      const checkpoint = await store.loadCheckpoint('never-written', { strict: true });
+      expect(checkpoint.cursor).toEqual(cursor(0));
+      expect(checkpoint.conversation).toBeNull();
+      expect(checkpoint.steps).toEqual([]);
+    });
+  });
+
   describe('loadCheckpoint', () => {
     it('assembles cursor, conversation, and steps into one checkpoint', async () => {
       const store = createCheckpointStore(createStore());
@@ -211,6 +270,59 @@ describe('createCheckpointStore', () => {
 
       await store.clear('run-1');
       expect(await store.loadCursor('run-2')).toEqual(cursor(9));
+    });
+  });
+
+  describe('run ids that contain the key delimiter', () => {
+    // A run id is caller-chosen (a child run, a goal's attempt). Keys are
+    // `durable-run:<id>:<part>`, so an unencoded `:` let one run's keys land
+    // inside another run's prefix.
+    const victim = 'goal-x-a0';
+    const intruder = 'goal-x-a0:step:q';
+
+    it('does not surface another run cursor or transcript as a step record', async () => {
+      const store = createCheckpointStore(createStore());
+      await store.saveStep(victim, {
+        step: 0,
+        content: 'v',
+        toolCalls: [],
+        results: [],
+        final: true,
+      });
+      await store.saveCursor(intruder, cursor(4));
+      await store.saveConversation(
+        intruder,
+        new Conversation(createConversationHistory()).snapshot(),
+      );
+
+      const steps = await store.loadSteps(victim);
+
+      expect(steps).toHaveLength(1);
+      expect(steps.map((record) => record.content)).toEqual(['v']);
+      const checkpoint = await store.loadCheckpoint(victim);
+      expect(checkpoint.cursor.step).toBe(0);
+    });
+
+    it('does not clear another run when a run is cleared, in either direction', async () => {
+      const store = createCheckpointStore(createStore());
+      await store.saveCursor(victim, cursor(1));
+      await store.saveCursor(intruder, cursor(2));
+
+      await store.clear(victim);
+      expect(await store.loadCursor(intruder)).toEqual(cursor(2));
+
+      await store.saveCursor(victim, cursor(1));
+      await store.clear(intruder);
+      expect(await store.loadCursor(victim)).toEqual(cursor(1));
+    });
+
+    it('keeps ids that differ only by an encoded delimiter apart', async () => {
+      const store = createCheckpointStore(createStore());
+      await store.saveCursor('a:b', cursor(1));
+      await store.saveCursor('a%3Ab', cursor(2));
+
+      expect(await store.loadCursor('a:b')).toEqual(cursor(1));
+      expect(await store.loadCursor('a%3Ab')).toEqual(cursor(2));
     });
   });
 });

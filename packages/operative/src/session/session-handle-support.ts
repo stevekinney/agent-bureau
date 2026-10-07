@@ -194,18 +194,37 @@ function engineStatusToRunRefStatus(
  * without resuming it. Returns `undefined` when no transcript was ever
  * checkpointed (e.g. the run failed before its first step) or the checkpoint
  * read fails — mirroring the "tolerate a missing conversation" behavior of
- * the settle path in `recover()`'s success branch.
+ * the settle path in `recover()`'s success branch. With `requireConversation`,
+ * either case throws instead, so the caller can retry.
  */
 async function loadTerminalConversationHistory(
   checkpointStore: CheckpointStore | undefined,
   runId: string,
+  requireConversation = false,
 ): Promise<ConversationHistory | undefined> {
-  if (!checkpointStore) return undefined;
+  if (!checkpointStore) {
+    // A caller that needs the transcript has nothing to read it with, which is
+    // a fault to retry, never a run recorded as ended without one.
+    if (requireConversation) {
+      throw new Error(`Run "${runId}" completed but there is no checkpoint store to read it from.`);
+    }
+    return undefined;
+  }
   try {
     const checkpoint = await checkpointStore.loadCheckpoint(runId);
-    if (checkpoint.conversation === null) return undefined;
+    if (checkpoint.conversation === null) {
+      // A caller that needs the transcript treats a checkpoint with none the
+      // same as an unreadable one: it must wait or fail, never seed from nothing.
+      if (requireConversation) {
+        throw new Error(`Run "${runId}" completed but its checkpoint holds no conversation.`);
+      }
+      return undefined;
+    }
     return Conversation.from(checkpoint.conversation).current;
-  } catch {
+  } catch (error) {
+    // A caller that needs the transcript would rather retry than record the
+    // run as ended without it: a terminal ref is never reconciled again.
+    if (requireConversation) throw error;
     return undefined;
   }
 }
@@ -222,11 +241,16 @@ async function loadTerminalConversationHistory(
  * runId must NOT be marked terminal) or when `engine.get()` reports it as
  * still non-terminal (`resume()` should have succeeded in that case — leave
  * the RunRef alone rather than guessing at a status).
+ *
+ * With `requireConversation` the caller is owed a committed transcript, so none
+ * of those is a quiet `null`: a failed or empty read, an unknown run, a run
+ * still open, and a completed run with no checkpoint store each reject.
  */
 async function readTerminalRunOutcome(
   engine: RegistryAgnosticEngine,
   checkpointStore: CheckpointStore | undefined,
   runId: string,
+  requireConversation: boolean,
 ): Promise<{
   status: RunRef['status'];
   conversation?: ConversationHistory | undefined;
@@ -235,15 +259,32 @@ async function readTerminalRunOutcome(
   let state: WorkflowState | null;
   try {
     state = await engine.get(runId);
-  } catch {
+  } catch (error) {
+    // A caller that needs the transcript treats a failed read as a fault to
+    // retry: resolving here would read as a transcript committed.
+    if (requireConversation) throw error;
     return null;
   }
-  if (!state) return null;
+  if (!state) {
+    if (requireConversation) {
+      throw new Error(`The engine has no record of run "${runId}" to read its transcript from.`);
+    }
+    return null;
+  }
   if (state.status === 'pending' || state.status === 'running' || state.status === 'suspended') {
+    if (requireConversation) {
+      throw new Error(`Run "${runId}" is not yet terminal, so its transcript is not committed.`);
+    }
     return null;
   }
 
-  const conversation = await loadTerminalConversationHistory(checkpointStore, runId);
+  // Only a run that completed is owed a transcript: one that failed or was
+  // cancelled may never have checkpointed a step.
+  const conversation = await loadTerminalConversationHistory(
+    checkpointStore,
+    runId,
+    requireConversation && state.status === 'completed',
+  );
 
   if (state.status !== 'completed') {
     const finishReason = state.status === 'cancelled' ? 'aborted' : 'error';
@@ -307,8 +348,21 @@ export async function reconcileTerminalRunRef(
   checkpointStore: CheckpointStore | undefined,
   sessionId: string,
   runningRef: RunRef,
+  options: {
+    /**
+     * Reject, leaving the ref `running`, when a completed run's checkpoint
+     * cannot be read, rather than recording the run as ended without its
+     * transcript. Defaults to `false`, which is what `recover()` has always done.
+     */
+    readonly requireConversation?: boolean;
+  } = {},
 ): Promise<void> {
-  const outcome = await readTerminalRunOutcome(engine, checkpointStore, runningRef.runId);
+  const outcome = await readTerminalRunOutcome(
+    engine,
+    checkpointStore,
+    runningRef.runId,
+    options.requireConversation ?? false,
+  );
   if (!outcome) return;
 
   const committed = await store.update(sessionId, (freshSession) => {

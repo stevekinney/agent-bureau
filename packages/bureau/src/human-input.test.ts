@@ -31,6 +31,7 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import { type GenerateFunction, HumanWaitParkedEvent, stopWhen } from '@lostgradient/operative';
 import {
   createProcessLocalGrantStateStore,
@@ -43,6 +44,17 @@ import { z } from 'zod';
 
 import { createBureau } from './create-bureau';
 import { waitForCondition } from './test';
+
+const runtime = createDefaultRuntimeServices();
+
+/** How long a negative assertion waits for a replayed park marker that never should arrive. */
+const REPLAY_SETTLE_WINDOW_MS = 150;
+
+function settleReplayWindow(): Promise<void> {
+  return new Promise<void>((resolve) =>
+    runtime.timers.setTimeout(resolve, REPLAY_SETTLE_WINDOW_MS),
+  );
+}
 
 // Matches `create-bureau.test.ts`'s own identically-named helper: `Toolbox`'s
 // generic tool-entries parameter doesn't narrow to an empty array on its
@@ -674,8 +686,10 @@ describe('resolving a recovered run re-park leaves no phantom review (COR-106)',
       expect(repark.endsWith(':human-response:1')).toBe(true);
       await bureauB.resolveReview({ id: repark, decision: 'approve', principal: 'op' });
       await waitForCondition(() => bCalls >= 2, 'expected the run to resume into its next step');
-      // Let any replayed park marker land before asserting.
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Let any replayed park marker land before asserting: a bounded real
+      // window, observed through the runtime timers, because SQLite replay can
+      // take more than one event-loop turn.
+      await settleReplayWindow();
       expect(bureauB.getRun(run.id)?.status).toBe('running');
       expect(pendingIds()).toEqual([]);
     } finally {
@@ -758,8 +772,10 @@ describe('parallel same-signal parks keep review ids stable across a restart (CO
     });
     try {
       await waitForCondition(() => bCalls >= 1, 'expected the recovered run to reach step 3');
-      // Let any replayed park marker land before asserting.
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Let any replayed park marker land before asserting: a bounded real
+      // window, observed through the runtime timers, because SQLite replay can
+      // take more than one event-loop turn.
+      await settleReplayWindow();
       expect(bureauB.getRun(run.id)?.status).toBe('running');
       expect(bureauB.listPendingReviews().filter((review) => review.runId === run.id)).toEqual([]);
     } finally {

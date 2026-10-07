@@ -63,6 +63,7 @@ import {
   DEFAULT_PROMPT_INJECTION_TRIPWIRE_THRESHOLD,
   isAgentRunWorkflowInput,
   isScheduledAgentRunInput,
+  reservedIdentifierReason,
   ScheduleAttemptedEvent,
   ScheduleCompletedEvent,
   ScheduleFailedEvent,
@@ -89,6 +90,7 @@ import {
   type ToolPolicy,
 } from '@lostgradient/skills';
 import {
+  type AnyWorkflowDefinition,
   type ConditionalTextValueStore,
   decode,
   deserializeCheckpoint,
@@ -121,6 +123,15 @@ import {
   createConversationHistory,
 } from 'conversationalist';
 
+import {
+  type GoalAttemptFence,
+  type GoalAttemptTarget,
+  registerGoalAttemptFence,
+} from './goal-attempt-fence';
+import {
+  type GoalAttemptCostEstimation,
+  isGoalAttemptCostEstimation,
+} from './goal-cost-estimation';
 import { resolveDiagnosticSink, serializeUnknownError } from './serialization';
 import type {
   BureauMemoryAuthorityOptions,
@@ -803,6 +814,28 @@ export function decodeScheduleRunMarker(decoded: unknown): string | undefined {
  * `buildRunDepsFromSession` rebuilds session-owned deps from config rather
  * than a stored blob.
  */
+export type CatalogRunRecoveryLoad =
+  | { status: 'found'; record: CatalogRunRecoveryRecord }
+  | { status: 'missing' }
+  /**
+   * A value is stored at the key but is not a recovery record (it does not
+   * decodes but fails shape validation). It is present, so goal ownership must
+   * never read it as absent; every other consumer treats it as it always did,
+   * as `missing`.
+   */
+  | { status: 'corrupt' }
+  | { status: 'read-error'; error: unknown };
+
+/** Who a goal attempt's claim must belong to for the goal to tombstone it. */
+export interface GoalAttemptClaimOwner {
+  readonly goalRunId: string;
+  readonly attemptIndex: number;
+  readonly agentName: string;
+  readonly principal: string | undefined;
+}
+
+export type GoalAttemptClaimFence = 'fenced' | 'foreign';
+
 export interface CatalogRunRecoveryRecord {
   readonly schemaVersion: 1;
   readonly agentName: string;
@@ -818,6 +851,35 @@ export interface CatalogRunRecoveryRecord {
    * Absent when the original dispatch supplied no principal.
    */
   readonly principal?: string;
+  /**
+   * COR-851 — set only on the run a durable goal started for one of its
+   * attempts: which goal and which attempt it was started for. A goal's run id
+   * is a deterministic function of the goal, so the id alone does not prove the
+   * run is the goal's; this marker, written by the goal's own start, does. A
+   * goal adopts or stops an existing run only when it carries its own marker.
+   */
+  readonly goalAttempt?: {
+    readonly goalRunId: string;
+    readonly attemptIndex: number;
+    /**
+     * COR-851 — set when the goal ended, closed, or was canceled over this
+     * attempt: the claim is tombstoned and no run may start from it or take a
+     * step under it. Written only by compare-and-swap from the claim's exact
+     * bytes (or created whole, where no claim existed), so a start that races
+     * the tombstone either wins the claim first, and is stopped by the run's own
+     * fence, or finds the tombstone and starts nothing. See `goal-attempt-fence.ts`.
+     */
+    readonly tombstonedAt?: string;
+  };
+  /**
+   * COR-851 — set with `goalAttempt` and only then: the cost estimator the
+   * attempt's run was started with (`null` when it declared none), written in
+   * the same conditional batch as the claim. A completed attempt is priced from
+   * this alone, never by resolving the agent again, so a catalog that has since
+   * moved to another revision or dropped the agent cannot change what the run
+   * cost. See `goal-cost-estimation.ts`.
+   */
+  readonly costEstimation?: GoalAttemptCostEstimation;
 }
 
 // Exported for tests only — lets `runtime-composition.test.ts` construct the
@@ -845,6 +907,30 @@ function isCatalogRunRecoveryRecord(value: unknown): value is CatalogRunRecovery
   if (typeof value['definitionRevision'] !== 'number') return false;
   const principal = value['principal'];
   if (principal !== undefined && typeof principal !== 'string') return false;
+  const goalAttempt = value['goalAttempt'];
+  if (
+    goalAttempt !== undefined &&
+    !(
+      isRecord(goalAttempt) &&
+      typeof goalAttempt['goalRunId'] === 'string' &&
+      typeof goalAttempt['attemptIndex'] === 'number' &&
+      Number.isSafeInteger(goalAttempt['attemptIndex']) &&
+      goalAttempt['attemptIndex'] >= 0 &&
+      (goalAttempt['tombstonedAt'] === undefined || typeof goalAttempt['tombstonedAt'] === 'string')
+    )
+  ) {
+    return false;
+  }
+  // The estimator selection belongs to a goal attempt's record and to nothing
+  // else; a goal attempt's record without one cannot be priced, so it is not valid.
+  const costEstimation = value['costEstimation'];
+  if (
+    goalAttempt === undefined
+      ? costEstimation !== undefined
+      : !isGoalAttemptCostEstimation(costEstimation)
+  ) {
+    return false;
+  }
   return isCatalogAgentInput(value['input']);
 }
 
@@ -1200,6 +1286,20 @@ export type RuntimeCompositionDependencies = {
    * private mutation backdoor.
    */
   createSessionStore?: typeof createSessionStore;
+  /**
+   * COR-851 — the durable `goalRun` workflow, registered on the durable engine
+   * beside `agentRun`. `createBureau` supplies it; the engine is built before
+   * the goal store and the agent catalog exist, so the workflow's ports are
+   * bound after composition (see `createGoalWorkflowHost`).
+   */
+  goalWorkflow?: AnyWorkflowDefinition;
+  /**
+   * COR-851 — the self-fence a goal attempt's run is registered with, on a fresh
+   * start and on recovery alike. `createBureau` supplies a late-bound one, since
+   * the goal store it reads does not exist yet; a composition with none runs
+   * goal attempts unfenced and has no goals to overtake them.
+   */
+  goalAttemptFence?: GoalAttemptFence;
 };
 
 const defaultRuntimeCompositionDependencies: RuntimeCompositionDependencies = {
@@ -1594,6 +1694,28 @@ export interface RuntimeComposition {
     record: Omit<CatalogRunRecoveryRecord, 'schemaVersion'>,
   ): Promise<boolean>;
   /**
+   * COR-851 — the persisted catalog-run recovery record for `runId`, as
+   * stored. A goal reads it to verify that a run at one of its deterministic
+   * ids is the goal's own before adopting or stopping it.
+   */
+  loadCatalogRunRecoveryRecord(runId: string): Promise<CatalogRunRecoveryLoad>;
+  /**
+   * COR-851 — tombstones the claim of a goal attempt's run, so that no start can
+   * begin from it and no run under it takes a step (see `goal-attempt-fence.ts`).
+   * The claim the goal's own start wrote is changed by compare-and-swap from the
+   * exact bytes read; where no claim exists a tombstoned one is created
+   * whole, create-if-absent, so a start that claims later finds it. `'fenced'`
+   * once the claim is tombstoned (by this call or an earlier one), `'foreign'`
+   * when the record at the id is not this goal attempt's, which is left alone.
+   * Rejects when the record cannot be read or is not valid, or when concurrent
+   * writers keep winning; the caller treats that as work still owed.
+   */
+  fenceGoalAttemptRecoveryRecord(
+    runId: string,
+    owner: GoalAttemptClaimOwner,
+    tombstonedAt: string,
+  ): Promise<GoalAttemptClaimFence>;
+  /**
    * Whether `runId` has a persisted catalog-run recovery record — used by
    * `createBureau`'s boot-recovery classification to route a catalog run to
    * a headless monitor instead of the session-ownership classification.
@@ -1709,7 +1831,7 @@ export interface RuntimeComposition {
    * {@link RuntimeComposition.createRunRuntime}. Merged as the first tier so
    * Bureau's policy still applies to those runs.
    */
-  createBureauInvariantHooks(): HookRegistry<OperativeHookMap>;
+  createBureauInvariantHooks(goalAttempt?: GoalAttemptTarget): HookRegistry<OperativeHookMap>;
 }
 
 /**
@@ -1852,8 +1974,12 @@ export type RuntimeCompositionOptions = Omit<BureauOptions, 'agents'>;
 
 export async function createRuntimeComposition(
   options: RuntimeCompositionOptions,
-  dependencies: RuntimeCompositionDependencies = defaultRuntimeCompositionDependencies,
+  suppliedDependencies: Partial<RuntimeCompositionDependencies> = {},
 ): Promise<RuntimeComposition> {
+  const dependencies: RuntimeCompositionDependencies = {
+    ...defaultRuntimeCompositionDependencies,
+    ...suppliedDependencies,
+  };
   const maximumSteps = options.maximumSteps ?? DEFAULT_MAXIMUM_STEPS;
   const systemPrompt = options.systemPrompt;
   const diagnose = resolveDiagnosticSink(options.onDiagnostic);
@@ -2022,6 +2148,9 @@ export async function createRuntimeComposition(
       backgroundTasks: options.durableBackgroundTasks ?? 'automatic',
       startScheduler: options.durableBackgroundTasks !== 'manual',
       resolveWorkflowServices: resolveRunServices,
+      ...(dependencies.goalWorkflow === undefined
+        ? {}
+        : { goalWorkflow: dependencies.goalWorkflow }),
       ...(effectiveObservability !== undefined ? { observability: effectiveObservability } : {}),
       ...(effectiveOnLog ? { onLog: effectiveOnLog } : {}),
       // durableGuardrails is a Pick of these exact CreateRunEngineOptions fields, so
@@ -2351,8 +2480,18 @@ export async function createRuntimeComposition(
    * short of a caller-facing hook field, which COR-567 Decision 4 declines. See
    * `documentation/hierarchical-hook-composition.md`.
    */
-  function createBureauInvariantHooks(): HookRegistry<OperativeHookMap> {
+  function createBureauInvariantHooks(
+    goalAttempt?: GoalAttemptTarget,
+  ): HookRegistry<OperativeHookMap> {
     const invariants = new HookRegistry<OperativeHookMap>({ source: BUREAU_HOOK_TIER });
+    // First, so no other `prepareStep` handler (the guardrail scan included)
+    // runs for a step the goal no longer allows. This is the one invariant that
+    // closes over a run, and only a goal attempt's run is given it.
+    if (goalAttempt !== undefined && dependencies.goalAttemptFence !== undefined) {
+      registerGoalAttemptFence(invariants, dependencies.goalAttemptFence, goalAttempt, {
+        runtime: runtimeServices,
+      });
+    }
     if (options.identity) {
       registerIdentityInvariant(invariants, options.identity);
     }
@@ -2936,11 +3075,6 @@ export async function createRuntimeComposition(
     );
   }
 
-  type CatalogRunRecoveryLoad =
-    | { status: 'found'; record: CatalogRunRecoveryRecord }
-    | { status: 'missing' }
-    | { status: 'read-error'; error: unknown };
-
   async function loadCatalogRunRecoveryRecord(runId: string): Promise<CatalogRunRecoveryLoad> {
     if (!durableStorage) return { status: 'missing' };
     try {
@@ -2949,10 +3083,88 @@ export async function createRuntimeComposition(
       const decoded = decode(value);
       return isCatalogRunRecoveryRecord(decoded)
         ? { status: 'found', record: decoded }
-        : { status: 'missing' };
+        : { status: 'corrupt' };
     } catch (error) {
       return { status: 'read-error', error };
     }
+  }
+
+  /** How many times a tombstone retries against a record that changed under it. */
+  const FENCE_WRITE_TRIES = 5;
+
+  async function fenceGoalAttemptRecoveryRecord(
+    runId: string,
+    owner: GoalAttemptClaimOwner,
+    tombstonedAt: string,
+  ): Promise<GoalAttemptClaimFence> {
+    // No durable storage, nothing to claim: a claim cannot exist to be raced.
+    if (!durableStorage) return 'fenced';
+    const key = catalogRunRecoveryKey(runId);
+    const tombstoned = {
+      goalRunId: owner.goalRunId,
+      attemptIndex: owner.attemptIndex,
+      tombstonedAt,
+    };
+    for (let attempt = 0; attempt < FENCE_WRITE_TRIES; attempt += 1) {
+      const bytes = await durableStorage.get(key);
+      if (!bytes) {
+        // Nothing claimed yet. The tombstone is the claim, written whole, so a
+        // start that reaches its own claim next finds this one and starts nothing.
+        // The estimator is the "declared none" selection a valid attempt record
+        // must carry; the record is never the source of a run, so nothing reads it.
+        const created: CatalogRunRecoveryRecord = {
+          schemaVersion: 1,
+          agentName: owner.agentName,
+          definitionRevision: 0,
+          input: '',
+          ...(owner.principal === undefined ? {} : { principal: owner.principal }),
+          goalAttempt: tombstoned,
+          costEstimation: null,
+        };
+        if (
+          await storageConditionalBatch(
+            durableStorage,
+            [{ key, expectedValue: null }],
+            [{ type: 'put', key, value: encode(created) }],
+          )
+        ) {
+          return 'fenced';
+        }
+        continue;
+      }
+      const decoded = decode(bytes);
+      if (!isCatalogRunRecoveryRecord(decoded)) {
+        throw new Error(
+          `The recovery record for run "${runId}" exists but is not valid, so its attempt cannot be fenced.`,
+        );
+      }
+      const claimed = decoded.goalAttempt;
+      if (
+        claimed?.goalRunId !== owner.goalRunId ||
+        claimed.attemptIndex !== owner.attemptIndex ||
+        decoded.agentName !== owner.agentName ||
+        decoded.principal !== owner.principal
+      ) {
+        return 'foreign';
+      }
+      if (claimed.tombstonedAt !== undefined) return 'fenced';
+      const next: CatalogRunRecoveryRecord = {
+        ...decoded,
+        goalAttempt: { ...claimed, tombstonedAt },
+      };
+      if (
+        await storageConditionalBatch(
+          durableStorage,
+          [{ key, expectedValue: bytes }],
+          [{ type: 'put', key, value: encode(next) }],
+        )
+      ) {
+        return 'fenced';
+      }
+    }
+    throw new Error(
+      `The recovery record for run "${runId}" kept changing while its attempt was being fenced.`,
+    );
   }
 
   /**
@@ -2988,7 +3200,7 @@ export async function createRuntimeComposition(
     // never evicted per-read).
     if (catalogRunRecoveryCache.has(runId)) return true;
     const load = await loadCatalogRunRecoveryRecord(runId);
-    return load.status !== 'missing';
+    return load.status !== 'missing' && load.status !== 'corrupt';
   }
 
   /**
@@ -3038,7 +3250,7 @@ export async function createRuntimeComposition(
       };
     }
     const load = await loadCatalogRunRecoveryRecord(runId);
-    if (load.status === 'missing') return { isCatalogRun: false };
+    if (load.status === 'missing' || load.status === 'corrupt') return { isCatalogRun: false };
     if (load.status === 'read-error') return { isCatalogRun: true };
     return {
       isCatalogRun: true,
@@ -3132,7 +3344,17 @@ export async function createRuntimeComposition(
     // The agent's own tier arrives inside `resolution.options.hooks`, from its
     // own `buildRunOptions`; Bureau goes first so it wins `runFirst` and, being
     // pinned last, still wins the waterfall.
-    const invariants = createBureauInvariantHooks();
+    // A recovered goal attempt's run is fenced exactly as a fresh one is: a run
+    // the goal ended over, which a crash left to be resumed here, takes no step.
+    const invariants = createBureauInvariantHooks(
+      record.goalAttempt === undefined
+        ? undefined
+        : {
+            goalRunId: record.goalAttempt.goalRunId,
+            attemptIndex: record.goalAttempt.attemptIndex,
+            runId,
+          },
+    );
     return {
       status: 'available',
       services: {
@@ -3325,6 +3547,19 @@ export async function createRuntimeComposition(
       existingStatelessSessionId ??
       `sched-${recoveredScheduleId ?? 'unknown'}-${runId}`;
 
+    // COR-851: a goal's sessions are the goal's alone. A schedule can name any
+    // session (an agent registers one itself through `scheduleSelf`, and one
+    // persisted before the reservation existed is still live), and the fire
+    // would load that conversation, append to it, and write it back. The id is
+    // refused before anything is read.
+    const reservedSession = reservedIdentifierReason('scheduled session', sessionId);
+    if (reservedSession !== undefined) {
+      return {
+        status: 'unavailable',
+        reason: `scheduled fire ${info.workflowId} names session "${sessionId}", which durable goals own: ${reservedSession}`,
+      };
+    }
+
     // Always check for an existing session at this id. A recurring fire
     // continues its stored session; a fresh-per-fire (stateless) session's id
     // embeds this exact runId, so a live (never-before-run) fire finds nothing
@@ -3333,6 +3568,14 @@ export async function createRuntimeComposition(
     // persisted (partially or fully) before this resume — which is exactly the
     // case `isRecoveredFireReplay` below needs to detect.
     const existing = await store.load(sessionId);
+    // Defence in depth behind the id check above: a session a goal wrote carries
+    // its `goalRunId`, whatever id it sits under, and no schedule fire reads it.
+    if (existing !== undefined && existing.metadata['goalRunId'] !== undefined) {
+      return {
+        status: 'unavailable',
+        reason: `scheduled fire ${info.workflowId} names session "${sessionId}", which belongs to a durable goal`,
+      };
+    }
     // The session's own metadata — not `info.schedule` — is the source of
     // truth for "have we already run this exact fire": `info.schedule` is
     // populated on BOTH a live tick and a recovered one, so it cannot
@@ -3691,6 +3934,8 @@ export async function createRuntimeComposition(
     },
     persistCatalogRunRecoveryRecord,
     claimCatalogRunRecoveryRecord,
+    loadCatalogRunRecoveryRecord,
+    fenceGoalAttemptRecoveryRecord,
     isCatalogRecoveredRun,
     classifyCatalogRecoveredRun,
     clearCatalogRunRecoveryCache,

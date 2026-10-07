@@ -1,27 +1,27 @@
 import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import {
-  type GovernedMemory,
-  type MemoryAuthority,
   createGovernedMemory,
   createInMemoryMemoryRecordStorage,
   createMemoryAuthority,
   createMemoryGovernanceLedger,
   createMemoryGovernancePolicy,
   createMockEmbedder,
+  type GovernedMemory,
+  type MemoryAuthority,
 } from '@lostgradient/memory';
 import { type GenerateFunction, stopWhen } from '@lostgradient/operative';
 import { MemoryStorage } from '@lostgradient/weft';
-import { type ToolRequestContext, createTool, createToolbox } from 'armorer';
+import { createTool, createToolbox, type ToolRequestContext } from 'armorer';
 import { describe, expect, it } from 'bun:test';
 import { Conversation } from 'conversationalist';
 import { z } from 'zod';
 
 import { createBureau } from './create-bureau';
 import {
-  DEFAULT_RUN_MEMORY_CAPABILITIES,
   createMemoryPersistHook,
   createMemoryRecallHook,
   createRunMemoryAuthority,
+  DEFAULT_RUN_MEMORY_CAPABILITIES,
 } from './runtime-composition';
 import { waitForRunState } from './test';
 

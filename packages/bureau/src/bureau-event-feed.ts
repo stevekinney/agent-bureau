@@ -15,6 +15,7 @@
  * @module bureau-event-feed
  */
 
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import {
   bindFeedLifetime,
   createInMemoryReplayLiveBackend,
@@ -204,7 +205,7 @@ export type BureauEventFeedOptions = {
 };
 
 export function createBureauEventFeed(options: BureauEventFeedOptions): BureauEventFeed {
-  const now = options.now ?? (() => Date.now());
+  const now = options.now ?? createDefaultRuntimeServices().clock.now;
   const backend: InMemoryReplayLiveBackend<BureauEventEnvelope> =
     createInMemoryReplayLiveBackend<BureauEventEnvelope>(
       options.maxEvents === undefined ? {} : { maxEvents: options.maxEvents },

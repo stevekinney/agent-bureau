@@ -1,9 +1,10 @@
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { createAgentSession, createSessionStore, type SessionStore } from '@lostgradient/operative';
 import {
-  resolveStorage,
-  textValueStore,
   type ConditionalTextValueStore,
+  resolveStorage,
   type Storage,
+  textValueStore,
   type TextValueStoreBatchOperation,
   type TextValueStoreCondition,
 } from '@lostgradient/weft';
@@ -333,6 +334,7 @@ describe('promoteSessionInput / projectSessionInputPromotion (COR-435 AC6/AC7)',
     // exactly the thing it was checking. The fix consults
     // `readSessionInputPromotion` on the replay path.
     const { storage, sessionStore, sessionId } = await createFixture();
+    const runtime = createManualRuntimeServices({ identifierSeed: 'session-input-promotion' });
     const kv = textValueStore(storage);
     const mailbox = createSessionInputMailbox(storage, sessionId, 100);
     const id = 'input-1';
@@ -349,7 +351,7 @@ describe('promoteSessionInput / projectSessionInputPromotion (COR-435 AC6/AC7)',
       payload: { payload: 'hello' },
       principalBacklogLimit: 100,
       sessionBacklogLimitForCrossSessionRead: 100,
-      nowMs: Date.now(),
+      nowMs: runtime.clock.now(),
     });
 
     const admitted = await admitSessionInput(attempt());

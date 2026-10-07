@@ -9,6 +9,7 @@
  * @module bureau-events-operation
  */
 
+import { createDefaultRuntimeServices, type RuntimeServices } from '@lostgradient/lifecycle';
 import {
   createReplayAwareClosableIterable,
   defineOperation,
@@ -17,9 +18,9 @@ import {
 import { z } from 'zod';
 
 import {
-  PUBLISHED_BUREAU_EVENT_KINDS,
   type BureauEventEnvelope,
   type BureauEventFeed,
+  PUBLISHED_BUREAU_EVENT_KINDS,
 } from './bureau-event-feed.ts';
 
 /** Matches the bound Weft and Operative apply, for the same reason. */
@@ -79,7 +80,10 @@ export function createBureauEventRegistry(): BureauEventRegistry & {
 }
 
 /** The shape a host passes as the operation's `engine` value. */
-export type BureauEventsOperationEngine = { bureauFeeds: BureauEventRegistry };
+export type BureauEventsOperationEngine = {
+  bureauFeeds: BureauEventRegistry;
+  runtime?: Pick<RuntimeServices, 'identifiers'>;
+};
 
 export const bureauEventsSubscriptionOperation = defineOperation({
   name: 'bureau.events',
@@ -98,43 +102,51 @@ export const bureauEventsSubscriptionOperation = defineOperation({
   discoverable: true,
   transports: { http: false, jsonRpcHttp: false, jsonRpcWebSocket: true, jsonRpcStdio: false },
   unknownKeyPolicy: { http: 'strip', jsonRpc: 'reject' },
-  invoke: async ({ input, engine }) => {
-    const registry = (engine as BureauEventsOperationEngine).bureauFeeds;
-    const bureauFeed = registry.get(input.bureauId);
-    if (bureauFeed === undefined) {
-      throw new Error(`Unknown bureau "${input.bureauId}"`);
+  invoke: ({ input, engine }) => {
+    try {
+      const registry = (engine as BureauEventsOperationEngine).bureauFeeds;
+      const runtime =
+        (engine as BureauEventsOperationEngine).runtime ?? createDefaultRuntimeServices();
+      const bureauFeed = registry.get(input.bureauId);
+      if (bureauFeed === undefined) {
+        throw new Error(`Unknown bureau "${input.bureauId}"`);
+      }
+
+      // Only the session's own signal: the feed binds its own lifetime into
+      // every subscription, so disposing the bureau ends this one too.
+      const controller = new AbortController();
+      // Normalized here rather than by a schema `.transform()`, so `invoke`
+      // behaves identically whether it is reached through the catalog pipeline
+      // or called directly.
+      const kinds =
+        input.kinds === undefined
+          ? undefined
+          : new Set<string>(Array.isArray(input.kinds) ? input.kinds : [input.kinds]);
+      const subscribeOptions: ReplayLiveSubscribeOptions<BureauEventEnvelope> = {
+        ...(input.fromCursor === undefined ? {} : { fromCursor: input.fromCursor }),
+        signal: controller.signal,
+        replayLimit: MAX_BUREAU_SUBSCRIPTION_REPLAY_EVENTS,
+        // No `countReplayEnvelope`: the feed filters before counting, so the
+        // cap already measures matching events.
+        filterEnvelope: (envelope) => kinds === undefined || kinds.has(envelope.kind),
+      };
+      const iterable = createReplayAwareClosableIterable<BureauEventEnvelope>(
+        (onReplayComplete) => bureauFeed.feed.subscribe({ ...subscribeOptions, onReplayComplete }),
+        { close: () => controller.abort() },
+      );
+
+      return Promise.resolve({
+        envelope: {
+          subscriptionId: `sub_${runtime.identifiers.next('bureau-subscription')}`,
+          cursor: input.fromCursor ?? '-1',
+        },
+        iterable,
+        close: () => iterable.close(),
+      });
+    } catch (error) {
+      return Promise.resolve().then(() => {
+        throw error;
+      });
     }
-
-    // Only the session's own signal: the feed binds its own lifetime into
-    // every subscription, so disposing the bureau ends this one too.
-    const controller = new AbortController();
-    // Normalized here rather than by a schema `.transform()`, so `invoke`
-    // behaves identically whether it is reached through the catalog pipeline
-    // or called directly.
-    const kinds =
-      input.kinds === undefined
-        ? undefined
-        : new Set<string>(Array.isArray(input.kinds) ? input.kinds : [input.kinds]);
-    const subscribeOptions: ReplayLiveSubscribeOptions<BureauEventEnvelope> = {
-      ...(input.fromCursor === undefined ? {} : { fromCursor: input.fromCursor }),
-      signal: controller.signal,
-      replayLimit: MAX_BUREAU_SUBSCRIPTION_REPLAY_EVENTS,
-      // No `countReplayEnvelope`: the feed filters before counting, so the
-      // cap already measures matching events.
-      filterEnvelope: (envelope) => kinds === undefined || kinds.has(envelope.kind),
-    };
-    const iterable = createReplayAwareClosableIterable<BureauEventEnvelope>(
-      (onReplayComplete) => bureauFeed.feed.subscribe({ ...subscribeOptions, onReplayComplete }),
-      { close: () => controller.abort() },
-    );
-
-    return {
-      envelope: {
-        subscriptionId: `sub_${crypto.randomUUID()}`,
-        cursor: input.fromCursor ?? '-1',
-      },
-      iterable,
-      close: () => iterable.close(),
-    };
   },
 });

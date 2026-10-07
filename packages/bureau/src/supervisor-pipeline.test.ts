@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+
 import { createAgentCatalog } from './agent-catalog';
 import { createSupervisor } from './create-supervisor';
 import {

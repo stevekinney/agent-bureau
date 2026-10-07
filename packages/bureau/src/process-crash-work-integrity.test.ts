@@ -21,6 +21,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { GenerateFunction } from '@lostgradient/operative';
 import { createTool, createToolbox } from 'armorer';
 import { describe, expect, it } from 'bun:test';
@@ -29,10 +30,9 @@ import { z } from 'zod';
 import {
   type Backend,
   CHARGE_ORDER_ID,
-  CLAIM_TTL_MS,
-  REMEMBERED_ANSWER,
   chargeStatus,
   chargeToolCalls,
+  CLAIM_TTL_MS,
   createChargeToolbox,
   createHarnessBureau,
   firstUserMessage,
@@ -40,10 +40,12 @@ import {
   openGovernedMemory,
   openIdempotencyCache,
   readEffects,
+  REMEMBERED_ANSWER,
 } from './test/process-crash-work-integrity-fixtures';
 import type { Bureau } from './types';
 
 const CHILD = join(import.meta.dir, 'test', 'process-crash-child.ts');
+const runtime = createDefaultRuntimeServices();
 
 async function pollUntil(
   check: () => boolean | Promise<boolean>,
@@ -51,7 +53,7 @@ async function pollUntil(
 ): Promise<boolean> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (await check()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise<void>((resolve) => runtime.timers.setTimeout(resolve, 5));
   }
   return check();
 }
@@ -145,7 +147,7 @@ async function crash<T>(scenario: Scenario, name: string, variant?: string): Pro
   expect(outcome.signalCode ?? outcome.stderr).toBe('SIGKILL');
   const marker = readMarker<T>(scenario);
   // The dead holder's claim lapses on Weft's own wall clock.
-  await new Promise((resolve) => setTimeout(resolve, CLAIM_TTL_MS * 10));
+  await new Promise<void>((resolve) => runtime.timers.setTimeout(resolve, CLAIM_TTL_MS * 10));
   return marker;
 }
 

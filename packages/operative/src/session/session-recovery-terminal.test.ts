@@ -8,7 +8,7 @@ import { AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION } from '../durable/run-workflo
 import { SessionRecoverEvent, type OperativeEventMap } from '../events';
 import { UnsupportedRunResultVersionError } from '../run-envelope';
 import { throwingRejectionOf } from '../testing/promise-outcome.test-support.ts';
-import { createSessionEngine } from './session-engine-test-fixture';
+import { createSessionEngine, type SessionEngineBehavior } from './session-engine-test-fixture';
 import { createSessionHandle } from './session-handle';
 import { reconcileTerminalRunRef } from './session-handle-support';
 import {
@@ -279,5 +279,276 @@ describe('recover() — terminal reconciliation', () => {
 
     const persisted = await store.load(sessionId);
     expect(persisted?.runs.find((r) => r.runId === runId)?.status).toBe('running');
+  });
+});
+
+describe('reconcileTerminalRunRef — a checkpoint that cannot be read', () => {
+  async function failingReadWorld() {
+    const sessionId = 'cor-851-unreadable-checkpoint';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+    const engine = createSessionEngine({
+      get: async () => ({
+        id: runId,
+        status: 'completed',
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        },
+      }),
+    });
+    let reads = 0;
+    const recovered = new Conversation(createConversationHistory());
+    recovered.appendUserMessage('hi');
+    const checkpointStore = createCheckpointStoreFixture(async () => {
+      reads += 1;
+      if (reads === 1) throw new Error('storage hiccup');
+      return {
+        conversation: recovered.snapshot(),
+        cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+        steps: [],
+      };
+    });
+    const running = {
+      runId,
+      sequence: 0,
+      status: 'running',
+      startedAt: fixtureRuntime.clock.nowISO(),
+      agentName: 'agent',
+    } as const;
+    return { sessionId, store, engine, checkpointStore, running };
+  }
+
+  it('by default marks the run terminal without its transcript, as recover() always has', async () => {
+    const { sessionId, store, engine, checkpointStore, running } = await failingReadWorld();
+
+    await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running);
+
+    const session = await store.load(sessionId);
+    const ref = session?.runs[0];
+    expect(ref?.status).toBe('completed');
+    expect(ref?.conversationBoundary).toBeUndefined();
+  });
+
+  it('when the transcript is required, leaves the run open so the read can be retried', async () => {
+    const { sessionId, store, engine, checkpointStore, running } = await failingReadWorld();
+
+    expect(
+      await throwingRejectionOf(
+        reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+          requireConversation: true,
+        }),
+      ),
+    ).toThrow('storage hiccup');
+    const stranded = await store.load(sessionId);
+    expect(stranded?.runs[0]?.status).toBe('running');
+
+    await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+      requireConversation: true,
+    });
+    const settled = await store.load(sessionId);
+    const ref = settled?.runs[0];
+    expect(ref?.status).toBe('completed');
+    expect(ref?.conversationBoundary).toBeDefined();
+  });
+});
+
+describe('reconcileTerminalRunRef — a completed run whose checkpoint holds no conversation', () => {
+  async function nullConversationWorld() {
+    const sessionId = 'cor-851-null-conversation';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+    const engine = createSessionEngine({
+      get: async () => ({
+        id: runId,
+        status: 'completed',
+        result: {
+          schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+          runId,
+          steps: 1,
+          content: 'done',
+          finishReason: 'stop-condition',
+        },
+      }),
+    });
+    let conversation: ReturnType<Conversation['snapshot']> | null = null;
+    const checkpointStore = createCheckpointStoreFixture(async () => ({
+      conversation,
+      cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+      steps: [],
+    }));
+    const running = {
+      runId,
+      sequence: 0,
+      status: 'running',
+      startedAt: fixtureRuntime.clock.nowISO(),
+      agentName: 'agent',
+    } as const;
+    return {
+      sessionId,
+      store,
+      engine,
+      checkpointStore,
+      running,
+      commitConversation: () => {
+        const recovered = new Conversation(createConversationHistory());
+        recovered.appendUserMessage('hi');
+        conversation = recovered.snapshot();
+      },
+    };
+  }
+
+  it('by default marks the run terminal without its transcript, as recover() always has', async () => {
+    const { sessionId, store, engine, checkpointStore, running } = await nullConversationWorld();
+
+    await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running);
+
+    const session = await store.load(sessionId);
+    const ref = session?.runs[0];
+    expect(ref?.status).toBe('completed');
+    expect(ref?.conversationBoundary).toBeUndefined();
+  });
+
+  it('when the transcript is required, leaves the run open until a conversation is committed', async () => {
+    const { sessionId, store, engine, checkpointStore, running, commitConversation } =
+      await nullConversationWorld();
+
+    expect(
+      await throwingRejectionOf(
+        reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+          requireConversation: true,
+        }),
+      ),
+    ).toThrow('no conversation');
+    const stranded = await store.load(sessionId);
+    expect(stranded?.runs[0]?.status).toBe('running');
+
+    commitConversation();
+    await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+      requireConversation: true,
+    });
+    const settled = await store.load(sessionId);
+    const ref = settled?.runs[0];
+    expect(ref?.status).toBe('completed');
+    expect(ref?.conversationBoundary).toBeDefined();
+  });
+});
+
+describe('reconcileTerminalRunRef — a required transcript never resolves without a commit', () => {
+  const completedResult = (runId: string) => ({
+    schemaVersion: AGENT_RUN_WORKFLOW_RESULT_SCHEMA_VERSION,
+    runId,
+    steps: 1,
+    content: 'done',
+    finishReason: 'stop-condition' as const,
+  });
+
+  async function world(get: NonNullable<SessionEngineBehavior['get']>) {
+    const sessionId = 'cor-851-required-read';
+    const runId = `${sessionId}:0`;
+    const store = await seedRunningSession(sessionId, runId);
+    const engine = createSessionEngine({ get: () => get(runId) });
+    const recovered = new Conversation(createConversationHistory());
+    recovered.appendUserMessage('hi');
+    const checkpointStore = createCheckpointStoreFixture(async () => ({
+      conversation: recovered.snapshot(),
+      cursor: { totalUsage: {}, lastContent: 'done', schemaAttempts: 0 },
+      steps: [],
+    }));
+    const running = {
+      runId,
+      sequence: 0,
+      status: 'running',
+      startedAt: fixtureRuntime.clock.nowISO(),
+      agentName: 'agent',
+    } as const;
+    return { sessionId, runId, store, engine, checkpointStore, running };
+  }
+
+  async function refStatus(store: SessionStore, sessionId: string) {
+    const session = await store.load(sessionId);
+    return session?.runs[0]?.status;
+  }
+
+  it('rejects, leaving the ref running, when the engine read fails transiently', async () => {
+    let reads = 0;
+    const { sessionId, store, engine, checkpointStore, running } = await world(async (runId) => {
+      reads += 1;
+      if (reads === 1) throw new Error('engine hiccup');
+      return { id: runId, status: 'completed', result: completedResult(runId) };
+    });
+
+    expect(
+      await throwingRejectionOf(
+        reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+          requireConversation: true,
+        }),
+      ),
+    ).toThrow('engine hiccup');
+    expect(await refStatus(store, sessionId)).toBe('running');
+
+    await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+      requireConversation: true,
+    });
+    expect(await refStatus(store, sessionId)).toBe('completed');
+  });
+
+  it('by default still treats a failed engine read as nothing to reconcile', async () => {
+    const { sessionId, store, engine, checkpointStore, running } = await world(async () => {
+      throw new Error('engine hiccup');
+    });
+
+    await reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running);
+
+    expect(await refStatus(store, sessionId)).toBe('running');
+  });
+
+  it('rejects when the engine has no record of the run', async () => {
+    const { sessionId, store, engine, checkpointStore, running } = await world(async () => null);
+
+    expect(
+      await throwingRejectionOf(
+        reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+          requireConversation: true,
+        }),
+      ),
+    ).toThrow('no record');
+    expect(await refStatus(store, sessionId)).toBe('running');
+  });
+
+  it('rejects when the run is not yet terminal', async () => {
+    const { sessionId, store, engine, checkpointStore, running } = await world(async (runId) => ({
+      id: runId,
+      status: 'running',
+    }));
+
+    expect(
+      await throwingRejectionOf(
+        reconcileTerminalRunRef(store, engine, checkpointStore, sessionId, running, {
+          requireConversation: true,
+        }),
+      ),
+    ).toThrow('not yet terminal');
+    expect(await refStatus(store, sessionId)).toBe('running');
+  });
+
+  it('rejects, rather than commit a completed run without a transcript, when there is no checkpoint store', async () => {
+    const { sessionId, store, engine, running } = await world(async (runId) => ({
+      id: runId,
+      status: 'completed',
+      result: completedResult(runId),
+    }));
+
+    expect(
+      await throwingRejectionOf(
+        reconcileTerminalRunRef(store, engine, undefined, sessionId, running, {
+          requireConversation: true,
+        }),
+      ),
+    ).toThrow('checkpoint store');
+    expect(await refStatus(store, sessionId)).toBe('running');
   });
 });

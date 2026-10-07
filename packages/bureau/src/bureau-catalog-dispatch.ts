@@ -18,8 +18,13 @@ import {
   OPERATIVE_RESOLVE_RUN_OPTIONS,
   readGenerationProfile,
 } from '@lostgradient/operative';
+
 import type { AgentDefinitions, AnyRunnableAgent, BureauAgentCatalog } from './agent-catalog';
 import type { ChildTopologyStart } from './child-topology';
+import {
+  type GoalAttemptCostEstimation,
+  isGoalAttemptCostEstimation,
+} from './goal-cost-estimation';
 import type { RuntimeComposition } from './runtime-composition';
 import type { RunAttribution } from './serialization';
 import type { BureauRunOptions } from './types';
@@ -49,6 +54,108 @@ export interface CatalogDispatcherDependencies {
   readonly onDurableRunAborted: (runId: string, reason: string) => void;
 }
 
+/**
+ * COR-851 — one goal attempt: a durable catalog run under the attempt's
+ * deterministic run id, started by Bureau's goal port.
+ */
+export interface GoalAttemptStart {
+  readonly agentName: string;
+  /** The first attempt's prompt, or a later attempt's seed conversation with its turn appended. */
+  readonly input: AgentInput;
+  readonly runId: string;
+  /** Recorded with the run, so the goal can later tell its own run from another at the same id. */
+  readonly goalRunId: string;
+  readonly attemptIndex: number;
+  readonly principal?: string | undefined;
+}
+
+/**
+ * A goal attempt's run, and the moment its engine workflow is durably there.
+ * The run handle is deferred: its agent resolution, recovery-record write, and
+ * engine start all happen after it is returned. `durablyStarted` settles when
+ * they have, and rejects with whatever stopped them, so a caller can tell
+ * "the run exists" from "a start is under way".
+ */
+/**
+ * The persistable selection for a run's `costEstimation`: copied as plain JSON
+ * and checked with the decoder's own predicate, so a value the recovery record
+ * would be refused on read is never written.
+ */
+function goalAttemptCostEstimation(
+  costEstimation: GoalAttemptCostEstimation | undefined,
+): GoalAttemptCostEstimation {
+  let selection: unknown;
+  try {
+    selection = costEstimation === undefined ? null : JSON.parse(JSON.stringify(costEstimation));
+  } catch (error) {
+    // A cycle, a bigint, or a throwing `toJSON`: the agent resolves the same
+    // way on every try, so this is the agent's property, not a transient fault.
+    throw new GoalAttemptInvalidCostEstimationError(
+      `The agent declared a cost estimation that cannot be persisted as plain JSON: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (!isGoalAttemptCostEstimation(selection)) {
+    throw new GoalAttemptInvalidCostEstimationError(
+      'The agent declared a cost estimation that cannot be persisted as plain JSON.',
+    );
+  }
+  return selection;
+}
+
+/** Which goal attempt a run was started for; see `CatalogRunRecoveryRecord.goalAttempt`. */
+interface GoalAttemptOwner {
+  readonly goalRunId: string;
+  readonly attemptIndex: number;
+}
+
+/**
+ * COR-851 — a goal attempt cannot run because of a permanent property of its
+ * agent, not a transient fault. The attempt ends with this reason instead of
+ * failing an activity that would retry the same refusal forever.
+ */
+export class GoalAttemptNotDurableCapableError extends Error {
+  readonly reason = 'agent-not-durable-capable';
+  constructor(message: string) {
+    super(message);
+    this.name = 'GoalAttemptNotDurableCapableError';
+  }
+}
+
+/**
+ * COR-851 — a goal attempt's agent declared a cost estimator that cannot be
+ * persisted as plain JSON (a cycle, a bigint, a throwing `toJSON`, fields the
+ * decoder does not know, or an invalid price). The agent resolves the same way
+ * on every try, so the attempt ends with this reason instead of failing an
+ * activity that would retry the same refusal forever.
+ */
+export class GoalAttemptInvalidCostEstimationError extends Error {
+  readonly reason = 'invalid-cost-estimation';
+  constructor(message: string) {
+    super(message);
+    this.name = 'GoalAttemptInvalidCostEstimationError';
+  }
+}
+
+/**
+ * COR-851 — the attempt's claim is tombstoned: the goal ended, closed, or was
+ * canceled over this attempt while its start was between claiming the run and
+ * creating it. Nothing is started from a tombstoned claim, and the attempt
+ * stands down; it is neither a fault to retry nor a verdict on the attempt.
+ */
+export class GoalAttemptTombstonedError extends Error {
+  constructor(runId: string) {
+    super(`The claim for run "${runId}" is tombstoned: the goal ended over this attempt.`);
+    this.name = 'GoalAttemptTombstonedError';
+  }
+}
+
+export interface GoalAttemptRun {
+  readonly run: AgentRun<unknown, boolean>;
+  readonly durablyStarted: Promise<void>;
+}
+
 export function createCatalogDispatcher({
   agentCatalog,
   runtime,
@@ -71,7 +178,23 @@ export function createCatalogDispatcher({
     name: string,
   ) => { readonly durable: boolean; readonly agentVersion: string } | undefined;
   startChildRun: (start: ChildTopologyStart) => AgentRun<unknown, boolean>;
+  startGoalAttemptRun: (start: GoalAttemptStart) => GoalAttemptRun;
 } {
+  /**
+   * The goal attempt each attribution entry this dispatcher made for one stands
+   * for. Keyed by the entry itself, so it lives and dies with it and an entry
+   * set anywhere else (a recovery reseed, an ordinary run) is never mistaken for
+   * a goal attempt's.
+   */
+  const goalAttemptAttributions = new WeakMap<RunAttribution, GoalAttemptOwner>();
+  /**
+   * How many live executions of a goal attempt hold each attribution object. A
+   * same-attempt retry reuses the held object instead of replacing it, so an
+   * older execution's failure must not delete what the retry still relies on:
+   * the entry goes only when its last holder lets go.
+   */
+  const attributionHolders = new WeakMap<RunAttribution, number>();
+
   function trackCatalogRun(handle: AgentRun<unknown, boolean>): AgentRun<unknown, boolean> {
     catalogRuns.add(handle);
     // `detachBestEffortPromise`, not a bare `void ... .finally(...)`: AB-15's
@@ -104,14 +227,43 @@ export function createCatalogDispatcher({
      * recovery record only where no other run already holds them.
      */
     runIdOverride?: string,
+    /**
+     * COR-851 — a goal attempt's id and recovery record are a deterministic
+     * function of the goal, so a claim already holding this id is the same
+     * attempt's own claim from a start that died before the workflow existed.
+     * The record is rewritten with identical content and the start continues
+     * from it, rather than refusing as a child with a taken id would.
+     */
+    goalAttempt?: GoalAttemptOwner,
+    /** COR-851 — settled with the durable start's own outcome; see {@link GoalAttemptRun}. */
+    durableStart?: {
+      readonly resolve: () => void;
+      readonly reject: (error: unknown) => void;
+    },
   ): AgentRun<unknown, boolean> {
     const durable = runtime.durable;
     if (!durable) {
       throw createBureauError('Durable runtime unavailable', 'CONFLICT');
     }
     const runId = runIdOverride ?? runtimeServices.identifiers.next('agent-run');
-    if (runIdOverride !== undefined && runAttribution.has(runId)) {
-      throw createBureauError(`Run "${runId}" already exists`, 'CONFLICT');
+    if (runIdOverride !== undefined) {
+      const held = runAttribution.get(runId);
+      // An attribution already under this id is another run's, unless it is this
+      // very goal attempt's own from an earlier execution of the same start (a
+      // resolver that outlived the start timeout inserted it before Weft retried
+      // the activity). Verified by what this dispatcher recorded when it set the
+      // entry: the same goal and attempt, and the same agent and principal. Any
+      // other holder, and an entry nothing here recorded, still conflicts.
+      const sameAttempt =
+        held !== undefined &&
+        goalAttempt !== undefined &&
+        goalAttemptAttributions.get(held)?.goalRunId === goalAttempt.goalRunId &&
+        goalAttemptAttributions.get(held)?.attemptIndex === goalAttempt.attemptIndex &&
+        held.agentName === name &&
+        held.principal === principal;
+      if (held !== undefined && !sameAttempt) {
+        throw createBureauError(`Run "${runId}" already exists`, 'CONFLICT');
+      }
     }
     // AB-241 — recorded BEFORE any async work, mirroring
     // `createRunFromRequest`'s own `runAttribution.set` (it writes before
@@ -123,9 +275,33 @@ export function createCatalogDispatcher({
     // existed would otherwise be a permanent phantom. A run that DOES
     // dispatch and settle keeps its attribution indefinitely (see
     // `trackCatalogRun`'s own doc comment) — it is not cleaned up here.
+    let ownAttribution: RunAttribution | undefined;
     if (principal !== undefined) {
-      runAttribution.set(runId, { agentName: name, principal });
+      const retained = runIdOverride === undefined ? undefined : runAttribution.get(runId);
+      if (retained !== undefined) {
+        // The same attempt's retry (any other holder threw above): it takes a
+        // share of the held object rather than replacing it.
+        ownAttribution = retained;
+      } else {
+        ownAttribution = { agentName: name, principal };
+        runAttribution.set(runId, ownAttribution);
+        if (goalAttempt !== undefined) goalAttemptAttributions.set(ownAttribution, goalAttempt);
+      }
+      attributionHolders.set(ownAttribution, (attributionHolders.get(ownAttribution) ?? 0) + 1);
     }
+    // Lets go of this execution's share, once. The entry is deleted only when
+    // the map still holds the very object this execution holds and no other
+    // execution of the attempt does.
+    let attributionReleased = false;
+    const releaseAttribution = (): void => {
+      if (ownAttribution === undefined || attributionReleased) return;
+      attributionReleased = true;
+      const remaining = (attributionHolders.get(ownAttribution) ?? 1) - 1;
+      attributionHolders.set(ownAttribution, remaining);
+      if (remaining <= 0 && runAttribution.get(runId) === ownAttribution) {
+        runAttribution.delete(runId);
+      }
+    };
     // Captured so the wrapper below can forward an abort straight to the
     // dispatched durable `ActiveRun` even in the race `createDeferredAgentRun`
     // does not close: `resolveDurableAgent` unconditionally starts the
@@ -178,6 +354,37 @@ export function createCatalogDispatcher({
     // handle (already fully built by the time this resolver settles) in a
     // one-shot synthetic agent reuses its buffering/abort-forwarding
     // machinery instead of reimplementing it.
+    /**
+     * AB-260: a catalog agent's own resolver builds its RunOptions independently
+     * of `runtime.createRunRuntime` (AB-240's dispatch path), so without this it
+     * would fall back to operative's OWN default RuntimeServices rather than this
+     * bureau's composed instance — breaking "two bureaus in one process never
+     * share a clock" for catalog-dispatched runs. Never overrides a resolver that
+     * deliberately set its own `runtime`.
+     *
+     * COR-1265 criterion 3b. The agent's own tier is already inside
+     * `resolvedOptions.hooks`, from its own `buildRunOptions`. Bureau's
+     * invariants — identity and both guardrails, the registrations that close
+     * over nothing run-specific — go in front of it, so a durably dispatched
+     * catalog run is governed by the same policy every other dispatch shape is.
+     * AB-240's separation is untouched: this adds a hook tier, not a provider, a
+     * toolbox or a generate.
+     */
+    const composeResolvedOptions = (resolved: RunOptions): RunOptions => {
+      const withRuntime: RunOptions = { runtime: runtimeServices, ...resolved };
+      return {
+        ...withRuntime,
+        // A goal attempt's run is also fenced against its goal: it takes no step
+        // once the goal ended or its own claim was tombstoned, and none until the
+        // goal's record shows this attempt opened as running (goal-attempt-fence.ts).
+        hooks: mergeHookRegistries(
+          runtime.createBureauInvariantHooks(
+            goalAttempt === undefined ? undefined : { ...goalAttempt, runId },
+          ),
+          withRuntime.hooks,
+        ),
+      };
+    };
     const resolveDurableAgent = async (): Promise<RunnableAgent<unknown, boolean>> => {
       let resolvedOptions: RunOptions;
       try {
@@ -188,26 +395,9 @@ export function createCatalogDispatcher({
         // arrow-function implementation) would otherwise lose its receiver
         // under strict-mode ESM. Matches `createLazyAgent`'s own resolver
         // forwarding for the same reason.
-        resolvedOptions = await agent[OPERATIVE_RESOLVE_RUN_OPTIONS](input, context);
-        // AB-260: a catalog agent's own resolver builds its RunOptions
-        // independently of `runtime.createRunRuntime` (AB-240's dispatch
-        // path), so without this it would fall back to operative's OWN
-        // default RuntimeServices rather than this bureau's composed
-        // instance — breaking "two bureaus in one process never share a
-        // clock" for catalog-dispatched runs. Never overrides a resolver
-        // that deliberately set its own `runtime`.
-        resolvedOptions = { runtime: runtimeServices, ...resolvedOptions };
-        // COR-1265 criterion 3b. The agent's own tier is already inside
-        // `resolvedOptions.hooks`, from its own `buildRunOptions`. Bureau's
-        // invariants — identity and both guardrails, the registrations that
-        // close over nothing run-specific — go in front of it, so a durably
-        // dispatched catalog run is governed by the same policy every other
-        // dispatch shape is. AB-240's separation is untouched: this adds a hook
-        // tier, not a provider, a toolbox or a generate.
-        resolvedOptions = {
-          ...resolvedOptions,
-          hooks: mergeHookRegistries(runtime.createBureauInvariantHooks(), resolvedOptions.hooks),
-        };
+        resolvedOptions = composeResolvedOptions(
+          await agent[OPERATIVE_RESOLVE_RUN_OPTIONS](input, context),
+        );
       } catch (error) {
         // Review round 2 (Codex): `typeof resolver === 'function'` above
         // is true for EVERY `createLazyAgent`-wrapped agent unconditionally
@@ -225,12 +415,21 @@ export function createCatalogDispatcher({
         // own `run()`, matching what direct registration would have done.
         // Anything else is a genuine resolver failure and must propagate.
         if (error instanceof AgentContractError) {
+          // COR-851: a goal attempt's run is untracked and its activity retries
+          // on failure, so a direct run here would be work no restart can find,
+          // launched again by the retry. There is no fallback for an attempt.
+          if (goalAttempt !== undefined) {
+            releaseAttribution();
+            throw new GoalAttemptNotDurableCapableError(
+              `Agent "${name}" cannot resolve its run options durably, so it cannot run a goal attempt: ${error.message}`,
+            );
+          }
           // AB-241: this fallback abandons `runId` entirely — the agent's
           // own `run()` mints (or is given) a DIFFERENT run identity, so
           // an attribution entry recorded above under `runId` would
           // otherwise be a permanent phantom, keyed to a run that never
           // existed.
-          runAttribution.delete(runId);
+          releaseAttribution();
           return agent;
         }
         throw error;
@@ -261,11 +460,62 @@ export function createCatalogDispatcher({
         // `principal`, and `runAttribution` (in-memory only) started
         // empty on the new process.
         ...(principal !== undefined ? { principal } : {}),
+        ...(goalAttempt === undefined ? {} : { goalAttempt }),
+        // COR-851: the estimator this run is configured with, written with the
+        // claim, so pricing the attempt later never resolves the agent again.
+        ...(goalAttempt === undefined
+          ? {}
+          : { costEstimation: goalAttemptCostEstimation(resolvedOptions.costEstimation) }),
       };
       if (runIdOverride === undefined) {
         await runtime.persistCatalogRunRecoveryRecord(runId, recoveryRecord);
       } else if (!(await runtime.claimCatalogRunRecoveryRecord(runId, recoveryRecord))) {
-        throw createBureauError(`Run "${runId}" already exists`, 'CONFLICT');
+        if (goalAttempt === undefined) {
+          throw createBureauError(`Run "${runId}" already exists`, 'CONFLICT');
+        }
+        // Only the same attempt's own claim may be continued. A claim another
+        // run, another goal, or another principal holds is never touched.
+        const existing = await runtime.loadCatalogRunRecoveryRecord(runId);
+        const owned =
+          existing.status === 'found' &&
+          existing.record.goalAttempt?.goalRunId === goalAttempt.goalRunId &&
+          existing.record.goalAttempt.attemptIndex === goalAttempt.attemptIndex &&
+          existing.record.agentName === name &&
+          existing.record.principal === principal;
+        if (!owned) {
+          throw createBureauError(
+            `Run "${runId}" already exists and does not belong to this goal attempt`,
+            'CONFLICT',
+          );
+        }
+        // A tombstoned claim is the goal saying it is over this attempt. It is the
+        // pre-start half of the fence: the start stops here, before the engine is
+        // asked for a workflow. A start that already passed this point is stopped
+        // by the run's own fence instead, which also refuses any step until the goal
+        // acknowledges the attempt as running (see goal-attempt-fence.ts).
+        if (existing.record.goalAttempt?.tombstonedAt !== undefined) {
+          releaseAttribution();
+          throw new GoalAttemptTombstonedError(runId);
+        }
+        // The winning claim is immutable. Two at-least-once executions of one
+        // attempt can overlap, and either may be the one whose workflow the
+        // engine accepts, so a loser never rewrites what the winner wrote: the
+        // record has to describe the workflow that runs, and the one claim
+        // does. A workflow this execution still has to start is built from that
+        // claim's own input and estimator, not from what this execution
+        // resolved. The claim's definition revision cannot be rebuilt (the
+        // catalog holds only the current one); recovery pins it and warns on a
+        // drift, and this start is no different.
+        const claimed = existing.record;
+        resolvedOptions = composeResolvedOptions(
+          await agent[OPERATIVE_RESOLVE_RUN_OPTIONS](claimed.input, context),
+        );
+        if (claimed.costEstimation !== undefined) {
+          resolvedOptions = {
+            ...resolvedOptions,
+            costEstimation: claimed.costEstimation ?? undefined,
+          };
+        }
       }
       const activeRun = createActiveRun(
         resolvedOptions,
@@ -304,8 +554,31 @@ export function createCatalogDispatcher({
     // swallows or alters `resolveDurableAgent`'s own result/rejection.
     const trackDispatchSettlement = async (): Promise<RunnableAgent<unknown, boolean>> => {
       try {
-        return await resolveDurableAgent();
+        const resolved = await resolveDurableAgent();
+        if (durableStart !== undefined) {
+          // No active run means the agent fell back to a direct run, which no
+          // restart could find; a goal attempt must never end up there.
+          if (dispatchedActiveRun === undefined) {
+            durableStart.reject(
+              new GoalAttemptNotDurableCapableError(
+                `Agent "${name}" did not run durably, so it cannot run a goal attempt`,
+              ),
+            );
+          } else {
+            void (dispatchedActiveRun.durablyStarted ?? Promise.resolve()).then(
+              durableStart.resolve,
+              (error: unknown) => {
+                // A start that never committed holds no workflow this share
+                // protects; the retry, if any, keeps its own.
+                releaseAttribution();
+                durableStart.reject(error);
+              },
+            );
+          }
+        }
+        return resolved;
       } catch (error) {
+        durableStart?.reject(error);
         // AB-241: `resolveDurableAgent`'s `AgentContractError` fallback
         // (above) already deletes `runAttribution` for the abandoned
         // `runId` on ITS OWN success path (a `return`, not a throw). Any
@@ -316,7 +589,7 @@ export function createCatalogDispatcher({
         // applies, mirroring `createRunFromRequest`'s own
         // `runAttribution.delete(runId)` for a run that "never reached
         // `store.register`" (see that catch block, below).
-        runAttribution.delete(runId);
+        releaseAttribution();
         throw error;
       } finally {
         dispatchSettled?.();
@@ -417,7 +690,12 @@ export function createCatalogDispatcher({
         return undefined;
       }),
     );
-    return trackCatalogRun(guardedRun);
+    // A goal attempt is deliberately left out of `catalogRuns`. Shutdown aborts
+    // every tracked run, and an attempt aborted by shutdown would end `aborted`
+    // for good: its goal would read that as the attempt failing. Untracked, the
+    // run is left to the engine's disposal, which is a crash for the next
+    // process to recover, and the goal waits for it.
+    return goalAttempt ? guardedRun : trackCatalogRun(guardedRun);
   }
 
   function prepareCatalogRunContext(
@@ -546,6 +824,57 @@ export function createCatalogDispatcher({
   }
 
   /**
+   * COR-851 — starts one goal attempt as a durable catalog run under the
+   * attempt's own deterministic id. Never falls back to an in-process run: a
+   * goal attempt with no workflow behind it is one no restart could find, so
+   * an agent that cannot run durably is refused here.
+   */
+  function startGoalAttemptRun(start: GoalAttemptStart): GoalAttemptRun {
+    if (getShutdownPromise()) {
+      throw createBureauError('Cannot start a goal attempt: bureau is disposed', 'CONFLICT');
+    }
+    const agent = agentCatalog.find(start.agentName);
+    if (!agent) {
+      throw createBureauError(`Unknown agent "${start.agentName}"`, 'NOT_FOUND');
+    }
+    if (!hasDefinitionResolver(agent)) {
+      throw new GoalAttemptNotDurableCapableError(
+        `Agent "${start.agentName}" cannot run durably, so it cannot run a goal attempt`,
+      );
+    }
+    if (!runtime.durable) {
+      throw createBureauError(
+        `Agent "${start.agentName}" cannot run durably, so it cannot run a goal attempt`,
+        'CONFLICT',
+      );
+    }
+    const context: AgentRunContext = {
+      agentName: start.agentName,
+      ...(start.principal === undefined ? {} : { principal: start.principal }),
+    };
+    let resolveStart!: () => void;
+    let rejectStart!: (error: unknown) => void;
+    const durablyStarted = new Promise<void>((resolve, reject) => {
+      resolveStart = resolve;
+      rejectStart = reject;
+    });
+    // The caller awaits it, but a start that throws below never reaches that await.
+    durablyStarted.catch(() => undefined);
+    const run = runDurableCatalogAgent(
+      start.agentName,
+      start.input,
+      undefined,
+      context,
+      start.principal,
+      agent,
+      start.runId,
+      { goalRunId: start.goalRunId, attemptIndex: start.attemptIndex },
+      { resolve: resolveStart, reject: rejectStart },
+    );
+    return { run, durablyStarted };
+  }
+
+  /**
    * COR-1277 — the agent this non-durable dispatch actually runs: the catalog
    * agent itself when nothing can be composed onto it, and otherwise a
    * one-shot synthetic agent carrying Bureau's invariant tier in front of the
@@ -659,5 +988,5 @@ export function createCatalogDispatcher({
     };
   }
 
-  return { runAgent, planChildRun, startChildRun };
+  return { runAgent, planChildRun, startChildRun, startGoalAttemptRun };
 }

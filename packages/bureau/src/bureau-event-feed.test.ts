@@ -1,11 +1,12 @@
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
 
 import {
+  type BureauEventEnvelope,
   createBureauEventFeed,
   projectBureauEvent,
   PUBLISHED_BUREAU_EVENT_KINDS,
   publishedBureauEventKinds,
-  type BureauEventEnvelope,
 } from './bureau-event-feed.ts';
 import {
   ActionEvent,
@@ -32,6 +33,24 @@ describe('the bureau event feed', () => {
     });
     expect(first?.payload).toEqual({ runId: 'run-1' });
     expect(second?.sequence).toBe(1);
+    feed.dispose();
+  });
+
+  it('stamps each envelope from the default runtime clock when no clock is injected', () => {
+    // The `now` option is optional. Without it the feed reads the default
+    // runtime services' wall clock, so `emittedAtMs` must lie between two
+    // readings of an equivalent clock taken around the publish. A fixed,
+    // missing, or non-numeric default fails the bounds.
+    const clock = createDefaultRuntimeServices().clock;
+    const feed = createBureauEventFeed({ bureauId: 'bureau-1' });
+
+    const before = clock.now();
+    const envelope = feed.publish(new RunRegisteredEvent('run-1'));
+    const after = clock.now();
+
+    const emittedAtMs = envelope?.emittedAtMs ?? Number.NaN;
+    expect(emittedAtMs).toBeGreaterThanOrEqual(before);
+    expect(emittedAtMs).toBeLessThanOrEqual(after);
     feed.dispose();
   });
 

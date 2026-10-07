@@ -200,36 +200,40 @@ export async function prepareStep(
       emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
       return { kind: 'error', error, errorKind: 'policy' };
     }
+    // `runFirst`: the first handler to return a verdict decides; `false` cancels.
+    const consultBeforeCompaction = async (
+      registry: NonNullable<typeof hooks>,
+      hook: 'beforeCompaction' | 'beforeBackgroundCompaction',
+      exceeds: boolean,
+    ): Promise<boolean> =>
+      (await registry.runFirst(hook, {
+        conversation,
+        step,
+        signal: stepSignal,
+        budget: {
+          maxTokens: contextManagement.maxTokens,
+          minimumResponseTokens: contextManagement.minimumResponseTokens ?? 1500,
+          warningThreshold,
+          compactionThreshold,
+          used: tokensBefore,
+          remaining,
+          exceeds,
+          warning: remaining <= warningThreshold,
+          update() {},
+          allocate() {
+            return 0;
+          },
+          estimate(text: string) {
+            return Math.ceil(text.length / 4);
+          },
+        },
+      })) !== false;
     if (tokensBefore > compactionThreshold) {
       // Run beforeCompaction hook if registered
       let shouldCompact = true;
       if (hooks?.has('beforeCompaction')) {
         try {
-          // `runFirst`: the first handler to return a verdict decides.
-          const hookResult = await hooks.runFirst('beforeCompaction', {
-            conversation,
-            step,
-            budget: {
-              maxTokens: contextManagement.maxTokens,
-              minimumResponseTokens: contextManagement.minimumResponseTokens ?? 1500,
-              warningThreshold,
-              compactionThreshold,
-              used: tokensBefore,
-              remaining,
-              exceeds: true,
-              warning: remaining <= warningThreshold,
-              update() {},
-              allocate() {
-                return 0;
-              },
-              estimate(text: string) {
-                return Math.ceil(text.length / 4);
-              },
-            },
-          });
-          if (hookResult === false) {
-            shouldCompact = false;
-          }
+          shouldCompact = await consultBeforeCompaction(hooks, 'beforeCompaction', true);
         } catch (error) {
           emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
           return { kind: 'error', error, errorKind: 'policy' };
@@ -280,7 +284,21 @@ export async function prepareStep(
       // awaited — this step generates against whatever history is current,
       // and a candidate publishes only by compare-and-swap. The request
       // never rejects, and the run's signal withdraws it on cancellation.
-      void background.scheduler.request({ signal: deps.signal });
+      // COR-851: a background candidate calls a model and writes the conversation,
+      // so a `beforeBackgroundCompaction` handler can withdraw it.
+      // Without a handler this adds no wait.
+      if (hooks?.has('beforeBackgroundCompaction')) {
+        try {
+          if (await consultBeforeCompaction(hooks, 'beforeBackgroundCompaction', false)) {
+            void background.scheduler.request({ signal: deps.signal });
+          }
+        } catch (error) {
+          emitter?.dispatch(new RunErrorEvent(step, error, 'policy'));
+          return { kind: 'error', error, errorKind: 'policy' };
+        }
+      } else {
+        void background.scheduler.request({ signal: deps.signal });
+      }
     }
   }
 

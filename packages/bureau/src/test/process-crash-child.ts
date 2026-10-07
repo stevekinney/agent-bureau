@@ -16,29 +16,33 @@
 import { writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { stopWhen } from '@lostgradient/operative';
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+import { createCheckpointStore, stopWhen } from '@lostgradient/operative';
 import { createTool, createToolbox } from 'armorer';
 import { z } from 'zod';
 
 import { createBureau } from '../create-bureau';
 import {
-  CLAIM_RENEW_MS,
-  CLAIM_TTL_MS,
-  REMEMBERED_ANSWER,
-  SESSION_ID,
   chargeStatus,
   chargeToolCalls,
+  CLAIM_RENEW_MS,
+  CLAIM_TTL_MS,
   createChargeToolbox,
   createHarnessBureau,
   firstUserMessage,
+  HUMAN_WAIT_PROMPT,
+  HUMAN_WAIT_SIGNAL,
   openGovernedMemory,
   openIdempotencyCache,
   readEffects,
+  REMEMBERED_ANSWER,
   requestContext,
+  SESSION_ID,
 } from './process-crash-work-integrity-fixtures';
 
 const POLL_ATTEMPTS = 2000;
 const POLL_DELAY_MS = 5;
+const runtime = createDefaultRuntimeServices();
 
 const scenarioName = process.argv[2];
 const backend = process.argv[3];
@@ -63,7 +67,7 @@ if (
 async function pollUntil(description: string, check: () => boolean | Promise<boolean>) {
   for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
     if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, POLL_DELAY_MS));
+    await new Promise<void>((resolve) => runtime.timers.setTimeout(resolve, POLL_DELAY_MS));
   }
   process.stderr.write(`child: timed out waiting for ${description}\n`);
   process.exit(3);
@@ -165,7 +169,7 @@ function killSelf(): never {
 async function chargeThenCrash(): Promise<void> {
   const directory = dirname(markerPath as string);
   const { cache, store } = await openIdempotencyCache(directory);
-  let runId: string | undefined;
+  const runState: { id?: string } = {};
   const toolbox = createChargeToolbox(
     directory,
     async () => {
@@ -173,8 +177,8 @@ async function chargeThenCrash(): Promise<void> {
         if (readEffects(directory).length !== 1) return false;
         return variant === 'unwrapped' ? true : (await chargeStatus(store, cache)) === 'completed';
       });
-      await pollUntil('the run id', () => runId !== undefined);
-      writeMarker({ runId });
+      await pollUntil('the run id', () => runState.id !== undefined);
+      writeMarker({ runId: runState.id });
       return killSelf();
     },
     { cache, wrap: variant !== 'unwrapped' },
@@ -191,14 +195,14 @@ async function chargeThenCrash(): Promise<void> {
     sessionId: SESSION_ID,
     requestContext: requestContext(),
   });
-  runId = run.id;
+  runState.id = run.id;
   await new Promise<never>(() => {});
 }
 
 /** COR-1391: the governed-memory record write resolves, then SIGKILL before the memo commits. */
 async function memoryWriteThenCrash(): Promise<void> {
   const directory = dirname(markerPath as string);
-  let runId: string | undefined;
+  const runState: { id?: string } = {};
   const { memory } = await openGovernedMemory(directory, (storage) => {
     const original = storage.conditionalBatch?.bind(storage);
     if (original === undefined) throw new Error('child: memory storage lacks conditionalBatch');
@@ -208,8 +212,8 @@ async function memoryWriteThenCrash(): Promise<void> {
           return async (...args: Parameters<typeof original>) => {
             const applied = await original(...args);
             if (applied && args[1].some((operation) => operation.type === 'put')) {
-              await pollUntil('the run id', () => runId !== undefined);
-              writeMarker({ runId, sessionId: SESSION_ID });
+              await pollUntil('the run id', () => runState.id !== undefined);
+              writeMarker({ runId: runState.id, sessionId: SESSION_ID });
               killSelf();
             }
             return applied;
@@ -233,7 +237,7 @@ async function memoryWriteThenCrash(): Promise<void> {
     sessionId: SESSION_ID,
     requestContext: requestContext(),
   });
-  runId = run.id;
+  runState.id = run.id;
   await new Promise<never>(() => {});
 }
 
@@ -256,6 +260,53 @@ async function twoParkedRuns(): Promise<void> {
   const y = await bureau.createRun({ message: 'crash harness run Y', principal: 'alice' });
   await pollUntil('both runs to invoke generate at step 1', () => reachedStepOne.size === 2);
   writeMarker({ xRunId: x.id, yRunId: y.id });
+}
+
+/**
+ * COR-1409: a run parks on `requestHumanInput`, and the process dies once the
+ * park is durable.
+ *
+ * The review becomes visible as soon as the tool dispatches its park event,
+ * which happens while the step memo carrying the pending wait is still being
+ * committed. A process killed in that window was never durably parked: its
+ * successor rightly re-runs the step. So the child waits until the run's cursor
+ * has advanced past step 0, which the workflow commits only after that memo and
+ * the step record. COR-121's in-process test covers the narrower window where
+ * the memo landed and the step record did not.
+ */
+async function humanWaitParked(): Promise<void> {
+  const bureau = await createHarnessBureau({
+    backend: backend as 'sqlite' | 'lmdb',
+    storagePath: storagePath as string,
+    generate: async () => ({
+      content: '',
+      toolCalls: [
+        {
+          id: 'call-park',
+          name: 'requestHumanInput',
+          arguments: { signalName: HUMAN_WAIT_SIGNAL, prompt: HUMAN_WAIT_PROMPT },
+        },
+      ],
+    }),
+    toolbox: createToolbox([]),
+    humanInput: true,
+  });
+  const run = await bureau.createRun({ message: 'crash harness park', principal: 'alice' });
+  await pollUntil('the run to surface its human-wait review', () =>
+    bureau.listPendingReviews().some((review) => review.runId === run.id),
+  );
+  // Read through the Bureau's own store: a second handle on a live LMDB path
+  // can deadlock against the Bureau's (see `storage-fixtures.ts`).
+  if (bureau.kv === undefined) {
+    process.stderr.write('child: the bureau has no durable key-value store\n');
+    process.exit(4);
+  }
+  const checkpoints = createCheckpointStore(bureau.kv);
+  await pollUntil('the run cursor to advance past the parked step', async () => {
+    const cursor = await checkpoints.loadCursor(run.id);
+    return cursor !== null && cursor.step >= 1;
+  });
+  writeMarker({ runId: run.id });
 }
 
 /** COR-1391: a non-crashing boot over the recovered, shut-down store. */
@@ -285,6 +336,7 @@ const scenarios: Record<string, () => Promise<void>> = {
   'charge-then-crash': chargeThenCrash,
   'memory-write-then-crash': memoryWriteThenCrash,
   'two-parked-runs': twoParkedRuns,
+  'human-wait-parked': humanWaitParked,
   verify,
 };
 

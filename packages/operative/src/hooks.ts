@@ -53,6 +53,8 @@ export interface BeforeCompactionHookContext {
   conversation: StepContext['conversation'];
   step: number;
   budget: TokenBudget;
+  /** The step's abort signal, so a handler that waits can stop waiting when the run is aborted. */
+  signal?: AbortSignal | undefined;
 }
 
 /** Stats provided to afterCompaction hooks. */
@@ -79,6 +81,13 @@ export interface OperativeHookMap extends HookMap {
   ) => Promise<ToolExecutionResult | void>;
   /** Runs before compaction. Return `false` to cancel compaction. */
   beforeCompaction: (context: BeforeCompactionHookContext) => Promise<boolean | void>;
+  /**
+   * Runs before a step requests background compaction (COR-808), which calls a model
+   * and writes the conversation, and the step waits for the answer. Return `false` to
+   * withdraw the request. Distinct from `beforeCompaction`, which runs only for a
+   * step that compacts synchronously.
+   */
+  beforeBackgroundCompaction: (context: BeforeCompactionHookContext) => Promise<boolean | void>;
   /** Runs after compaction with stats about what was removed. */
   afterCompaction: (context: AfterCompactionHookContext) => Promise<void>;
   selectToolChoice: (context: StepContext) => Promise<ToolChoice | void>;

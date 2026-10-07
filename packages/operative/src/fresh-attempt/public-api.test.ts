@@ -33,6 +33,10 @@ describe('@lostgradient/operative fresh-attempt surface (COR-1354)', () => {
     expect(typeof operative.validateFreshAttemptArtifactForPublication).toBe('function');
     expect(typeof operative.createFreshAttemptArtifactStore).toBe('function');
     expect(typeof operative.applyConversationPolicy).toBe('function');
+    // COR-851 — a durable goal builds its fresh and forked sessions itself.
+    expect(typeof operative.createFreshAttemptSession).toBe('function');
+    expect(typeof operative.conversationThroughRun).toBe('function');
+    expect(typeof operative.reconcileTerminalRunRef).toBe('function');
   });
 
   it('exports the ConversationPolicy and FreshAttemptHandoffArtifact types', () => {

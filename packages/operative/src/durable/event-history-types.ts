@@ -16,16 +16,21 @@
  */
 
 /**
- * The three aggregate kinds a durable event can be scoped to. `'schedule'`
+ * The aggregate kinds a durable event can be scoped to. `'goal'` (COR-851)
+ * owns a durable goal's audit events (`goal.started`, `goal.attempt.*`, the
+ * four terminal events, and the durable-only `goal.recovered`), keyed by the
+ * goal run id.
+ *
+ * `'schedule'`
  * (AB-320, widening AB-310's original `'run' | 'session'`) owns a
  * schedule's four DEFINITION events (`schedule.created`/`paused`/`resumed`/
  * `cancelled`, AB-298/AB-223) only — a scheduled FIRE stays on the fired
  * run's own `'run'` owner ("a schedule fire is an ordinary run", AB-87's
  * coordinator ruling), never on `'schedule'`.
  */
-export type DurableEventOwnerKind = 'run' | 'session' | 'schedule';
+export type DurableEventOwnerKind = 'run' | 'session' | 'schedule' | 'goal';
 
-/** Identifies the run, session, or schedule a durable event belongs to. */
+/** Identifies the run, session, schedule, or goal a durable event belongs to. */
 export interface DurableEventOwner {
   readonly kind: DurableEventOwnerKind;
   readonly id: string;

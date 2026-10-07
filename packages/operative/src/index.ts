@@ -255,30 +255,74 @@ export {
   GoalStartedEvent,
   GoalSucceededEvent,
 } from './events';
-export { GOAL_RUN_TRANSITIONS, canTransitionGoalRun, startGoal } from './goal-run';
+export {
+  ATTEMPT_RUN_FAILURE_DETAIL,
+  GOAL_RUN_TRANSITIONS,
+  TERMINAL_STATUSES,
+  TERMINAL_STATUS_BY_REASON,
+  canTransitionGoalRun,
+  decideAttemptRunFailure,
+  decideCancellation,
+  decideDeterminismRequirement,
+  decideOutcome,
+  decideRetryOrExhaust,
+  decideRunFinish,
+  goalAttemptInput,
+  isAttemptStartFailureDetail,
+  isBudgetExceeded,
+  normalizeValidatorOutcome,
+  projectValidatorError,
+  projectValidatorOutcome,
+  projectValidatorResult,
+  stripValidatorErrorCause,
+  toJsonSafe,
+  validateBudget,
+  validateConversationPolicy,
+  validateGoalConfiguration,
+  validateRetryPolicy,
+} from './goal-decision';
 export type {
-  GoalAttemptRecord,
-  GoalAttemptTarget,
   GoalBudget,
   GoalConversationPolicy,
+  GoalDecision,
+  GoalDecisionContext,
   GoalIdentity,
   GoalRetryPolicy,
   GoalRetryableReason,
-  GoalRun,
-  GoalRunEvent,
-  GoalRunResult,
   GoalRunStatus,
   GoalRunTerminalReason,
   GoalRunTerminalStatus,
   GoalUsage,
-  StartGoalOptions,
-  Validator,
+  ProjectedValidatorError,
+  ProjectedValidatorEvidence,
+  ProjectedValidatorOutcome,
+  ProjectedValidatorResult,
   ValidatorEvidence,
   ValidatorIdentity,
-  ValidatorInput,
   ValidatorOutcome,
   ValidatorResult,
+} from './goal-decision';
+export {
+  GOAL_AUDIT_WORKFLOW_ID_PREFIX,
+  GOAL_RESERVED_IDENTIFIER_PREFIXES,
+  GOAL_RUN_AND_SESSION_ID_PREFIX,
+  GOAL_WORKFLOW_ID_PREFIX,
+  reservedGoalIdentifierPrefix,
+  reservedIdentifierReason,
+} from './goal-reserved-identifiers';
+export { startGoal } from './goal-run';
+export type {
+  GoalAttemptRecord,
+  GoalAttemptTarget,
+  GoalRun,
+  GoalRunEvent,
+  GoalRunResult,
+  StartGoalOptions,
+  Validator,
+  ValidatorInput,
 } from './goal-run';
+export { executeValidator } from './goal-validator-execution';
+export type { ValidatorExecution, ValidatorExecutionOptions } from './goal-validator-execution';
 // COR-1354 — fresh-attempt handoff artifacts and conversation policies
 export { createFreshAttemptArtifactStore } from './fresh-attempt/artifact-store';
 export type {
@@ -324,6 +368,8 @@ export type {
   FreshAttemptProvenance,
   FreshAttemptSourceRunOrAttempt,
 } from './fresh-attempt/handoff-artifact';
+export { createFreshAttemptSession } from './fresh-attempt/start-fresh-attempt';
+export type { CreateFreshAttemptSessionOptions } from './fresh-attempt/start-fresh-attempt';
 export {
   FRESH_ATTEMPT_ARTIFACT_CLOCK_SKEW_MS,
   FRESH_ATTEMPT_ARTIFACT_ENTROPY_MINIMUM_TOKEN_LENGTH,

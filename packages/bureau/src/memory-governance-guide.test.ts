@@ -14,18 +14,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  type MemoryGovernanceNotification,
   createGovernedMemory,
   createMemoryAuthority,
   createMemoryGovernanceLedger,
   createMemoryGovernancePolicy,
   createMockEmbedder,
   createWeftMemoryRecordStorage,
+  type MemoryGovernanceNotification,
 } from '@lostgradient/memory';
 import {
-  type GenerateResponse,
   createAgent,
   createMockGenerate,
+  type GenerateResponse,
   stopWhen,
   waitForCondition,
   waitForRunState,
@@ -35,7 +35,7 @@ import { createTool, createToolbox } from 'armorer';
 import { afterEach, describe, expect, it } from 'bun:test';
 import { z } from 'zod';
 
-import { type SubmitSchedulerTaskResponse, createBureau } from './index';
+import { createBureau, type SubmitSchedulerTaskResponse } from './index';
 
 const databasePath = join(tmpdir(), `bureau-memory-governance-guide-${process.pid}.sqlite`);
 

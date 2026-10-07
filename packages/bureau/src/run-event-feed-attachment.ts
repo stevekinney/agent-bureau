@@ -25,10 +25,10 @@
  */
 
 import {
-  createAgentRunEventFeed,
-  PUBLISHED_RUN_EVENT_KINDS,
   type ActiveRun,
   type AgentRunEventFeed,
+  createAgentRunEventFeed,
+  PUBLISHED_RUN_EVENT_KINDS,
 } from '@lostgradient/operative';
 
 /** The mutable half of operative's registry, as this module needs it. */
