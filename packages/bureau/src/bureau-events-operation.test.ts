@@ -1,16 +1,17 @@
+import { createManualRuntimeServices } from '@lostgradient/lifecycle';
 import { describe, expect, it } from 'bun:test';
 
-import { createBureauEventFeed, type BureauEventEnvelope } from './bureau-event-feed.ts';
+import { type BureauEventEnvelope, createBureauEventFeed } from './bureau-event-feed.ts';
 import {
   bureauEventEnvelopeSchema,
+  type BureauEventsOperationEngine,
   bureauEventsSubscriptionOperation,
   createBureauEventRegistry,
-  type BureauEventsOperationEngine,
 } from './bureau-events-operation.ts';
 import { BureauDisposedEvent, RunRegisteredEvent, RunRemovedEvent } from './events.ts';
 import { throwingRejectionOf } from './testing/promise-outcome.test-support.ts';
 
-async function invoke(
+function invoke(
   input: { bureauId: string; fromCursor?: string; kinds?: string | string[] },
   engine: BureauEventsOperationEngine,
 ) {
@@ -114,6 +115,48 @@ describe('the bureau.events subscription', () => {
     const envelope = bureauFeed.publish(new RunRegisteredEvent('run-1'));
 
     expect(bureauEventEnvelopeSchema.safeParse(envelope).success).toBe(true);
+    bureauFeed.dispose();
+  });
+
+  it('mints the subscription id through the injected runtime', async () => {
+    const registry = createBureauEventRegistry();
+    const bureauFeed = createBureauEventFeed({ bureauId: 'bureau-1' });
+    registry.set('bureau-1', bureauFeed);
+    const runtime = createManualRuntimeServices({ identifierSeed: 'bureau-events-operation' });
+    const reference = createManualRuntimeServices({ identifierSeed: 'bureau-events-operation' });
+
+    const first = await invoke({ bureauId: 'bureau-1' }, { bureauFeeds: registry, runtime });
+    const second = await invoke({ bureauId: 'bureau-1' }, { bureauFeeds: registry, runtime });
+
+    expect(first.envelope.subscriptionId).toBe(
+      `sub_${reference.identifiers.next('bureau-subscription')}`,
+    );
+    expect(second.envelope.subscriptionId).toBe(
+      `sub_${reference.identifiers.next('bureau-subscription')}`,
+    );
+    expect(second.envelope.subscriptionId).not.toBe(first.envelope.subscriptionId);
+    await first.close();
+    await second.close();
+    bureauFeed.dispose();
+  });
+
+  it('falls back to a default runtime when none is supplied', async () => {
+    const registry = createBureauEventRegistry();
+    const bureauFeed = createBureauEventFeed({ bureauId: 'bureau-1' });
+    registry.set('bureau-1', bureauFeed);
+
+    const first = await invoke({ bureauId: 'bureau-1' }, { bureauFeeds: registry });
+    const second = await invoke({ bureauId: 'bureau-1' }, { bureauFeeds: registry });
+
+    // A fresh default runtime is created per invocation, so its per-kind
+    // counter is always at 1; the trailing UUID is what keeps the ids unique.
+    const defaultRuntimeIdentifier =
+      /^sub_bureau-subscription-1-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    expect(first.envelope.subscriptionId).toMatch(defaultRuntimeIdentifier);
+    expect(second.envelope.subscriptionId).toMatch(defaultRuntimeIdentifier);
+    expect(second.envelope.subscriptionId).not.toBe(first.envelope.subscriptionId);
+    await first.close();
+    await second.close();
     bureauFeed.dispose();
   });
 });

@@ -1,9 +1,9 @@
 import type { RunState } from '@lostgradient/operative';
 import { AgentRunError } from '@lostgradient/operative';
 import { Conversation, currentConversationFromSnapshot } from 'conversationalist';
+
 import { safeStringify, serializeAgentRunErrorForBureau, toJsonSafe } from './serialization-json';
 import { serializeLivenessSnapshot } from './serialization-liveness';
-
 import type { BureauDiagnostic, DiagnosticSink, RunDetail, RunSummary } from './types';
 
 export function serializeUnknownError(error: unknown): string {

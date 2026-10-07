@@ -12,6 +12,11 @@ import {
   type AgentRun,
   type AgentSession,
   type ChildSignalContract,
+  // COR-625: operative's OBJECT-form cleanup acknowledgement, aliased on
+  // import because `./types` exports an unrelated string-union type under
+  // the same name (armorer's shutdown-owner outcome vocabulary). The two are
+  // genuinely different values and must not shadow each other here.
+  type CleanupAcknowledgement as RunCleanupAcknowledgement,
   type CombinedOperativeEventMap,
   createActiveRun,
   createAgentRunEventRegistry,
@@ -42,11 +47,9 @@ import {
   reattachDurableActiveRun,
   type RecoveredRunHandle,
   type RequestHumanInputResult,
-  // COR-625: operative's OBJECT-form cleanup acknowledgement, aliased on
-  // import because `./types` exports an unrelated string-union type under
-  // the same name (armorer's shutdown-owner outcome vocabulary). The two are
-  // genuinely different values and must not shadow each other here.
-  type CleanupAcknowledgement as RunCleanupAcknowledgement,
+  reservedIdentifierReason,
+  RunRegisteredEvent as StoreRunRegisteredEvent,
+  RunRemovedEvent as StoreRunRemovedEvent,
   type RunReport,
   type RunResult,
   ScheduleAttemptedEvent,
@@ -77,8 +80,6 @@ import {
   type StepRecord,
   type Store,
   StoreActionEvent,
-  RunRegisteredEvent as StoreRunRegisteredEvent,
-  RunRemovedEvent as StoreRunRemovedEvent,
   type StreamEventMap,
   type Subscription,
   TaskCancelledEvent,
@@ -112,16 +113,6 @@ import {
   type ToolRequestContext,
 } from 'armorer';
 import { Conversation, createConversationHistory, isConversationHistory } from 'conversationalist';
-import {
-  isPlainAuthorityRecord,
-  isSessionAuthorityAuthorized,
-  isSessionRunTerminal,
-  resolvePersistedRunOwningPrincipal,
-} from './session-authority';
-import {
-  normalizeRunRequestContext,
-  recoveredRequestContextFromMetadata,
-} from './session-request-context';
 
 import { type AgentDefinitions, type AgentNames, createAgentCatalog } from './agent-catalog';
 import {
@@ -169,6 +160,12 @@ import {
   RunRegisteredEvent,
   RunRemovedEvent,
 } from './events';
+import { createGoalAttemptFenceHost } from './goal-attempt-fence';
+import { createGoalWorkflowHost } from './goal-ports';
+import { recoveryEntryFailure } from './goal-recovery';
+import type { BureauGoals } from './goal-types';
+import { createGoalValidatorCatalog } from './goal-validator-catalog';
+import { composeBureauGoals } from './goals-composition';
 import { leaseEvidenceFromLostHealth } from './liveness-projection';
 import { createModelCatalogService } from './model-catalog-refresh';
 import { createModelPolicyPlanner } from './model-policy';
@@ -199,11 +196,21 @@ import {
   serializeUnknownError,
 } from './serialization';
 import {
+  isPlainAuthorityRecord,
+  isSessionAuthorityAuthorized,
+  isSessionRunTerminal,
+  resolvePersistedRunOwningPrincipal,
+} from './session-authority';
+import {
   admitSessionInput,
   createSessionInputMailbox,
   type PersistedSessionInput,
 } from './session-input-durability';
 import { generateSessionOutboxDrainOwnerSuffix } from './session-outbox-drain-owner-suffix';
+import {
+  normalizeRunRequestContext,
+  recoveredRequestContextFromMetadata,
+} from './session-request-context';
 import {
   type BureauSteeringGate,
   createSteeringCommandLedger,
@@ -628,6 +635,16 @@ function toBadRequest(message: string): never {
 }
 
 /**
+ * COR-851 — an id an ordinary caller chooses may not sit in a namespace durable
+ * goals own (see `reserved-identifiers.ts`). Refused as `BAD_REQUEST` with a
+ * message beginning `reserved-identifier:`.
+ */
+function rejectReservedIdentifier(kind: string, id: string): void {
+  const reason = reservedIdentifierReason(kind, id);
+  if (reason !== undefined) toBadRequest(reason);
+}
+
+/**
  * The exact duration grammar weft's `parseDuration` accepts: a number (optionally
  * fractional, optionally space-separated from the unit) followed by a unit, where
  * the unit is `ms`/`s`/`m`/`h`/`d` or its full word (`seconds`, `minutes`, …).
@@ -699,6 +716,7 @@ function validateCreateRunRequest(request: CreateRunRequest): void {
     if (request.sessionId.trim().length === 0) {
       toBadRequest('"sessionId" must be a non-empty string');
     }
+    rejectReservedIdentifier('"sessionId"', request.sessionId.trim());
   }
 
   if (request.agentName !== undefined) {
@@ -758,6 +776,9 @@ function validateBureauRunOptions(
   }
   if (options.sessionId !== undefined && typeof options.sessionId !== 'string') {
     toBadRequest('"options.sessionId" must be a string');
+  }
+  if (options.sessionId !== undefined) {
+    rejectReservedIdentifier('"options.sessionId"', options.sessionId.trim());
   }
   if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) {
     toBadRequest('"options.signal" must be an AbortSignal');
@@ -1296,7 +1317,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   // `createRuntimeComposition`'s own `options.runtime ?? createDefaultRuntimeServices()`
   // resolution (its contract for direct, non-Bureau callers) picks up this
   // SAME instance rather than minting a second default one.
-  const runtime = await createRuntimeComposition({ ...options, runtime: runtimeServices });
+  // COR-851 — the goal controller's workflow is registered on the durable
+  // engine this call builds; its ports are bound once the goal control plane
+  // exists below.
+  const goalWorkflowHost = createGoalWorkflowHost();
+  // The self-fence every goal attempt's run is registered with is read from the
+  // goal store, which exists only after the runtime composition, so it is bound
+  // by `composeBureauGoals` below.
+  const goalAttemptFenceHost = createGoalAttemptFenceHost();
+  // Built first: two validators registered under one name and version are a
+  // startup error, and it should fail before the durable engine exists.
+  const goalValidatorCatalog = createGoalValidatorCatalog(options.validators);
+  const runtime = await createRuntimeComposition(
+    { ...options, runtime: runtimeServices },
+    { goalWorkflow: goalWorkflowHost.workflow, goalAttemptFence: goalAttemptFenceHost.fence },
+  );
   // AB-223: scheduled fires are headless (no per-run emitter — see
   // `runtime-composition.ts`'s `buildScheduledRunServices`), so a fire's
   // terminal `schedule.completed`/`schedule.failed` has nowhere else to
@@ -3394,7 +3429,14 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       activeRun.once('run.error', (_event) => {
         activeRuns.delete(activeRun);
         runToolboxes.delete(runToolbox);
-        disposeRegisteredStreamListeners(disposeStreamListeners);
+        // The stream listeners are deliberately NOT disposed here. `run.error`
+        // is not terminal: Operative follows it with `run.completed`, which
+        // carries the finish reason, so the `run.completed` listener above
+        // disposes them once that event has reached them. Detaching on
+        // `run.error` stopped the run frame forwarder and the run event feed
+        // one event early, so a run that exceeded its budget never announced
+        // it and a failed run's feed never recorded its terminal event
+        // (COR-1419). A recovered run already works this way.
         // COR-625: a terminal transition owes this run one checkpoint-
         // retention step whether or not anyone ever calls `closed()`.
         // Memoized per run id, so this and `closed()`'s own fold resolve the
@@ -3404,6 +3446,18 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         flowController?.settle(runId);
         queueMicrotask(() => releaseTerminalRunReviewState(runId));
       });
+
+      // A run can settle without any terminal event: a durable run whose engine lost a
+      // checkpoint compare-and-swap, or was disposed, is abandoned to whoever owns it and
+      // resolves its result quietly (`driveDurableRun`). The terminal listeners above never run
+      // for it, and `run.error` no longer detaches the stream listeners, so a run that reported
+      // an error before being abandoned would keep them attached for good. A result settles
+      // only after any terminal event it carries has been dispatched, so detaching here cannot
+      // cut off the `run.completed` the forwarder and the run event feed are waiting for. The
+      // disposers drain as they run, which makes this a no-op after a terminal listener ran.
+      detachBestEffortPromise(
+        activeRun.result.finally(() => disposeRegisteredStreamListeners(disposeStreamListeners)),
+      );
 
       store.register(activeRun, runId);
       registeredForRecovery = true;
@@ -4166,6 +4220,36 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   }
 
   /**
+   * COR-851 — the boot sweep over every unfinished goal. Recovery reports what it
+   * could not do rather than throwing; each goal it found stuck (see
+   * `recoveryEntryFailure`) is a failure of the boot, not a clean one, and is
+   * diagnosed.
+   */
+  async function recoverGoalsAtBoot(): Promise<{ runId: string; reason: string }[]> {
+    const failures: { runId: string; reason: string }[] = [];
+    const goalRecovery = await goalsComposition.recoverAtBoot();
+    for (const failure of goalRecovery.failures) {
+      failures.push({ runId: failure.goalRunId, reason: failure.reason });
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Could not recover goal "${failure.goalRunId}": ${failure.reason}`,
+      });
+    }
+    for (const entry of goalRecovery.goals) {
+      const reason = recoveryEntryFailure(entry);
+      if (reason === undefined) continue;
+      failures.push({ runId: entry.goalRunId, reason });
+      diagnose({
+        level: 'error',
+        scope: 'recovery',
+        message: `[bureau] Goal "${entry.goalRunId}" is ${entry.attempt === 'failed' ? 'running with an attempt that could not be reconciled' : entry.outcome}: ${reason}`,
+      });
+    }
+    return failures;
+  }
+
+  /**
    * Boot-single-shot: called at most once per bureau, either immediately
    * during `createBureau()` or once from the deferred-authority-validator
    * path (never both — `durableRecoveryStarted` guards it). Resolves a
@@ -4221,7 +4305,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
     if (!runtime.durable) {
       await childTopology.reconcileRecovery();
-      return { outcome: 'clean', perRunFailures: [] };
+      // A goal's stored record is settled without an engine too: a marked
+      // cancellation is committed, and what cannot be read back is reported.
+      const goalFailures = dedupeRecoveryPerRunFailures(await recoverGoalsAtBoot());
+      return {
+        outcome: goalFailures.length > 0 ? 'partial' : 'clean',
+        perRunFailures: goalFailures,
+      };
     }
 
     const durable = runtime.durable;
@@ -4335,6 +4425,12 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // logic below (which would treat its absent session as "orphaned" and
         // cancel it).
         if (await runtime.isCatalogRecoveredRun(handle.id)) continue;
+
+        // COR-851: a goal's controller workflow carries `{ goalRunId }`, not an
+        // agent run's input, so the classification below would read it as a
+        // foreign run and cancel it. The goal control plane recovers it instead
+        // (`goals.recover`, below), by what the goal's own record says.
+        if (await goalsComposition.ownsWorkflow(handle.id)) continue;
 
         const readError = 'error' in rest ? rest.error : undefined;
         if (readError !== undefined) {
@@ -4567,6 +4663,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // `reconcileRecovery()` diagnoses each child's failure itself and
       // never rejects, so it cannot mask the error this `finally` follows.
       await childTopology.reconcileRecovery();
+      // COR-851 — every unfinished goal, now that its controller and its
+      // attempt's run have both been resumed by `recoverAll()` above. Recovery
+      // reports what it could not do rather than throwing.
+      currentRecoveryPerRunFailures?.push(...(await recoverGoalsAtBoot()));
     }
 
     const perRunFailures = dedupeRecoveryPerRunFailures(currentRecoveryPerRunFailures ?? []);
@@ -8079,6 +8179,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   async function createSchedule(
     definition: DurableScheduleDefinition,
   ): Promise<import('@lostgradient/weft').ScheduleSummary | undefined> {
+    if (definition.sessionId !== undefined) {
+      rejectReservedIdentifier('"sessionId"', definition.sessionId.trim());
+    }
     if (!runtime.durable) return undefined;
     // A schedule whose every fire would fail is worse than rejecting up front:
     // without a configured generate/provider, each tick's `createRunRuntime` throws
@@ -8434,6 +8537,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // The bounded wait on child results for 'abort' shutdown comes below, so
       // a child that ignores its abort costs at most that bound.
       await childTopology.drain();
+      // COR-851 — land every goal signal already being sent. A goal interrupted
+      // by shutdown is deliberately left non-terminal for the next process.
+      await goalsComposition.drain();
       // Land terminal session saves already under way before the outbox
       // drain await and `backgroundShutdownController.abort()` below: a save
       // committing after that abort leaves its `session.saved` entry
@@ -8769,6 +8875,95 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   let durableEventProducerInstance: DurableEventProducer | undefined;
 
   /**
+   * Whether `principal` may read `owner`'s durable history right now: the one
+   * rule `eventHistory()` and `subscribeEventHistory()` both apply, so a feed
+   * that cannot be paged by a stranger cannot be tailed by one either.
+   *
+   * - run: only the principal `runAttribution` records for it, failing closed
+   *   when none is recorded (see `resolveEventHistory`).
+   * - goal: only a principal `bureau.goals.get` shows the goal to, failing closed
+   *   for a goal that cannot be read, so an id cannot be probed.
+   * - session: open unless the session records an authority the principal does
+   *   not hold (a session with no recorded authority is open).
+   * - schedule: no ownership concept exists, so open.
+   *
+   * Read fresh on every call, because ownership is not stable for a live feed:
+   * a goal or run may not exist yet when a subscription starts, and a session
+   * id can be recreated under another authority.
+   */
+  async function ownerReadableBy(owner: DurableEventOwner, principal: string): Promise<boolean> {
+    switch (owner.kind) {
+      case 'run':
+        return runAttribution.get(owner.id)?.principal === principal;
+      case 'goal':
+        return (await goalsComposition.goals.get(owner.id, { principal })) !== undefined;
+      case 'session': {
+        if (!runtime.sessionStore) return true;
+        const session = await runtime.sessionStore.load(owner.id);
+        return !session || isSessionAuthorityAuthorized(session.metadata, principal);
+      }
+      case 'schedule':
+        return true;
+    }
+  }
+
+  /**
+   * `Bureau.subscribeEventHistory` for a caller that stated a principal. The
+   * store's subscription is opened at once (so an invalid cursor still throws
+   * synchronously, as for a trusted caller), but nothing it produces reaches
+   * `listener` until `ownerReadableBy` says so, and it says so again for every
+   * event, in order, through one serialized chain: an owner that did not exist
+   * when the subscription began (a goal created afterwards, a run dispatched
+   * afterwards) is authorized by the first event that names it, and an owner
+   * whose authority changes mid-feed stops being delivered. An event the
+   * principal may not read is dropped, never queued, and a failed check is
+   * a denial. The subscription stays open and silent rather than reporting a
+   * refusal, so it cannot be used to tell an owner that exists from one that
+   * does not.
+   */
+  function subscribeAuthorized(
+    history: DurableEventHistory,
+    owner: DurableEventOwner,
+    listener: (event: DurableEventEnvelope) => void,
+    principal: string,
+    subscribeOptions: DurableEventHistorySubscribeOptions | undefined,
+  ): Subscription {
+    let delivery: Promise<void> = Promise.resolve();
+    const deliver = async (event: DurableEventEnvelope): Promise<void> => {
+      let readable = false;
+      try {
+        readable = await ownerReadableBy(owner, principal);
+      } catch (error) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-event-history',
+          message: `[bureau] Could not authorize ${owner.kind}:${owner.id} for a subscriber; its event "${event.kind}" was not delivered: ${serializeUnknownError(error)}`,
+          cause: error,
+        });
+      }
+      if (!readable || inner.closed) return;
+      try {
+        listener(event);
+      } catch (error) {
+        diagnose({
+          level: 'error',
+          scope: 'durable-event-history',
+          message: `[bureau] Listener threw for ${owner.kind}:${owner.id} event "${event.kind}": ${serializeUnknownError(error)}`,
+          cause: error,
+        });
+      }
+    };
+    const inner = history.subscribeEventHistory(
+      owner,
+      (event) => {
+        delivery = delivery.then(() => deliver(event));
+      },
+      subscribeOptions,
+    );
+    return inner;
+  }
+
+  /**
    * AB-313 — authorization and deleted-aggregate handling layered over
    * `eventHistoryInstance.page()`. This wrapper (not `page()` itself, which
    * knows nothing about sessions, runs, or principals) is the only place
@@ -8867,10 +9062,26 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // (copilot review, PR #551). Omitting `principal` entirely still
       // skips this check (an internal/trusted caller), matching every
       // other owner kind's convention.
-      const runPrincipal = runAttribution.get(owner.id)?.principal;
-      if (runPrincipal !== principal) {
+      if (!(await ownerReadableBy(owner, principal))) {
         return { outcome: 'not-found' };
       }
+    }
+
+    // COR-851 — a goal's events are as private as the goal itself. The same
+    // rule `bureau.goals.get` applies: omitting `principal` is a trusted call,
+    // and a mismatch reads as `not-found`. A goal that cannot be read at all
+    // (never created, or unreadable) fails closed for the same reason a run
+    // with unverifiable ownership does, so its id cannot be probed. Goal ids
+    // are never reused and a goal is closed, not deleted, so the owner read
+    // here cannot change under the page read below, and a goal owner has no
+    // deletion marker. Checked before anything else, so neither a gap nor an
+    // owner-write wait is observable to a caller who may not see the goal.
+    if (
+      owner.kind === 'goal' &&
+      principal !== undefined &&
+      !(await ownerReadableBy(owner, principal))
+    ) {
+      return { outcome: 'not-found' };
     }
 
     // AB-372 (Codex review findings, PR #580 — see the running history in
@@ -9043,7 +9254,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     return page;
   }
 
-  const { runAgent, planChildRun, startChildRun } = createCatalogDispatcher({
+  const { runAgent, planChildRun, startChildRun, startGoalAttemptRun } = createCatalogDispatcher({
     agentCatalog,
     runtime,
     runtimeServices,
@@ -9150,6 +9361,34 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     delegation: options.children?.delegation,
   });
 
+  // COR-851 — durable goals: the control plane over the goal store, its
+  // controller workflow's ports, and the attempt forwarder.
+  const goalsComposition = composeBureauGoals({
+    catalog: goalValidatorCatalog,
+    kv: runtime.kv,
+    sessionStore: runtime.sessionStore,
+    resolveFreshAttemptSource: options.resolveFreshAttemptSource,
+    runtimeServices,
+    host: goalWorkflowHost,
+    getDurable: () => runtime.durable,
+    planAgent: planChildRun,
+    startAttemptRun: startGoalAttemptRun,
+    cancelRun: cancelDurableRun,
+    readRunRecord: (runId) => runtime.loadCatalogRunRecoveryRecord(runId),
+    fenceClaim: (runId, owner, tombstonedAt) =>
+      runtime.fenceGoalAttemptRecoveryRecord(runId, owner, tombstonedAt),
+    fenceHost: goalAttemptFenceHost,
+    // Not the memoized, audited step runs get: that records a run's cleanup
+    // under a run id, and a goal's controller is not a run. An attempt's run is
+    // one, but a goal prunes it at close, once its terminal checkpoint has been
+    // read, and a memoized "not terminal yet" answer must not outlive that.
+    // Pruning is idempotent, so asking again on every `close()` is safe.
+    cleanupWorkflow: classifyTerminalCheckpointCleanup,
+    isClosing: () => shutdownPromise !== undefined,
+    diagnose,
+    eventHistory: eventHistoryInstance,
+  });
+
   const bureau: Bureau<D> = {
     id: bureauId,
     eventFeed,
@@ -9173,6 +9412,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // The topology is keyed by plain runtime strings; `D` only narrows which
     // agent names a caller may pass, exactly as `run` above.
     children: childTopology.children as BureauChildren<AgentNames<D>>,
+    goals: goalsComposition.goals as BureauGoals<AgentNames<D>>,
     get auditTrail(): AuditTrail | undefined {
       return auditTrailInstance;
     },
@@ -9209,7 +9449,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
         // `eventHistory()` first.
         return { unsubscribe() {}, closed: true };
       }
-      return eventHistoryInstance.subscribeEventHistory(owner, listener, subscribeOptions);
+      const principal = subscribeOptions?.principal;
+      // An omitted principal is a trusted caller, as it is for `eventHistory()`.
+      return principal === undefined
+        ? eventHistoryInstance.subscribeEventHistory(owner, listener, subscribeOptions)
+        : subscribeAuthorized(eventHistoryInstance, owner, listener, principal, subscribeOptions);
     },
     get webhookNotifier(): WebhookNotifier | undefined {
       return webhookNotifierInstance;

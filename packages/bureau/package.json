@@ -47,12 +47,13 @@
     "validate": "bun run format:check && bun run lint && bun run check-types && bun run test"
   },
   "dependencies": {
+    "@lostgradient/cryptography": "workspace:*",
     "@lostgradient/lifecycle": "workspace:*",
     "@lostgradient/memory": "workspace:*",
     "@lostgradient/operative": "workspace:*",
     "@lostgradient/skills": "workspace:*",
     "@lostgradient/tool-protocol": "workspace:*",
-    "@lostgradient/weft": "^0.27.11",
+    "@lostgradient/weft": "^0.27.15",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "zod": "^4.4.3"

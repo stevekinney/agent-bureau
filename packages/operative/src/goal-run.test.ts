@@ -23,15 +23,17 @@ import type { FreshAttemptSourceResolver } from './fresh-attempt/validate';
 import {
   canTransitionGoalRun,
   GOAL_RUN_TRANSITIONS,
+  type GoalRunStatus,
+  type GoalRunTerminalReason,
+  type ValidatorOutcome,
+} from './goal-decision';
+import {
   startGoal,
   type GoalRun,
   type GoalRunEvent,
-  type GoalRunStatus,
-  type GoalRunTerminalReason,
   type StartGoalOptions,
   type Validator,
   type ValidatorInput,
-  type ValidatorOutcome,
 } from './goal-run';
 import { createSessionStore } from './session/create-session-store';
 import { createSessionHandle } from './session/session-handle';
@@ -791,6 +793,9 @@ describe('malformed validator output', () => {
     { kind: 'error', error: { kind: 'unknown-kind', code: 'X', message: 'm' } },
     { kind: 'unavailable', error: { kind: 'execute', code: 'X', message: 'm' } },
     { kind: 'indeterminate' },
+    { kind: 'pass', evidence: [null] },
+    { kind: 'pass', evidence: [{ detail: 'no source' }] },
+    { kind: 'fail', feedback: 'x', evidence: ['unit'], retryable: true },
   ])('treats %p as an output error and never retries it', async (malformed) => {
     const fixture = createFixture();
     const { result, run } = await runToEnd(
@@ -821,6 +826,84 @@ describe('malformed validator output', () => {
     const { result, run } = await runToEnd(goalOptions(fixture, scriptedValidator([step])));
     expect(result.validatorError?.kind).toBe('execute');
     expect(result.validatorError?.message).toContain('boom');
+    expect(run.attempts()).toHaveLength(1);
+  });
+
+  /** An object whose named property throws when read, as a hostile or buggy validator may return. */
+  const throwsOn = (property: string, base: Record<string, unknown> = {}) =>
+    Object.defineProperty({ ...base }, property, {
+      enumerable: true,
+      get() {
+        throw new Error(`reading ${property} threw`);
+      },
+    });
+
+  it.each([
+    ['its kind', () => throwsOn('kind')],
+    [
+      'an error code',
+      () => ({ kind: 'error', error: throwsOn('code', { kind: 'execute', message: 'm' }) }),
+    ],
+    ['an evidence source', () => ({ kind: 'pass', evidence: [throwsOn('source')] })],
+    [
+      'an evidence detail',
+      () => ({ kind: 'pass', evidence: [throwsOn('detail', { source: 'unit' })] }),
+    ],
+    [
+      'a failure reason',
+      () => throwsOn('feedback', { kind: 'fail', evidence: [], retryable: true }),
+    ],
+    [
+      'any property at all',
+      () =>
+        new Proxy(
+          {},
+          {
+            get(_target, property) {
+              // `Promise.resolve` probes `then` first; only normalization reads the rest.
+              if (property === 'then') return undefined;
+              throw new Error('proxy get threw');
+            },
+          },
+        ),
+    ],
+  ])('settles the goal as an output error when reading %s throws', async (_label, hostile) => {
+    const fixture = createFixture();
+    const { result, run } = await runToEnd(
+      goalOptions(fixture, scriptedValidator([hostile()]), {
+        retryPolicy: {
+          retryOn: ['validator-fail-retryable', 'validator-unavailable', 'validator-canceled'],
+        },
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'failed',
+      terminalReason: 'validator-infrastructure-error',
+    });
+    expect(result.validatorError).toMatchObject({
+      kind: 'output',
+      code: 'MALFORMED_VALIDATOR_OUTPUT',
+    });
+    expect(run.attempts()).toHaveLength(1);
+    expect(fixture.runtime.pendingTimers()).toEqual([]);
+  });
+
+  it('settles a goal whose validator rejects with a value that cannot be described', async () => {
+    const fixture = createFixture();
+    const undescribable = Object.assign(new Error('hidden'), {});
+    Object.defineProperty(undescribable, 'message', {
+      get() {
+        throw new Error('message getter threw');
+      },
+    });
+    const { result, run } = await runToEnd(
+      goalOptions(fixture, scriptedValidator([() => Promise.reject(undescribable)])),
+    );
+    expect(result).toMatchObject({
+      status: 'failed',
+      terminalReason: 'validator-infrastructure-error',
+    });
+    expect(result.validatorError?.kind).toBe('execute');
     expect(run.attempts()).toHaveLength(1);
   });
 
@@ -1014,6 +1097,32 @@ describe('terminal reasons', () => {
       terminalReason: 'aggregate-budget-exceeded',
     });
     expect(run.attempts()).toHaveLength(1);
+  });
+
+  it('exhausts, applying no verdict, when the bound elapsed while the validator ran, even if its timer is inert', async () => {
+    const fixture = createFixture();
+    const inertTimers = {
+      ...fixture.runtime.timers,
+      setTimeout: () => ({}),
+      clearTimeout: () => {},
+    };
+    const runtime = { ...fixture.runtime, timers: inertTimers } as never;
+    const validator = scriptedValidator([
+      async () => {
+        await fixture.runtime.advance(1000);
+        return PASS;
+      },
+    ]);
+    const { result } = await runToEnd(
+      goalOptions(fixture, validator, {
+        runtime,
+        budget: { maximumAttempts: 3, maximumTotalDurationMs: 1000 },
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'exhausted',
+      terminalReason: 'aggregate-budget-exceeded',
+    });
   });
 
   it('clears the duration timer once the goal is terminal', async () => {
@@ -1615,6 +1724,25 @@ describe('abort', () => {
     const seen = types(await events);
     expect(seen).toContain('goal.retrying');
     expect(seen).not.toContain('goal.failed');
+  });
+
+  it('exhausts at the aggregate duration bound while the validator never settles', async () => {
+    const fixture = createFixture();
+    const reached = deferred<void>();
+    const validator = scriptedValidator([parkedValidatorStep(reached)]);
+    const run = startGoal(
+      goalOptions(fixture, validator, {
+        budget: { maximumAttempts: 3, maximumTotalDurationMs: 1000 },
+      }),
+    );
+    await reached.promise;
+    await fixture.runtime.advance(1000);
+    const result = await run.result();
+    expect(result).toMatchObject({
+      status: 'exhausted',
+      terminalReason: 'aggregate-budget-exceeded',
+    });
+    expect(run.attempts()[0]?.validation).toBeUndefined();
   });
 
   it('aborts one attempt mid-validation on the last allowed attempt and exhausts the goal', async () => {

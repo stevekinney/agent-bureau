@@ -102,7 +102,12 @@ function trackLifetime(result: unknown, close: () => void): unknown {
   }
   if (typeof (result as { then?: unknown }).then === 'function') {
     try {
-      (result as PromiseLike<unknown>).then(close, close);
+      // Registered synchronously, and attached only to the original thenable:
+      // whatever `then()` returns is a different value (a fluent thenable may
+      // return itself) and must never be assimilated or observed, or its
+      // settlement, a second `then()` call, or its rejection would replace or
+      // pre-empt the original's.
+      void (result as PromiseLike<unknown>).then(close, close);
     } catch {
       // A `then` that throws synchronously must not escape the verb call or
       // leak the handle; awaiting the value surfaces the failure as usual.

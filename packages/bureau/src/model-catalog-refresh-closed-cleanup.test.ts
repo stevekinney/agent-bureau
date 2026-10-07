@@ -1,7 +1,7 @@
 import type { BackendDescriptor } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
-import { createModelCatalogService } from './model-catalog-refresh';
 
+import { createModelCatalogService } from './model-catalog-refresh';
 import {
   createClock,
   createIdMinter,

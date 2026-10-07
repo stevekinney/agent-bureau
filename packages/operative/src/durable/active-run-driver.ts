@@ -271,7 +271,16 @@ export async function driveDurableRun(
     // shaped result and leave the session `running`. Structural code match (not
     // `instanceof`) to survive the module boundary — `isWeftErrorLike` narrows a
     // caught unknown without `instanceof`.
-    if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
+    //
+    // `WorkflowCheckpointConflictError` takes the same path: another engine
+    // over the same store won a checkpoint compare-and-swap for this run, so it
+    // owns the run's durable state and terminal outcome. This engine stopped
+    // driving the run and wrote nothing; firing a terminal lifecycle here would
+    // persist an error/abort over the winner's run, so it must stay write-free.
+    if (
+      isWeftErrorLike(error) &&
+      (error.code === 'EngineDisposedError' || error.code === 'WorkflowCheckpointConflictError')
+    ) {
       // AB-204: closed() classifies this as unresolved/unreachable, never
       // completed/not-required — see `reachability`'s doc comment above.
       reachability.unreachable = true;

@@ -105,7 +105,13 @@ export async function driveReattachedRun(
     // services-unavailable, and the resolver ALREADY reconciled that session to
     // `error`. Firing a terminal lifecycle here would clobber what the
     // resolver/teardown owns, so we only log and resolve quiet.
-    if (isWeftErrorLike(error) && error.code === 'EngineDisposedError') {
+    // WorkflowCheckpointConflictError = another engine over the same store won
+    // a checkpoint compare-and-swap for this run and owns its durable state, so
+    // this engine stopped driving it and must not write a terminal over it.
+    if (
+      isWeftErrorLike(error) &&
+      (error.code === 'EngineDisposedError' || error.code === 'WorkflowCheckpointConflictError')
+    ) {
       // AB-204 AC8: closed() classifies this as unresolved/unreachable,
       // never failed — see `reachability`'s doc comment above.
       reachability.unreachable = true;

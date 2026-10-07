@@ -33,6 +33,49 @@ export type {
   DurableEventOwnerKind,
   DurableEventPage,
 } from './event-history-types';
+export {
+  START_ATTEMPT_MAXIMUM_TRIES,
+  START_ATTEMPT_TIMEOUT_MS,
+  createGoalWorkflow,
+} from './goal-workflow';
+export {
+  GOAL_CANCEL_SIGNAL,
+  GOAL_WORKFLOW_RESULT_SCHEMA_VERSION,
+  GOAL_WORKFLOW_TYPE,
+  GoalControllerError,
+  goalAttemptTerminalSignalName,
+} from './goal-workflow-ports';
+export type {
+  GoalAttemptTerminalSignal,
+  GoalWorkflowAbortRequest,
+  GoalWorkflowActiveWork,
+  GoalWorkflowAttempt,
+  GoalWorkflowAttemptStatus,
+  GoalWorkflowAttemptUsage,
+  GoalWorkflowCommit,
+  GoalWorkflowIdentifiers,
+  GoalWorkflowInput,
+  GoalWorkflowLoad,
+  GoalWorkflowPorts,
+  GoalWorkflowRecord,
+  GoalWorkflowRejection,
+  GoalWorkflowResult,
+  GoalWorkflowStart,
+  GoalWorkflowStartRequest,
+  GoalWorkflowTransition,
+  GoalWorkflowUsage,
+  GoalWorkflowValidation,
+  GoalWorkflowValidatorRequest,
+  GoalWorkflowView,
+} from './goal-workflow-ports';
+export {
+  buildGoalForcedFinish,
+  goalInputFeedbackFor,
+  isDeadlineElapsed,
+  remainingMilliseconds,
+} from './goal-workflow-transitions';
+export { readDurableRunResult } from './read-run-result';
+export type { DurableRunReading, ReadDurableRunResultOptions } from './read-run-result';
 export { createRunWorkflow } from './run-workflow';
 export { isAgentRunWorkflowInput } from './run-workflow-input';
 export type { AgentRunWorkflowInput, CreateRunWorkflowOptions } from './run-workflow-input';

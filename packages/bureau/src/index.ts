@@ -1,4 +1,3 @@
-export { createAgentCatalog } from './agent-catalog';
 export type {
   AgentCatalogEntry,
   AgentDefinitions,
@@ -9,12 +8,7 @@ export type {
   BureauAgentCatalog,
   CreateAgentCatalogOptions,
 } from './agent-catalog';
-export {
-  AUDIT_EVENT_TYPES,
-  computeInitialAuditSequence,
-  createAuditTrail,
-  encodeKey as encodeAuditEntryKey,
-} from './audit-trail';
+export { createAgentCatalog } from './agent-catalog';
 export type {
   AuditEventType,
   AuditPruneResult,
@@ -24,7 +18,12 @@ export type {
   AuditTrail,
   AuditTrailOptions,
 } from './audit-trail';
-export { CHILD_AGENT_RUN_WORKFLOW_TYPE } from './child-topology';
+export {
+  AUDIT_EVENT_TYPES,
+  computeInitialAuditSequence,
+  createAuditTrail,
+  encodeKey as encodeAuditEntryKey,
+} from './audit-trail';
 export type {
   BureauChildAuthorityRequest,
   BureauChildCancelOutcome,
@@ -35,11 +34,12 @@ export type {
   BureauChildDispatchRequest,
   BureauChildGrantSummary,
   BureauChildReference,
+  BureauChildren,
   BureauChildSignalOutcome,
   BureauChildSignalRequest,
   BureauChildWaitOutcome,
-  BureauChildren,
 } from './child-topology';
+export { CHILD_AGENT_RUN_WORKFLOW_TYPE } from './child-topology';
 export type {
   BureauChildOutcome,
   BureauChildParentCancellation,
@@ -49,13 +49,6 @@ export type {
   BureauChildWorkflowIdentity,
 } from './child-topology-store';
 export { createAgentDiscoveryTool } from './create-agent-discovery-tool';
-export {
-  BureauError,
-  ScheduleLocatorUnavailableError,
-  classifyRecoveredRun,
-  classifyRecoveredRunDetailed,
-  createBureau,
-} from './create-bureau';
 export type {
   BureauErrorNotConfiguredSubject,
   ClassifyRecoveredRunArgs,
@@ -63,17 +56,17 @@ export type {
   SessionLoadOutcome,
 } from './create-bureau';
 export {
+  BureauError,
+  classifyRecoveredRun,
+  classifyRecoveredRunDetailed,
+  createBureau,
+  ScheduleLocatorUnavailableError,
+} from './create-bureau';
+export {
   createFanOutRouting,
   createRoundRobinRouting,
   createSupervisor,
 } from './create-supervisor';
-export {
-  DEFAULT_PAGE_LIMIT,
-  RUN_DURABLE_EVENT_TYPES,
-  UnsupportedDurableEventSchemaVersionError,
-  createDurableEventHistory,
-  createDurableEventProducer,
-} from './durable-event-history';
 export type {
   DurableEventHistory,
   DurableEventHistoryPageOptions,
@@ -83,6 +76,14 @@ export type {
   RetainedRunOwnerSnapshot,
 } from './durable-event-history';
 export {
+  createDurableEventHistory,
+  createDurableEventProducer,
+  DEFAULT_PAGE_LIMIT,
+  RUN_DURABLE_EVENT_TYPES,
+  UnsupportedDurableEventSchemaVersionError,
+} from './durable-event-history';
+export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
+export {
   ActionEvent,
   BureauDisposedEvent,
   RecoveryAttemptedEvent,
@@ -91,14 +92,43 @@ export {
   RunRegisteredEvent,
   RunRemovedEvent,
 } from './events';
-export type { BureauEventMap, RecoveredRunVerdict, RecoveryRejectionReason } from './events';
+export { MAXIMUM_CONTROLLER_RESTARTS } from './goal-recovery';
+export type {
+  ActiveGoalWork,
+  DurableGoalAttempt,
+  DurableGoalAttemptStatus,
+  DurableGoalAttemptUsage,
+  DurableGoalUsage,
+  DurableGoalValidation,
+  GoalCancellationMarker,
+  GoalObjective,
+  GoalState,
+  GoalTransitionRecord,
+} from './goal-state';
 export {
-  leaseEvidenceFromLostHealth,
-  projectEngineLeaseSnapshot,
-  projectStreamLivenessSnapshot,
-  projectTaskLivenessSnapshot,
-  projectWorkerLivenessSnapshot,
-} from './liveness-projection';
+  GOAL_OBJECTIVE_MAXIMUM_BYTES,
+  GOAL_STATE_SCHEMA_VERSION,
+  GOAL_VALIDATION_MAXIMUM_BYTES,
+  GoalObjectiveTooLargeError,
+} from './goal-state';
+export type {
+  BureauGoalActiveWork,
+  BureauGoalAttemptRecovery,
+  BureauGoalCancellationWait,
+  BureauGoalCancelOptions,
+  BureauGoalCancelOutcome,
+  BureauGoalCloseOutcome,
+  BureauGoalControllerStart,
+  BureauGoalCreateOutcome,
+  BureauGoalCreateRejectionCode,
+  BureauGoalListOptions,
+  BureauGoalQuery,
+  BureauGoalRecoveryEntry,
+  BureauGoalRecoveryOutcome,
+  BureauGoalRecoveryReport,
+  BureauGoalRequest,
+  BureauGoals,
+} from './goal-types';
 export type {
   LivenessSnapshotEnvelope,
   TaskDiagnosticsFilter,
@@ -106,7 +136,13 @@ export type {
   WeftLivenessSource,
   WorkerDiagnosticsResult,
 } from './liveness-projection';
-export { createModelCatalogService } from './model-catalog-refresh';
+export {
+  leaseEvidenceFromLostHealth,
+  projectEngineLeaseSnapshot,
+  projectStreamLivenessSnapshot,
+  projectTaskLivenessSnapshot,
+  projectWorkerLivenessSnapshot,
+} from './liveness-projection';
 export type {
   CatalogDescriptorSource,
   CatalogRefreshCleanupAcknowledgement,
@@ -121,35 +157,35 @@ export type {
   ModelCatalogService,
   SubscribeSnapshotOptions,
 } from './model-catalog-refresh';
-export { createModelPolicyPlanner } from './model-policy';
+export { createModelCatalogService } from './model-catalog-refresh';
 export type {
   BureauModelPolicyOptions,
   CreateModelPolicyPlannerOptions,
   ModelPolicyPlanner,
   PlanSelectionRequest,
 } from './model-policy';
-export { createOnlineEvalSampler } from './online-evals';
+export { createModelPolicyPlanner } from './model-policy';
 export type {
   EvalScore,
   OnlineEvalJudge,
   OnlineEvalSampler,
   OnlineEvalSamplerOptions,
 } from './online-evals';
+export { createOnlineEvalSampler } from './online-evals';
+export type { BureauToolbox, DurableComposition, RuntimeComposition } from './runtime-composition';
 export {
-  DEFAULT_RUN_MEMORY_CAPABILITIES,
   createMemoryPersistHook,
   createMemoryRecallHook,
   createRunMemoryAuthority,
   createRuntimeComposition,
+  DEFAULT_RUN_MEMORY_CAPABILITIES,
 } from './runtime-composition';
-export type { BureauToolbox, DurableComposition, RuntimeComposition } from './runtime-composition';
 export {
   serializeActionDetail,
   serializeRunDetail,
   serializeRunState,
   serializeUnknownError,
 } from './serialization';
-export { createSteeringGate } from './steering';
 export type {
   BureauSteeringGate,
   ImplementedSteeringCommand,
@@ -159,6 +195,20 @@ export type {
   SteeringCommandRequest,
   SteeringCommandSnapshot,
 } from './steering';
+export { createSteeringGate } from './steering';
+export type {
+  AgentDescriptor,
+  CreateSupervisorOptions,
+  PipelineStage,
+  RoutingStrategy,
+  Supervisor,
+  SupervisorEventMap,
+  SupervisorEvents,
+  SupervisorEventType,
+  SupervisorResult,
+  SupervisorTaskResult,
+  SynthesisStrategy,
+} from './supervisor-contracts';
 export {
   SynthesisCompletedEvent,
   SynthesisStartedEvent,
@@ -167,28 +217,20 @@ export {
   TaskRoutedEvent,
 } from './supervisor-contracts';
 export type {
-  AgentDescriptor,
-  CreateSupervisorOptions,
-  PipelineStage,
-  RoutingStrategy,
-  Supervisor,
-  SupervisorEventMap,
-  SupervisorEventType,
-  SupervisorEvents,
-  SupervisorResult,
-  SupervisorTaskResult,
-  SynthesisStrategy,
-} from './supervisor-contracts';
-export {
-  DURABLE_EVENT_HISTORY_FIXTURE_SEQUENCE,
-  createDurableEventHistoryFixture,
-  seedSchemaVersionMismatchRecord,
-} from './test/durable-event-history-fixture';
-export type {
   DurableEventHistoryFixture,
   DurableEventHistoryFixtureOptions,
   DurableEventHistoryFixtureRecord,
 } from './test/durable-event-history-fixture';
+export {
+  createDurableEventHistoryFixture,
+  DURABLE_EVENT_HISTORY_FIXTURE_SEQUENCE,
+  seedSchemaVersionMismatchRecord,
+} from './test/durable-event-history-fixture';
+export type {
+  BureauFaultOperation,
+  BureauFaultPlan,
+  BureauFaultPlanEntry,
+} from './test/fault-plan';
 export {
   BureauFaultSelectorResolutionError,
   selectAuditWriteFaultTarget,
@@ -196,30 +238,20 @@ export {
   selectWebhookDeliveryFaultTarget,
 } from './test/fault-plan';
 export type {
-  BureauFaultOperation,
-  BureauFaultPlan,
-  BureauFaultPlanEntry,
-} from './test/fault-plan';
-export { BureauHarnessUnsupportedError, createBureauTestHarness } from './test/harness';
-export type {
   BureauHarnessCapability,
   BureauTestHarness,
   BureauTestHarnessOptions,
   DurableRunRegistration,
 } from './test/harness';
-export { BureauQuiescenceError, assertBureauQuiescent } from './test/quiescence';
+export { BureauHarnessUnsupportedError, createBureauTestHarness } from './test/harness';
 export type { BureauIncompleteWork, BureauQuiescenceReport } from './test/quiescence';
-export { assembleReproductionArtifact, locateWorkspaceRoot } from './test/reproduction-artifact';
+export { assertBureauQuiescent, BureauQuiescenceError } from './test/quiescence';
 export type {
   AssembleReproductionArtifactOptions,
   ReproductionArtifact,
   ReproductionArtifactEnvironment,
 } from './test/reproduction-artifact';
-export {
-  createLmdbStorageFixture,
-  createMemoryStorageFixture,
-  createSqliteStorageFixture,
-} from './test/storage-fixtures';
+export { assembleReproductionArtifact, locateWorkspaceRoot } from './test/reproduction-artifact';
 export type {
   BureauStorageFixture,
   CreateLmdbStorageFixtureOptions,
@@ -227,9 +259,10 @@ export type {
   CreatePersistentStorageFixtureOptions,
 } from './test/storage-fixtures';
 export {
-  DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT,
-  DEFAULT_SESSION_INPUT_BACKLOG_LIMIT,
-} from './types';
+  createLmdbStorageFixture,
+  createMemoryStorageFixture,
+  createSqliteStorageFixture,
+} from './test/storage-fixtures';
 export type {
   AbortingRun,
   Bureau,
@@ -281,7 +314,10 @@ export type {
   ToolPolicy,
   ToolSummary,
 } from './types';
-export { createWebhookNotifier } from './webhook-notifier';
+export {
+  DEFAULT_PRINCIPAL_SESSION_INPUT_BACKLOG_LIMIT,
+  DEFAULT_SESSION_INPUT_BACKLOG_LIMIT,
+} from './types';
 export type {
   WebhookDeliveryRecord,
   WebhookNotifier,
@@ -289,6 +325,7 @@ export type {
   WebhookTarget,
   WebhookTriggerType,
 } from './webhook-notifier';
+export { createWebhookNotifier } from './webhook-notifier';
 export { streamEventToFrame } from './websocket-frames';
 /*
  * A bureau's lifecycle events, projected onto Weft's replay-plus-live feed
@@ -297,20 +334,20 @@ export { streamEventToFrame } from './websocket-frames';
  * registration, recovery, disposal, and review describe the supervisor.
  */
 export {
-  PUBLISHED_BUREAU_EVENT_KINDS,
-  createBureauEventFeed,
-  projectBureauEvent,
-  publishedBureauEventKinds,
   type BureauEventEnvelope,
   type BureauEventFeed,
   type BureauEventFeedOptions,
+  createBureauEventFeed,
+  projectBureauEvent,
+  PUBLISHED_BUREAU_EVENT_KINDS,
   type PublishedBureauEventKind,
+  publishedBureauEventKinds,
 } from './bureau-event-feed';
 export {
   bureauEventEnvelopeSchema,
-  bureauEventsSubscriptionOperation,
-  createBureauEventRegistry,
   type BureauEventRegistry,
   type BureauEventsOperationEngine,
   type BureauEventsSubscriptionInput,
+  bureauEventsSubscriptionOperation,
+  createBureauEventRegistry,
 } from './bureau-events-operation';

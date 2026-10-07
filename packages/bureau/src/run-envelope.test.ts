@@ -1,7 +1,7 @@
 import { TypedEventTarget } from '@lostgradient/lifecycle';
 import {
   type ActiveRun,
-  BudgetExceededEvent,
+  BudgetExceededError,
   BudgetThresholdEvent,
   type CombinedOperativeEventMap,
   ContextBudgetWarningEvent,
@@ -10,6 +10,7 @@ import {
   type GenerateFunction,
   type RunFrame,
   runFrameSchema,
+  type RunOptions,
   StreamCustomEvent,
   type StreamEventMap,
 } from '@lostgradient/operative';
@@ -215,23 +216,107 @@ describe('createRunFrameForwarder', () => {
     }
   });
 
-  it('emits an error notification frame when the cost budget is exceeded', () => {
-    const { activeRun, dispatch } = createEventDrivenActiveRun();
+  it('emits one error notification before the terminal observer when a real run exceeds its budget', async () => {
+    const noopTool = createTool({
+      name: 'noop',
+      description: 'does nothing',
+      input: z.object({}),
+      execute: async () => ({}),
+    });
+    const activeRun = createActiveRun({
+      generate: async ({ step }) =>
+        step === 0
+          ? { content: '', toolCalls: [{ name: 'noop', arguments: {} }] }
+          : Promise.reject(new BudgetExceededError('token limit reached')),
+      toolbox: createToolbox<readonly Tool[]>([noopTool]),
+      conversation: new Conversation(),
+      maximumSteps: 5,
+      runId: 'run-budget-exceeded',
+    });
     const frames: RunFrame[] = [];
-    const dispose = createRunFrameForwarder('run-budget-exceeded', activeRun, (frame) =>
-      frames.push(frame),
+    const order: string[] = [];
+    const dispose = createRunFrameForwarder(
+      'run-budget-exceeded',
+      activeRun,
+      (frame) => {
+        frames.push(frame);
+        if (frame.type === 'notification' && frame.code === 'budget.exceeded') {
+          order.push('notification');
+        }
+      },
+      { clock: () => 4242 },
     );
+    activeRun.addEventListener('run.completed', () => order.push('terminal'));
 
-    dispatch(new BudgetExceededEvent({ currentCost: 6, budget: 5, model: 'claude-sonnet-5' }));
+    const result = await activeRun.result;
     dispose();
 
-    const notification = frames.find((frame) => frame.type === 'notification');
+    expect(result.finishReason).toBe('budget-exceeded');
+    expect(order).toEqual(['notification', 'terminal']);
+    const notifications = frames.filter(
+      (frame) => frame.type === 'notification' && frame.code === 'budget.exceeded',
+    );
+    expect(notifications).toHaveLength(1);
+    const notification = notifications[0];
     expect(notification?.type).toBe('notification');
     if (notification?.type === 'notification') {
       expect(notification.level).toBe('error');
       expect(notification.code).toBe('budget.exceeded');
-      expect(notification.message).toBe('Cost budget exceeded (6 of 5)');
+      expect(notification.message).toBe('Budget exceeded');
+      expect(notification.step).toBe(1);
+      expect(notification.timestamp).toBe(4242);
     }
+  });
+
+  it('does not turn a deprecated budget event, a successful run or a failed run into a budget notification', async () => {
+    const { activeRun, dispatch } = createEventDrivenActiveRun();
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-legacy-budget', activeRun, (frame) =>
+      frames.push(frame),
+    );
+    dispatch(new Event('budget.exceeded'));
+    dispose();
+    expect(frames).toEqual([]);
+
+    const successfulRun = createActiveRun({
+      generate: generateDone,
+      toolbox: createToolbox<readonly Tool[]>([]),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+      runId: 'run-within-budget',
+    });
+    const successfulFrames: RunFrame[] = [];
+    const disposeSuccessful = createRunFrameForwarder('run-within-budget', successfulRun, (frame) =>
+      successfulFrames.push(frame),
+    );
+    const successfulResult = await successfulRun.result;
+    expect(successfulResult.finishReason).not.toBe('budget-exceeded');
+    disposeSuccessful();
+    expect(
+      successfulFrames.some(
+        (frame) => frame.type === 'notification' && frame.code === 'budget.exceeded',
+      ),
+    ).toBe(false);
+
+    const failedRun = createActiveRun({
+      generate: () => Promise.reject(new Error('provider unavailable')),
+      toolbox: createToolbox<readonly Tool[]>([]),
+      conversation: new Conversation(),
+      maximumSteps: 1,
+      runId: 'run-provider-error',
+    });
+    const failedFrames: RunFrame[] = [];
+    const disposeFailed = createRunFrameForwarder('run-provider-error', failedRun, (frame) =>
+      failedFrames.push(frame),
+    );
+    const failedResult = await failedRun.result;
+    disposeFailed();
+    expect(failedResult.finishReason).toBe('error');
+    expect(
+      failedFrames.some(
+        (frame) => frame.type === 'notification' && frame.code === 'budget.exceeded',
+      ),
+    ).toBe(false);
   });
 
   it('emits a warning notification frame when the context window budget is running low', () => {
@@ -310,5 +395,105 @@ describe('createRunFrameForwarder', () => {
       }),
     );
     expect(frames.filter((frame) => frame.type === 'assistant-chunk')).toHaveLength(1);
+  });
+});
+
+/**
+ * Operative's `run.error` event names the step a failure belongs to, and a failure can happen
+ * where no step event has fired for that step: `onMaximumSteps` runs after the last step ended,
+ * and a context compaction runs while a step is prepared, before `step.started` is dispatched.
+ * The budget notification must name the step `run.error` reports, not the last step event seen.
+ */
+const callToolEveryStep: GenerateFunction = async () => ({
+  content: '',
+  toolCalls: [{ name: 'noop', arguments: {} }],
+});
+
+/** A compaction hook that fails with a budget error on its `failingCall`th call. */
+function compactionFailingOnCall(failingCall: number): RunOptions['contextManagement'] {
+  let calls = 0;
+  return {
+    maxTokens: 100,
+    compactionThreshold: 50,
+    // Over the threshold on every step, so each step's preparation compacts.
+    tokenEstimator: () => 1000,
+    onCompact: async () => {
+      calls += 1;
+      if (calls === failingCall) throw new BudgetExceededError('token limit reached');
+    },
+  };
+}
+
+const budgetFailureSites: Array<{
+  name: string;
+  step: number;
+  options: () => Partial<RunOptions>;
+}> = [
+  {
+    name: 'onMaximumSteps throws once the step limit is reached',
+    step: 1,
+    options: () => ({
+      maximumSteps: 1,
+      onMaximumSteps: async () => {
+        throw new BudgetExceededError('token limit reached');
+      },
+    }),
+  },
+  {
+    name: 'compaction throws while step 1 is prepared, before its step.started',
+    step: 1,
+    options: () => ({ contextManagement: compactionFailingOnCall(2) }),
+  },
+  {
+    name: 'compaction throws while step 0 is prepared, before any step event',
+    step: 0,
+    options: () => ({ contextManagement: compactionFailingOnCall(1) }),
+  },
+  {
+    name: 'a stop condition throws after step 1 completed',
+    step: 1,
+    options: () => ({
+      stopWhen: (stepResult) => {
+        if (stepResult.step === 1) throw new BudgetExceededError('cost limit reached');
+        return false;
+      },
+    }),
+  },
+];
+
+describe.each(budgetFailureSites)('createRunFrameForwarder when $name', ({ step, options }) => {
+  it('names the step that run.error reports in the one budget notification', async () => {
+    const noopTool = createTool({
+      name: 'noop',
+      description: 'does nothing',
+      input: z.object({}),
+      execute: async () => ({}),
+    });
+    const activeRun = createActiveRun({
+      generate: callToolEveryStep,
+      toolbox: createToolbox<readonly Tool[]>([noopTool]),
+      conversation: new Conversation(),
+      maximumSteps: 5,
+      runId: 'run-budget-failure-site',
+      ...options(),
+    });
+    const reportedSteps: number[] = [];
+    activeRun.addEventListener('run.error', (event) => reportedSteps.push(event.step));
+    const frames: RunFrame[] = [];
+    const dispose = createRunFrameForwarder('run-budget-failure-site', activeRun, (frame) =>
+      frames.push(frame),
+    );
+
+    const result = await activeRun.result;
+    dispose();
+
+    expect(result.finishReason).toBe('budget-exceeded');
+    // The expected step is what Operative itself reports, so the case cannot drift from it.
+    expect(reportedSteps).toEqual([step]);
+    const notifications = frames.filter(
+      (frame): frame is Extract<RunFrame, { type: 'notification' }> =>
+        frame.type === 'notification' && frame.code === 'budget.exceeded',
+    );
+    expect(notifications.map((notification) => notification.step)).toEqual([step]);
   });
 });

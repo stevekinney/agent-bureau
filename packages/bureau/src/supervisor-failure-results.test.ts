@@ -1,5 +1,6 @@
 import type { RunResult } from '@lostgradient/operative';
 import { describe, expect, it } from 'bun:test';
+
 import { createAgentCatalog } from './agent-catalog';
 import { createSupervisor } from './create-supervisor';
 import { TaskCompletedEvent, TaskFailedEvent } from './supervisor-contracts';

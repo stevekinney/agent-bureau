@@ -8,6 +8,7 @@
  * initialization failure are covered by `agent-catalog.test.ts` and
  * `create-bureau.test.ts` respectively.
  */
+import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import {
   AgentContractError,
   type AgentRun,
@@ -24,6 +25,18 @@ import { z } from 'zod';
 
 import { BureauError, createBureau } from './create-bureau';
 import type { BureauRunOptions } from './types';
+
+const runtime = createDefaultRuntimeServices();
+
+/**
+ * One timer turn on the runtime timers. A negative assertion drains with this
+ * rather than a microtask or MessageChannel turn, because those return in a
+ * fraction of a millisecond and would end the observation window before
+ * anything scheduled on a timer could fire.
+ */
+function waitOneTimerTurn(): Promise<void> {
+  return new Promise<void>((resolve) => runtime.timers.setTimeout(resolve, 0));
+}
 
 function mockGenerate(content = 'ok') {
   return async () => ({ content, toolCalls: [] });
@@ -927,7 +940,7 @@ describe('Bureau invariants on catalog-agent dispatch (COR-1265, COR-1277)', () 
       // moving `createActiveRun` into the resolver makes this fail only with
       // the drain, and pass without it.
       for (let attempt = 0; attempt < 20; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await waitOneTimerTurn();
       }
 
       expect(generateCalls).toBe(0);
@@ -1151,7 +1164,7 @@ describe('every Bureau hook hand-off is a merge (COR-1265 criterion 3)', () => {
     try {
       const run = await bureau.createRun({ message: 'hi' });
       for (let attempt = 0; attempt < 50 && seen.length === 0; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        await waitOneTimerTurn();
       }
       expect(bureau.getRun(run.id)).toBeDefined();
       expect(seen).toContain('BUREAU-TIER-REACHED');

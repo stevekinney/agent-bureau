@@ -449,6 +449,36 @@ describe('children.dispatch', () => {
     expect('child' in outcome).toBe(false);
   });
 
+  it.each(['goal:g1', 'goal-g1-a0', 'bureau-goal-audit:g1'])(
+    'refuses the identifier %s, which durable goals own, before anything is reserved or recorded',
+    async (childRunId) => {
+      const fixture = createFixture({ delegation: { secret: SECRET } });
+
+      const outcome = await fixture.topology.children.dispatch({
+        parentRunId: 'parent-1',
+        agentName: 'worker',
+        input: 'x',
+        childRunId,
+        principal: 'mallory',
+      });
+
+      expect(outcome).toMatchObject({ outcome: 'rejected', code: 'reserved-child-run-id' });
+      expect((outcome as { reason: string }).reason).toContain('reserved-identifier');
+      expect(await fixture.store.get(childRunId)).toBeUndefined();
+      expect(await fixture.store.listAll()).toEqual([]);
+      expect(fixture.starts).toEqual([]);
+      expect(fixture.audits).toEqual([]);
+    },
+  );
+
+  it('leaves an identifier that only resembles a goal prefix free', async () => {
+    const fixture = createFixture();
+
+    const outcome = await startedChild(fixture, { childRunId: 'goalpost' });
+
+    expect(outcome.childRunId).toBe('goalpost');
+  });
+
   it('refuses a child identifier that already names another run, before anything is reserved or recorded', async () => {
     const fixture = createFixture({
       delegation: { secret: SECRET },

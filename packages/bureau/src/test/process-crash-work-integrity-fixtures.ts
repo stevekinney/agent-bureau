@@ -13,23 +13,23 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
-  type GovernedMemory,
   createGovernedMemory,
   createMemoryAuthority,
   createMemoryGovernanceLedger,
   createMemoryGovernancePolicy,
   createMockEmbedder,
   createWeftMemoryRecordStorage,
+  type GovernedMemory,
 } from '@lostgradient/memory';
 import { type GenerateFunction, stopWhen } from '@lostgradient/operative';
-import { type Storage, resolveStorage, textValueStore } from '@lostgradient/weft';
+import { resolveStorage, type Storage, textValueStore } from '@lostgradient/weft';
 import {
   type AnyToolbox,
+  createTool,
+  createToolbox,
+  createToolResultCache,
   type ToolRequestContext,
   type ToolResultCache,
-  createTool,
-  createToolResultCache,
-  createToolbox,
   withToolboxIdempotency,
 } from 'armorer';
 import { z } from 'zod';
@@ -46,6 +46,8 @@ export const OWNER_ID = 'process-crash-owner';
 export const SESSION_ID = 'process-crash-session';
 export const CHARGE_ORDER_ID = 'order-1';
 export const REMEMBERED_ANSWER = 'the remembered answer';
+export const HUMAN_WAIT_SIGNAL = 'human-response';
+export const HUMAN_WAIT_PROMPT = 'Approve the crashed run?';
 
 export type Backend = 'sqlite' | 'lmdb';
 
@@ -192,6 +194,8 @@ export interface HarnessBureauOptions {
   readonly generate: GenerateFunction;
   readonly toolbox: AnyToolbox;
   readonly memory?: GovernedMemory;
+  /** Wires `requestHumanInput` into the run (the COR-1409 park scenario). */
+  readonly humanInput?: boolean;
 }
 
 /** The durable, `workflow-lease` Bureau every child and the recoverer share. */
@@ -205,6 +209,7 @@ export function createHarnessBureau(options: HarnessBureauOptions): Promise<Bure
     stopWhen: stopWhen.noToolCalls(),
     requestAuthorityValidator: () => true,
     ...(options.memory === undefined ? {} : { memory: options.memory }),
+    ...(options.humanInput === true ? { humanInput: true as const } : {}),
     durableOwnership: {
       ownership: 'workflow-lease',
       workflowClaimTtlMs: CLAIM_TTL_MS,

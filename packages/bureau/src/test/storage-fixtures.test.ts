@@ -174,6 +174,54 @@ describe('createMemoryStorageFixture', () => {
     expect(fixture.openHandles()).toEqual([]);
   });
 
+  it('openHandles() closes a self-returning single-slot thenable when it settles, never assimilating its then() return value', async () => {
+    // A fluent thenable: `then()` stores the one callback pair it is given and
+    // returns itself. Assimilating that return value (for example through
+    // `Promise.resolve(...)`) calls `then()` a second time with different
+    // callbacks, which overwrites the registered `close` so it never runs.
+    let onFulfilled: ((value: unknown) => void) | undefined;
+    const thenable = {
+      then(resolve?: (value: unknown) => void) {
+        onFulfilled = resolve;
+        return thenable;
+      },
+    };
+    const { fixture, storage } = fixtureWithVerb('get', () => thenable);
+
+    storage.get('key');
+    // Two microtask turns: enough for an assimilation job to have re-entered `then()`.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fixture.openHandles()).toEqual(['get#1']);
+
+    onFulfilled?.(null);
+    expect(fixture.openHandles()).toEqual([]);
+  });
+
+  it('openHandles() stays open while a thenable returns an independently rejected promise from then()', async () => {
+    // Only the original thenable's own settlement ends the call's lifetime. A
+    // promise that `then()` happens to return is a different value and must
+    // not close the handle when it rejects.
+    let onFulfilled: ((value: unknown) => void) | undefined;
+    const independent = Promise.reject(new Error('independent failure'));
+    independent.catch(() => {});
+    const thenable = {
+      then(resolve?: (value: unknown) => void) {
+        onFulfilled = resolve;
+        return independent;
+      },
+    };
+    const { fixture, storage } = fixtureWithVerb('get', () => thenable);
+
+    storage.get('key');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fixture.openHandles()).toEqual(['get#1']);
+
+    onFulfilled?.(null);
+    expect(fixture.openHandles()).toEqual([]);
+  });
+
   it('openHandles() still closes a genuinely synchronous return immediately', () => {
     const { fixture, storage } = fixtureWithVerb('count', () => 3);
 

@@ -2051,6 +2051,95 @@ describe('createRuntimeComposition durable execution', () => {
     }
   });
 
+  // COR-851: the scheduled-fire session load is the second layer behind the
+  // reservation at registration, so a schedule persisted before the reservation
+  // existed, or registered straight on the engine, still cannot reach a goal's
+  // conversation.
+  describe('a scheduled fire naming a goal-owned session', () => {
+    async function composition() {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+        storage: { type: 'memory' },
+        durableExecution: true,
+      });
+      return runtime;
+    }
+
+    const fire = (sessionId: string) => ({
+      workflowId: 'scheduled-goal-session',
+      workflowType: 'agentRun',
+      input: { agentName: 'agent', input: 'read it', scheduleId: 'sneaky', sessionId },
+      schedule: { id: 'sneaky' },
+    });
+
+    it.each(['goal-g1-s0', 'goal-victim-a0', 'goal:g1', 'bureau-goal-audit:g1'])(
+      'is unavailable for the reserved session id %s, without loading it',
+      async (sessionId) => {
+        const runtime = await composition();
+        try {
+          const loaded: string[] = [];
+          const store = {
+            ...runtime.sessionStore!,
+            load: (id: string) => {
+              loaded.push(id);
+              return runtime.sessionStore!.load(id);
+            },
+          };
+
+          const resolution = await runtime.buildScheduledRunServices(fire(sessionId), store);
+
+          expect(resolution).toMatchObject({ status: 'unavailable' });
+          expect(resolution.status === 'unavailable' && resolution.reason).toContain(
+            'reserved-identifier',
+          );
+          expect(loaded).toEqual([]);
+        } finally {
+          runtime.durable?.engine[Symbol.dispose]?.();
+        }
+      },
+    );
+
+    it('is unavailable for a session a goal wrote, whatever its id', async () => {
+      const runtime = await composition();
+      try {
+        await runtime.sessionStore!.save(
+          createAgentSession({
+            id: 'owned-by-a-goal',
+            agentName: 'agent',
+            conversationHistory: createConversationHistory(),
+            metadata: { goalRunId: 'victim' },
+          }),
+        );
+
+        const resolution = await runtime.buildScheduledRunServices(
+          fire('owned-by-a-goal'),
+          runtime.sessionStore!,
+        );
+
+        expect(resolution).toMatchObject({ status: 'unavailable' });
+        const untouched = await runtime.sessionStore!.load('owned-by-a-goal');
+        expect(getMessages(untouched!.conversationHistory)).toEqual([]);
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('still resolves an ordinary recurring session', async () => {
+      const runtime = await composition();
+      try {
+        const resolution = await runtime.buildScheduledRunServices(
+          fire('nightly-digest'),
+          runtime.sessionStore!,
+        );
+
+        expect(resolution).toMatchObject({ status: 'available' });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+  });
+
   it("mints AgentSession.incarnation from this composition's own injected runtime, not a second default one (AB-384, Codex P2 review finding, PR #592)", async () => {
     // Two independently seeded manual runtimes, each composed with its own
     // `createRuntimeComposition` call: if `sessionStore` were built from a
@@ -5514,6 +5603,67 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
     }
   });
 
+  it.each([
+    ['a negative integer', -1],
+    ['a fraction', 0.5],
+    ['NaN', Number.NaN],
+    ['a huge number', Number.MAX_VALUE],
+    ['an infinity', Number.POSITIVE_INFINITY],
+  ])('reads a goal attempt marker with %s as its index as corrupt', async (_name, attemptIndex) => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      await runtime.durable!.engine.storage.put(
+        `${CATALOG_RUN_RECOVERY_KEY_PREFIX}goal-bad-index`,
+        encode({
+          schemaVersion: 1,
+          agentName: 'worker',
+          definitionRevision: 1,
+          input: 'work',
+          goalAttempt: { goalRunId: 'g1', attemptIndex },
+          costEstimation: null,
+        }),
+      );
+
+      expect(await runtime.loadCatalogRunRecoveryRecord('goal-bad-index')).toEqual({
+        status: 'corrupt',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
+  it('reads a decodable record of the wrong shape as corrupt for ownership, and as missing for every other consumer', async () => {
+    const runtime = await createRuntimeComposition({
+      storage: { type: 'memory' },
+      durableExecution: true,
+    });
+
+    try {
+      await runtime.durable!.engine.storage.put(
+        `${CATALOG_RUN_RECOVERY_KEY_PREFIX}catalog-run-wrong-shape`,
+        encode({ schemaVersion: 1, agentName: 7 }),
+      );
+
+      expect(await runtime.loadCatalogRunRecoveryRecord('catalog-run-wrong-shape')).toEqual({
+        status: 'corrupt',
+      });
+      // Non-goal consumers see exactly what they saw before: not catalog territory.
+      expect(await runtime.isCatalogRecoveredRun('catalog-run-wrong-shape')).toBe(false);
+      expect(await runtime.classifyCatalogRecoveredRun('catalog-run-wrong-shape')).toEqual({
+        isCatalogRun: false,
+      });
+      expect(await runtime.loadCatalogRunRecoveryRecord('catalog-run-never-written')).toEqual({
+        status: 'missing',
+      });
+    } finally {
+      runtime.durable?.engine[Symbol.dispose]?.();
+    }
+  });
+
   it('reports a distinct reason (never "no longer in the catalog") when the catalog agent exists but no longer supports durable definition resolution', async () => {
     const runtime = await createRuntimeComposition({
       storage: { type: 'memory' },
@@ -5616,6 +5766,191 @@ describe('resolveRunServices catalog-run recovery branch (AB-240)', () => {
     } finally {
       runtime.durable?.engine[Symbol.dispose]?.();
     }
+  });
+
+  describe('fenceGoalAttemptRecoveryRecord (COR-851)', () => {
+    const OWNER = {
+      goalRunId: 'g1',
+      attemptIndex: 0,
+      agentName: 'worker',
+      principal: 'alice',
+    } as const;
+    const AT = '2026-10-02T12:00:00.000Z';
+    const claim = {
+      agentName: 'worker',
+      definitionRevision: 3,
+      input: 'the goal’s work',
+      principal: 'alice',
+      goalAttempt: { goalRunId: 'g1', attemptIndex: 0 },
+      costEstimation: null,
+    } as const;
+
+    async function compose() {
+      return createRuntimeComposition({ storage: { type: 'memory' }, durableExecution: true });
+    }
+
+    it('tombstones the goal’s own claim in place, keeping everything else it recorded', async () => {
+      const runtime = await compose();
+      try {
+        await runtime.claimCatalogRunRecoveryRecord('goal-g1-a0', claim);
+
+        expect(await runtime.fenceGoalAttemptRecoveryRecord('goal-g1-a0', OWNER, AT)).toBe(
+          'fenced',
+        );
+
+        expect(await runtime.loadCatalogRunRecoveryRecord('goal-g1-a0')).toEqual({
+          status: 'found',
+          record: {
+            schemaVersion: 1,
+            ...claim,
+            goalAttempt: { goalRunId: 'g1', attemptIndex: 0, tombstonedAt: AT },
+          },
+        });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('is idempotent and keeps the first tombstone’s time', async () => {
+      const runtime = await compose();
+      try {
+        await runtime.claimCatalogRunRecoveryRecord('goal-g1-a0', claim);
+        await runtime.fenceGoalAttemptRecoveryRecord('goal-g1-a0', OWNER, AT);
+
+        expect(
+          await runtime.fenceGoalAttemptRecoveryRecord(
+            'goal-g1-a0',
+            OWNER,
+            '2027-01-01T00:00:00.000Z',
+          ),
+        ).toBe('fenced');
+
+        const load = await runtime.loadCatalogRunRecoveryRecord('goal-g1-a0');
+        expect(load).toMatchObject({
+          status: 'found',
+          record: { goalAttempt: { tombstonedAt: AT } },
+        });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('creates a tombstoned claim where none exists, so a start that claims later is refused', async () => {
+      const runtime = await compose();
+      try {
+        expect(await runtime.fenceGoalAttemptRecoveryRecord('goal-g1-a0', OWNER, AT)).toBe(
+          'fenced',
+        );
+
+        // The late start's own claim loses to the tombstone and finds it.
+        expect(await runtime.claimCatalogRunRecoveryRecord('goal-g1-a0', claim)).toBe(false);
+        expect(await runtime.loadCatalogRunRecoveryRecord('goal-g1-a0')).toMatchObject({
+          status: 'found',
+          record: {
+            agentName: 'worker',
+            principal: 'alice',
+            goalAttempt: { goalRunId: 'g1', attemptIndex: 0, tombstonedAt: AT },
+          },
+        });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it.each([
+      ['claim', 'tombstone'],
+      ['tombstone', 'claim'],
+    ] as const)(
+      'ends tombstoned when a start’s claim and the goal’s tombstone race, with the %s issued first',
+      async (first, second) => {
+        const runtime = await compose();
+        try {
+          for (let round = 0; round < 25; round += 1) {
+            const runId = `goal-g1-a${round}`;
+            const owner = { ...OWNER, attemptIndex: round };
+            const racing = {
+              ...claim,
+              goalAttempt: { goalRunId: 'g1', attemptIndex: round },
+            };
+            const claiming = () => runtime.claimCatalogRunRecoveryRecord(runId, racing);
+            const fencing = () => runtime.fenceGoalAttemptRecoveryRecord(runId, owner, AT);
+            const [one, two] = await Promise.all([
+              first === 'claim' ? claiming() : fencing(),
+              second === 'claim' ? claiming() : fencing(),
+            ]);
+
+            // However the two interleave, the claim's holder is told the truth and the
+            // tombstone lands: a start that won its claim is stopped by its own run's
+            // fence, and one that lost it starts nothing.
+            expect([one, two]).toContain('fenced');
+            expect(await runtime.loadCatalogRunRecoveryRecord(runId)).toMatchObject({
+              status: 'found',
+              record: { goalAttempt: { goalRunId: 'g1', attemptIndex: round, tombstonedAt: AT } },
+            });
+          }
+        } finally {
+          runtime.durable?.engine[Symbol.dispose]?.();
+        }
+      },
+    );
+
+    it.each([
+      ['an ordinary run’s record', { agentName: 'worker', principal: 'alice' }],
+      ['another goal’s claim', { ...claim, goalAttempt: { goalRunId: 'g2', attemptIndex: 0 } }],
+      ['another principal’s claim', { ...claim, principal: 'mallory' }],
+    ])('leaves %s alone', async (_label, held) => {
+      const runtime = await compose();
+      try {
+        await runtime.claimCatalogRunRecoveryRecord('goal-g1-a0', {
+          definitionRevision: 1,
+          input: 'x',
+          ...held,
+        });
+
+        expect(await runtime.fenceGoalAttemptRecoveryRecord('goal-g1-a0', OWNER, AT)).toBe(
+          'foreign',
+        );
+
+        const load = await runtime.loadCatalogRunRecoveryRecord('goal-g1-a0');
+        expect(JSON.stringify(load)).not.toContain('tombstonedAt');
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('rejects, writing nothing, when the record at the id is not a valid recovery record', async () => {
+      const runtime = await compose();
+      try {
+        const storage = runtime.durable?.engine.storage;
+        await storage?.put(
+          `${CATALOG_RUN_RECOVERY_KEY_PREFIX}goal-g1-a0`,
+          encode({ schemaVersion: 1, agentName: 7 }),
+        );
+
+        let caught: unknown;
+        try {
+          await runtime.fenceGoalAttemptRecoveryRecord('goal-g1-a0', OWNER, AT);
+        } catch (error) {
+          caught = error;
+        }
+
+        expect((caught as Error | undefined)?.message).toContain('not valid');
+        expect(await runtime.loadCatalogRunRecoveryRecord('goal-g1-a0')).toEqual({
+          status: 'corrupt',
+        });
+      } finally {
+        runtime.durable?.engine[Symbol.dispose]?.();
+      }
+    });
+
+    it('has nothing to fence with no durable storage', async () => {
+      const runtime = await createRuntimeComposition({
+        generate: async () => ({ content: 'x', toolCalls: [] }),
+        toolbox: createToolbox([], { context: {} }),
+      });
+
+      expect(await runtime.fenceGoalAttemptRecoveryRecord('goal-g1-a0', OWNER, AT)).toBe('fenced');
+    });
   });
 
   it('claimCatalogRunRecoveryRecord has nothing to claim against with no durable storage', async () => {

@@ -19,13 +19,22 @@ import { type FinishReason, type RunOptions, type RunResult } from '../types';
 import type { DurableActiveRunContext } from './active-run-adapter';
 import { type AgentRunWorkflowResult } from './run-workflow-result';
 
-export async function loadRunStateFromCheckpoint(
+/**
+ * Rebuilds a run's state from its checkpoint and REJECTS when the checkpoint
+ * cannot be read, including one whose persisted cursor, transcript, or step
+ * records are malformed. A run with no persisted checkpoint yet is not a read failure:
+ * the store answers with a zeroed cursor, which this returns as an empty state.
+ * Goal accounting and validation use this, because an empty state fabricated
+ * from a transient read failure would undercount budget and let a validator
+ * judge a conversation that never existed.
+ */
+export async function readRunStateFromCheckpoint(
   context: DurableActiveRunContext,
   runId: string,
   runtime: RuntimeServices,
 ): Promise<{ runState: RunState; conversation: Conversation }> {
-  try {
-    const checkpoint = await context.checkpointStore.loadCheckpoint(runId);
+  {
+    const checkpoint = await context.checkpointStore.loadCheckpoint(runId, { strict: true });
     const conversation =
       checkpoint.conversation !== null
         ? // AB-321: forwards the resolved runtime so any append on this
@@ -54,6 +63,21 @@ export async function loadRunStateFromCheckpoint(
     }));
 
     return { runState, conversation };
+  }
+}
+
+/**
+ * The tolerant read the live reattach and result entry points use: a checkpoint
+ * that cannot be read yields an empty state rather than failing the run. Goal
+ * code must not use this; see {@link readRunStateFromCheckpoint}.
+ */
+export async function loadRunStateFromCheckpoint(
+  context: DurableActiveRunContext,
+  runId: string,
+  runtime: RuntimeServices,
+): Promise<{ runState: RunState; conversation: Conversation }> {
+  try {
+    return await readRunStateFromCheckpoint(context, runId, runtime);
   } catch {
     return { runState: createRunState(), conversation: new Conversation(undefined, { runtime }) };
   }
@@ -74,8 +98,12 @@ export async function reconstructRunResult(
   runId: string,
   summary: AgentRunWorkflowResult,
   runtime: RuntimeServices,
+  options: { readonly strictCheckpointRead?: boolean } = {},
 ): Promise<{ result: RunResult; runState: RunState; conversation: Conversation }> {
-  const { runState, conversation } = await loadRunStateFromCheckpoint(context, runId, runtime);
+  const load = options.strictCheckpointRead
+    ? readRunStateFromCheckpoint
+    : loadRunStateFromCheckpoint;
+  const { runState, conversation } = await load(context, runId, runtime);
   const terminalError = reconstructTerminalRunError({
     finishReason: summary.finishReason,
     steps: summary.steps,

@@ -18,6 +18,7 @@ import {
   SchedulePausedEvent,
   ScheduleResumedEvent,
 } from '../events';
+import { reservedIdentifierReason } from '../goal-reserved-identifiers';
 import type { EventDispatcher } from '../run-step';
 import type { CleanupAcknowledgement, ClosedOptions } from '../types';
 
@@ -464,7 +465,8 @@ function assertCompatibleAgentSchedule(
  * Session semantics: `session` present → each fire continues that session's
  * conversation (recurring); absent → each fire is a fresh standalone session.
  *
- * @throws {InvalidScheduleError} when `session` or `id` is blank, or
+ * @throws {InvalidScheduleError} when `session` or `id` is blank, `session` begins with a
+ * prefix durable goals own (`reserved-identifier:`), or
  * `overlap: 'allow'` is combined with a recurring `session` (a recurring
  * conversation is sequential, so overlapping fires would interleave turns and
  * race the session write-back), or an `overlap` value outside
@@ -481,6 +483,15 @@ export async function createAgentSchedule(
   assertSupportedOverlapPolicy(overlap);
   if (session !== undefined && session.trim().length === 0) {
     throw new InvalidScheduleError('schedule session must be a non-empty string');
+  }
+  // COR-851: a scheduled fire loads the session its schedule names, and this is
+  // where every registration converges (the bureau, `AgentScheduler`, and the
+  // `scheduleSelf` tool an agent calls with an id of its own choosing). A session
+  // in a durable goal's namespace would let a fire read or write the goal's
+  // conversation, or squat the id before the goal is created.
+  if (session !== undefined) {
+    const reserved = reservedIdentifierReason('schedule session', session.trim());
+    if (reserved !== undefined) throw new InvalidScheduleError(reserved);
   }
   if (id !== undefined && id.trim().length === 0) {
     throw new InvalidScheduleError('schedule id must be a non-empty string');

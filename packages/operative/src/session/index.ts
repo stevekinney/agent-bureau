@@ -3,6 +3,7 @@ export {
   StaleSessionIncarnationError,
   createSessionStore,
 } from './create-session-store';
+export { conversationThroughRun } from './run-conversation-boundary';
 export {
   ForkThroughRunError,
   NoDurableEngineError,
@@ -17,6 +18,7 @@ export type {
   SessionHandleContext,
   SessionRunOptions,
 } from './session-handle';
+export { reconcileTerminalRunRef } from './session-handle-support';
 export { MissingRunOptionsError } from './session-handle-types';
 export { resumeSession } from './session-resume';
 export type { ResumeSessionOptions, ResumeSessionResult } from './session-resume';

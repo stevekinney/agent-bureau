@@ -2,10 +2,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { RuntimeTimeoutHandle } from '@lostgradient/lifecycle';
 import {
   CompletableEventTarget,
+  createDefaultRuntimeServices,
   createManualRuntimeServices,
+  type RuntimeTimeoutHandle,
   TypedEventTarget,
 } from '@lostgradient/lifecycle';
 import {
@@ -27,9 +28,9 @@ import {
   type CombinedOperativeEventMap,
   createAgent,
   createAgentSession,
+  createMockGenerate as createSequentialGenerate,
   createModelCatalog,
   createScheduleWakeupTool,
-  createMockGenerate as createSequentialGenerate,
   createSessionStore,
   createStore,
   DEFAULT_MAXIMUM_STEPS,
@@ -13672,6 +13673,57 @@ describe('createBureau durable event history producer + subscribeEventHistory (A
     }
   });
 
+  it("subscribeEventHistory applies eventHistory's run principal gate: a stranger is delivered nothing, the attributed principal replays (COR-851)", async () => {
+    const databasePath = join(
+      tmpdir(),
+      `bureau-durable-subscribe-authz-${process.pid}-${recoveryDatabaseCounter++}.sqlite`,
+    );
+    const runtime = createManualRuntimeServices();
+
+    try {
+      const bureau = await createBureau({
+        agents: {},
+        generate: createMockGenerate('Done.'),
+        toolbox: createEmptyToolbox(),
+        storage: { type: 'sqlite', path: databasePath },
+        runtime,
+      });
+
+      const run = await bureau.createRun({ message: 'Alice only', principal: 'alice' });
+      await waitForRunCompletion(bureau, run.id);
+      await runtime.deferred.drain();
+
+      const owned: string[] = [];
+      const allowed = bureau.subscribeEventHistory(
+        { kind: 'run', id: run.id },
+        (event) => owned.push(event.kind),
+        { principal: 'alice' },
+      );
+      const stolen: string[] = [];
+      const denied = bureau.subscribeEventHistory(
+        { kind: 'run', id: run.id },
+        (event) => stolen.push(event.kind),
+        { principal: 'mallory' },
+      );
+
+      await waitForCondition(() => owned.length > 0, 'the attributed principal got no replay');
+      // The stranger's replay races the attributed principal's; give a leak every chance to land.
+      await new Promise<void>((resolve) =>
+        createDefaultRuntimeServices().timers.setTimeout(resolve, 50),
+      );
+      expect(owned).toEqual(['run.completed']);
+      expect(stolen).toEqual([]);
+
+      allowed.unsubscribe();
+      denied.unsubscribe();
+      await bureau.shutdown();
+    } finally {
+      await rm(databasePath, { force: true });
+      await rm(`${databasePath}-wal`, { force: true });
+      await rm(`${databasePath}-shm`, { force: true });
+    }
+  });
+
   it('never subscribes or records anything for an ephemeral bureau — eventHistory stays unsupported, subscribeEventHistory returns an already-closed subscription', async () => {
     const bureau = await createBureau({
       agents: {},
@@ -21290,6 +21342,7 @@ describe('COR-625: terminal-run checkpoint retention and cleanup', () => {
 // ---------------------------------------------------------------------------
 describe('createBureau schedule tick observation (COR-660)', () => {
   it('maps every tick to one schedule.attempted and an overlap collision to exactly one schedule.skipped', async () => {
+    const runtime = createDefaultRuntimeServices();
     const released = Promise.withResolvers<void>();
     let fireCount = 0;
     const generate: GenerateFunction = async () => {
@@ -21308,6 +21361,7 @@ describe('createBureau schedule tick observation (COR-660)', () => {
       generate,
       toolbox: createEmptyToolbox(),
       storage: { type: 'memory' },
+      runtime,
       durableExecution: true,
       durableBackgroundTasks: 'manual',
       stopWhen: stopWhen.noToolCalls(),
@@ -21331,7 +21385,7 @@ describe('createBureau schedule tick observation (COR-660)', () => {
       expect(attempted).toEqual([]);
 
       // First tick: the slot is free, so the occurrence launches a fire.
-      const firstOccurrence = Date.now() + 60_000;
+      const firstOccurrence = runtime.clock.now() + 60_000;
       await pollUntil(async () => {
         await bureau.runDurableMaintenance(firstOccurrence);
         return fireCount >= 1;
