@@ -31,6 +31,57 @@ const keys = {
 };
 
 /**
+ * Operative 0.15.x wrote the run id verbatim: `durable-run:{runId}:{part}`.
+ * Session run ids (`${sessionId}:${sequence}`) contain `:`, so 0.16.0 reads
+ * those keys as a fallback whenever escaping changed the id. Writes never use
+ * this layout.
+ */
+const legacyKeys = {
+  prefix: (runId: string) => `durable-run:${runId}:`,
+  cursor: (runId: string) => `${legacyKeys.prefix(runId)}cursor`,
+  transcript: (runId: string) => `${legacyKeys.prefix(runId)}transcript`,
+  stepPrefix: (runId: string) => `${legacyKeys.prefix(runId)}step:`,
+};
+
+/**
+ * Whether the run id has 0.15.x keys to fall back to: escaping changed its
+ * keys, and its verbatim prefix is not some other run's current prefix. An
+ * id that is itself a complete escaping of a different id (no `:`, and every
+ * `%` begins `%25` or `%3A`, such as `a%3Ab` for run `a:b`) would read that
+ * run's keys, so it gets no fallback. Session run ids (`${sessionId}:${n}`)
+ * and ids like `job%one` keep theirs.
+ */
+function hasLegacyKeys(runId: string): boolean {
+  if (encodeRunId(runId) === runId) return false;
+  const isEscapingOfAnotherId = !runId.includes(':') && /^(?:[^%]|%25|%3A)*$/.test(runId);
+  return !isEscapingOfAnotherId;
+}
+
+/** A step number in a key: `String(step).padStart(10, '0')`, which never truncates. */
+const STEP_NUMBER = /^\d{10,}$/;
+
+/** Numeric order for zero-padded step numbers of any width. */
+function compareStepNumbers(left: string, right: string): number {
+  if (left.length !== right.length) return left.length - right.length;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * The step keys under `stepPrefix`, keyed by their step number (ten or more digits). The
+ * unescaped layout is ambiguous (run `x-a0:step:q`'s keys sit under run
+ * `x-a0`'s step prefix), so a key whose remainder is anything but exactly a
+ * step number belongs to another run and is not a step.
+ */
+function stepKeysByNumber(keysUnderPrefix: string[], stepPrefix: string): Map<string, string> {
+  const byNumber = new Map<string, string>();
+  for (const key of keysUnderPrefix) {
+    const stepNumber = key.slice(stepPrefix.length);
+    if (STEP_NUMBER.test(stepNumber)) byNumber.set(stepNumber, key);
+  }
+  return byNumber;
+}
+
+/**
  * Options for the checkpoint reads. With `strict`, persisted data that is
  * present but malformed rejects instead of reading as absent (a cursor or
  * transcript) or being skipped (a step record). A key that is genuinely absent
@@ -89,6 +140,18 @@ function strictKeyFor(options: CheckpointReadOptions | undefined, key: string): 
   return options?.strict === true ? key : undefined;
 }
 
+/** The keys under `prefix` that are exactly this run's cursor, transcript, or step records. */
+function ownKeys(keysUnderPrefix: string[], prefix: string): string[] {
+  return keysUnderPrefix.filter((key) => {
+    const part = key.slice(prefix.length);
+    return (
+      part === 'cursor' ||
+      part === 'transcript' ||
+      (part.startsWith('step:') && STEP_NUMBER.test(part.slice('step:'.length)))
+    );
+  });
+}
+
 /**
  * Creates a {@link CheckpointStore} backed by the given {@link TextValueStore}.
  *
@@ -97,17 +160,31 @@ function strictKeyFor(options: CheckpointReadOptions | undefined, key: string): 
  * uses the text-value surface.
  */
 export function createCheckpointStore(store: TextValueStore): CheckpointStore {
+  /**
+   * Reads a cursor or transcript. The escaped key wins when present; a run id
+   * that has a legacy key falls back to it only when the escaped key is absent.
+   */
+  async function readPart(
+    key: string,
+    legacyKey: string | undefined,
+    options?: CheckpointReadOptions,
+  ) {
+    const raw = await store.get(key);
+    if (raw !== null || legacyKey === undefined) return parseJson(raw, strictKeyFor(options, key));
+    return parseJson(await store.get(legacyKey), strictKeyFor(options, legacyKey));
+  }
+
   const checkpointStore: CheckpointStore = {
     async saveCursor(runId, cursor) {
       await store.set(keys.cursor(runId), JSON.stringify(cursor));
     },
 
     async loadCursor(runId, options) {
-      const cursorKey = keys.cursor(runId);
-      const cursor = parseJson(
-        await store.get(cursorKey),
-        strictKeyFor(options, cursorKey),
-      ) as RunCursor | null;
+      const cursor = (await readPart(
+        keys.cursor(runId),
+        hasLegacyKeys(runId) ? legacyKeys.cursor(runId) : undefined,
+        options,
+      )) as RunCursor | null;
       // A cursor persisted before AB-221 added `lastAppliedConfigVersion` to
       // `RunCursor` deserializes with every OTHER field present but that one
       // `undefined` — `parseJson` casts the stored JSON to `RunCursor`
@@ -129,11 +206,11 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
     },
 
     async loadConversation(runId, options) {
-      const transcriptKey = keys.transcript(runId);
-      return parseJson(
-        await store.get(transcriptKey),
-        strictKeyFor(options, transcriptKey),
-      ) as ConversationSnapshot | null;
+      return (await readPart(
+        keys.transcript(runId),
+        hasLegacyKeys(runId) ? legacyKeys.transcript(runId) : undefined,
+        options,
+      )) as ConversationSnapshot | null;
     },
 
     async saveStep(runId, record) {
@@ -141,9 +218,20 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
     },
 
     async loadSteps(runId, options) {
-      const stepKeys = await store.list(keys.stepPrefix(runId));
-      // `list()` returns keys in lexicographic order; zero-padded step indices
-      // make that match numeric step order, so no re-sort is required.
+      const stepPrefix = keys.stepPrefix(runId);
+      const byNumber = stepKeysByNumber(await store.list(stepPrefix), stepPrefix);
+      if (hasLegacyKeys(runId)) {
+        // A run started on 0.15.x and resumed on 0.16.0 has steps in both
+        // layouts. The escaped record wins a duplicate step number.
+        const legacyPrefix = legacyKeys.stepPrefix(runId);
+        const legacy = stepKeysByNumber(await store.list(legacyPrefix), legacyPrefix);
+        for (const [stepNumber, key] of legacy) {
+          if (!byNumber.has(stepNumber)) byNumber.set(stepNumber, key);
+        }
+      }
+      const stepKeys = [...byNumber.entries()]
+        .toSorted(([left], [right]) => compareStepNumbers(left, right))
+        .map(([, key]) => key);
       const records: StepRecord[] = [];
       for (const key of stepKeys) {
         const record = parseJson(
@@ -179,9 +267,16 @@ export function createCheckpointStore(store: TextValueStore): CheckpointStore {
     },
 
     async clear(runId) {
-      // `deletePrefix` is a required member of Weft's TextValueStore (0.2.1), so
-      // a prefix wipe needs no optional-method fallback.
-      return store.deletePrefix(keys.prefix(runId));
+      // Exact keys only, never a prefix wipe: 0.15.x wrote ids verbatim, so a
+      // prefix such as `durable-run:x-a0:` can also hold run `x-a0:step:q`'s
+      // legacy keys, whichever layout `x-a0` itself uses.
+      const doomed = ownKeys(await store.list(keys.prefix(runId)), keys.prefix(runId));
+      if (hasLegacyKeys(runId)) {
+        const legacyPrefix = legacyKeys.prefix(runId);
+        doomed.push(...ownKeys(await store.list(legacyPrefix), legacyPrefix));
+      }
+      for (const key of doomed) await store.delete(key);
+      return doomed.length;
     },
   };
 
