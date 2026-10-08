@@ -205,4 +205,56 @@ describe('readDurableRunResult', () => {
       context.engine[Symbol.dispose]();
     }
   });
+
+  it('rebuilds a session run whose checkpoint was persisted in the Operative 0.15.x key layout', async () => {
+    const storage = new MemoryStorage();
+    const context = await (async () => {
+      const checkpointStore = createCheckpointStore(
+        textValueStore(storage, { disposeUnderlyingStorage: false }),
+      );
+      const { engine } = await createRunEngine({
+        storage,
+        runWorkflow: createRunWorkflow(checkpointStore),
+        recover: false,
+      });
+      return { engine, checkpointStore };
+    })();
+    try {
+      // A session run id is `${sessionId}:${sequence}`, so it contains `:`.
+      const runId = 'user-123:2';
+      const original = await startDurableRunResult(context, {
+        runId,
+        sessionId: 'user-123',
+        options: runOptions(async () => ({
+          content: 'from 0.15.x',
+          toolCalls: [],
+          usage: { prompt: 10, completion: 5, total: 15 },
+        })),
+        prompt: 'go',
+      });
+
+      // Rewrite the checkpoint keys into the exact 0.15.x layout: the run id
+      // verbatim, with no escaping.
+      const raw = textValueStore(storage, { disposeUnderlyingStorage: false });
+      const escapedPrefix = 'durable-run:user-123%3A2:';
+      const checkpointKeys = await raw.list(escapedPrefix);
+      expect(checkpointKeys.length).toBeGreaterThan(0);
+      for (const key of checkpointKeys) {
+        const value = await raw.get(key);
+        await raw.delete(key);
+        await raw.set(`durable-run:${runId}:${key.slice(escapedPrefix.length)}`, value as string);
+      }
+
+      const reading = await readDurableRunResult(context, runId, { runtime });
+
+      expect(reading.status).toBe('completed');
+      if (reading.status !== 'completed') return;
+      expect(reading.result.content).toBe('from 0.15.x');
+      expect(reading.result.steps).toHaveLength(original.steps.length);
+      expect(reading.result.steps.length).toBeGreaterThan(0);
+      expect(reading.result.usage).toEqual(original.usage);
+    } finally {
+      context.engine[Symbol.dispose]();
+    }
+  });
 });
