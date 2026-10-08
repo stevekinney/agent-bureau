@@ -325,4 +325,227 @@ describe('createCheckpointStore', () => {
       expect(await store.loadCursor('a%3Ab')).toEqual(cursor(2));
     });
   });
+
+  describe('legacy unescaped keys written by Operative 0.15.x', () => {
+    // 0.15.x laid keys out as `durable-run:{runId}:{part}` with the run id
+    // verbatim. A session run id is `${sessionId}:${sequence}`, so it contains
+    // `:` and 0.16.0 must still read what 0.15.x persisted.
+    const sessionRunId = 'user-123:2';
+    const legacyStepKey = (runId: string, step: number) =>
+      `durable-run:${runId}:step:${String(step).padStart(10, '0')}`;
+    const stepRecord = (step: number, content = `step-${step}`): StepRecord => ({
+      step,
+      content,
+      toolCalls: [],
+      results: [],
+      final: false,
+    });
+    async function failure(read: () => Promise<unknown>): Promise<unknown> {
+      try {
+        await read();
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    }
+    const persistedSnapshot = new Conversation(createConversationHistory()).snapshot();
+
+    it('reads the cursor, transcript, and steps persisted in the legacy layout', async () => {
+      const underlying = createStore();
+      await underlying.set(`durable-run:${sessionRunId}:cursor`, JSON.stringify(cursor(2)));
+      await underlying.set(
+        `durable-run:${sessionRunId}:transcript`,
+        JSON.stringify(persistedSnapshot),
+      );
+      for (const step of [0, 1]) {
+        await underlying.set(legacyStepKey(sessionRunId, step), JSON.stringify(stepRecord(step)));
+      }
+
+      const store = createCheckpointStore(underlying);
+
+      expect(await store.loadCursor(sessionRunId)).toEqual(cursor(2));
+      expect(await store.loadConversation(sessionRunId)).toEqual(
+        JSON.parse(JSON.stringify(persistedSnapshot)),
+      );
+      const loadedSteps = await store.loadSteps(sessionRunId);
+      expect(loadedSteps.map((record) => record.step)).toEqual([0, 1]);
+      const checkpoint = await store.loadCheckpoint(sessionRunId);
+      expect(checkpoint.cursor).toEqual(cursor(2));
+      expect(checkpoint.conversation).toEqual(JSON.parse(JSON.stringify(persistedSnapshot)));
+      expect(checkpoint.steps).toHaveLength(2);
+    });
+
+    it('merges legacy and escaped steps in step order, and the escaped cursor wins', async () => {
+      const underlying = createStore();
+      await underlying.set(`durable-run:${sessionRunId}:cursor`, JSON.stringify(cursor(1)));
+      for (const step of [0, 1, 2]) {
+        await underlying.set(legacyStepKey(sessionRunId, step), JSON.stringify(stepRecord(step)));
+      }
+      const store = createCheckpointStore(underlying);
+      await store.saveStep(sessionRunId, stepRecord(3));
+      await store.saveCursor(sessionRunId, cursor(4));
+
+      const mergedSteps = await store.loadSteps(sessionRunId);
+      expect(mergedSteps.map((record) => record.step)).toEqual([0, 1, 2, 3]);
+      expect(await store.loadCursor(sessionRunId)).toEqual(cursor(4));
+    });
+
+    it('prefers the escaped step record over a legacy one with the same step number', async () => {
+      const underlying = createStore();
+      await underlying.set(legacyStepKey(sessionRunId, 1), JSON.stringify(stepRecord(1, 'legacy')));
+      const store = createCheckpointStore(underlying);
+      await store.saveStep(sessionRunId, stepRecord(1, 'escaped'));
+      await store.saveStep(sessionRunId, stepRecord(0));
+
+      const steps = await store.loadSteps(sessionRunId);
+
+      expect(steps.map((record) => [record.step, record.content])).toEqual([
+        [0, 'step-0'],
+        [1, 'escaped'],
+      ]);
+    });
+
+    it('never reads another run key under a legacy step prefix as a step, or clears it', async () => {
+      const victim = 'x-a0';
+      const intruder = 'x-a0:step:q';
+      const underlying = createStore();
+      // The intruder's legacy keys sit beneath the victim's legacy step prefix.
+      await underlying.set(`durable-run:${intruder}:cursor`, JSON.stringify(cursor(7)));
+      await underlying.set(`durable-run:${intruder}:transcript`, JSON.stringify(persistedSnapshot));
+      await underlying.set(legacyStepKey(intruder, 0), JSON.stringify(stepRecord(0, 'intruder')));
+      const store = createCheckpointStore(underlying);
+      await store.saveStep(victim, stepRecord(0, 'victim'));
+
+      const victimSteps = await store.loadSteps(victim);
+      expect(victimSteps.map((record) => record.content)).toEqual(['victim']);
+
+      await store.clear(victim);
+
+      expect(await underlying.get(`durable-run:${intruder}:cursor`)).not.toBeNull();
+      expect(await underlying.get(`durable-run:${intruder}:transcript`)).not.toBeNull();
+      expect(await underlying.get(legacyStepKey(intruder, 0))).not.toBeNull();
+    });
+
+    it('clear removes the exact keys of both layouts', async () => {
+      const underlying = createStore();
+      await underlying.set(`durable-run:${sessionRunId}:cursor`, JSON.stringify(cursor(1)));
+      await underlying.set(
+        `durable-run:${sessionRunId}:transcript`,
+        JSON.stringify(persistedSnapshot),
+      );
+      await underlying.set(legacyStepKey(sessionRunId, 0), JSON.stringify(stepRecord(0)));
+      const store = createCheckpointStore(underlying);
+      await store.saveCursor(sessionRunId, cursor(2));
+      await store.saveStep(sessionRunId, stepRecord(1));
+
+      const deleted = await store.clear(sessionRunId);
+
+      expect(deleted).toBe(5);
+      expect(await underlying.list('durable-run:')).toEqual([]);
+    });
+
+    it('clear leaves legacy keys that are not exact cursor, transcript, or step keys', async () => {
+      const underlying = createStore();
+      const unrelated = `durable-run:${sessionRunId}:step:not-a-number`;
+      await underlying.set(unrelated, '{}');
+      await underlying.set(`durable-run:${sessionRunId}:cursor`, JSON.stringify(cursor(1)));
+      const store = createCheckpointStore(underlying);
+
+      await store.clear(sessionRunId);
+
+      expect(await underlying.list('durable-run:')).toEqual([unrelated]);
+    });
+
+    it('rejects malformed legacy JSON in strict mode and reads it as absent otherwise', async () => {
+      const underlying = createStore();
+      await underlying.set(`durable-run:${sessionRunId}:cursor`, '{not json');
+      await underlying.set(`durable-run:${sessionRunId}:transcript`, '{not json');
+      await underlying.set(legacyStepKey(sessionRunId, 0), '{not json');
+      const store = createCheckpointStore(underlying);
+
+      const strictFailures = [
+        await failure(() => store.loadCursor(sessionRunId, { strict: true })),
+        await failure(() => store.loadConversation(sessionRunId, { strict: true })),
+        await failure(() => store.loadSteps(sessionRunId, { strict: true })),
+      ];
+      expect(strictFailures.map((error) => (error as Error).message)).toEqual([
+        expect.stringContaining(`durable-run:${sessionRunId}:cursor`),
+        expect.stringContaining(`durable-run:${sessionRunId}:transcript`),
+        expect.stringContaining(legacyStepKey(sessionRunId, 0)),
+      ]);
+      expect(await store.loadCursor(sessionRunId)).toBeNull();
+      expect(await store.loadConversation(sessionRunId)).toBeNull();
+      expect(await store.loadSteps(sessionRunId)).toEqual([]);
+    });
+
+    it('gives an id with an escape sequence but no delimiter no fallback into another run', async () => {
+      const underlying = createStore();
+      const store = createCheckpointStore(underlying);
+      // `a%3Ab`'s unescaped prefix is `durable-run:a%3Ab:`, which is run `a:b`'s escaped prefix.
+      await store.saveCursor('a:b', cursor(4));
+      await store.saveConversation('a:b', persistedSnapshot);
+      await store.saveStep('a:b', stepRecord(0));
+
+      expect(await store.loadCursor('a%3Ab')).toBeNull();
+      expect(await store.loadConversation('a%3Ab')).toBeNull();
+      expect(await store.loadSteps('a%3Ab')).toEqual([]);
+      expect(await store.clear('a%3Ab')).toBe(0);
+      expect(await store.loadCursor('a:b')).toEqual(cursor(4));
+      expect(await store.loadSteps('a:b')).toEqual([stepRecord(0)]);
+    });
+
+    it('reads the legacy keys of an id with a percent sign that escapes no other id', async () => {
+      const underlying = createStore();
+      await underlying.set('durable-run:job%one:cursor', JSON.stringify(cursor(3)));
+      await underlying.set('durable-run:job%one:transcript', JSON.stringify(persistedSnapshot));
+      await underlying.set(legacyStepKey('job%one', 0), JSON.stringify(stepRecord(0)));
+      const store = createCheckpointStore(underlying);
+
+      expect(await store.loadCursor('job%one')).toEqual(cursor(3));
+      expect(await store.loadConversation('job%one')).toEqual(persistedSnapshot);
+      expect(await store.loadSteps('job%one')).toEqual([stepRecord(0)]);
+      expect(await store.clear('job%one')).toBe(3);
+      expect(await underlying.list('durable-run:')).toEqual([]);
+    });
+
+    it('reads, orders, and clears legacy steps numbered past ten digits', async () => {
+      const underlying = createStore();
+      await underlying.set(
+        legacyStepKey(sessionRunId, 10_000_000_000),
+        JSON.stringify(stepRecord(10_000_000_000)),
+      );
+      await underlying.set(legacyStepKey(sessionRunId, 9), JSON.stringify(stepRecord(9)));
+      const store = createCheckpointStore(underlying);
+
+      const legacySteps = await store.loadSteps(sessionRunId);
+      expect(legacySteps.map((record) => record.step)).toEqual([9, 10_000_000_000]);
+      expect(await store.clear(sessionRunId)).toBe(2);
+      expect(await underlying.list('durable-run:')).toEqual([]);
+    });
+  });
+
+  describe('steps numbered past ten digits', () => {
+    const stepRecord = (step: number): StepRecord => ({
+      step,
+      content: `step-${step}`,
+      toolCalls: [],
+      results: [],
+      final: false,
+    });
+
+    it('loads them in numeric order and clears them, for ordinary and delimited ids', async () => {
+      for (const runId of ['run-wide', 'user-9:1']) {
+        const underlying = createStore();
+        const store = createCheckpointStore(underlying);
+        await store.saveStep(runId, stepRecord(10_000_000_000));
+        await store.saveStep(runId, stepRecord(9_999_999_999));
+        await store.saveStep(runId, stepRecord(2));
+
+        const steps = await store.loadSteps(runId);
+        expect(steps.map((record) => record.step)).toEqual([2, 9_999_999_999, 10_000_000_000]);
+        expect(await store.clear(runId)).toBe(3);
+        expect(await underlying.list('durable-run:')).toEqual([]);
+      }
+    });
+  });
 });
