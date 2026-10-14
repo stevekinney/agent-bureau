@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.4.4
+
+### Patch Changes
+
+- 95de2e2: Keep tool execution lifecycles accurate through completion and shutdown.
+
+  - Cleanup lifecycles stay quiescent before shutdown, and a `failFast` batch parent finalizes when a sibling callback settles after the batch has already rejected.
+  - Progress reporting stays live while a streamed async-iterable tool result is consumed, whether collected or live, and deactivates when a tool executor throws synchronously. Toolbox progress events carry the tool's checkpoint.
+  - Toolbox execution accepts `AbortSignal` values from another realm.
+
+- Updated dependencies [95de2e2]
+- Updated dependencies [95de2e2]
+  - @lostgradient/lifecycle@0.0.3
+  - @lostgradient/tool-protocol@0.0.3
+
 ## 2.4.3
 
 ### Patch Changes

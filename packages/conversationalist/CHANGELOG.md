@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.3
+
+### Patch Changes
+
+- Updated dependencies [95de2e2]
+- Updated dependencies [95de2e2]
+  - @lostgradient/lifecycle@0.0.3
+  - @lostgradient/tool-protocol@0.0.3
+
 ## 2.1.2
 
 ### Patch Changes
