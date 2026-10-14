@@ -2,6 +2,13 @@ import type { ToolChoice } from '../structured-output/types.ts';
 import { ProviderError } from './errors.ts';
 import { createModelCatalog } from './model-catalog.ts';
 import type { ResolvedCommonParameters } from './shared/resolve-common-parameters.ts';
+import { anthropicSamplingSupport, DEFAULT_ONLY_SAMPLING_VALUES } from './shared/sampling.ts';
+import {
+  anthropicDisabledThinkingRule,
+  anthropicRejectsManualThinking,
+  EFFORTS_THAT_FORBID_DISABLED_THINKING,
+} from './shared/thinking.ts';
+import { ANTHROPIC_FORCED_TOOL_CHOICE_REJECTED } from './shared/tool-choice.ts';
 import { toAnthropicToolChoice } from './structured-output/tool-choice-adapters.ts';
 import type {
   AnthropicMessageCreateRequest,
@@ -119,6 +126,130 @@ function describeForcedToolChoice(choice: ToolChoice | undefined): string | unde
   if (choice === 'required') return `'required'`;
   if (typeof choice === 'object') return `the named tool '${choice.tool}'`;
   return undefined;
+}
+
+/**
+ * Rejects manual extended thinking (`thinking.type 'enabled'`) before any
+ * request on a model whose documentation says Anthropic returns a 400 for it
+ * (`ANTHROPIC_MANUAL_THINKING` in `shared/thinking.ts`). Models the table does
+ * not list are left to the API.
+ */
+export function assertManualThinkingSupported(
+  resolvedModel: string,
+  thinking: AnthropicThinkingConfig | undefined,
+): void {
+  if (thinking?.type !== 'enabled' || !anthropicRejectsManualThinking(resolvedModel)) return;
+  throw new ProviderError({
+    provider: 'anthropic',
+    cause: undefined,
+    message:
+      `[provider:anthropic] Model ${resolvedModel} rejects thinking.type 'enabled' with ` +
+      `budget_tokens: manual extended thinking is not supported on this model. Omit thinking or ` +
+      `use 'adaptive', and control thinking depth with effort.`,
+  });
+}
+
+/**
+ * Rejects forced tool choice (`'required'` or a named tool) before any request
+ * on the models that return a 400 for it (`shared/tool-choice.ts`). `'auto'`,
+ * `'none'` and an unset choice always pass.
+ */
+export function assertToolChoiceSupported(
+  resolvedModel: string,
+  toolChoice: ToolChoice | undefined,
+): void {
+  const forced = describeForcedToolChoice(toolChoice);
+  if (forced === undefined || !ANTHROPIC_FORCED_TOOL_CHOICE_REJECTED.has(resolvedModel)) return;
+  throw new ProviderError({
+    provider: 'anthropic',
+    cause: undefined,
+    message:
+      `[provider:anthropic] Model ${resolvedModel} rejects forced tool use: toolChoice ${forced} ` +
+      `returns a 400. Use toolChoice 'auto' or 'none' and state in the prompt when the tool ` +
+      `applies.`,
+  });
+}
+
+/**
+ * Rejects `thinking: { type: 'disabled' }` before any request on a model whose
+ * documentation says Anthropic returns a 400 for it (`shared/thinking.ts`): at
+ * every effort on `never` models, and at `xhigh`/`max` effort on
+ * `high-or-below` models. `effort` is the value actually sent after
+ * per-model degradation, since that is what the API sees. A model the table
+ * does not list is left to the API.
+ */
+export function assertDisabledThinkingSupported(
+  resolvedModel: string,
+  thinking: AnthropicThinkingConfig | undefined,
+  resolvedEffort: string | undefined,
+): void {
+  if (thinking?.type !== 'disabled') return;
+  const rule = anthropicDisabledThinkingRule(resolvedModel);
+
+  if (rule === 'never') {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] Model ${resolvedModel} rejects thinking.type 'disabled' at every ` +
+        `effort level: thinking cannot be turned off on this model. Omit thinking or use ` +
+        `'adaptive', and lower effort to reduce thinking.`,
+    });
+  }
+
+  if (
+    rule === 'high-or-below' &&
+    resolvedEffort !== undefined &&
+    (EFFORTS_THAT_FORBID_DISABLED_THINKING as readonly string[]).includes(resolvedEffort)
+  ) {
+    throw new ProviderError({
+      provider: 'anthropic',
+      cause: undefined,
+      message:
+        `[provider:anthropic] Model ${resolvedModel} rejects thinking.type 'disabled' at effort ` +
+        `'${resolvedEffort}': it accepts disabled thinking only at 'high' effort or below. Lower ` +
+        `effort, or omit thinking or use 'adaptive' to keep thinking on.`,
+    });
+  }
+}
+
+/**
+ * Rejects `temperature` and `topP` before any request when the resolved model
+ * is recorded as accepting only default sampling values (`shared/sampling.ts`, the
+ * same table the model catalog reads, so a row never advertises what this
+ * throws on). A model the table does not settle is left alone: the request is
+ * sent and a 400 is classified afterwards (COR-989). Like the thinking guard
+ * below, it runs at construction, since both fields are construction-time options.
+ */
+export function assertSamplingParametersSupported(
+  resolvedModel: string,
+  common: ResolvedCommonParameters,
+): void {
+  if (anthropicSamplingSupport(resolvedModel) !== 'defaults-only') return;
+
+  const problems: string[] = [];
+  const { temperature, topP } = common;
+  const defaults = DEFAULT_ONLY_SAMPLING_VALUES;
+  if (temperature !== undefined && temperature !== defaults.temperature) {
+    problems.push(`temperature (${temperature}) must be ${defaults.temperature}`);
+  }
+  if (topP !== undefined && topP !== defaults.topP) {
+    problems.push(`topP (${topP}) must be ${defaults.topP}`);
+  }
+  if (temperature !== undefined && topP !== undefined) {
+    problems.push('temperature and topP cannot be sent together');
+  }
+  if (problems.length === 0) return;
+
+  throw new ProviderError({
+    provider: 'anthropic',
+    cause: undefined,
+    message:
+      `[provider:anthropic] Model ${resolvedModel} rejects this sampling configuration: ` +
+      `${problems.join('; ')}. Anthropic accepts temperature ${defaults.temperature} or topP ` +
+      `${defaults.topP} alone, never both and never another value — omit them and guide the ` +
+      `model with prompting instead.`,
+  });
 }
 
 /**

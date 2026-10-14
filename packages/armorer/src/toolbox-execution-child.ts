@@ -1,3 +1,4 @@
+import { isAbortSignalLike } from './create-tool/execution-options';
 import type { EffectiveToolExecutionContext } from './execution-context';
 import type { ExecutionHandle, ExecutionLifecycle } from './execution-lifecycle';
 import type { Tool } from './is-tool';
@@ -89,7 +90,7 @@ function createChildHandle(context: ChildExecutionContext): ExecutionHandle | un
     callId: toolCall.id,
     ownerId: executionHandle.snapshot().ownerId,
     parentExecutionId: executionHandle.id,
-    ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+    ...(isAbortSignalLike(options.signal) ? { signal: options.signal } : {}),
     ...(options.timeout !== undefined ? { deadline: nowFunction() + options.timeout } : {}),
     scheduleDeadline: false,
     now: nowFunction,

@@ -8,6 +8,8 @@ export class ToolboxProgressEvent extends Event {
   readonly call: ToolCall;
   readonly percent: number | undefined;
   readonly message: string | undefined;
+  /** Verbatim checkpoint value bubbled from the tool; never re-serialized or reconstructed. */
+  readonly checkpoint: unknown;
   /** Armorer's own per-execution id (AB-290). */
   readonly executionId: string | undefined;
   /** Caller-supplied owner identity, echoed verbatim when supplied (AB-290). */
@@ -18,6 +20,7 @@ export class ToolboxProgressEvent extends Event {
       call: ToolCall;
       percent?: number;
       message?: string;
+      checkpoint?: unknown;
     } & ToolExecutionIdentity,
   ) {
     super(ToolboxProgressEvent.type);
@@ -25,6 +28,7 @@ export class ToolboxProgressEvent extends Event {
     this.call = detail.call;
     this.percent = detail.percent;
     this.message = detail.message;
+    this.checkpoint = detail.checkpoint;
     this.executionId = detail.executionId;
     this.ownerId = detail.ownerId;
   }

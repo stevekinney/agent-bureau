@@ -24,6 +24,8 @@ import {
 
 type StreamingInput<TReturn> = {
   value: TReturn;
+  /** Deactivates `context.progress()` once a streamed result is done (COR-95). */
+  finishProgress: () => void;
   options: ToolExecuteOptions & {
     executionHandle?: {
       activity: () => void;
@@ -157,6 +159,8 @@ async function collectStreamResult<TReturn, TChunk>(
   } catch (error) {
     input.emit('stream-error', streamErrorDetail(error, accumulator, input));
     throw error;
+  } finally {
+    input.finishProgress();
   }
   const finalized = finalizeAccumulator(accumulator);
   return {
@@ -199,6 +203,7 @@ function handleLiveStreamAbort(
   streamIterator: AsyncIterator<unknown>,
   input: StreamingInput<unknown>,
 ): void {
+  input.finishProgress();
   const executionHandle = input.options.executionHandle;
   if (!executionHandle) return;
   executionHandle.cleanupPending('stream return requested');
@@ -206,7 +211,16 @@ function handleLiveStreamAbort(
     executionHandle.unknownEffect('stream iterator has no return method');
     return;
   }
-  void Promise.resolve(streamIterator.return()).then(
+  // A `return()` that throws synchronously must terminalize the same way an
+  // asynchronously rejected one does, or the execution stays cleanup-pending.
+  let returned: unknown;
+  try {
+    returned = streamIterator.return();
+  } catch (error) {
+    executionHandle.cleanup({ status: 'failed', error });
+    return;
+  }
+  void Promise.resolve(returned).then(
     () => executionHandle.cleanup(),
     (error) => executionHandle.cleanup({ status: 'failed', error }),
   );
@@ -227,6 +241,7 @@ async function* liveStreamIterator(
     input.emit('stream-error', streamErrorDetail(error, accumulator, input));
     throw error;
   } finally {
+    input.finishProgress();
     input.options.executionHandle?.signal.removeEventListener('abort', onExecutionAbort);
     await finalizeLiveStream(streamError, accumulator, input);
   }

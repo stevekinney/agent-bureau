@@ -85,6 +85,19 @@ export interface ModelLimitEntry {
 }
 
 export const ANTHROPIC_LIMITS: Readonly<Record<string, ModelLimitEntry>> = Object.freeze({
+  // https://platform.claude.com/docs/en/models/fable-5-1/overview — confirmed 2026-10-13.
+  'claude-fable-5-1': { contextWindowTokens: 1_000_000, maxOutputTokens: 128_000 },
+  // Same page, "Claude Fable 5.1 and Claude Mythos 5.1": Mythos 5.1 "shares
+  // Claude Fable 5.1's specifications and pricing" — confirmed 2026-10-13.
+  'claude-mythos-5-1': { contextWindowTokens: 1_000_000, maxOutputTokens: 128_000 },
+  // https://platform.claude.com/docs/en/models/overview (compare-models table) — confirmed 2026-10-13.
+  'claude-opus-5-5': { contextWindowTokens: 1_000_000, maxOutputTokens: 128_000 },
+  // https://platform.claude.com/docs/en/models/opus-5/overview — confirmed 2026-10-13.
+  'claude-opus-5': { contextWindowTokens: 1_000_000, maxOutputTokens: 128_000 },
+  // https://platform.claude.com/docs/en/models/overview (compare-models table) — confirmed 2026-10-13.
+  'claude-sonnet-5-5': { contextWindowTokens: 1_000_000, maxOutputTokens: 128_000 },
+  // https://platform.claude.com/docs/en/models/overview (compare-models table) — confirmed 2026-10-13.
+  'claude-haiku-5-5': { contextWindowTokens: 1_000_000, maxOutputTokens: 128_000 },
   // https://platform.claude.com/docs/en/models/fable-5/overview — confirmed 2026-09-02.
   'claude-fable-5': { contextWindowTokens: 1_000_000, maxOutputTokens: 128_000 },
   // Same page, "Fable vs. Mythos": Mythos 5 "shares Claude Fable 5's
@@ -178,7 +191,14 @@ export const MODEL_LIMITS: Readonly<
 
 const ANTHROPIC_MODALITIES_TABLE: Readonly<Record<string, ModalityMatrix>> = Object.freeze({
   // ANTHROPIC_MODALITIES above — https://platform.claude.com/docs/en/build-with-claude/vision,
-  // confirmed 2026-09-02.
+  // confirmed 2026-09-02. The overview's "All current models support text and image input"
+  // covers the 5.1 / 5.5 / Opus 5 rows below, confirmed 2026-10-13.
+  'claude-fable-5-1': ANTHROPIC_MODALITIES,
+  'claude-mythos-5-1': ANTHROPIC_MODALITIES,
+  'claude-opus-5-5': ANTHROPIC_MODALITIES,
+  'claude-opus-5': ANTHROPIC_MODALITIES,
+  'claude-sonnet-5-5': ANTHROPIC_MODALITIES,
+  'claude-haiku-5-5': ANTHROPIC_MODALITIES,
   'claude-fable-5': ANTHROPIC_MODALITIES,
   'claude-mythos-5': ANTHROPIC_MODALITIES,
   'claude-opus-4-8': ANTHROPIC_MODALITIES,

@@ -47,6 +47,7 @@ export async function readRunStateFromCheckpoint(
 
     const runState = createRunState();
     runState.totalUsage = { ...checkpoint.cursor.totalUsage };
+    runState.cost = checkpoint.cursor.cost ? { ...checkpoint.cursor.cost } : undefined;
     runState.lastContent = checkpoint.cursor.lastContent;
     runState.schemaAttempts = checkpoint.cursor.schemaAttempts;
     runState.steps = checkpoint.steps.map((record, index) => ({

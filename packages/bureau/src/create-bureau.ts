@@ -1510,6 +1510,21 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
   const runToolboxes = new Set<BureauToolbox>();
   const runToolboxesByRunId = new Map<string, BureauToolbox>();
   let shutdownPromise: Promise<BureauShutdownReport> | undefined;
+  // COR-690: flipped synchronously the moment `shutdown()` starts, before it
+  // snapshots the runs and toolboxes it drains, so an API or scheduler run
+  // admitted afterwards can never exist outside that snapshot.
+  let runAdmissionClosed = false;
+  function assertRunAdmissionOpen(subject: 'run' | 'scheduler task'): void {
+    if (runAdmissionClosed) {
+      throw new BureauError(`Cannot create ${subject}: Bureau is shutting down.`, 'CONFLICT');
+    }
+  }
+  // COR-690: a terminal run's toolbox leaves the tracked set only once its own
+  // execution lifecycle is idle. A tool callback that ignored the run's abort
+  // is still running inside it, and a later `shutdown()` must find and await it.
+  function releaseRunToolboxWhenIdle(runToolbox: BureauToolbox): void {
+    detachBestEffortPromise(runToolbox.whenIdle().then(() => runToolboxes.delete(runToolbox)));
+  }
   // AB-207: Bureau-owned background work (scheduler, online-evals, webhook
   // notifier, audit trail) shares this signal so `shutdown()` can tell an
   // in-flight judge invocation / webhook delivery to hurry up and settle
@@ -2883,6 +2898,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
    */
   async function createRunFromRequest(request: CreateRunRequest): Promise<RunSummary> {
     validateCreateRunRequest(request);
+    assertRunAdmissionOpen('run');
 
     if (!runtime.ready) {
       throw new BureauError('No generate function configured', 'NOT_CONFIGURED', 'generate');
@@ -2917,6 +2933,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // synchronously right after the run starts (it does not await
     // completion), so admission is a synchronous pre-gate — over-cap or
     // rate-limited or duplicate triggers are rejected outright, not queued.
+    // COR-690: re-checked here because the authority validation above awaits,
+    // and `shutdown()` may have started during it.
+    assertRunAdmissionOpen('run');
     if (flowController) {
       const decision = flowController.admit({
         runId,
@@ -3164,6 +3183,11 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       // concurrent run on this same session must never block this one.
       const runSteeringGate = steeringGate?.forRun(runId);
 
+      // COR-690: the last admission check before the run and its toolbox are
+      // registered. Everything from here to that registration is synchronous,
+      // so a `shutdown()` that started during the awaits above rejects this
+      // run instead of letting it start outside shutdown's snapshot.
+      assertRunAdmissionOpen('run');
       const activeRun = createActiveRun(
         {
           generate: runRuntime.generate,
@@ -3308,7 +3332,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
       activeRun.once('run.completed', (event) => {
         activeRuns.delete(activeRun);
-        runToolboxes.delete(runToolbox);
+        releaseRunToolboxWhenIdle(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         // COR-625: a terminal transition owes this run one checkpoint-
         // retention step whether or not anyone ever calls `closed()`.
@@ -3362,7 +3386,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
       activeRun.once('run.aborted', (event) => {
         activeRuns.delete(activeRun);
-        runToolboxes.delete(runToolbox);
+        releaseRunToolboxWhenIdle(runToolbox);
         disposeRegisteredStreamListeners(disposeStreamListeners);
         // COR-625: a terminal transition owes this run one checkpoint-
         // retention step whether or not anyone ever calls `closed()`.
@@ -3428,7 +3452,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
 
       activeRun.once('run.error', (_event) => {
         activeRuns.delete(activeRun);
-        runToolboxes.delete(runToolbox);
+        releaseRunToolboxWhenIdle(runToolbox);
         // The stream listeners are deliberately NOT disposed here. `run.error`
         // is not terminal: Operative follows it with `run.completed`, which
         // carries the finish reason, so the `run.completed` listener above
@@ -4689,6 +4713,7 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (!runtime.scheduler) {
       throw new BureauError('Scheduler not configured', 'NOT_CONFIGURED', 'scheduler');
     }
+    assertRunAdmissionOpen('scheduler task');
 
     const taskId = runtimeServices.identifiers.next('scheduler-task');
     const priority = request.priority ?? 'scheduled';
@@ -4725,6 +4750,10 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
       metadata: request.metadata,
       requeue: request.requeue,
       async createRun() {
+        // COR-690: a task queued before `shutdown()` started must not be
+        // dispatched into a new run once it has; the scheduler records the
+        // failed dispatch.
+        assertRunAdmissionOpen('scheduler task');
         const runRuntime = await runtime.createRunRuntime(
           {
             message: request.message,
@@ -7120,14 +7149,13 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     if (isSessionRunTerminal(session.metadata) && liveRunIds.length === 0) {
       return { outcome: 'session-terminal', sessionId };
     }
-    // AB-200/AB-68: `agent-identity` joins `pause`/`resume` on the admitted
-    // path. The gate has always accepted it (see `ImplementedSteeringCommand`),
-    // and what was missing was this verb's own catalog validation — the one
-    // piece `ImplementedSteeringCommand`'s doc comment names as still owed.
-    // `route`/`model`/`provider`/`effort` remain unreachable: the gate is
-    // type-narrowed against them on purpose, and widening it is the
-    // separate state-machine slice that owns per-target desired-state
-    // writes and per-run `configVersion` accounting.
+    // AB-200/AB-68: all seven targets reach the gate. `agent-identity` is
+    // validated against the agents map below, and `model`/`provider`/
+    // `effort` are validated against the model catalog; `route` is not,
+    // because Bureau holds no routing table (see the `known` check below).
+    // A configuration `policyRef` is first resolved through
+    // `modelPolicy.users` (COR-1227). The gate then owns their
+    // desired-state writes and per-run `configVersion` accounting.
     const steeringTarget = request.requestedValue.target;
     // A `policyRef` names a pre-approved policy only the AB-66 selector can
     // resolve into a concrete agent name. Until that resolution path exists
@@ -8308,6 +8336,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // call's already-cached report promise, ignoring whatever `policy` it
     // was given — the FIRST call's policy is what actually ran.
     if (shutdownPromise) return shutdownPromise;
+    // COR-690: close run admission before anything below snapshots the active
+    // runs or run toolboxes, so nothing admitted afterwards escapes the drain.
+    runAdmissionClosed = true;
 
     const policy: 'abort' | 'drain' = shutdownOptions?.policy ?? 'abort';
     const timeoutMilliseconds = shutdownOptions?.timeoutMilliseconds;
@@ -8326,7 +8357,9 @@ export async function createBureau<const D extends AgentDefinitions = AgentDefin
     // is known; closed() means teardown actually finished), and a caller-
     // supplied `ModelCatalogService` is explicitly allowed to do that — so
     // only awaiting `closed()` observes the real cleanup fence (review
-    // finding, PR #432).
+    // finding, PR #432). Only this one captured handle is awaited: a refresh
+    // newly started by an observer notified during that handle's settlement
+    // is a different handle, and this `shutdown()` call does NOT wait for it.
     const modelCatalogRefreshClosedPromise = modelCatalog.inFlightRefresh()?.closed();
 
     // Which owners this bureau actually composes — a report row is emitted

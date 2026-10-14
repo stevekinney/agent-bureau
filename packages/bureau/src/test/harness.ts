@@ -172,8 +172,8 @@ export interface BureauTestHarness<D extends AgentDefinitions = AgentDefinitions
 
   /**
    * Durable runs this harness has been told to track for quiescence
-   * (AB-262) — see `registerDurableRun`. A public, read-only snapshot;
-   * never a private `Map`.
+   * (AB-262) — see `registerDurableRun`. Each read returns a fresh, frozen
+   * snapshot; mutating it never affects the harness's own bookkeeping.
    */
   readonly durableRegistrations: readonly DurableRunRegistration[];
 
@@ -359,7 +359,12 @@ export async function createBureauTestHarness<D extends AgentDefinitions = Agent
     childRegistry,
 
     get durableRegistrations() {
-      return durableRegistrations;
+      // A fresh frozen snapshot per read (COR-84): `readonly` is a type-level
+      // promise only, so handing out the internal array would let a caller
+      // mutate the bookkeeping `registerDurableRun` and quiescence rely on.
+      return Object.freeze(
+        durableRegistrations.map((registration) => Object.freeze({ ...registration })),
+      );
     },
 
     registerDurableRun(runId, registerOptions) {

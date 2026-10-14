@@ -74,6 +74,7 @@ export function buildStepDeps(options: RunOptions): StepDeps {
     // never a second resolution on the in-memory run path.
     runtime: options.runtime ?? createDefaultRuntimeServices(),
     agentName: options.agentName,
+    costEstimation: options.costEstimation,
   };
 }
 

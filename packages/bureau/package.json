@@ -53,7 +53,7 @@
     "@lostgradient/operative": "workspace:*",
     "@lostgradient/skills": "workspace:*",
     "@lostgradient/tool-protocol": "workspace:*",
-    "@lostgradient/weft": "^0.27.15",
+    "@lostgradient/weft": "^0.27.17",
     "armorer": "workspace:*",
     "conversationalist": "workspace:*",
     "zod": "^4.4.3"

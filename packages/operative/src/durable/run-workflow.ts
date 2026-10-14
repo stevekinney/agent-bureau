@@ -256,6 +256,7 @@ export function createRunWorkflow(
             const stepIndex = cursor.step;
             const carriedAccumulators = {
               totalUsage: cursor.totalUsage,
+              cost: cursor.cost,
               lastContent: cursor.lastContent,
               schemaAttempts: cursor.schemaAttempts,
               lastAppliedConfigVersion: cursor.lastAppliedConfigVersion,

@@ -56,6 +56,19 @@ describe('createModelCatalogService', () => {
     expect(after.descriptors).toBe(before.descriptors);
   });
 
+  it('a second failed refresh against an already-stale catalog keeps the same catalog object', async () => {
+    const { service } = createService(() => Promise.reject(new Error('boom')));
+    await service.refresh(request()).result();
+    const staleCatalog = service.catalog();
+    expect(staleCatalog.stale).toBe(true);
+
+    const second = await service.refresh(request()).result();
+    expect(second.outcome).toBe('failed');
+    // No fresh wrapper is allocated for a catalog that is already stale at
+    // the same revision — callers holding the stale catalog keep its identity.
+    expect(service.catalog()).toBe(staleCatalog);
+  });
+
   it('an aborted refresh resolves with outcome failed, never rejects, and commits nothing; descriptorSource observes the abort', async () => {
     let observedSignal: AbortSignal | undefined;
     const source = deferred<readonly BackendDescriptor[]>();

@@ -12,6 +12,7 @@ import {
   BureauHarnessUnsupportedError,
   type BureauTestHarness,
   createBureauTestHarness,
+  type DurableRunRegistration,
 } from './harness';
 import {
   type BureauStorageFixture,
@@ -89,6 +90,32 @@ describe('createBureauTestHarness', () => {
     const harness = await harnessWithMemoryStorage();
 
     expect(harness.bureau.ready).toBe(true);
+  });
+
+  it('COR-84: durableRegistrations returns a fresh frozen snapshot that callers cannot use to mutate the harness bookkeeping', async () => {
+    const harness = await harnessWithMemoryStorage();
+    harness.registerDurableRun('run-a');
+
+    const first = harness.durableRegistrations;
+    const second = harness.durableRegistrations;
+    expect(second).not.toBe(first);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(first[0])).toBe(true);
+
+    const mutable = first as DurableRunRegistration[];
+    expect(() => mutable.push({ runId: 'injected', detached: false })).toThrow(TypeError);
+    expect(() => mutable.splice(0, 1)).toThrow(TypeError);
+    expect(() => {
+      (mutable[0] as { detached: boolean }).detached = true;
+    }).toThrow(TypeError);
+
+    harness.registerDurableRun('run-b', { detached: true });
+
+    expect(first).toEqual([{ runId: 'run-a', detached: false }]);
+    expect(harness.durableRegistrations).toEqual([
+      { runId: 'run-a', detached: false },
+      { runId: 'run-b', detached: true },
+    ]);
   });
 
   it('composes the bureau over the injected runtime and storage fixture', async () => {

@@ -899,6 +899,10 @@ export function createAuditTrail<D extends AgentDefinitions = AgentDefinitions>(
   // to the real-globals runtime so every pre-existing direct caller of this
   // exported factory (including this package's own test suite) is
   // unaffected by construction.
+  // COR-89: an omitted-`runtime` caller has no handle on that default
+  // instance, so its `deferred` ledger is never the only path to the work
+  // tracked on it: every promise passed to `runtime.deferred.track` below is
+  // also held in `activeWrites`, which `dispose()` awaits.
   runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): AuditTrail {
   const diagnose = resolveDiagnosticSink(onDiagnostic);

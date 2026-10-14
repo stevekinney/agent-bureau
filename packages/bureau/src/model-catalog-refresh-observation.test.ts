@@ -67,6 +67,25 @@ describe('createModelCatalogService', () => {
     expect(secondObserverDeliveries).toEqual(['pending', 'settled']);
   });
 
+  it('an observer removed by an earlier observer during the same delivery is not notified after removal', async () => {
+    const { service } = createService(() => Promise.resolve([]));
+    const handle = service.refresh(request());
+
+    const removedDeliveries: string[] = [];
+    let unsubscribeSecond: (() => void) | undefined;
+    handle.subscribeSnapshot((snapshot) => {
+      if (snapshot.status === 'settled') unsubscribeSecond?.();
+    });
+    unsubscribeSecond = handle.subscribeSnapshot((snapshot) =>
+      removedDeliveries.push(snapshot.status),
+    );
+
+    await handle.result();
+    // The first observer removed the second during the terminal delivery,
+    // before the second's turn in that pass came up.
+    expect(removedDeliveries).toEqual(['pending']);
+  });
+
   it('two subscriptions with the SAME observer function are independently disposable', async () => {
     const { service } = createService(() => Promise.resolve([]));
     const handle = service.refresh(request());

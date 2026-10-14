@@ -2,7 +2,7 @@ import type { RuntimeServices } from '@lostgradient/lifecycle';
 import { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 import type { Conversation } from 'conversationalist';
 
-import { estimateCost, getModelPricing } from './cost-estimation';
+import { type AccumulatedCost, estimateCost, getModelPricing } from './cost-estimation';
 import {
   AbortAgentRunError,
   type AgentRunError,
@@ -38,10 +38,28 @@ import type { FinishReason, RunOptions, RunResult, TokenUsage } from './types';
 export function computeCostEstimate(
   usage: TokenUsage,
   costEstimation: RunOptions['costEstimation'],
+  accumulatedCost?: AccumulatedCost,
 ): RunResult['costEstimate'] {
   if (!costEstimation) return undefined;
   if (!getModelPricing(costEstimation.model, costEstimation.pricing)) return undefined;
-  return estimateCost(usage, costEstimation.model, costEstimation.pricing);
+  if (accumulatedCost) {
+    // The sum of every request priced on its own usage (`accumulateUsage`), so a long-prompt tier
+    // applies to exactly the requests that crossed it and the estimate matches what the cost
+    // budget monitor saw per step.
+    return {
+      ...accumulatedCost,
+      totalCost:
+        accumulatedCost.promptCost +
+        accumulatedCost.completionCost +
+        accumulatedCost.cacheWriteCost +
+        accumulatedCost.cacheReadCost,
+      model: costEstimation.model,
+      usage,
+    };
+  }
+  // No per-request cost was recorded: a run with no priced usage, or a checkpoint written before
+  // costs were accumulated. Only the run total is known, so price it at the base tier.
+  return estimateCost(usage, costEstimation.model, costEstimation.pricing, 'aggregate');
 }
 
 /**
@@ -121,7 +139,7 @@ export function makeAbortResult(
   terminalError?: AgentRunError,
   hookTracker?: (promise: Promise<unknown>) => void,
 ): RunResult {
-  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation, runState.cost);
   const explicitReason = typeof reason === 'string' ? reason : undefined;
   const error = terminalError ?? new AbortAgentRunError(explicitReason);
   emitter?.dispatch(
@@ -194,7 +212,7 @@ export function makeErrorResult(
           ? 'tripwire'
           : 'error';
 
-  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation, runState.cost);
   const result: RunResult = {
     conversation,
     steps: runState.steps,
@@ -244,7 +262,7 @@ export function makeCompletedResult(
   // driver (`loop.ts`) always supplies the run's own snapshotted instance.
   runtime?: RuntimeServices,
 ): RunResult {
-  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation);
+  const costEstimate = computeCostEstimate(runState.totalUsage, costEstimation, runState.cost);
   const maximumStepsError =
     finishReason === 'maximum-steps'
       ? (terminalError ?? new MaximumStepsExceededError(runState.steps.length))

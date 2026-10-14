@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { defaultPricingTable } from '../cost-estimation.ts';
 import { getProviderCapabilities, type ProviderCapabilities } from './capabilities.ts';
+import { pricingFor } from './model-catalog-rows.ts';
 import {
   type BackendDescriptor,
   createModelCatalog,
@@ -30,6 +31,7 @@ import {
   GEMINI_MODEL_ALIASES,
   OPENAI_MODEL_ALIASES,
 } from './shared/model-registry.ts';
+import { anthropicSamplingSupport } from './shared/sampling.ts';
 import type { Effort, ProviderName } from './types.ts';
 
 const FIXED_NOW = '2026-09-02T12:00:00.000Z';
@@ -83,11 +85,11 @@ describe('createModelCatalog: seed model set (computed, not hand-copied)', () =>
     }
   });
 
-  it('produces exactly 25 descriptor rows: 14 Anthropic, 8 OpenAI, 3 Gemini', () => {
-    expect(descriptorsFor('anthropic')).toHaveLength(14);
+  it('produces exactly 31 descriptor rows: 20 Anthropic, 8 OpenAI, 3 Gemini', () => {
+    expect(descriptorsFor('anthropic')).toHaveLength(20);
     expect(descriptorsFor('openai')).toHaveLength(8);
     expect(descriptorsFor('gemini')).toHaveLength(3);
-    expect(createModelCatalog({ now: fixedNow }).descriptors).toHaveLength(25);
+    expect(createModelCatalog({ now: fixedNow }).descriptors).toHaveLength(31);
   });
 
   it('emits no descriptor row for voyage or ollama', () => {
@@ -186,6 +188,104 @@ describe('createModelCatalog: parameterCompatibility', () => {
   });
 });
 
+describe('createModelCatalog: Anthropic sampling parameters follow the documented per-model decision', () => {
+  // Models the cited pages do not settle (see shared/sampling.ts): conservatively not advertised.
+  const UNSETTLED = ['claude-haiku-4-20250506', 'claude-3-5-haiku-20241022'];
+
+  it('advertises temperature and topP exactly when the model is recorded as accepting them', () => {
+    for (const row of descriptorsFor('anthropic')) {
+      const advertised = ['temperature', 'topP'].map((field) =>
+        row.parameterCompatibility.includes(field as 'temperature' | 'topP'),
+      );
+      const accepted = anthropicSamplingSupport(row.model) === 'accepted';
+      expect([row.model, advertised]).toEqual([row.model, [accepted, accepted]]);
+    }
+  });
+
+  it('records a decision for every Anthropic row except the documented unsettled ones', () => {
+    const undecided = descriptorsFor('anthropic')
+      .map((row) => row.model)
+      .filter((model) => anthropicSamplingSupport(model) === 'unsettled');
+    expect(undecided.toSorted()).toEqual(UNSETTLED.toSorted());
+  });
+
+  it('does not advertise sampling for the current Claude models, which reject it', () => {
+    for (const model of [
+      'claude-fable-5-1',
+      'claude-mythos-5-1',
+      'claude-opus-5-5',
+      'claude-opus-5',
+      'claude-sonnet-5-5',
+      'claude-haiku-5-5',
+      'claude-fable-5',
+      'claude-mythos-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-sonnet-5',
+    ]) {
+      const row = descriptorsFor('anthropic').find((candidate) => candidate.model === model);
+      expect(row?.parameterCompatibility).not.toContain('temperature');
+      expect(row?.parameterCompatibility).not.toContain('topP');
+    }
+  });
+
+  it('still advertises sampling for models that accept it', () => {
+    for (const model of ['claude-opus-4-6', 'claude-opus-4-5', 'claude-sonnet-4-6']) {
+      const row = descriptorsFor('anthropic').find((candidate) => candidate.model === model);
+      expect(row?.parameterCompatibility).toContain('temperature');
+      expect(row?.parameterCompatibility).toContain('topP');
+    }
+  });
+
+  it('keeps every other parameter, including toolChoice, on every Anthropic row', () => {
+    for (const row of descriptorsFor('anthropic')) {
+      for (const field of [
+        'model',
+        'effort',
+        'maximumTokens',
+        'stopSequences',
+        'toolChoice',
+        'responseFormat',
+        'requestMetadata',
+      ] as const) {
+        expect(row.parameterCompatibility).toContain(field);
+      }
+    }
+  });
+
+  it('leaves OpenAI and Gemini rows advertising sampling', () => {
+    for (const row of [...descriptorsFor('openai'), ...descriptorsFor('gemini')]) {
+      expect(row.parameterCompatibility).toContain('temperature');
+      expect(row.parameterCompatibility).toContain('topP');
+    }
+  });
+});
+
+describe('createModelCatalog: Haiku 5.5 carries its long-context tier', () => {
+  it('exposes the tier on the descriptor and no tier on a flat-priced model', () => {
+    const rows = createModelCatalog({ now: fixedNow }).descriptors;
+    expect(rows.find((row) => row.model === 'claude-haiku-5-5')?.pricing?.longContext).toEqual({
+      inputTokensAbove: 100_000,
+      inputPerMillionTokens: 0.5,
+      outputPerMillionTokens: 2.5,
+    });
+    expect(
+      rows.find((row) => row.model === 'claude-haiku-4-5')?.pricing?.longContext,
+    ).toBeUndefined();
+  });
+});
+
+describe('createModelCatalog: access-restricted Anthropic models', () => {
+  it('reports Mythos availability as unknown and every other Anthropic row as available', () => {
+    for (const row of descriptorsFor('anthropic')) {
+      expect([row.model, row.availability]).toEqual([
+        row.model,
+        row.model.startsWith('claude-mythos') ? 'unknown' : 'available',
+      ]);
+    }
+  });
+});
+
 describe('createModelCatalog: pricing is derived from defaultPricingTable, never fabricated', () => {
   it('matches promptCostPerMillionTokens/completionCostPerMillionTokens exactly, in USD, for every priced model', () => {
     const catalog = createModelCatalog({ now: fixedNow });
@@ -196,18 +296,30 @@ describe('createModelCatalog: pricing is derived from defaultPricingTable, never
         inputPerMillionTokens: priced.promptCostPerMillionTokens,
         outputPerMillionTokens: priced.completionCostPerMillionTokens,
         currency: 'USD',
+        ...(priced.longContext
+          ? {
+              longContext: {
+                inputTokensAbove: priced.longContext.inputTokensAbove,
+                inputPerMillionTokens: priced.longContext.promptCostPerMillionTokens,
+                outputPerMillionTokens: priced.longContext.completionCostPerMillionTokens,
+              },
+            }
+          : {}),
       });
     }
   });
 
   it('omits the pricing field entirely for a model with no defaultPricingTable row', () => {
+    expect(pricingFor('claude-unpriced-fixture')).toBeUndefined();
+  });
+
+  it('prices every catalog row, so no resolvable model reports a fabricated or missing cost', () => {
     const catalog = createModelCatalog({ now: fixedNow });
-    const unpriced = catalog.descriptors.filter(
-      (descriptor) => !(descriptor.model in defaultPricingTable),
-    );
-    expect(unpriced.length).toBeGreaterThan(0);
-    for (const row of unpriced) {
-      expect('pricing' in row).toBe(false);
+    for (const row of catalog.descriptors) {
+      expect({ model: row.model, priced: 'pricing' in row }).toEqual({
+        model: row.model,
+        priced: true,
+      });
     }
   });
 });

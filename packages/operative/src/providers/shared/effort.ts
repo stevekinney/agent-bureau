@@ -14,23 +14,34 @@ import type { Effort } from '../types.ts';
 const EFFORT_ORDER: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
- * Anthropic `output_config.effort` support by resolved model ID, per the
- * mapping table in AB-64:
- * - Fable 5, Sonnet 5, Opus 4.7, Opus 4.8: full `low` .. `max` range, including `xhigh`.
- * - Opus 4.5, Opus 4.6, Sonnet 4.6: `low` .. `max`, no `xhigh`.
- * - Haiku (any generation) and Sonnet 4.5 or earlier: no effort parameter support at all.
+ * Anthropic `output_config.effort` support by resolved model ID, per
+ * https://platform.claude.com/docs/en/build-with-claude/effort (effort-levels
+ * table and per-model sections, confirmed 2026-10-13):
+ * - Fable 5.1, Mythos 5.1, Fable 5, Mythos 5, Opus 5.5, Opus 5, Opus 4.8,
+ *   Opus 4.7, Sonnet 5.5, Sonnet 5, Haiku 5.5: full `low` .. `max` range,
+ *   including `xhigh`.
+ * - Opus 4.6, Sonnet 4.6: `low` .. `max`, no `xhigh`.
+ * - Opus 4.5: `low` .. `high` only (the page lists it under neither `xhigh`
+ *   nor `max`).
+ * - Haiku 4.5 and Sonnet 4.5 or earlier: no effort parameter support at all.
  * A resolved model absent from this table is treated conservatively as
  * unsupported (empty list) — the effort parameter is omitted rather than
  * guessed at.
  */
 export const ANTHROPIC_EFFORT_SUPPORT: Readonly<Record<string, readonly Effort[]>> = Object.freeze({
+  'claude-fable-5-1': EFFORT_ORDER,
+  'claude-mythos-5-1': EFFORT_ORDER,
   'claude-fable-5': EFFORT_ORDER,
   'claude-mythos-5': EFFORT_ORDER,
+  'claude-opus-5-5': EFFORT_ORDER,
+  'claude-opus-5': EFFORT_ORDER,
   'claude-opus-4-8': EFFORT_ORDER,
   'claude-opus-4-7': EFFORT_ORDER,
+  'claude-sonnet-5-5': EFFORT_ORDER,
   'claude-sonnet-5': EFFORT_ORDER,
+  'claude-haiku-5-5': EFFORT_ORDER,
   'claude-opus-4-6': ['low', 'medium', 'high', 'max'],
-  'claude-opus-4-5': ['low', 'medium', 'high', 'max'],
+  'claude-opus-4-5': ['low', 'medium', 'high'],
   'claude-sonnet-4-6': ['low', 'medium', 'high', 'max'],
 });
 

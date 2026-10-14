@@ -4,6 +4,7 @@ import { Conversation } from 'conversationalist';
 import type { ZodType } from 'zod';
 
 import type { ContextEpochSealer } from './context-epoch';
+import type { AccumulatedCost } from './cost-estimation';
 import type { AgentRunErrorKind } from './errors';
 import {
   GenerateCompletedEvent,
@@ -128,6 +129,8 @@ export interface StepDeps {
    */
   readonly runtime: RuntimeServices;
   readonly agentName: string | undefined;
+  /** Prices each request's usage into `RunState.cost`; `undefined` accumulates no cost. */
+  readonly costEstimation: RunOptions['costEstimation'];
   /**
    * AB-204: when supplied, every run-owned hook's fire-and-forget promise
    * (`onLLMInput`/`onLLMOutput` here; `onRunComplete`/`onRunAbort`/
@@ -165,6 +168,12 @@ export interface StepDeps {
 export interface RunState {
   steps: StepResult[];
   totalUsage: TokenUsage;
+  /**
+   * The cost of every request folded into `totalUsage`, each priced on its own usage and added at
+   * the same point (`accumulateUsage`), so the two cannot drift apart. `undefined` until a priced
+   * request is recorded, or for a run with no `costEstimation`.
+   */
+  cost?: AccumulatedCost | undefined;
   lastContent: string;
   /** Run-scoped count of structured-output schema retries already consumed. */
   schemaAttempts: number;
@@ -367,7 +376,7 @@ export async function runStep(
     } catch (error) {
       // See the comment on the validateResponseHooks catch above — the
       // response has already been billed by the provider.
-      accumulateUsage(runState, emitter, step, response.usage);
+      accumulateUsage(runState, emitter, step, response.usage, deps.costEstimation);
       emitter?.dispatch(new RunErrorEvent(step, error, 'output'));
       return { kind: 'error', error, errorKind: 'output' };
     }
@@ -415,7 +424,7 @@ export async function runStep(
 
   const { content, usage, metadata } = response;
   runState.lastContent = content;
-  accumulateUsage(runState, emitter, step, usage);
+  accumulateUsage(runState, emitter, step, usage, deps.costEstimation);
 
   if (content && !response.messageAppended) {
     conversation.appendAssistantMessage(content, metadata);

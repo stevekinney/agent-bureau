@@ -10,6 +10,7 @@
 
 import type { RuntimeServices } from '@lostgradient/lifecycle';
 
+import type { AccumulatedCost } from '../cost-estimation';
 import { computeCostEstimate } from '../run-lifecycle';
 import type { FinishReason, RunOptions, RunResult } from '../types';
 import type { DurableActiveRunContext } from './active-run-adapter';
@@ -45,9 +46,13 @@ export interface ReadDurableRunResultOptions {
   readonly costEstimation?: RunOptions['costEstimation'] | undefined;
 }
 
-function withCost(result: RunResult, options: ReadDurableRunResultOptions): RunResult {
+function withCost(
+  result: RunResult,
+  options: ReadDurableRunResultOptions,
+  accumulatedCost: AccumulatedCost | undefined,
+): RunResult {
   if (result.costEstimate !== undefined) return result;
-  const costEstimate = computeCostEstimate(result.usage, options.costEstimation);
+  const costEstimate = computeCostEstimate(result.usage, options.costEstimation, accumulatedCost);
   return costEstimate === undefined ? result : { ...result, costEstimate };
 }
 
@@ -66,10 +71,16 @@ export async function readDurableRunResult(
   if (state === null) return { status: 'missing' };
   if (state.status === 'completed') {
     const summary = normalizeAgentRunWorkflowResult(state.result);
-    const { result } = await reconstructRunResult(context, runId, summary, options.runtime, {
-      strictCheckpointRead: true,
-    });
-    return { status: 'completed', result: withCost(result, options) };
+    const { result, runState } = await reconstructRunResult(
+      context,
+      runId,
+      summary,
+      options.runtime,
+      {
+        strictCheckpointRead: true,
+      },
+    );
+    return { status: 'completed', result: withCost(result, options, runState.cost) };
   }
   if (state.status !== 'cancelled' && state.status !== 'failed' && state.status !== 'timed-out') {
     return { status: 'not-terminal' };
@@ -92,6 +103,6 @@ export async function readDurableRunResult(
     workflowStatus: state.status,
     finishReason,
     detail: state.error,
-    result: withCost(result, options),
+    result: withCost(result, options, runState.cost),
   };
 }

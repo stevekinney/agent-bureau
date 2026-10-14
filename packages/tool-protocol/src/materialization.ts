@@ -64,6 +64,7 @@ export async function materializeToolResultAsync(
 ): Promise<ToolResult> {
   const streamingPayload = getStreamingPayload(toolResult);
   if (!streamingPayload) {
+    if (options.signal?.aborted) throw toAbortError(options.signal);
     return stripRuntimeToolResultFields(toolResult, normalizeJSONValue(toolResult.content));
   }
 
@@ -669,10 +670,29 @@ async function collectAsyncIterable(
       chunks.push(result.value);
     }
   } finally {
-    if (signal?.aborted) await iterator.return?.();
+    if (signal?.aborted) closeIteratorInBackground(iterator);
   }
 
   return chunks;
+}
+
+/**
+ * Asks an abandoned iterator to release its resources without waiting for it.
+ * A `return()` that never settles must not hold the aborted materialization
+ * open, and one that rejects must not surface as an unhandled rejection.
+ */
+function closeIteratorInBackground(iterator: AsyncIterator<unknown>): void {
+  try {
+    void Promise.resolve(iterator.return?.()).catch(() => undefined);
+  } catch {
+    // Cleanup is best effort; the abort reason is what the caller observes.
+  }
+}
+
+function toAbortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException('The operation was aborted', 'AbortError');
 }
 
 async function nextWithSignal<T>(

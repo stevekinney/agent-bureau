@@ -73,7 +73,7 @@ export interface DurableStepMemoResult {
   conversationSnapshot: ReturnType<Conversation['snapshot']>;
   nextAccumulators: Pick<
     RunCursor,
-    'totalUsage' | 'lastContent' | 'schemaAttempts' | 'lastAppliedConfigVersion'
+    'totalUsage' | 'cost' | 'lastContent' | 'schemaAttempts' | 'lastAppliedConfigVersion'
   >;
   pendingWakeup?: PendingWakeup | undefined;
   pendingHumanWait?: PendingHumanWait | undefined;
@@ -100,6 +100,7 @@ export function runStepMemo(
     };
     const runState = createRunState();
     runState.totalUsage = { ...carriedAccumulators.totalUsage };
+    runState.cost = carriedAccumulators.cost ? { ...carriedAccumulators.cost } : undefined;
     runState.lastContent = carriedAccumulators.lastContent;
     runState.schemaAttempts = carriedAccumulators.schemaAttempts;
     runState.lastAppliedConfigVersion = carriedAccumulators.lastAppliedConfigVersion;
@@ -148,6 +149,7 @@ export function runStepMemo(
       conversationSnapshot: snapshotAfterStep(deps, conversation),
       nextAccumulators: {
         totalUsage: runState.totalUsage,
+        cost: runState.cost,
         lastContent: runState.lastContent,
         schemaAttempts: runState.schemaAttempts,
         lastAppliedConfigVersion: runState.lastAppliedConfigVersion,

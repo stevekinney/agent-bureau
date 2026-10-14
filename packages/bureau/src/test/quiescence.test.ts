@@ -446,6 +446,44 @@ describe('assertBureauQuiescent / BureauTestHarness.close()', () => {
     }
   });
 
+  it('COR-84: a detached registration is never reported as detached when no durable engine is composed (getDurableRun resolves undefined)', async () => {
+    const harness = await harnessWithMemoryStorage();
+    expect(await harness.bureau.getDurableRun('stale-run')).toBeUndefined();
+    harness.registerDurableRun('stale-run', { detached: true });
+
+    const report = await assertBureauQuiescent(harness);
+
+    expect(report.detached).toEqual([]);
+    expect(report.quiescent).toBe(false);
+    const expected = {
+      kind: 'durable-owner',
+      identifier: 'stale-run',
+      owner: 'durable-engine-unavailable',
+      discoveredVia: 'public-snapshot',
+    } as const;
+    expect(report.durableAttempts).toEqual([expected]);
+    expect(report.leaked).toContainEqual(expected);
+  });
+
+  it('COR-84: a detached registration is never reported as detached when the durable engine does not know the run (getDurableRun resolves null)', async () => {
+    const harness = await harnessWithMemoryStorage({ durableExecution: true });
+    expect(await harness.bureau.getDurableRun('unknown-run')).toBeNull();
+    harness.registerDurableRun('unknown-run', { detached: true });
+
+    const report = await assertBureauQuiescent(harness);
+
+    expect(report.detached).toEqual([]);
+    expect(report.quiescent).toBe(false);
+    const expected = {
+      kind: 'durable-owner',
+      identifier: 'unknown-run',
+      owner: 'durable-run-unknown',
+      discoveredVia: 'public-snapshot',
+    } as const;
+    expect(report.durableAttempts).toEqual([expected]);
+    expect(report.leaked).toContainEqual(expected);
+  });
+
   it('AB-339: a directly aborted durable run reports quiescent even when the harness closes without the caller awaiting closed() first', async () => {
     // Real SQLite storage, matching the original reproduction
     // (`adapters/bureau-durable.ts`) — this bug does not reproduce against

@@ -31,7 +31,10 @@
  * - `durableAttempts` (the non-detached case) — `bureau.getDurableRun`
  *   (AB-207/AB-29) for every id a test registered via
  *   `harness.registerDurableRun`, when its `WorkflowState.status` is not
- *   yet terminal.
+ *   yet terminal. A `detached` registration lands here too (COR-84) when
+ *   `getDurableRun` cannot confirm it — `owner: 'durable-engine-unavailable'`
+ *   for `undefined` (no durable engine composed) or `'durable-run-unknown'`
+ *   for `null` — and under `detached` only when it resolves a `WorkflowState`.
  * - `incomplete` — the `BureauShutdownReport` `shutdown()` itself just
  *   produced (AB-207): any owner it classified `'unresolved'` (a bounded
  *   `timeoutMilliseconds` wait elapsed before that owner's drain settled).
@@ -325,7 +328,20 @@ export async function assertBureauQuiescent<D extends AgentDefinitions = AgentDe
   for (const registration of harness.durableRegistrations) {
     const state = await bureau.getDurableRun(registration.runId);
     if (registration.detached) {
-      detachedDurable.push({ kind: 'durable-owner', id: registration.runId });
+      // COR-84: a detachment only counts when the engine confirms the run.
+      // `undefined` (no durable engine composed) and `null` (run unknown to
+      // the engine) are a stale or invalid registration, surfaced as a leak
+      // with a distinguishing `owner` rather than hidden under `detached`.
+      if (state) {
+        detachedDurable.push({ kind: 'durable-owner', id: registration.runId });
+      } else {
+        durableAttempts.push({
+          kind: 'durable-owner',
+          identifier: registration.runId,
+          owner: state === undefined ? 'durable-engine-unavailable' : 'durable-run-unknown',
+          discoveredVia: 'public-snapshot',
+        });
+      }
       continue;
     }
     if (state && isNonTerminalWorkflowStatus(state.status)) {

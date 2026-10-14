@@ -1,5 +1,6 @@
+import { isAbortSignalLike } from './create-tool/execution-options';
 import { freezeToolRequestContext, type EffectiveToolExecutionContext } from './execution-context';
-import type { ExecutionHandle, ExecutionLifecycle } from './execution-lifecycle';
+import type { ExecutionLifecycle } from './execution-lifecycle';
 import type { InternalToolboxExecuteOptions } from './toolbox-contracts';
 import type { ToolCallInput } from './types';
 
@@ -90,15 +91,10 @@ export function executionTimingParameters(
   deadline: number | undefined,
 ) {
   return {
-    ...(options.signal instanceof AbortSignal ? { signal: options.signal } : {}),
+    ...(isAbortSignalLike(options.signal) ? { signal: options.signal } : {}),
     ...(deadline !== undefined ? { deadline } : {}),
     now: nowFunction,
     ...(options.setTimeoutFunction ? { setTimeoutFunction: options.setTimeoutFunction } : {}),
     ...(options.clearTimeoutFunction ? { clearTimeoutFunction: options.clearTimeoutFunction } : {}),
   };
-}
-
-export function isAbortRequested(handle: ExecutionHandle): boolean {
-  const state = handle.snapshot().state;
-  return state === 'abort-requested' || state === 'cleanup-pending';
 }

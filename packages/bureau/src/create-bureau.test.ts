@@ -57,6 +57,7 @@ import {
   startDurableRunResult,
   StepCompletedEvent,
   type StepResult,
+  type SteeringRequestedValue,
   stopWhen,
   type StreamEventMap,
   TaskCancelledEvent,
@@ -6719,6 +6720,69 @@ describe('createBureau submitSteeringCommand (AB-67/AB-199)', () => {
       expect(outcome.command.requestedValue).toEqual({
         target: 'model',
         override: 'claude-sonnet-5',
+      });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('admits every one of the seven steering targets through the public verb (AB-200)', async () => {
+    // Pins the contract `Bureau.submitSteeringCommand`'s doc comment and the
+    // README state: no target is refused as unsupported. The `satisfies`
+    // record makes a new `SteeringRequestedValue` target a compile error
+    // here until this test decides how it is admitted.
+    const requestedValues = {
+      pause: { target: 'pause' },
+      resume: { target: 'resume' },
+      'agent-identity': { target: 'agent-identity', override: 'steered' },
+      route: { target: 'route', override: 'primary' },
+      model: { target: 'model', override: 'claude-sonnet-5' },
+      provider: { target: 'provider', override: 'anthropic' },
+      effort: { target: 'effort', override: 'high' },
+    } satisfies {
+      [Target in SteeringRequestedValue['target']]: Extract<
+        SteeringRequestedValue,
+        { target: Target }
+      >;
+    };
+    const steered = createAgent({
+      generate: () => new Promise<never>(() => {}),
+      name: 'steered',
+    });
+    const bureau = await createBureau({
+      agents: { steered },
+      generate: () => new Promise<never>(() => {}),
+      toolbox: createEmptyToolbox(),
+      storage: { type: 'memory' },
+    });
+    try {
+      const run = await bureau.createRun({
+        message: 'Wait forever',
+        agentName: 'steered',
+        principal: 'alice',
+      });
+      await pollUntil(async () => {
+        const session = await bureau.getSession(run.sessionId);
+        return session?.metadata['lastRunStatus'] === 'running';
+      });
+
+      const outcomes: Record<string, string> = {};
+      for (const [target, requestedValue] of Object.entries(requestedValues)) {
+        const outcome = await bureau.submitSteeringCommand(run.sessionId, {
+          principal: 'alice',
+          requestedValue,
+        });
+        outcomes[target] = outcome.outcome;
+      }
+
+      expect(outcomes).toEqual({
+        pause: 'accepted',
+        resume: 'accepted',
+        'agent-identity': 'accepted',
+        route: 'accepted',
+        model: 'accepted',
+        provider: 'accepted',
+        effort: 'accepted',
       });
     } finally {
       await bureau.dispose();
@@ -21884,6 +21948,71 @@ describe('COR-636: scheduler task locator', () => {
     }
   });
 
+  it('expires an unconfigured scheduler task outcome after the default retention window', async () => {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([{ content: 'default window', toolCalls: [] }]),
+      scheduler: { enabled: true },
+      toolbox: createEmptyToolbox(),
+      runtime,
+    });
+
+    try {
+      const submittedAt = runtime.monotonic.now();
+      const { taskId } = await bureau.submitSchedulerTask({
+        message: 'Expire me eventually',
+        priority: 'background',
+      });
+      await bureau.awaitSchedulerTask(taskId);
+      expect(runtime.monotonic.now()).toBe(submittedAt);
+      expect(bureau.locateSchedulerTask(taskId).status).toBe('terminal');
+
+      await runtime.advance(3_599_999);
+      expect(bureau.locateSchedulerTask(taskId).status).toBe('terminal');
+
+      await runtime.advance(1);
+      expect(bureau.locateSchedulerTask(taskId)).toEqual({ status: 'expired' });
+      const expired = await bureau.awaitSchedulerTask(taskId).catch((error: unknown) => error);
+      expect(expired).toBeInstanceOf(SchedulerTaskLookupError);
+      expect(expired).toMatchObject({ taskId, reason: 'expired' });
+
+      await runtime.advance(3_600_000);
+      expect(bureau.locateSchedulerTask(taskId)).toEqual({ status: 'not-found' });
+      const forgotten = await bureau.awaitSchedulerTask(taskId).catch((error: unknown) => error);
+      expect(forgotten).toBeInstanceOf(SchedulerTaskLookupError);
+      expect(forgotten).toMatchObject({ taskId, reason: 'not-found' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
+  it('lets an explicit retentionWindowMs override the default retention window', async () => {
+    const runtime = createManualRuntimeServices();
+    const bureau = await createBureau({
+      agents: {},
+      generate: createSequentialGenerate([{ content: 'explicit window', toolCalls: [] }]),
+      scheduler: { enabled: true, retentionWindowMs: 1_000 },
+      toolbox: createEmptyToolbox(),
+      runtime,
+    });
+
+    try {
+      const { taskId } = await bureau.submitSchedulerTask({
+        message: 'Expire me sooner',
+        priority: 'background',
+      });
+      await bureau.awaitSchedulerTask(taskId);
+
+      await runtime.advance(999);
+      expect(bureau.locateSchedulerTask(taskId).status).toBe('terminal');
+      await runtime.advance(1);
+      expect(bureau.locateSchedulerTask(taskId)).toEqual({ status: 'expired' });
+    } finally {
+      await bureau.dispose();
+    }
+  });
+
   it('reports not-found for an unknown id and rejects awaitSchedulerTask with a lookup error', async () => {
     const bureau = await createBureau({
       agents: {},
@@ -21939,5 +22068,103 @@ describe('COR-636: scheduler task locator', () => {
 
     expect(rejection).toBeInstanceOf(Error);
     expect((rejection as Error).message).toContain('retentionWindowMs');
+  });
+});
+
+// COR-690: shutdown must close run admission before it snapshots the runs and
+// toolboxes it drains, and an aborted run's toolbox must stay discoverable
+// until its own execution lifecycle is idle.
+describe('Bureau shutdown quiescence (COR-690)', () => {
+  it('rejects an API run submitted after shutdown() has started', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+    });
+    const shutdownPromise = bureau.shutdown();
+
+    const rejection = await bureau.createRun({ message: 'too late' }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as { code?: string }).code).toBe('CONFLICT');
+    expect(bureau.listRuns()).toEqual([]);
+    await shutdownPromise;
+  });
+
+  it('rejects a scheduler task submitted after shutdown() has started', async () => {
+    const bureau = await createBureau({
+      agents: {},
+      generate: createMockGenerate(),
+      toolbox: createEmptyToolbox(),
+      scheduler: { enabled: true, idleDelay: 1 },
+    });
+    const shutdownPromise = bureau.shutdown();
+
+    const rejection = await Promise.resolve()
+      .then(() => bureau.submitSchedulerTask({ message: 'too late' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as { code?: string }).code).toBe('CONFLICT');
+    await shutdownPromise;
+  });
+
+  it('keeps an aborted run toolbox discoverable until its ignored-cancellation callback settles', async () => {
+    let releaseTool!: () => void;
+    const toolGate = new Promise<string>((resolve) => {
+      releaseTool = () => resolve('done');
+    });
+    let notifyToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      notifyToolStarted = resolve;
+    });
+    let toolSettled = false;
+    const stubbornTool = createTool({
+      name: 'stubborn',
+      description: 'ignores its abort signal and keeps running',
+      input: z.object({}),
+      async execute() {
+        notifyToolStarted();
+        const value = await toolGate;
+        toolSettled = true;
+        return value;
+      },
+    });
+    const bureau = await createBureau({
+      agents: {},
+      generate: async ({ step }) =>
+        step === 0
+          ? { content: 'calling', toolCalls: [{ name: 'stubborn', arguments: {} }] }
+          : { content: 'done', toolCalls: [] },
+      toolbox: createToolbox([stubbornTool]),
+      stopWhen: stopWhen.noToolCalls(),
+    });
+
+    const run = await bureau.createRun({ message: 'abort me mid-tool' });
+    await toolStarted;
+    bureau.abortRun(run.id);
+    expect(await pollUntil(() => bureau.getRun(run.id)?.status === 'aborted')).toBe(true);
+    // Remove the run's id-keyed entry the way a session deletion does, so only
+    // the tracked-toolbox set can still lead shutdown to the live callback.
+    await bureau.deleteRun(run.id);
+
+    let shutdownSettled = false;
+    const shutdownPromise = bureau.shutdown().then((report) => {
+      shutdownSettled = true;
+      return report;
+    });
+    for (let tick = 0; tick < 5; tick++) await yieldToPortableEventLoop();
+    expect(toolSettled).toBe(false);
+    expect(shutdownSettled).toBe(false);
+
+    releaseTool();
+    await shutdownPromise;
+    expect(toolSettled).toBe(true);
   });
 });

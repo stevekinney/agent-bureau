@@ -119,14 +119,16 @@ export interface SteeringCommandConflict {
  *   its own terms).
  * - `not-found` / `session-terminal` — AB-42's pre-admission outcomes,
  *   reused verbatim.
- * - `unsupported-capability` — every target other than `pause`/`resume`
- *   (`reason: 'selector-unavailable'`, matching the reason AB-67's decision
- *   record fixes for the four configuration targets, reused here for
- *   agent-identity too since its own real admission — catalog validation,
- *   policy resolution — is equally out of this issue's scope, per this
- *   issue's own "Out of scope" section), and `pause`/`resume` against a
- *   session with `runtime.durable` configured (`reason:
- *   'durable-steering-unavailable'`).
+ * - `unsupported-capability` — never returned for a target as such: all
+ *   seven are admitted (AB-199/AB-200/AB-68, COR-1227). It is returned for
+ *   an `agent-identity` `policyRef`, or a configuration-target command with
+ *   no `override` reaching the gate directly (`reason:
+ *   'selector-unavailable'`); for a durably-configured Bureau with no
+ *   resolved storage backend (`reason: 'durable-steering-unavailable'`); and
+ *   for a durable command the session's steering mailbox rejects at
+ *   admission, such as an exhausted backlog (the mailbox's own rejection
+ *   reason). A reused `id` with a different persisted identity returns
+ *   `conflict`, not this. See `Bureau.submitSteeringCommand`.
  */
 export type SteeringCommandAdmissionOutcome =
   | { readonly outcome: 'accepted'; readonly command: SteeringCommandSnapshot }
@@ -138,31 +140,25 @@ export type SteeringCommandAdmissionOutcome =
   | { readonly outcome: 'unsupported-capability'; readonly reason: string };
 
 /**
- * The subset of {@link SteeringCommand}'s seven targets this issue's gate
- * implementation actually admits. `pause`/`resume` are the two
- * `submitSteeringCommand` itself ever routes into {@link BureauSteeringGate.admit}
- * (every other target is rejected as `unsupported-capability` before the
- * gate is ever consulted — see `SteeringCommandAdmissionOutcome`'s doc
- * comment). `agent-identity` is admitted here too, but ONLY reachable
- * through direct calls to `admit` (this module's own tests, and whatever
- * `ab-67-bureau-b` calls once it resolves a `policyRef`/`override` before
- * calling in) — never through `submitSteeringCommand`, per AB-199's
- * coordinator amendments (2026-09-02, AB-221 review addendum): "only the
- * real `SteeringGate` can own" tracking which `configVersion` bump is
- * effective for the CURRENT run versus deferred to the next run's step 0,
- * because `SteeringDesiredState` is an aggregate with no per-target
- * application history of its own (see `run-step.ts`'s
- * `maybeDispatchSteeringApplied` comment). Building that tracking now, in
- * the one real implementation of `SteeringGate` this batch ships, is this
- * issue's contribution to that ruling — `ab-67-bureau-b` (AB-200) still
- * owns admitting an agent-identity command through the public verb
- * (catalog validation, policyRef resolution), and route/model/provider/
- * effort are untouched here entirely (see AB-200's own scope).
+ * The steering commands {@link BureauSteeringGate.admit} accepts. Since
+ * AB-200 this covers all seven {@link SteeringCommand} targets, and
+ * `submitSteeringCommand` routes every one of them here once its own
+ * pre-admission checks pass: `pause`/`resume` bind to one run,
+ * `agent-identity` is deferred to the session's next run, and `route`,
+ * `model`, `provider`, and `effort` apply at the next step boundary.
  *
- * Narrowing the parameter type this way, rather than a runtime `switch`
- * with a `default: throw`, means there is no unreachable-but-uncovered
- * branch for route/model/provider/effort: the type system, not a runtime
- * guard, is what keeps them out of this method.
+ * The gate owns per-target `configVersion` accounting — which bump is
+ * effective for the CURRENT run versus deferred to the next run's step 0 —
+ * because `SteeringDesiredState` is an aggregate with no per-target
+ * application history of its own (AB-199's coordinator amendments,
+ * 2026-09-02; see `run-step.ts`'s `maybeDispatchSteeringApplied` comment).
+ *
+ * The gate itself resolves nothing: `submitSteeringCommand` validates an
+ * `agent-identity` `override` against the agents map, checks a
+ * configuration `override` against the model catalog, and rewrites a
+ * configuration `policyRef` to the concrete coordinate it names before
+ * calling in. A command that still carries no `override` when it reaches
+ * the gate returns `unsupported-capability` (`selector-unavailable`).
  */
 export type ImplementedSteeringCommand = SteeringCommand & {
   readonly requestedValue: Extract<
@@ -1204,20 +1200,18 @@ export function createSteeringGate(
         return { outcome: 'accepted', command: snapshotOf(stored) };
       }
 
-      // agent-identity: reachable only via a direct `admit()` call, never
-      // through `submitSteeringCommand` (see `ImplementedSteeringCommand`'s
-      // doc comment). Resolving a `policyRef` against AB-66's catalog is
-      // `ab-67-bureau-b` (AB-200)'s job, explicitly out of THIS issue's own
-      // scope — admitting a `policyRef` command here anyway would silently
-      // accept a command that never actually changes `agentName` (nothing
-      // in this module resolves a `policyRef` to a concrete name), a
+      // agent-identity: `submitSteeringCommand` has already validated an
+      // `override` against the agents map and returned
+      // `unsupported-capability` for a `policyRef` before calling in.
+      // Nothing in this module resolves a `policyRef` to a concrete agent
+      // name, so admitting one reaching `admit()` directly would silently
+      // accept a command that never actually changes `agentName` — a
       // command that LOOKS admitted but has no real effect (review finding,
       // PR #430 — Codex P2, "Reject unresolved policyRef identity
       // commands"). Only the `override` variant — a caller-supplied,
-      // already-concrete agent name needing no catalog resolution — is
-      // admitted; `policyRef` returns the identical `unsupported-capability`
-      // reason `submitSteeringCommand` itself already returns for every
-      // other target `ab-67-bureau-b` owns.
+      // already-concrete agent name — is admitted; `policyRef` returns the
+      // same `unsupported-capability` reason `submitSteeringCommand`
+      // returns for it.
       if (
         !('override' in command.requestedValue) ||
         command.requestedValue.override === undefined

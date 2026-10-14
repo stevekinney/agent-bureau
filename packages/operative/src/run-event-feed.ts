@@ -103,10 +103,8 @@ const isInstance =
 /**
  * An error, reduced to what a client can act on.
  *
- * `cause` and `stack` are deliberately absent. `@lostgradient/telephone` applies
- * the same rule to the chat wire for the same reason, and the two are
- * independent on purpose: a producer that forgot one should not inherit the
- * other's omission by accident.
+ * `cause` and `stack` are deliberately absent: they can carry internal
+ * detail a client has no use for and should not see.
  */
 function projectError(error: unknown): Readonly<Record<string, unknown>> {
   if (error instanceof AgentRunError) {
@@ -122,8 +120,8 @@ function projectError(error: unknown): Readonly<Record<string, unknown>> {
  * Tool calls are projected to identity only — no `arguments`.
  *
  * This feed is for observing a run's progress, not for reconstructing its
- * content; a chat client reads the turn through `@lostgradient/telephone`'s
- * stream, which has its own contract. Arguments are unbounded and
+ * content; a chat client reads the turn through its own stream, which has
+ * its own contract. Arguments are unbounded and
  * caller-supplied, so they stay off a feed whose subscribers are authorized
  * to watch a run rather than to read its inputs. Widening this later is a
  * deliberate decision with an access-policy question attached.
