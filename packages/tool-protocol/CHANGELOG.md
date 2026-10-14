@@ -1,5 +1,13 @@
 # @lostgradient/tool-protocol
 
+## 0.0.3
+
+### Patch Changes
+
+- 95de2e2: Bound async tool-result materialization by cancellation: an already-aborted signal rejects immediately with its reason, and an abandoned iterator is asked to close in the background, so a `return()` that never settles no longer holds an aborted materialization open and one that rejects no longer surfaces as an unhandled rejection.
+- Updated dependencies [95de2e2]
+  - @lostgradient/lifecycle@0.0.3
+
 ## 0.0.2
 
 ### Patch Changes

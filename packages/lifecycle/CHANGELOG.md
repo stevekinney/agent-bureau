@@ -1,5 +1,11 @@
 # @lostgradient/lifecycle
 
+## 0.0.3
+
+### Patch Changes
+
+- 95de2e2: `createManualRuntimeServices` throws a `RangeError` at construction when its `clockOrigin` is not a parsable ISO-8601 timestamp, instead of admitting `NaN` into the virtual wall clock.
+
 ## 0.0.2
 
 ### Patch Changes
