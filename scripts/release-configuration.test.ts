@@ -83,23 +83,41 @@ describe('release workflow contract', () => {
     });
   });
 
-  test('continues to use changesets/action with the version and publish commands', async () => {
+  test('uses changesets/action v2, the line for @changesets/cli 3', async () => {
+    const workflow = await readWorkflow();
+    const step = changesetsActionStep(workflow);
+    const manifest = (await Bun.file(resolve(repositoryRoot, 'package.json')).json()) as {
+      devDependencies: Record<string, string>;
+    };
+
+    expect(manifest.devDependencies['@changesets/cli']).toMatch(/^3\./);
+    expect(step.uses).toBe('changesets/action@v2.1.2');
+  });
+
+  test('runs the version and publish commands, and creates no git tags or GitHub releases', async () => {
     const workflow = await readWorkflow();
     const step = changesetsActionStep(workflow);
 
-    expect(step.uses).toMatch(/^changesets\/action@/);
+    // v2 defaults both create-github-releases and push-git-tags to true. This pipeline has never
+    // tagged or released, so both stay off.
     expect(step.with).toEqual({
-      version: 'bun run version',
-      publish: 'bun run release',
+      'version-script': 'bun run version',
+      'publish-script': 'bun run release',
+      'pr-title': 'Version Packages',
+      'commit-message': 'Version Packages',
+      'create-github-releases': false,
+      'push-git-tags': false,
+      'github-token': '${{ secrets.GITHUB_TOKEN }}',
     });
   });
 
-  test('the changesets/action step exposes only GITHUB_TOKEN and RELEASE_ENABLED', async () => {
+  test('the changesets/action step exposes only RELEASE_ENABLED', async () => {
     const workflow = await readWorkflow();
     const step = changesetsActionStep(workflow);
 
+    // v2 refuses a GITHUB_TOKEN environment variable that differs from its github-token input, and
+    // passes the token to the scripts itself, so the token goes through the input only.
     expect(step.env).toEqual({
-      GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
       RELEASE_ENABLED: '${{ vars.RELEASE_ENABLED }}',
     });
   });

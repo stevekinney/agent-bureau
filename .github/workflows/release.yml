@@ -63,12 +63,21 @@ jobs:
         run: bun run turbo run build --filter=@lostgradient/cryptography --filter=@lostgradient/embeddings --filter=@lostgradient/lifecycle --filter=@lostgradient/tool-protocol --filter=armorer --filter=conversationalist --filter=@lostgradient/operative
 
       - name: Create Version Packages PR or publish
-        uses: changesets/action@v1
+        # v2 is the changesets/action line for @changesets/cli 3.x (pinned in package.json); v1 is
+        # for Changesets 2.x and bundles older readers of the changeset state.
+        uses: changesets/action@v2.1.2
         with:
-          version: bun run version
-          publish: bun run release
+          version-script: bun run version
+          publish-script: bun run release
+          pr-title: Version Packages
+          commit-message: Version Packages
+          # This pipeline has never created git tags or GitHub releases: scripts/release.ts publishes
+          # with `npm publish`, not `changeset publish`, so v1 never saw a tag to push. v2 defaults
+          # both of these to true, so they are set off explicitly to keep that behaviour.
+          create-github-releases: false
+          push-git-tags: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No NPM_TOKEN — its presence can suppress OIDC. Trusted publishing uses the id-token above.
           # Publishing is opt-in: scripts/release.ts no-ops unless RELEASE_ENABLED is "true". Set the
           # `RELEASE_ENABLED` repository variable to `true` once the npm trusted publishers are
