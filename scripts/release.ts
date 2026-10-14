@@ -42,6 +42,13 @@
  *
  * The npm binary is resolved from the environment (the release workflow pins `npm@^11`); we assert
  * the version is new enough for trusted publishing before touching the registry.
+ *
+ * `CHANGESETS_OUTPUT`: `changesets/action` v2 sets this to a file path and reads it back after the
+ * publish script exits, expecting one `git-tag` event per published package, the way
+ * `changeset publish` writes them. A custom publish script that leaves the file unwritten gets a
+ * warning on every run, so this script always writes it: empty when nothing published, one line per
+ * package otherwise. The release workflow turns off the action's tag pushing and GitHub releases,
+ * so the events only feed the action's `published` and `published-packages` outputs.
  */
 import { resolve } from 'node:path';
 
@@ -263,6 +270,32 @@ async function publishPackage(
   return 'published';
 }
 
+/** One `changeset publish` output event: the tag Changesets would give a published package. */
+export type ChangesetsOutputEvent = { type: 'git-tag'; packageName: string; tag: string };
+
+export function changesetsOutputEvents(
+  published: ReadonlyArray<{ packageName: string; version: string }>,
+): ChangesetsOutputEvent[] {
+  return published.map(({ packageName, version }) => ({
+    type: 'git-tag',
+    packageName,
+    tag: `${packageName}@${version}`,
+  }));
+}
+
+/**
+ * Writes the published packages to `outputPath` (the `CHANGESETS_OUTPUT` file) as newline-delimited
+ * JSON. Outside `changesets/action` the variable is unset, so there is no path and this does nothing.
+ */
+export async function writeChangesetsOutput(
+  published: ReadonlyArray<{ packageName: string; version: string }>,
+  outputPath: string | undefined,
+): Promise<void> {
+  if (!outputPath) return;
+  const lines = changesetsOutputEvents(published).map((event) => `${JSON.stringify(event)}\n`);
+  await Bun.write(outputPath, lines.join(''));
+}
+
 async function main(): Promise<void> {
   // Publishing is opt-in. Until the npm trusted publishers are registered and you're ready to ship,
   // leave `RELEASE_ENABLED` unset so a merge to main lands the pipeline without attempting to publish
@@ -274,6 +307,7 @@ async function main(): Promise<void> {
         'Set the RELEASE_ENABLED repository variable once the npm trusted publishers are configured. ' +
         'Skipping publish.',
     );
+    await writeChangesetsOutput([], process.env['CHANGESETS_OUTPUT']);
     process.exit(0);
   }
 
@@ -309,6 +343,15 @@ async function main(): Promise<void> {
   const failed = outcomes
     .filter((entry) => entry.outcome === 'failed')
     .map((entry) => entry.package);
+
+  // Written before any exit below, so a partial failure still reports what did publish.
+  await writeChangesetsOutput(
+    published.map((packageName) => ({
+      packageName,
+      version: workspaceVersions.get(packageName) ?? '',
+    })),
+    process.env['CHANGESETS_OUTPUT'],
+  );
 
   console.log('\nRelease summary:');
   console.log(`  published: ${published.length ? published.join(', ') : '(none)'}`);
