@@ -83,7 +83,10 @@ export interface ManualRuntimeServices extends RuntimeServices {
 }
 
 export interface CreateManualRuntimeServicesOptions {
-  /** The virtual wall clock's starting value, as an ISO-8601 string. Defaults to a fixed epoch. */
+  /**
+   * The virtual wall clock's starting value, as an ISO-8601 string. Defaults to a fixed epoch.
+   * An unparsable string makes {@link createManualRuntimeServices} throw a `RangeError`.
+   */
   origin?: string;
   /**
    * Disambiguates the identifiers this instance mints (Coordinator ruling
@@ -184,6 +187,14 @@ export function createManualRuntimeServices(
   // actually starts at can never drift apart.
   const clockOrigin = options.origin ?? DEFAULT_ORIGIN;
   const originEpochMilliseconds = Date.parse(clockOrigin);
+  // COR-89: reject an unparsable origin here, at construction, rather than
+  // admitting `NaN` into the wall clock where it would surface only later,
+  // indirectly, wherever the clock is read.
+  if (Number.isNaN(originEpochMilliseconds)) {
+    throw new RangeError(
+      `createManualRuntimeServices: origin ${JSON.stringify(clockOrigin)} is not a parsable ISO-8601 timestamp.`,
+    );
+  }
 
   let monotonicMilliseconds = 0;
   // wallClockNow = wallClockOffsetMilliseconds + monotonicMilliseconds. `setTime` rewrites the

@@ -243,7 +243,15 @@ export function createExecutionLifecycle(
   let idlePromise: Promise<void> | undefined;
   let resolveIdle: (() => void) | undefined;
 
-  const freeze = (snapshot: ExecutionSnapshot) => Object.freeze({ ...snapshot });
+  // The nested cleanup outcome is copied and frozen too, so a holder of a
+  // published snapshot cannot rewrite its cleanup status after publication.
+  const freeze = (snapshot: ExecutionSnapshot): ExecutionSnapshot => {
+    const { cleanup, ...rest } = snapshot;
+    return Object.freeze({
+      ...rest,
+      ...(cleanup === undefined ? {} : { cleanup: Object.freeze({ ...cleanup }) }),
+    });
+  };
   const unfinished = () =>
     [...records.values()].filter(
       ({ snapshot }) => snapshot.state !== 'terminal' && snapshot.state !== 'unknown-effect',

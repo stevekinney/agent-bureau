@@ -321,6 +321,12 @@ export function wireDurableOptInTools(
 const requestAuthorityMetadataKey = 'lastRequestAuthority';
 const requestAuthoritiesMetadataKey = 'lastRequestAuthorities';
 const defaultBureauAgentName = 'bureau';
+/**
+ * How long a settled scheduler task outcome stays resolvable when the caller
+ * sets no `scheduler.retentionWindowMs`: one hour, bounding memory in a
+ * long-lived Bureau. Bureau offers no unbounded opt-out.
+ */
+const DEFAULT_SCHEDULER_RETENTION_WINDOW_MS = 3_600_000;
 const schedulerServicePrincipalId = 'service:scheduler';
 const schedulerServiceAuthorizationRevision = 'bureau:scheduler:1';
 const toolExecutionCapability = 'tools:execute';
@@ -2416,7 +2422,8 @@ export async function createRuntimeComposition(
           generate: schedulerGenerate,
           toolbox: fallbackToolbox,
           idleDelay: options.scheduler?.idleDelay ?? 1000,
-          retentionWindowMs: options.scheduler?.retentionWindowMs,
+          retentionWindowMs:
+            options.scheduler?.retentionWindowMs ?? DEFAULT_SCHEDULER_RETENTION_WINDOW_MS,
           // The composed runtime, so idle/wake and retention timers are
           // deterministic under a manual runtime.
           runtime: runtimeServices,

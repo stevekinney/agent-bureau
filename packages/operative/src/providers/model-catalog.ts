@@ -93,8 +93,29 @@ export interface BackendDescriptor {
         readonly inputPerMillionTokens: number;
         readonly outputPerMillionTokens: number;
         readonly currency: string;
+        /**
+         * Rates that replace the two above for a request whose input exceeds
+         * `inputTokensAbove` tokens, mirroring `ModelPricing.longContext`.
+         * Absent for a model that bills one rate at every prompt size.
+         */
+        readonly longContext?:
+          | {
+              readonly inputTokensAbove: number;
+              readonly inputPerMillionTokens: number;
+              readonly outputPerMillionTokens: number;
+            }
+          | undefined;
       }
     | undefined;
+  /**
+   * `'unavailable'` is the only value selection excludes. `'unknown'` means the
+   * catalog cannot tell whether this caller can reach the model, and selection
+   * still considers it: an ambiguous OpenAI endpoint, and an Anthropic model
+   * restricted to organizations accepted into a verification program (Mythos),
+   * whose access depends on the account, not on anything this static seed can
+   * see. A caller who has confirmed access supplies its own descriptor with
+   * `availability: 'available'` and `source: 'operator-override'`.
+   */
   readonly availability: 'available' | 'unavailable' | 'unknown';
   readonly health: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
   readonly source: 'static' | 'provider-reported' | 'operator-override';

@@ -244,6 +244,16 @@ export type {
   DurableRunRegistration,
 } from './test/harness';
 export { BureauHarnessUnsupportedError, createBureauTestHarness } from './test/harness';
+// COR-89 — `createBureauTestHarness` takes a `ManualRuntimeServices`, so the
+// factory that builds one is reachable from this package too. The source
+// owner is the private @lostgradient/lifecycle workspace, which is inlined
+// here rather than installed; re-exporting it (as @lostgradient/operative
+// does) spares a consumer any direct dependency on lifecycle.
+export { createManualRuntimeServices } from '@lostgradient/lifecycle';
+export type {
+  CreateManualRuntimeServicesOptions,
+  ManualRuntimeServices,
+} from '@lostgradient/lifecycle';
 export type { BureauIncompleteWork, BureauQuiescenceReport } from './test/quiescence';
 export { assertBureauQuiescent, BureauQuiescenceError } from './test/quiescence';
 export type {

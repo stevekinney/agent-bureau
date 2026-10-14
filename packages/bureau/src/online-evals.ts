@@ -395,6 +395,10 @@ export function createOnlineEvalSampler<D extends AgentDefinitions = AgentDefini
   // exported factory (including this package's own test suite) is
   // unaffected by construction. `options.rng` (this module's own
   // pre-existing injectable seam) still takes precedence when supplied.
+  // COR-89: an omitted-`runtime` caller has no handle on that default
+  // instance, so its `deferred` ledger is never the only path to the work
+  // tracked on it: every promise passed to `runtime.deferred.track` below is
+  // also held in `activeEvaluations`, which `flush()`/`dispose()` awaits.
   runtime: RuntimeServices = createDefaultRuntimeServices(),
 ): OnlineEvalSampler {
   const judges = options?.judges ?? [];

@@ -181,9 +181,13 @@ export * from './generation-profile';
 export * from './runnable-agent';
 export * from './selection-gate';
 // RuntimeServices is part of this package's public execution contract.
-// Its implementation and types have one source owner: @lostgradient/lifecycle.
-// Deterministic callers can use createManualRuntimeServices from that workspace.
-export { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
+// Its implementation and types have one source owner: @lostgradient/lifecycle,
+// a private workspace inlined into this package rather than one a consumer
+// installs. COR-89 — both the real-globals default and the deterministic
+// manual implementation are re-exported here (as HookRegistry is below), so
+// a deterministic caller imports createManualRuntimeServices from this
+// package and never needs a direct dependency on @lostgradient/lifecycle.
+export { createDefaultRuntimeServices, createManualRuntimeServices } from '@lostgradient/lifecycle';
 // COR-1268 — `HookRegistry` is the ONLY way to configure hooks on a run, so
 // it has to be reachable from this package. Before the legacy `RunOptions`
 // hook arrays were removed a consumer could configure hooks without ever
@@ -192,6 +196,7 @@ export { createDefaultRuntimeServices } from '@lostgradient/lifecycle';
 // operative run contract requires. Source owner is still lifecycle.
 export { HookRegistry, mergeHookRegistries } from '@lostgradient/lifecycle';
 export type {
+  CreateManualRuntimeServicesOptions,
   DeferredDrainReport,
   HookErrorHandler,
   HookPlanDescription,
@@ -201,6 +206,7 @@ export type {
   HookRegistrationOptions,
   HookRegistryOptions,
   HookReplayPolicy,
+  ManualRuntimeServices,
   RuntimeClock,
   RuntimeDeferred,
   RuntimeIdentifiers,

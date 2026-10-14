@@ -274,6 +274,7 @@ export interface ToolboxEvents {
     call: ToolCall;
     percent?: number;
     message?: string;
+    checkpoint?: unknown;
   } & ToolExecutionIdentity;
   'stream-start': {
     tool: Tool;

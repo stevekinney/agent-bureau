@@ -13,6 +13,7 @@ import {
   GEMINI_MODEL_ALIASES,
   OPENAI_MODEL_ALIASES,
 } from './shared/model-registry.ts';
+import { anthropicSamplingSupport } from './shared/sampling.ts';
 import type { BaseProviderOptions, Effort } from './types.ts';
 
 // ── Effort degradation, derived from effort.ts — never a second table ──────
@@ -98,6 +99,21 @@ const FULL_PARAMETER_COMPATIBILITY: readonly (keyof BaseProviderOptions)[] = [
   'requestMetadata',
 ];
 
+/**
+ * Anthropic rows advertise `temperature` and `topP` only for a model that
+ * `shared/sampling.ts` records as accepting them — current Claude models
+ * reject non-default sampling with a 400. A model the documentation does not
+ * settle is treated the same way, conservatively. Everything else, including
+ * `toolChoice` (`auto` and `none` stay valid where forced choice is not), is
+ * unchanged.
+ */
+function anthropicParameterCompatibility(model: string): readonly (keyof BaseProviderOptions)[] {
+  if (anthropicSamplingSupport(model) === 'accepted') return FULL_PARAMETER_COMPATIBILITY;
+  return FULL_PARAMETER_COMPATIBILITY.filter(
+    (field) => field !== 'temperature' && field !== 'topP',
+  );
+}
+
 const GEMINI_PARAMETER_COMPATIBILITY: readonly (keyof BaseProviderOptions)[] =
   FULL_PARAMETER_COMPATIBILITY.filter((field) => field !== 'requestMetadata');
 
@@ -127,15 +143,40 @@ function isFreezableObject(value: unknown): value is object {
   return Array.isArray(value) || Object.getPrototypeOf(value) === Object.prototype;
 }
 
-function pricingFor(model: string): BackendDescriptor['pricing'] {
+/** Exported only for `model-catalog.test.ts`; not part of the public `./providers` barrel. */
+export function pricingFor(model: string): BackendDescriptor['pricing'] {
   const pricing = getModelPricing(model);
   if (!pricing) return undefined;
   return {
     inputPerMillionTokens: pricing.promptCostPerMillionTokens,
     outputPerMillionTokens: pricing.completionCostPerMillionTokens,
     currency: 'USD',
+    ...(pricing.longContext
+      ? {
+          longContext: {
+            inputTokensAbove: pricing.longContext.inputTokensAbove,
+            inputPerMillionTokens: pricing.longContext.promptCostPerMillionTokens,
+            outputPerMillionTokens: pricing.longContext.completionCostPerMillionTokens,
+          },
+        }
+      : {}),
   };
 }
+
+/**
+ * Anthropic models offered only to organizations accepted into Anthropic's
+ * verification programs, per https://platform.claude.com/docs/en/models/mythos-5-1/overview
+ * ("available only to organizations verified through Anthropic's verification
+ * programs, such as the Cyber Verification Program"; the Mythos 5 page says the
+ * same, status "Active (verification required)"). Whether a given caller is
+ * verified is invisible to a static seed, so these rows report `'unknown'`
+ * rather than `'available'`; `'unavailable'` would exclude the model for
+ * verified organizations too.
+ */
+const ACCESS_RESTRICTED_ANTHROPIC_MODELS: ReadonlySet<string> = new Set([
+  'claude-mythos-5',
+  'claude-mythos-5-1',
+]);
 
 export function buildAnthropicRow(model: string, freshness: string): BackendDescriptor {
   const limits = requireLimits('anthropic', model);
@@ -156,14 +197,14 @@ export function buildAnthropicRow(model: string, freshness: string): BackendDesc
     tools: true,
     parallelTools: true,
     structuredOutput: true,
-    parameterCompatibility: FULL_PARAMETER_COMPATIBILITY,
+    parameterCompatibility: anthropicParameterCompatibility(model),
     caching: true,
     batchInference: true,
     explicitThinkingRequest: true,
     serverSideTokenCounting: true,
     effort: anthropicEffort(model),
     ...(pricingRow !== undefined ? { pricing: pricingRow } : {}),
-    availability: 'available',
+    availability: ACCESS_RESTRICTED_ANTHROPIC_MODELS.has(model) ? 'unknown' : 'available',
     health: 'unknown',
     source: 'static',
     freshness,

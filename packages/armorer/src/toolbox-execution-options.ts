@@ -163,9 +163,11 @@ function copyContextOptions(
     ...(requestContext && initialEffectiveContext
       ? { requestContext, effectiveContext: initialEffectiveContext }
       : {}),
-    ...(hasSingleChild
-      ? { parentCompletionHandle: executionHandle, onParentCompletionPending }
-      : {}),
+    // Every child reports its callback's lifetime so the batch parent cannot
+    // settle under a still-running callback; only a single child settles the
+    // parent handle directly.
+    ...(hasSingleChild ? { parentCompletionHandle: executionHandle } : {}),
+    onParentCompletionPending,
   };
 }
 

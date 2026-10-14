@@ -405,11 +405,19 @@ function createRefreshHandle(options: CreateRefreshHandleOptions): CatalogRefres
     previousRevision,
   });
 
-  /** Delivers `next` to every current observer, isolating a throwing one. */
+  /**
+   * Delivers `next` to every current observer, isolating a throwing one.
+   * Iterates a snapshot of the registrations taken at entry, but re-checks
+   * the live map before each call so an observer removed by an earlier
+   * observer's callback in this same pass is never invoked after removal.
+   * An observer ADDED mid-pass is not in the snapshot and is not notified
+   * by this pass.
+   */
   function deliver(next: CatalogRefreshSnapshot, onObserverThrow?: () => void): void {
     currentSnapshot = next;
-    const currentObservers = [...observers.values()];
-    for (const observer of currentObservers) {
+    const currentObservers = [...observers.entries()];
+    for (const [token, observer] of currentObservers) {
+      if (!observers.has(token)) continue;
       try {
         observer(next);
       } catch {
@@ -618,7 +626,10 @@ export function createModelCatalogService(
   let inFlight: CatalogRefreshHandle | undefined;
 
   function markStaleIfUnchanged(previousRevision: number): void {
-    if (catalog.revision === previousRevision) {
+    // An already-stale catalog at the same revision is left in place: a
+    // repeated failure must not allocate a new wrapper and change the stale
+    // catalog's identity under callers already holding it.
+    if (catalog.revision === previousRevision && !catalog.stale) {
       catalog = Object.freeze({ ...catalog, stale: true });
     }
   }

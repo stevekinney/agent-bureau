@@ -17,7 +17,7 @@ import type {
   ToolboxExecuteOptions,
   ToolboxOptions,
 } from './toolbox-contracts';
-import { isAbortRequested, prepareExecution } from './toolbox-execution-setup';
+import { prepareExecution } from './toolbox-execution-setup';
 import { createExecutionTask } from './toolbox-execution-task';
 import type {
   ToolboxCallInputForTools,
@@ -73,6 +73,8 @@ export type ExecutorContext = {
     code: string,
   ) => ToolExecutionResult;
 };
+type BatchExecutionState = { pendingChildCallbacks: number };
+
 export function createExecutor<TEntries extends ToolboxEntries>(context: ExecutorContext) {
   const {
     runtime,
@@ -141,7 +143,7 @@ export function createExecutor<TEntries extends ToolboxEntries>(context: Executo
     }
     executionHandle.activate();
     options = { ...options, signal: executionHandle.signal };
-    const executionState = { hasSingleChild: false, childCallbackPending: false };
+    const executionState: BatchExecutionState = { pendingChildCallbacks: 0 };
     try {
       return await runExecutionBatch(
         input,
@@ -156,8 +158,7 @@ export function createExecutor<TEntries extends ToolboxEntries>(context: Executo
         executionHandle.snapshot().state !== 'terminal' &&
         executionHandle.snapshot().state !== 'cleanup-pending' &&
         executionHandle.snapshot().state !== 'streaming' &&
-        !executionState.childCallbackPending &&
-        !(executionState.hasSingleChild && executionHandle.snapshot().state === 'abort-requested')
+        executionState.pendingChildCallbacks === 0
       ) {
         executionHandle.settle();
       }
@@ -169,11 +170,11 @@ export function createExecutor<TEntries extends ToolboxEntries>(context: Executo
     executionHandle: ReturnType<ExecutionLifecycle['begin']>,
     suppliedOwnerId: string | undefined,
     nowFunction: () => number,
-    state: { hasSingleChild: boolean; childCallbackPending: boolean },
+    state: BatchExecutionState,
   ): Promise<ToolExecutionResult | ToolExecutionResult[]> {
     const calls = Array.isArray(input) ? input : [input];
     const isMultiple = Array.isArray(input);
-    state.hasSingleChild = calls.length === 1;
+    const hasSingleChild = calls.length === 1;
     const mode = options.mode ?? 'parallel';
     const errorMode = options.errorMode ?? 'collect';
     const limiter = createConcurrencyLimiter(mode === 'sequential' ? 1 : options.concurrency);
@@ -181,17 +182,24 @@ export function createExecutor<TEntries extends ToolboxEntries>(context: Executo
     let liveStreams = 0;
     let executionReturned = false;
     let executionOutput: ToolExecutionResult | ToolExecutionResult[] | undefined;
-    const finalizeParentStream = () => {
-      liveStreams -= 1;
-      if (!executionReturned || liveStreams !== 0) return;
-      if (
-        executionHandle.snapshot().state === 'abort-requested' ||
-        executionHandle.snapshot().state === 'cleanup-pending'
-      ) {
+    // COR-690: the parent settles only once the batch has returned AND every
+    // live stream and every started child callback has genuinely finished. A
+    // child callback that ignores its abort signal outlives `Promise.all`
+    // over the per-call tasks, so its own settlement must be able to finish
+    // the parent later.
+    const finalizeParent = () => {
+      if (!executionReturned || liveStreams !== 0 || state.pendingChildCallbacks !== 0) return;
+      const parentState = executionHandle.snapshot().state;
+      if (parentState === 'terminal' || parentState === 'unknown-effect') return;
+      if (parentState === 'abort-requested' || parentState === 'cleanup-pending') {
         executionHandle.cleanup();
         return;
       }
       executionHandle.settle(executionOutput);
+    };
+    const finalizeParentStream = () => {
+      liveStreams -= 1;
+      finalizeParent();
     };
     const tasks = calls.map((call, callIndex) =>
       createExecutionTask(
@@ -225,14 +233,15 @@ export function createExecutor<TEntries extends ToolboxEntries>(context: Executo
           approvalRevision,
           createInterruptedResumeApprovalValidationResult,
           options,
-          hasSingleChild: state.hasSingleChild,
+          hasSingleChild,
           nowFunction,
           executionHandle,
           errorMode,
           callIndex,
           suppliedOwnerId,
           setChildCallbackPending: (pending) => {
-            state.childCallbackPending = pending;
+            state.pendingChildCallbacks += pending ? 1 : -1;
+            if (!pending) finalizeParent();
           },
           incrementLiveStreams: () => {
             liveStreams += 1;
@@ -242,15 +251,20 @@ export function createExecutor<TEntries extends ToolboxEntries>(context: Executo
         call,
       ),
     );
-    const results = await Promise.all(tasks.map((task) => runTask(task)));
+    let results: ToolExecutionResult[];
+    try {
+      results = await Promise.all(tasks.map((task) => runTask(task)));
+    } catch (error) {
+      // COR-690: a `failFast` rejection can leave a sibling callback still
+      // running. Mark the batch returned so that callback's own settlement
+      // can still finalize the parent instead of stranding it.
+      executionReturned = true;
+      throw error;
+    }
     const output = isMultiple ? results : results[0]!;
     executionOutput = output;
     executionReturned = true;
-    if (
-      liveStreams === 0 &&
-      !state.childCallbackPending &&
-      !(state.hasSingleChild && isAbortRequested(executionHandle))
-    ) {
+    if (liveStreams === 0 && state.pendingChildCallbacks === 0) {
       executionHandle.settle(output);
     }
     return output;

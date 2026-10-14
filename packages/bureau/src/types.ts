@@ -220,8 +220,9 @@ export interface SchedulerConfiguration {
   /**
    * How long a settled scheduler task stays resolvable through
    * `locateSchedulerTask` / `awaitSchedulerTask` before it expires (and one
-   * window later is forgotten). Finite and greater than zero; unset keeps
-   * outcomes indefinitely. Forwarded unchanged to `createScheduler`.
+   * window later is forgotten). Finite and greater than zero; unset defaults to
+   * 3600000 milliseconds (one hour), and an explicit value overrides that
+   * default. Forwarded to `createScheduler`.
    */
   retentionWindowMs?: number;
 }
@@ -1220,12 +1221,13 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
 
   /**
    * @deprecated Use {@link Bureau.run} with a catalog `RunnableAgent` instead
-   * (per-agent `generate`/tools on `createAgent`). For a call that passes
-   * `principal`, `bureau.run` does NOT yet accept it — `BureauRunOptions`
-   * validation rejects any defined `principal` with `BAD_REQUEST` until
-   * AB-241 lands; stay on `createRun` for principal-attributed calls until
-   * then. Not yet removed — see AB-242's decision record and the removal
-   * issue it names (AB-352).
+   * (per-agent `generate`/tools on `createAgent`). A principal-attributed
+   * call migrates by passing {@link BureauRunOptions.principal}: since
+   * AB-241, `bureau.run` forwards it into `AgentRunContext.principal` and, on
+   * the durable branch, records it exactly as `createRun` records
+   * `request.principal`. Only a defined non-string `principal` is rejected
+   * (`BAD_REQUEST`). Not yet removed — see AB-242's decision record and the
+   * removal issue it names (AB-352).
    */
   createRun(request: CreateRunRequest): Promise<RunSummary>;
   submitSchedulerTask(request: SubmitSchedulerTaskRequest): Promise<SubmitSchedulerTaskResponse>;
@@ -1419,8 +1421,8 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
   ): Promise<SessionInputAdmissionOutcome>;
 
   /**
-   * AB-67/AB-199 — admit a `pause` or `resume` steering command as a sixth
-   * session verb, scoped to an in-memory (process-local) session. Reads
+   * AB-67/AB-199/AB-200 — admit a steering command as a sixth session verb,
+   * for in-memory and durable sessions alike. Reads
    * authority and terminal status through the same mechanism
    * `submitSessionInput` uses ({@link isSessionAuthorityAuthorized},
    * {@link isSessionRunTerminal}): an unauthorized caller or unknown
@@ -1428,16 +1430,40 @@ export interface Bureau<D extends AgentDefinitions = AgentDefinitions> {
    * naming an already-terminal session returns `{ outcome: 'session-terminal',
    * sessionId }`.
    *
-   * Every target other than `pause`/`resume` returns `{ outcome:
-   * 'unsupported-capability', reason: 'selector-unavailable' }` — `ab-67-
-   * bureau-b` owns admitting them (`policyRef` resolution through AB-66's
-   * selector, `override`-against-catalog validation). A `pause`/`resume`
-   * request against a session with `runtime.durable` configured likewise
-   * returns `unsupported-capability`, with `reason:
-   * 'durable-steering-unavailable'`: this method never holds process-local
-   * pause/resume state a restart would lose.
+   * All seven targets are admitted (AB-199/AB-200/AB-68, COR-1227):
+   * `pause`/`resume` bind to one run; `agent-identity` is deferred to the
+   * session's next run, and its `override` must name a key of this
+   * Bureau's `agents` map (otherwise `rejected` with `policy-denied`);
+   * `route`, `model`, `provider`, and `effort` apply at the next step
+   * boundary. A configuration `override` is checked against the live model
+   * catalog (`route` is not catalog-validated), and a configuration
+   * `policyRef` resolves through `modelPolicy.users` — an unknown profile,
+   * a profile that omits the coordinate, or an uncatalogued coordinate is
+   * `rejected` with `policy-denied`. Only an `agent-identity` `policyRef`
+   * returns `{ outcome: 'unsupported-capability', reason:
+   * 'selector-unavailable' }`.
    *
-   * A `pause` against an authorized, non-terminal, in-memory session is
+   * Durable sessions are admitted too: the command is persisted in the
+   * session's steering mailbox before it enters desired state, so recovery
+   * can replay it. `{ outcome: 'unsupported-capability', reason:
+   * 'durable-steering-unavailable' }` is returned only by the guard for a
+   * durably-configured Bureau with no resolved storage backend, which
+   * normal composition does not produce. A durable command the session's
+   * mailbox rejects at admission (for example, an exhausted backlog) returns
+   * `unsupported-capability` with the mailbox's own rejection reason and
+   * never enters desired state. A reused `id` whose persisted identity
+   * differs is not one of those: it falls through to the gate and returns
+   * the typed `conflict` described below.
+   *
+   * Known limit: durability holds across ONE restart. Recovery replays the
+   * mailbox and acknowledges what it replays, so after a second restart the
+   * session's mailbox and in-memory gate are both empty: desired
+   * configuration and agent identity fall back to defaults, and a reused
+   * `(principal, id)` — exact or not — is admitted as a new command rather
+   * than `replayed` or a `conflict`. Steering is also process-local: two
+   * Bureau processes sharing a backend each admit into their own gate.
+   *
+   * A `pause` against an authorized, non-terminal session is
    * accepted, increments the session's `configVersion` by exactly one, and
    * is idempotent against a second `pause` while the first is still
    * `accepted`/`applied` (no second increment). A `resume` against a session

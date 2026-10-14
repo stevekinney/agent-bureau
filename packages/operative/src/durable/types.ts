@@ -7,6 +7,7 @@ import type {
   TextContent,
 } from 'conversationalist';
 
+import type { AccumulatedCost } from '../cost-estimation';
 import type { Effort } from '../providers/types';
 import type { EventDispatcher } from '../run-step';
 import type { RunOptions } from '../types';
@@ -33,6 +34,11 @@ export interface RunCursor {
   step: number;
   /** Accumulated token usage across all completed steps. */
   totalUsage: { prompt: number; completion: number; total: number };
+  /**
+   * Cost of every request in `totalUsage`, each priced on its own usage. Absent for a run with no
+   * `costEstimation` and for a cursor persisted before costs were accumulated.
+   */
+  cost?: AccumulatedCost | undefined;
   /** Content of the most recent assistant turn. */
   lastContent: string;
   /** Run-scoped count of structured-output schema retries already consumed. */

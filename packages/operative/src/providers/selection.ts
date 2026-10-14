@@ -377,8 +377,13 @@ function evaluateEffort(
 /** The three named ranking signals — see this module's top-level
  *  documentation for the normalization and weighting rules. */
 function candidateCost(descriptor: BackendDescriptor): number | undefined {
-  if (descriptor.pricing === undefined) return undefined;
-  return (descriptor.pricing.inputPerMillionTokens + descriptor.pricing.outputPerMillionTokens) / 2;
+  const pricing = descriptor.pricing;
+  if (pricing === undefined) return undefined;
+  // A selection request carries no prompt size, so a tiered model cannot be priced for the
+  // request it will actually serve. Rank it by its long-context rates, the most it can cost per
+  // token: ranking by the base rate would call it up to several times cheaper than it can bill.
+  const rates = pricing.longContext ?? pricing;
+  return (rates.inputPerMillionTokens + rates.outputPerMillionTokens) / 2;
 }
 
 function buildRankingInputs(

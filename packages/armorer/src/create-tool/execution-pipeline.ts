@@ -235,8 +235,18 @@ async function runReadyExecution<TInput, TOutput, E extends ToolEventsMap>(
     handleCancellation,
   });
   if (runtimeOutcome.kind === 'cancelled') return runtimeOutcome.result;
+  let value: TOutput;
+  try {
+    value = await Promise.resolve(runtimeOutcome.value);
+  } catch (error) {
+    // A timeout or abort can win the race while the callback is still
+    // running; nothing will consume a stream it later returns.
+    runtimeOutcome.finishProgress();
+    throw error;
+  }
   const streamingOutcome = await handleStreamingExecution({
-    value: await Promise.resolve(runtimeOutcome.value),
+    value,
+    finishProgress: runtimeOutcome.finishProgress,
     options,
     now: nowFunction,
     digestOptions,

@@ -7,7 +7,7 @@ import {
   policyAuthorizationOnlySymbol,
   policyAuthorizationResultSymbol,
 } from '../internal/approval-resume';
-import type { MinimalAbortSignal, ToolExecuteOptions } from '../is-tool';
+import type { ToolExecuteOptions } from '../is-tool';
 
 export type InternalToolExecuteOptions = ToolExecuteOptions & {
   [approvalConsumeSymbol]?: () => Promise<ApprovalAdmissionRollback>;
@@ -18,10 +18,11 @@ export type InternalToolExecuteOptions = ToolExecuteOptions & {
   privilegedContextMirrorHandle?: ExecutionHandle;
   parentCompletionHandle?: ExecutionHandle;
   /**
-   * Reports whether the tool's own callback is still in flight behind
-   * `parentCompletionHandle`. The owner of that handle must not settle it while
-   * this reports `true`: the callback may ignore cancellation and keep running
-   * long after the raced execution promise has already rejected.
+   * Reports whether the tool's own callback is still in flight on behalf of a
+   * parent execution (`parentCompletionHandle` for a single toolbox call, or
+   * the batch parent for a multi-call batch). The parent's owner must not
+   * settle it while this reports `true`: the callback may ignore cancellation
+   * and keep running long after the raced execution promise has rejected.
    */
   onParentCompletionPending?: (pending: boolean) => void;
   [executionCallbackStartSymbol]?: () => void;
@@ -41,11 +42,20 @@ export function resolveSuppliedOwnerId(options: ToolExecuteOptions): string | un
   return options.ownerId ?? options.requestContext?.authority.ownerId;
 }
 
-export function isAbortSignalLike(signal: MinimalAbortSignal | undefined): signal is AbortSignal {
+/**
+ * Structural check for an `AbortSignal`. A signal created in another
+ * JavaScript realm (an iframe, a worker, or a `node:vm` context) fails
+ * `instanceof AbortSignal` against this realm's constructor while remaining
+ * fully usable, so cancellation forwarding must not rely on `instanceof`.
+ */
+export function isAbortSignalLike(value: unknown): value is AbortSignal {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Partial<
+    Record<'aborted' | 'addEventListener' | 'removeEventListener', unknown>
+  >;
   return (
-    signal !== undefined &&
-    typeof signal === 'object' &&
-    typeof signal.aborted === 'boolean' &&
-    typeof signal.addEventListener === 'function'
+    typeof candidate.aborted === 'boolean' &&
+    typeof candidate.addEventListener === 'function' &&
+    typeof candidate.removeEventListener === 'function'
   );
 }
